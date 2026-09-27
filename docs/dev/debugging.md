@@ -62,6 +62,11 @@ cfg.initial_script = src;   /* pauses at entry, then at breakpoints */
 qz_t *rt = qz_create(&cfg);
 ```
 
+Note: code eval'd via `cfg.initial_script` is recorded by the engine under
+the source name `<initial>` (see Limitations), so file breakpoints only fire
+if your host evals the source with its real filename itself — entry pause and
+`debugger;` work either way.
+
 That's it — `qz_create` auto-attaches DAP, sends `initialized`, and blocks
 on the DAP configuration phase (initialize / setBreakpoints /
 configurationDone) before returning. `stop_on_entry` pauses at the first
@@ -71,13 +76,20 @@ statement of your program.
 
 The debugger speaks **standard DAP over stdio**: the runtime (`qz_create` with
 debug enabled) is the DAP server on stdin/stdout, and the client is anything
-that speaks DAP. There is currently **no VS Code extension** registering a
-`qzjs` debug type, so the usual `launch.json` `type: "qzjs"` configuration
-cannot be used as-is — VS Code would report the debug adapter type is not
-registered. (The DAP layer itself is complete and tested end-to-end via
-`test/test_dap_gtest.cpp` and any generic DAP client.)
+that speaks DAP. Two pieces:
 
-Until an extension ships, two ways to drive it from VS Code:
+- **`vscode/qzjs-debug`** — the VS Code extension registering the `qzjs`
+  debug type. It is an *inline* adapter: it spawns your binary with
+  `QZ_DEBUG=1` and relays DAP frames between VS Code and the child's stdio.
+- **The DAP server inside qzjs** — the library itself, also driven directly
+  end-to-end by `test/test_dap_gtest.cpp`.
+
+Run the extension from a development host: `npm run compile` in
+`vscode/qzjs-debug`, open that folder in VS Code and press F5 (Run Extension),
+or start VS Code with
+`code --extensionDevelopmentPath=<repo>/vscode/qzjs-debug`.
+
+Two other ways to drive the same DAP server without the extension:
 
 **Option 1 — a generic debug adapter.** Point a stdio DAP adapter (e.g. the
 Mock Debug adapter, or your own) at a launch config whose `program` runs your
@@ -97,29 +109,32 @@ configurationDone, threads, stackTrace, scopes, variables, continue, next,
 stepIn, stepOut, evaluate, disconnect.
 
 <details>
-<summary>Reference `launch.json` (requires the not-yet-shipped extension)</summary>
-
-The config below **only works once** an extension registers the `qzjs`
-debug type. It is included as the intended final shape, not as a currently
-runnable setup:
+<summary>Reference <code>launch.json</code> (uses the bundled extension <code>vscode/qzjs-debug</code>)</summary>
 
 ```json
 {
   "version": "0.2.0",
   "configurations": [{
     "type": "qzjs",
-    "request": "attach",
+    "request": "launch",
     "name": "qzjs: debug",
     "program": "${workspaceFolder}/app.js",
-    "runtimeExecutable": "${workspaceFolder}/myapp",
-    "runtimeArgs": ["${workspaceFolder}/app.js"],
-    "env": { "QZ_DEBUG": "1" }
+    "runtimeExecutable": "${workspaceFolder}/build/qzjs"
   }]
 }
 ```
+
+`program` is the JS entry file, `runtimeExecutable` the binary embedding qzjs.
+The adapter launches the child with `QZ_DEBUG=1` itself (no `env` entry
+needed), appends `program` as the last argument, and resolves a relative
+`program` against the workspace folder — VS Code sends breakpoints as the
+document's absolute path, and the two must be byte-identical for the engine's
+exact-match breakpoint lookup. If you pass `runtimeArgs`, they go *before* the
+program path; don't list the program there a second time.
+
 </details>
 
-With a working adapter you attach to your program paused at entry, then
+With the extension running you attach to your program paused at entry, then
 continue to hit breakpoints, inspect Locals, step, and evaluate watch
 expressions.
 
@@ -127,6 +142,20 @@ expressions.
 ## What works (MVP)
 
 - Breakpoints by (source file, line) — set from VS Code before launch.
+- Breakpoints fire on all statement kinds: `return`, `break`/`continue`,
+  `case`/`default:`, `try`/`catch`/`finally`/`else` headers, `do {`, empty
+  statements and every line of a multi-declarator `var`. The compiler records
+  a pc→line entry at every statement entry (and at switch-clause / `else` /
+  `catch` / `finally` positions), not just plain assignments and calls.
+- `setBreakpoints` is scoped per source file: each request replaces only the
+  named file's breakpoints, so breakpoints in other files survive (DAP sends
+  one request per file whenever that file's breakpoints change).
+- Conditional breakpoints: a breakpoint's `condition` is evaluated (as JS,
+  with frame locals exposed under `locals`, same convention as `evaluate`);
+  non-zero stops, zero skips, a throwing condition stops so you see the error.
+- `debugger;` statement in your source — stops with reason `breakpoint` even
+  when zero breakpoints are set, and regardless of what filename the engine
+  recorded for the code.
 - Pause at entry (`stop_on_entry`).
 - Step over / into / out, continue.
 - Call stack with file/line/function per frame.
@@ -135,21 +164,36 @@ expressions.
   frame's locals are exposed on a `locals` object during evaluate, so
   `locals.x` reads a local variable. (Bare `x` won't bind — true eval-in-frame
   would need engine support QuickJS doesn't expose.)
-- **Async-across-pause**: `fetch`/`setTimeout` advance while paused (the DAP
-  loop pumps the PAL event loop between stdin polls, single-threaded).
 
 ## Limitations (MVP)
 
 - **`evaluate` bare-local binding**: watch expressions referencing locals
   must use the `locals.` prefix (`locals.x`, not `x`). True eval-in-frame
   (binding locals directly) needs engine support QuickJS doesn't expose.
+- **Filename matching is exact and entry-script-centric**: breakpoints match
+  the frame's recorded source name with a byte-exact string compare. The CLI
+  script path records the real path (the adapter guarantees an identical
+  absolute string), but:
+  - code from `-e` or the REPL records `<input>`;
+  - an embedding host that evals `cfg.initial_script` records `<initial>`
+    (`qz_eval_internal` hardcodes it), so breakpoints on the real file never
+    fire there — entry pause and `debugger;` still work.
+- **`verified: true` means "registered", not "will hit"**: the engine matches
+  breakpoints by byte-exact filename, so a breakpoint only fires if that file
+  is evaluated under the exact same path (see filename matching above).
+- **Closing braces aren't breakable**: a line with no statement bytecode —
+  a lone `}` closing a block — has no pc→line entry, so a breakpoint set
+  there reports `verified` but never fires.
+- **`finally` continuation can re-fire the catch-body line**: resuming out
+  of a `finally` block returns (`gosub`) into bookkeeping bytecode that
+  physically sits in the preceding statement's line region, so a breakpoint
+  on that already-executed line may fire once more on the way out. Mapping
+  that code to a future line instead would break step semantics, so the
+  line-entry behavior is kept.
 - **No CDP / Chrome DevTools**: DAP only. Chrome DevTools Protocol (CDP over
   WebSocket) is deferred.
-- **No source maps**, no conditional/logpoint breakpoints, no exception
+- **No source maps**, no logpoints, no exception
   breakpoints, no edit-and-continue, no multi-isolate.
-- **`debugger;` keyword** is still a no-op (breakpoints are set from the UI).
-- A packaged VS Code extension registering the `qzjs` debug type is a
-  follow-up; the DAP layer is complete and tested via the scripted clients.
 
 ## Async while paused
 
@@ -173,6 +217,30 @@ client over a pipe: initialize → setBreakpoints → configurationDone → expe
 `stopped` at the breakpoint → stackTrace/scopes/variables/evaluate → step →
 continue → terminate. It validates the whole stack: engine patch + debug core
 + DAP layer + the auto-attach path in `qz_create`.
+
+The extension has its own end-to-end tests that drive the inline adapter
+against a debugger-enabled binary (default `build_dbg/qzjs`, override with
+`QZJS_RUNTIME`):
+
+```bash
+cmake -B build_dbg -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build build_dbg -j$(nproc)
+cd vscode/qzjs-debug && npm run compile && npm test
+```
+
+- `test/smoke.mjs` — a breakpoint on the *real* source path fires:
+  entry stop → continue → `stopped` with `reason: breakpoint`, top frame's
+  path/line equal the file VS Code broke on, then `terminated`.
+- `test/debugger-stmt.mjs` — `debugger;` stops with **zero** breakpoints
+  registered (`reason: breakpoint`) and its frame reports the statement's own
+  file and line.
+- `test/line-coverage.mjs` — 17 breakpoints across every statement kind
+  (if/return, do-while, switch `case`/`default:`, try/catch/finally,
+  break/continue) asserting the exact stop sequence — a statement line that
+  silently loses its pc→line entry fails the test.
+- `test/breakpoint-scope.mjs` — two real sources (entry script + a helper
+  file named via `__native__.nativeEvalScript`) plus a third file's set/clear
+  requests: both files' breakpoints must fire, and the other file's requests
+  must not wipe them.
 
 ## Troubleshooting
 

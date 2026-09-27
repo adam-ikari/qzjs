@@ -40,22 +40,32 @@ QZ_DEBUG=1 ./myapp app.js
 ```c
 qz_config_t cfg = {};
 cfg.debug = 0x2;            /* 位 1 = 启用调试（或直接以 QZ_DEBUG=1 运行） */
+cfg.initial_script = src;   /* 在入口处暂停，然后在断点处暂停 */
 qz_t *rt = qz_create(&cfg);
-qz_eval(rt, src, NULL);   /* 在入口处暂停，然后在断点处暂停 */
 ```
+
+注意：经 `cfg.initial_script` eval 的代码会被引擎记为源名 `<initial>`
+（见「限制」），因此文件断点只有在宿主自己用真实文件名 eval 源码时才会
+命中——入口暂停与 `debugger;` 在任何情况下都有效。
 
 就这样——`qz_create` 自动附加 DAP，发送 `initialized`，并在 DAP 配置阶段（initialize / setBreakpoints / configurationDone）阻塞后返回。`stop_on_entry` 在程序的第一条语句处暂停。
 
 ## 从 VS Code 调试
 
 调试器通过 **stdio 上的标准 DAP** 通信：运行时（启用调试的 `qz_create`）
-是 stdin/stdout 上的 DAP 服务端，任何会讲 DAP 的客户端都能连。当前
-**没有 VS Code 扩展**注册 `qzjs` 调试类型，所以常见的 `launch.json`
-`type: "qzjs"` 配置无法直接使用——VS Code 会报调试适配器类型未注册。
-（DAP 层本身已实现且经 `test/test_dap_gtest.cpp` 与任意通用 DAP 客户端
-端到端测试过。）
+是 stdin/stdout 上的 DAP 服务端，任何会讲 DAP 的客户端都能连。两个组成部分：
 
-在扩展发布之前，从 VS Code 驱动有两种方式：
+- **`vscode/qzjs-debug`** —— 注册 `qzjs` 调试类型的 VS Code 扩展。它是一个
+  *内联*适配器：用 `QZ_DEBUG=1` 拉起你的二进制，并在 VS Code 与子进程
+  stdio 之间转发 DAP 帧。
+- **qzjs 内置的 DAP 服务端** —— 即库本身，也由 `test/test_dap_gtest.cpp`
+  直接端到端驱动。
+
+在开发宿主中运行扩展：在 `vscode/qzjs-debug` 里执行 `npm run compile`，
+打开该文件夹后按 F5（Run Extension），或以
+`code --extensionDevelopmentPath=<repo>/vscode/qzjs-debug` 启动 VS Code。
+
+不使用扩展时，仍有两种方式驱动同一个 DAP 服务端：
 
 **方案 1 —— 通用调试适配器。** 用一个 stdio DAP 适配器（如 Mock Debug
 适配器，或自己写的）配一个 launch：`program` 指向在 `QZ_DEBUG=1` 下
@@ -74,33 +84,48 @@ threads、stackTrace、scopes、variables、continue、next、stepIn、stepOut�
 evaluate、disconnect。
 
 <details>
-<summary>参考 `launch.json`（需尚未发布的扩展）</summary>
-
-下面的配置**只有在扩展注册了 `qzjs` 调试类型之后才能用**。这里给出
-是作为预期的最终形态，而非当前可跑的设置：
+<summary>参考 <code>launch.json</code>（使用仓库自带的扩展 <code>vscode/qzjs-debug</code>）</summary>
 
 ```json
 {
   "version": "0.2.0",
   "configurations": [{
     "type": "qzjs",
-    "request": "attach",
+    "request": "launch",
     "name": "qzjs: debug",
     "program": "${workspaceFolder}/app.js",
-    "runtimeExecutable": "${workspaceFolder}/myapp",
-    "runtimeArgs": ["${workspaceFolder}/app.js"],
-    "env": { "QZ_DEBUG": "1" }
+    "runtimeExecutable": "${workspaceFolder}/build/qzjs"
   }]
 }
 ```
+
+`program` 是 JS 入口文件，`runtimeExecutable` 是嵌入 qzjs 的二进制。
+适配器自己会给子进程加 `QZ_DEBUG=1`（无需 `env`），把 `program` 追加为
+最后一个参数，并把相对的 `program` 按工作区文件夹解析成绝对路径——VS Code
+发送的断点是文档自身的绝对路径，两者必须是字节相同的字符串，引擎的断点
+精确匹配才认得。若传 `runtimeArgs`，它位于 program 路径**之前**——别把
+program 再写一遍。
+
 </details>
 
-有了可用的适配器，你就能附加到入口处暂停的程序，继续以命中断点、
+有了扩展，你就能附加到入口处暂停的程序，继续以命中断点、
 检查 Locals、单步、求值监视表达式。
 
 ## 当前可用功能（MVP）
 
 - 按（源文件，行号）设置断点 — 在启动前从 VS Code 设置。
+- 断点在**所有语句种类**上都会命中：`return`、`break`/`continue`、
+  `case`/`default:`、`try`/`catch`/`finally`/`else` 头、`do {`、空语句、
+  多声明的 `var` 每一行。编译器在每个语句入口（以及 switch 子句 /
+  `else` / `catch` / `finally` 位置）都记录 pc→行号条目，而不只是普通的
+  赋值与调用。
+- `setBreakpoints` 按源文件作用域生效：每个请求只替换所指名文件的断点，
+  其他文件的断点不受影响（DAP 每次只对一个文件发请求）。
+- 条件断点：断点的 `condition` 以 JS 求值（帧局部变量同样暴露在 `locals`
+  下，与 `evaluate` 同一约定）；非零则停，零则跳过，表达式抛错则停下来让
+  你看到错误。
+- 源码中的 `debugger;` 语句 —— 即使一个断点都没设也会暂停，`reason` 为
+  `breakpoint`；且与引擎为该代码记录的文件名无关。
 - 入口暂停（`stop_on_entry`）。
 - 逐过程 / 步入 / 步出、继续。
 - 调用栈，包含每个帧的文件/行号/函数。
@@ -111,10 +136,23 @@ evaluate、disconnect。
 ## 限制（MVP）
 
 - **`evaluate` 裸局部变量绑定**：引用局部变量的监视表达式必须使用 `locals.` 前缀（`locals.x`，而非 `x`）。真正的帧内求值（直接绑定局部变量）需要 QuickJS 未暴露的引擎支持。
+- **文件名匹配是精确字符串比较，且以入口脚本为中心**：断点用帧记录的源名做字节精确匹配。CLI 脚本模式记录的是真实路径（适配器保证绝对路径字符串一致），但：
+  - `-e` / REPL 的代码记录为 `<input>`；
+  - 嵌入宿主若 eval `cfg.initial_script`，记录为 `<initial>`（`qz_eval_internal`
+    写死），此时对真实文件设置的断点永远不会命中——入口暂停与 `debugger;`
+    仍然有效。
+- **`verified: true` 表示「已登记」而非「会命中」**：引擎按字节精确的文件名
+  匹配断点，该文件必须以完全相同的路径被求值断点才会触发（见上一条文件名
+  匹配）。
+- **右花括号行不可断点**：只有语句入口才有 pc→行号条目；某行没有语句
+  字节码——例如单独一个 `}` 收尾块——就没有条目，在那里设的断点会回报
+  `verified` 但永远不会命中。
+- **`finally` 续段可能再次触发 catch 体所在行**：从 `finally` 里继续执行
+  时，`gosub` 返回到的簿记字节码物理上位于前一条语句的行区域内，因此那
+  条已经执行过的行上的断点可能再触发一次。若把这段代码改挂到未来的行
+  号上，会破坏单步语义，故保留按行入口记录的行为。
 - **无 CDP / Chrome DevTools**：仅 DAP。Chrome DevTools 协议（通过 WebSocket 的 CDP）已推迟。
-- **无 source map**，无条件/日志点断点，无异常断点，无编辑并继续，无多隔离。
-- **`debugger;` 关键字**仍是无操作（断点从 UI 设置）。
-- 注册 `qzjs` 调试类型的打包 VS Code 扩展是后续事项；DAP 层已完成并通过脚本化客户端测试。
+- **无 source map**，无日志点断点，无异常断点，无编辑并继续，无多隔离。
 
 ## 暂停期间的异步
 
@@ -132,6 +170,29 @@ ctest --test-dir build -L dap --output-on-failure
 ```
 
 `test/test_dap_gtest.cpp` 是一个进程内嵌入宿主，它 fork 一个子进程，在 `QZ_DEBUG=1` 下运行一个小型 JS 程序，然后通过管道充当 VS Code 客户端：initialize → setBreakpoints → configurationDone → 期望在断点处 `stopped` → stackTrace/scopes/variables/evaluate → step → continue → terminate。它验证了整个技术栈：引擎补丁 + 调试核心 + DAP 层 + `qz_create` 中的自动附加路径。
+
+扩展自带端到端测试，直接以内联适配器驱动调试构建的二进制
+（默认 `build_dbg/qzjs`，可用 `QZJS_RUNTIME` 覆盖）：
+
+```bash
+cmake -B build_dbg -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build build_dbg -j$(nproc)
+cd vscode/qzjs-debug && npm run compile && npm test
+```
+
+- `test/smoke.mjs` —— 打在**真实源路径**上的断点会命中：入口暂停 →
+  continue → `reason: breakpoint` 的 `stopped`，栈顶帧的路径/行号等于
+  VS Code 打断点的那个文件，随后 `terminated`。
+- `test/debugger-stmt.mjs` —— 一个断点都没设时，`debugger;` 也会暂停
+  （`reason: breakpoint`），且栈顶帧报出该语句自己的文件与行号。
+- `test/line-coverage.mjs` —— 覆盖所有语句种类的 17 个断点
+  （if/return、do-while、switch `case`/`default:`、try/catch/finally、
+  break/continue），并断言精确的停顿序列——任何语句行悄悄丢失 pc→行号
+  条目都会让该测试失败。
+- `test/breakpoint-scope.mjs` —— 两个真实源（入口脚本 + 经
+  `__native__.nativeEvalScript` 命名的辅助文件）外加对第三个文件的
+  set/clear 请求：两个文件的断点都要命中，且第三个文件的请求不得清掉
+  它们。
+
 ## 故障排查
 
 **断点不命中 / 无 `stopped` 事件 / 测试 30 秒超时**
