@@ -451,8 +451,8 @@ static void qz_dap_timer_cb(uv_timer_t *t)
 /* Service the DAP stdin channel while the debuggee is NOT paused. Called
  * from the periodic poll timer (see qz_dap_attach); never blocks. Handles
  * the requests that are meaningful mid-run: pause (arm the next dispatch
- * checkpoint to stop), setBreakpoints (replace the breakpoint table so new
- * breakpoints take effect immediately) and disconnect (stop polling). All
+ * checkpoint to stop), setBreakpoints (replace the named source's breakpoints
+ * so new breakpoints take effect immediately) and disconnect (stop polling). All
  * other requests are acknowledged so the VS Code client stays happy; their
  * real work (stackTrace/scopes/variables/evaluate) happens in the paused
  * pump (dap_on_stopped), which runs on the same thread and therefore cannot
@@ -575,11 +575,15 @@ void qz_dap_detach(qz_t *rt)
  * configuration phase: initialize, setBreakpoints, attach, configurationDone).
  * Called by the host (qz_create auto-attach path) after qz_dap_attach.
  * Returns when configurationDone is received. */
-/* Handle a setBreakpoints request: replace the whole breakpoint table for the
- * session with the breakpoints in `args` (source.path + breakpoints[].line,
- * optional condition), then respond with the verified lines. Shared by the
- * configuration phase (qz_dap_configure) and the run-time pump
- * (qz_dap_service) so breakpoints added mid-run take effect immediately. */
+/* Handle a setBreakpoints request: replace the breakpoints of the source in
+ * `args` (source.path + breakpoints[].line, optional condition) with the ones
+ * in the request, then respond with the verified lines. Scoped per source —
+ * DAP sends one request per file, so other files' breakpoints must survive;
+ * a request without source.path (malformed: DAP requires source) registers
+ * nothing and leaves the table untouched rather than wiping files we cannot
+ * attribute. Shared by the configuration phase (qz_dap_configure) and the
+ * run-time pump (qz_dap_service) so breakpoints added mid-run take effect
+ * immediately. */
 static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_seq)
 {
     /* args.source.path + args.breakpoints[].line（+ 可选 condition） */
@@ -590,17 +594,19 @@ static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_se
                         cJSON_IsString(cJSON_GetObjectItemCaseSensitive(src, "path")))
         ? cJSON_GetObjectItemCaseSensitive(src, "path")->valuestring : NULL;
 
-    qz_debug_clear_breakpoints(d->dbg);
-    if (path && cJSON_IsArray(bps)) {
-        const cJSON *bp = NULL;
-        cJSON_ArrayForEach(bp, bps) {
-            const cJSON *ln = cJSON_GetObjectItemCaseSensitive(bp, "line");
-            if (!cJSON_IsNumber(ln) || ln->valueint <= 0)
-                continue;
-            const cJSON *cond = cJSON_GetObjectItemCaseSensitive(bp, "condition");
-            const char *condstr = (cJSON_IsString(cond) && cond->valuestring)
-                ? cond->valuestring : NULL;
-            qz_debug_add_breakpoint(d->dbg, path, ln->valueint, condstr);
+    if (path) {
+        qz_debug_clear_breakpoints_in_file(d->dbg, path);
+        if (cJSON_IsArray(bps)) {
+            const cJSON *bp = NULL;
+            cJSON_ArrayForEach(bp, bps) {
+                const cJSON *ln = cJSON_GetObjectItemCaseSensitive(bp, "line");
+                if (!cJSON_IsNumber(ln) || ln->valueint <= 0)
+                    continue;
+                const cJSON *cond = cJSON_GetObjectItemCaseSensitive(bp, "condition");
+                const char *condstr = (cJSON_IsString(cond) && cond->valuestring)
+                    ? cond->valuestring : NULL;
+                qz_debug_add_breakpoint(d->dbg, path, ln->valueint, condstr);
+            }
         }
     }
 

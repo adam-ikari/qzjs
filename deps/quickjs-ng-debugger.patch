@@ -20,10 +20,10 @@ index ec2a5ad..402d288 100644
  #undef DEF
  #undef def
 diff --git a/quickjs.c b/quickjs.c
-index 174a134..9e061aa 100644
+index d54a178..9632f5c 100644
 --- a/quickjs.c
 +++ b/quickjs.c
-@@ -372,6 +372,16 @@ struct JSRuntime {
+@@ -382,6 +382,16 @@ struct JSRuntime {
      JSInterruptHandler *interrupt_handler;
      void *interrupt_opaque;
  
@@ -40,14 +40,15 @@ index 174a134..9e061aa 100644
      JSPromiseHook *promise_hook;
      void *promise_hook_opaque;
      // for smuggling the parent promise from js_promise_then
-@@ -2484,6 +2494,34 @@ void JS_SetCanBlock(JSRuntime *rt, bool can_block)
+@@ -2479,6 +2489,35 @@ void JS_SetCanBlock(JSRuntime *rt, bool can_block)
      rt->can_block = can_block;
  }
  
 +/* ---- qwrt debugger dispatch hook ----
 + * Called once per opcode dispatch from JS_CallInternal when a debugger is
-+ * attached (rt->debugger_hooks != NULL). Writes sf->cur_pc = pc FIRST so
-+ * frame walkers / find_line_num see a live PC (see FIXME at the
++ * attached (rt->debugger_hooks != NULL). Writes sf->cur_pc = pc + 1 FIRST so
++ * frame walkers / find_line_num see a live PC — one-past, matching what the
++ * -1 in JS_PcToLine/JS_GetCallFrames expects (see FIXME at the
 + * build_backtrace call site). When no debugger is attached, this is a
 + * single never-taken branch. Returns 0 to continue; the on_dispatch hook
 + * must also return 0 (it blocks internally to pause, then returns 0).
@@ -62,7 +63,7 @@ index 174a134..9e061aa 100644
 +    JSDebuggerHooks *h = rt->debugger_hooks;
 +    if (likely(!h))
 +        return 0;
-+    sf->cur_pc = (uint8_t *)pc;
++    sf->cur_pc = (uint8_t *)(pc + 1); /* one past: SWITCH hasn't done *pc++ yet */
 +    return h->on_dispatch(ctx, sf, pc, h->opaque);
 +}
 +#define DEBUGGER_CHECK(ctx, sf, pc) \
@@ -75,7 +76,7 @@ index 174a134..9e061aa 100644
  void JS_SetSharedArrayBufferFunctions(JSRuntime *rt,
                                        const JSSharedArrayBufferFunctions *sf)
  {
-@@ -8142,6 +8180,169 @@ fail:
+@@ -8151,6 +8190,169 @@ fail:
      return b->line_num;
  }
  
@@ -245,7 +246,7 @@ index 174a134..9e061aa 100644
  /* in order to avoid executing arbitrary code during the stack trace
     generation, we only look at simple 'name' properties containing a
     string. */
-@@ -18074,7 +18275,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18083,7 +18285,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #endif
  
  #if !DIRECT_DISPATCH
@@ -254,7 +255,7 @@ index 174a134..9e061aa 100644
  #define CASE(op)        case op
  #define DEFAULT         default
  #define BREAK           break
-@@ -18085,7 +18286,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -18094,7 +18296,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  #include "quickjs-opcode.h"
          [ OP_COUNT ... 255 ] = &&case_default
      };
@@ -263,7 +264,7 @@ index 174a134..9e061aa 100644
  #define CASE(op)        case_ ## op
  #define DEFAULT         case_default
  #define BREAK           SWITCH(pc)
-@@ -20862,6 +21063,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+@@ -20894,6 +21096,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
  
          CASE(OP_nop):
              BREAK;
@@ -275,17 +276,183 @@ index 174a134..9e061aa 100644
          CASE(OP_is_undefined_or_null):
              if (JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_UNDEFINED ||
                  JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_NULL) {
-@@ -30250,7 +30456,9 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+@@ -28861,6 +29068,10 @@ static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
+     JSAtom name = JS_ATOM_NULL;
+ 
+     for (;;) {
++        /* qwrt: pc2line entry for this declarator's line — a multi-line
++         * declaration (`var a = 1,\n    b = 2;`) has no other marker on the
++         * second declarator's line. */
++        emit_source_loc(s);
+         if (s->token.val == TOK_IDENT) {
+             if (s->token.u.ident.is_reserved) {
+                 return js_parse_error_reserved_identifier(s);
+@@ -29416,6 +29627,14 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+     JSAtom label_name;
+     int tok;
+ 
++    /* qwrt: pc2line entry for the statement's own line. Every statement gets
++     * one marker here, so a breakpoint on a line that generates no other
++     * marker (return 1;, break;, continue;, if/while/try headers, function
++     * declarations ...) still has a table entry and can fire. Statements whose
++     * expression or clause parser emits another marker on the same line add a
++     * duplicate entry, which pc2line drops (same line+col at the same pc). */
++    emit_source_loc(s);
++
+     /* specific label handling */
+     /* XXX: support multiple labels on loop statements */
+     label_name = JS_ATOM_NULL;
+@@ -29567,6 +29786,8 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+ 
+             if (s->token.val == TOK_ELSE) {
+                 label2 = emit_goto(s, OP_goto, -1);
++                /* qwrt: pc2line entry for the `else` line */
++                emit_source_loc(s);
+                 if (next_token(s))
+                     goto fail;
+ 
+@@ -29922,6 +30143,10 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+                     label_case = -1;
+                     for (;;) {
+                         /* parse a sequence of case clauses */
++                        /* qwrt: pc2line entry for this `case` line (clause
++                         * positions are not statements, the statement-level
++                         * marker does not cover them) */
++                        emit_source_loc(s);
+                         if (next_token(s))
+                             goto fail;
+                         emit_op(s, OP_dup);
+@@ -29939,6 +30164,8 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+                         }
+                     }
+                 } else if (s->token.val == TOK_DEFAULT) {
++                    /* qwrt: pc2line entry for this `default` line */
++                    emit_source_loc(s);
+                     if (next_token(s))
+                         goto fail;
+                     if (js_parse_expect(s, ':'))
+@@ -30000,6 +30227,11 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+             }
+             if (js_parse_expect(s, '}'))
+                 goto fail;
++            /* qwrt: pc2line entry for whatever follows the switch — without
++             * it the epilogue (drop of the discriminant, break/land targets)
++             * would inherit the last clause's line and a breakpoint on that
++             * (never executed) line would fire. */
++            emit_source_loc(s);
+             if (default_label_pos >= 0) {
+                 /* Ugly patch for the `default` label, shameful and risky */
+                 put_u32(s->cur_func->byte_code.buf + default_label_pos,
+@@ -30052,6 +30284,8 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+             }
+ 
+             if (s->token.val == TOK_CATCH) {
++                /* qwrt: pc2line entry for the `catch` clause line */
++                emit_source_loc(s);
+                 if (next_token(s))
+                     goto fail;
+ 
+@@ -30135,6 +30369,8 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
+             if (s->token.val == TOK_FINALLY) {
+                 int saved_eval_ret_idx = 0; /* avoid warning */
+ 
++                /* qwrt: pc2line entry for the `finally` clause line */
++                emit_source_loc(s);
+                 if (next_token(s))
+                     goto fail;
+                 /* on the stack: ret_value gosub_ret_value */
+@@ -30282,7 +30518,10 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
          break;
  
      case TOK_DEBUGGER:
 -        /* currently no debugger, so just skip the keyword */
 +        /* qwrt: emit OP_debugger so the attached debugger can pause here.
 +         * The interpreter CASE is a no-op when no debugger is attached. */
++        emit_source_loc(s); /* pc2line entry: without it the stop reports line N-1 */
 +        emit_op(s, OP_debugger);
          if (next_token(s))
              goto fail;
          if (js_parse_expect_semi(s))
+@@ -35895,8 +36134,29 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
+             /* line number info (for debug). We put it in a separate
+                compressed table to reduce memory usage and get better
+                performance */
+-            line_num = get_u32(bc_buf + pos + 1);
+-            col_num = get_u32(bc_buf + pos + 5);
++            {
++                int new_line_num = get_u32(bc_buf + pos + 1);
++                int new_col_num = get_u32(bc_buf + pos + 5);
++                /* qwrt: entries are recorded when an opcode is emitted, with
++                 * the last marker seen active. When the line changes but the
++                 * current line was never recorded (no opcode emitted since —
++                 * OP_label and phase-2-consumed ops such as an empty
++                 * OP_enter_scope emit no code, and skip_dead_code can move
++                 * the line over markers it does not copy), that line would
++                 * vanish from the table and a breakpoint on it could never
++                 * fire (do {, `default:`, `} finally {`, a block's first
++                 * statement, ...). Emit a nop so it gets a pc of its own.
++                 * Same-line marker chains (if/while conditions, expression
++                 * statements) skip this; a column-only difference is
++                 * cosmetic, breakpoints match on lines. */
++                if (new_line_num != line_num &&
++                    line_num != s->line_number_last) {
++                    add_pc2line_info(s, bc_out.size, line_num, col_num);
++                    dbuf_putc(&bc_out, OP_nop);
++                }
++                line_num = new_line_num;
++                col_num = new_col_num;
++            }
+             break;
+ 
+         case OP_label:
+@@ -36478,11 +36738,17 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
+                 int idx;
+                 idx = get_u16(bc_buf + pos + 1);
+                 if (code_match(&cc, pos_next, op - 1, idx, -1)) {
+-                    if (cc.line_num >= 0) line_num = cc.line_num;
+-                    if (cc.col_num >= 0) col_num = cc.col_num;
++                    /* qwrt: record the pc2line entry with the line at which
++                     * the merged opcode STARTS. source_loc markers consumed
++                     * by the lookahead belong to the FOLLOWING statement and
++                     * must only take effect after this opcode — otherwise a
++                     * breakpoint on the next line fires one statement early,
++                     * before the previous statement's store has run. */
+                     add_pc2line_info(s, bc_out.size, line_num, col_num);
+                     put_short_code(&bc_out, op + 1, idx);
+                     pos_next = cc.pos;
++                    if (cc.line_num >= 0) line_num = cc.line_num;
++                    if (cc.col_num >= 0) col_num = cc.col_num;
+                     break;
+                 }
+                 add_pc2line_info(s, bc_out.size, line_num, col_num);
+@@ -36506,15 +36772,24 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
+                     op1 = cc.op;
+                     idx = cc.idx;
+                     pos_next = cc.pos;
+-                    if (code_match(&cc, cc.pos, op1 - 1, idx, -1)) {
+-                        if (cc.line_num >= 0) line_num = cc.line_num;
+-                        if (cc.col_num >= 0) col_num = cc.col_num;
++                    /* qwrt: the second match can cross into the NEXT
++                     * statement (post_inc put_x drop get_x folds the
++                     * following get_x in). Record the pc2line entry with the
++                     * current line first; consume the lookahead's source_loc
++                     * markers only after emitting, so that the next line's
++                     * breakpoint doesn't fire one statement early. */
++                    bool fold = code_match(&cc, cc.pos, op1 - 1, idx, -1);
++                    if (fold) {
+                         op1 += 1;   /* put_x(n) get_x(n) -> set_x(n) */
+                         pos_next = cc.pos;
+                     }
+                     add_pc2line_info(s, bc_out.size, line_num, col_num);
+                     dbuf_putc(&bc_out, OP_dec + (op - OP_post_dec));
+                     put_short_code(&bc_out, op1, idx);
++                    if (fold) {
++                        if (cc.line_num >= 0) line_num = cc.line_num;
++                        if (cc.col_num >= 0) col_num = cc.col_num;
++                    }
+                     break;
+                 }
+                 if (code_match(&cc, pos_next, OP_perm3, OP_put_field, OP_drop, -1)) {
 diff --git a/quickjs.h b/quickjs.h
 index 7254f72..a97eab9 100644
 --- a/quickjs.h

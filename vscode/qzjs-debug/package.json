@@ -1,0 +1,126 @@
+{
+  "name": "qzjs-debug",
+  "displayName": "Qz.js Debugger",
+  "description": "DAP debugger for qzjs — breakpoints, stepping, variable inspection over stdio DAP",
+  "version": "0.1.0",
+  "publisher": "qzjs",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "qzjs",
+        "label": "Qz.js Debug",
+        "languages": [
+          "javascript"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program",
+              "runtimeExecutable"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the JS entry file passed to the qzjs runtime"
+              },
+              "runtimeExecutable": {
+                "type": "string",
+                "description": "Path to the binary embedding qzjs (e.g. build/qzjs, or your own host)"
+              },
+              "runtimeArgs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments passed to runtimeExecutable before the program"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Extra environment variables; QZ_DEBUG=1 is set automatically"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": true,
+                "description": "Pause at the first statement (qzjs always stops on entry when debug is on)"
+              }
+            }
+          },
+          "attach": {
+            "required": [
+              "program",
+              "runtimeExecutable"
+            ],
+            "properties": {
+              "program": {
+                "type": "string"
+              },
+              "runtimeExecutable": {
+                "type": "string"
+              },
+              "runtimeArgs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          }
+        },
+        "configurationSnippets": [
+          {
+            "label": "Qz.js: Debug Program",
+            "description": "Debug a JS program running inside a qzjs-embedding binary",
+            "body": {
+              "type": "qzjs",
+              "request": "launch",
+              "name": "qzjs: debug program",
+              "program": "^\"\\${workspaceFolder}/app.js\"",
+              "runtimeExecutable": "^\"\\${workspaceFolder}/build/qzjs\"",
+              "runtimeArgs": []
+            }
+          }
+        ]
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "javascript"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node ./build.mjs",
+    "watch": "node ./build.mjs --watch",
+    "test": "node --test test/*.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.138.0",
+    "@vscode/debugadapter": "^1.66.0",
+    "@vscode/debugprotocol": "^1.65.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

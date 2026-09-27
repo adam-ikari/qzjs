@@ -179,8 +179,12 @@ static void cli_message_cb(qz_t *rt, const char *json, size_t len, void *data) {
  * - globalThis.arguments: script args (no runtime parts; aligned with the
  *   WinterCG proposal-cli-api direction; excludes the executable and path)
  * - globalThis.env: environment key-values (minimal form)
- * - onmessage eval command channel: host posts {"cmd":"eval","code":...}
+ * - onmessage eval command channel: host posts {"cmd":"eval","code":...,
+ *   "file":<source path>|null}
  *   → JS eval → postMessage({ok, v|e})
+ *   file 是这段 code 的来源文件。带 file 时走 nativeEvalScript，让引擎用真实
+ *   路径命名这次求值——栈帧与断点都按 JS_Eval 的源名精确匹配（qz_debug.h），
+ *   少了它按真实路径设的断点永远不命中。没 file（-e / REPL）维持 (0, eval)。
  * ARGS_JSON / ENV_JSON are substituted at runtime by build_bootstrap(). */
 static const char *kCliBootstrap =
     "globalThis.arguments = %s;\n"
@@ -188,7 +192,12 @@ static const char *kCliBootstrap =
     "globalThis.onmessage = function (e) {\n"
     "  var d = e.data;\n"
     "  if (d && d.cmd === 'eval') {\n"
-    "    try { postMessage({ok: true, v: JSON.stringify((0, eval)(d.code))}); }\n"
+    "    try {\n"
+    "      var nat = typeof __native__ !== 'undefined' ? __native__ : null;\n"
+    "      var r = d.file && nat && nat.nativeEvalScript\n"
+    "        ? nat.nativeEvalScript(d.code, d.file) : (0, eval)(d.code);\n"
+    "      postMessage({ok: true, v: JSON.stringify(r)});\n"
+    "    }\n"
     "    catch (err) { postMessage({ok: false, e: String(err)}); }\n"
     "  }\n"
     "};\n";
@@ -346,7 +355,11 @@ static void apply_control_plane(qz_config_t *cfg) {
     cfg->control_pipe_path = g_control_pipe;
 }
 
-static int run_code(const char *code, const char *const *args, int nargs) {
+/* file: 这段 code 的来源路径（script 模式 = argv 里的脚本路径；-e / REPL 传
+ * NULL）。它作为 eval 通道的 "file" 字段送进运行时，引擎用它命名这次求值，
+ * 栈帧 / Error().stack / 调试器断点才认得真实文件（否则全是 "<input>"）。 */
+static int run_code(const char *code, const char *file,
+                    const char *const *args, int nargs) {
     cli_host_t host = {0};
 
     char *bootstrap = build_bootstrap(args, nargs);
@@ -376,20 +389,31 @@ static int run_code(const char *code, const char *const *args, int nargs) {
         qz_free(rt);
         return 1;
     }
-    /* json_escape 上界 strlen*6+3，故按 cmd_json 实际长度 + 固定信封开销
-     * 分配（原 strlen*2+64 会溢出）。snprintf 检查返回值防截断。 */
-    size_t cmd_cap = strlen(cmd_json) + 64;
-    char *cmd = malloc(cmd_cap);
-    if (!cmd) {
+    char *file_json = file ? json_escape(file) : NULL;
+    if (file && !file_json) {
         free(cmd_json);
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
         return 1;
     }
-    int wrote = snprintf(cmd, cmd_cap, "{\"cmd\":\"eval\",\"code\":%s}",
-                         cmd_json);
+    /* json_escape 上界 strlen*6+3，故按 cmd_json/file_json 实际长度 + 固定信封
+     * 开销分配（原 strlen*2+64 会溢出）。snprintf 检查返回值防截断。 */
+    size_t cmd_cap = strlen(cmd_json) + (file_json ? strlen(file_json) : 4) + 64;
+    char *cmd = malloc(cmd_cap);
+    if (!cmd) {
+        free(cmd_json);
+        free(file_json);
+        fprintf(stderr, "qzjs: out of memory\n");
+        qz_wait_idle(rt);
+        qz_free(rt);
+        return 1;
+    }
+    int wrote = snprintf(cmd, cmd_cap,
+                         "{\"cmd\":\"eval\",\"file\":%s,\"code\":%s}",
+                         file_json ? file_json : "null", cmd_json);
     free(cmd_json);
+    free(file_json);
     if (wrote < 0 || (size_t)wrote >= cmd_cap) {
         free(cmd);
         fprintf(stderr, "qzjs: out of memory\n");
@@ -640,8 +664,9 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
         }
         if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--eval")) {
             if (i + 1 >= argc) { usage(stderr); return 2; }
-            /* -e mode: eval the code; remaining args become script args */
-            return run_code(argv[i + 1],
+            /* -e mode: eval the code; remaining args become script args.
+             * file=NULL：没有来源文件，引擎按 "<input>" 命名（与旧版一致）。 */
+            return run_code(argv[i + 1], NULL,
                             (const char *const *)argv + i + 2, argc - i - 2);
         }
         /* 未知 flag */
@@ -679,7 +704,9 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
         }
         code[sz] = 0;
         fclose(f);
-        int rc = run_code(code, (const char *const *)argv + script_index, argc - script_index);
+        /* file = script_path：按调用方给的路径命名这次 eval（见 run_code） */
+        int rc = run_code(code, script_path,
+                          (const char *const *)argv + script_index, argc - script_index);
         free(code);
         return rc;
     }

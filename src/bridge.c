@@ -41,6 +41,7 @@
 static JSValue js_pal_time_now(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_pal_hrtime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_pal_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_pal_native_eval_script(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_pal_timer_stop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_pal_timer_start(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_pal_http_request(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -237,6 +238,49 @@ void qz_timer_cancel(qz_ctx_t *cctx, int idx)
 /* ================================================================
  * Sync primitives
  * ================================================================ */
+
+/* pal.nativeEvalScript(code, filename) → value
+ *
+ * 用显式源名执行一段源码。JS 里的 eval 无法给自己的源码命名（quickjs-ng 把
+ * 间接 eval 的源名固定成 "<input>"），所以宿主拿到"某个文件的内容"当字符串
+ * 再送进运行时时——CLI 的 {"cmd":"eval"} 通道——栈帧 / Error().stack / 调试器
+ * 断点都会记成 <input>。而断点是拿 JS_Eval 的源名做精确 strcmp 匹配的
+ * （qz_debug.h："the host must eval with the real source path"），于是按真实
+ * 路径设的断点永远不命中。把字符串来源的文件名一起送进来，引擎就用它命名
+ * 这次求值。
+ *
+ * - filename 省略 / undefined / null → "<input>"（与原来的 (0, eval) 一致）。
+ * - 按 *脚本* 语义执行（JS_EVAL_TYPE_GLOBAL，顶层 var/函数进全局），与 node
+ *   跑一个文件一致；间接 eval 对 strict 代码会另开变量环境，那条语义留在
+ *   无文件名的调用（-e / REPL）里不变。
+ * - 抛出的异常原样向上传播（调用方 try/catch 拿到同一个 Error）。 */
+static JSValue js_pal_native_eval_script(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv)
+{
+    QZ_UNUSED(this_val);
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "nativeEvalScript requires at least 1 argument: code");
+
+    size_t len = 0;
+    const char *code = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!code)
+        return JS_EXCEPTION;
+
+    const char *file = NULL;
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
+        file = JS_ToCString(ctx, argv[1]);
+        if (!file) {
+            JS_FreeCString(ctx, code);
+            return JS_EXCEPTION;
+        }
+    }
+
+    JSValue ret = JS_Eval(ctx, code, len, file ? file : "<input>",
+                          JS_EVAL_TYPE_GLOBAL);
+    JS_FreeCString(ctx, code);
+    if (file) JS_FreeCString(ctx, file);
+    return ret;   /* JS_EXCEPTION 原样上抛：调用方 try/catch 拿到同一个 Error */
+}
 
 static JSValue js_pal_time_now(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
@@ -2302,6 +2346,9 @@ JSValue qz_create_pal_object_ctx(qz_t *rt, qz_ctx_t *ctx)
     /* Sync functions */
     JS_SetPropertyStr(jsctx, pal, "timeNow", JS_NewCFunction(jsctx, js_pal_time_now, "timeNow", 0));
     JS_SetPropertyStr(jsctx, pal, "hrtime", JS_NewCFunction(jsctx, js_pal_hrtime, "hrtime", 0));
+    /* 带源名的 eval（栈帧 / 断点匹配用，见 js_pal_native_eval_script） */
+    JS_SetPropertyStr(jsctx, pal, "nativeEvalScript",
+                      JS_NewCFunction(jsctx, js_pal_native_eval_script, "nativeEvalScript", 2));
     JS_SetPropertyStr(jsctx, pal, "log", JS_NewCFunction(jsctx, js_pal_log, "log", 2));
     JS_SetPropertyStr(jsctx, pal, "timerStop", JS_NewCFunction(jsctx, js_pal_timer_stop, "timerStop", 1));
 

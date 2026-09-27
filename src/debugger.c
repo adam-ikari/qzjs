@@ -158,7 +158,13 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
 {
     qz_debug_t *dbg = (qz_debug_t *)opaque;
     int col = 0;
-    int line = JS_PcToLine(ctx, sf, pc, &col);
+    /* on_dispatch receives pc pointing AT the opcode (SWITCH runs
+     * DEBUGGER_CHECK before *pc++), but JS_PcToLine's pc_value -= 1 expects
+     * the engine's one-past convention (the one every sf->cur_pc save inside
+     * a handler follows). Without the +1 the reported line is the previous
+     * source line whenever the opcode starts a line — which is exactly the
+     * `debugger;` case, where the stop would highlight line N-1. */
+    int line = JS_PcToLine(ctx, sf, pc + 1, &col);
     if (line < 0)
         return 0;  /* native or no debug info — can't debug this frame */
 
@@ -356,6 +362,22 @@ void qz_debug_clear_breakpoints(qz_debug_t *dbg)
         free(dbg->bps[i].condition);
     }
     dbg->bp_count = 0;
+}
+
+void qz_debug_clear_breakpoints_in_file(qz_debug_t *dbg, const char *filename)
+{
+    if (!dbg || !filename) return;
+    int i, j = 0;
+    for (i = 0; i < dbg->bp_count; i++) {
+        qz_bp_t *bp = &dbg->bps[i];
+        if (bp->filename && strcmp(bp->filename, filename) == 0) {
+            free(bp->filename);
+            free(bp->condition);
+        } else {
+            dbg->bps[j++] = *bp;   /* keep other files' breakpoints */
+        }
+    }
+    dbg->bp_count = j;
 }
 
 void qz_debug_continue(qz_debug_t *dbg)

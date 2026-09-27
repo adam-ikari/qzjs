@@ -56,6 +56,11 @@ int  qz_debug_add_breakpoint(qz_debug_t *dbg, const char *filename,
                                int line, const char *condition);
 int  qz_debug_remove_breakpoint(qz_debug_t *dbg, const char *filename, int line);
 void qz_debug_clear_breakpoints(qz_debug_t *dbg);
+/* Remove only the breakpoints registered for `filename`, keeping every other
+ * file's breakpoints. DAP setBreakpoints is per-source: a request replaces
+ * just the named source's breakpoints (qz_debug_clear_breakpoints would wipe
+ * the other files too). */
+void qz_debug_clear_breakpoints_in_file(qz_debug_t *dbg, const char *filename);
 
 /* Flow control. Called by the host while inside on_stopped (i.e. from within
  * the paused interrupt handler). They set the step mode and return, causing

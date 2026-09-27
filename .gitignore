@@ -7,6 +7,8 @@ build-*/
 *.so
 *.dylib
 *.dll
+# VS Code extension bundle output (npm run compile)
+vscode/qzjs-debug/out/
 
 # Generated files
 # NOTE: dist/polyfill.js + dist/polyfill.bytecode + src/polyfill_default.c and

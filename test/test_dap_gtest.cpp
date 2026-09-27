@@ -479,6 +479,179 @@ TEST(DapDebugger, BreakpointFlow) {
     }
 }
 
+/* ---- PerFileBreakpointScope: setBreakpoints is scoped per source ----
+ * VS Code sends one setBreakpoints request per file. The old handler cleared
+ * the whole table on every request, so set/clear requests for any other file
+ * silently wiped this file's breakpoints (answered verified, never hit).
+ * The child runs kJsProgram as "<initial>"; the parent sets a breakpoint
+ * there, then issues set + clear requests for a second path ("<second>",
+ * never loaded) — the <initial> breakpoint must still fire. */
+static int scope_parent_main(int child_out_fd, int child_in_fd, pid_t pid)
+{
+    FILE *from_child = fdopen(child_out_fd, "r");
+    if (!from_child) return 1;
+
+    int failures = 0;
+    char *msg;
+
+    /* 1. initialize — up to 4 messages for initialized event + response */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":1,\"command\":\"initialize\","
+        "\"arguments\":{\"adapterID\":\"qzjs\",\"clientID\":\"test\"}}");
+    int got_event = 0, got_response = 0;
+    for (int tries = 0; tries < 4 && !(got_event && got_response); tries++) {
+        msg = dap_read(from_child);
+        if (!msg) break;
+        if (strstr(msg, "\"event\"") && strstr(msg, "\"initialized\"")) got_event = 1;
+        if (strstr(msg, "\"response\"") && strstr(msg, "\"initialize\"")) got_response = 1;
+        free(msg);
+    }
+    if (!got_event || !got_response) {
+        fprintf(stderr, "FAIL: no initialized event/response\n");
+        return 1;
+    }
+    fprintf(stderr, "ok: initialized\n");
+
+    /* 2. breakpoint on <initial> line 3 */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":2,\"command\":\"setBreakpoints\","
+        "\"arguments\":{\"source\":{\"path\":\"<initial>\"},"
+        "\"breakpoints\":[{\"line\":3}]}}");
+    msg = dap_read(from_child);
+    if (!msg) { fprintf(stderr, "FAIL: no setBreakpoints response\n"); return 1; }
+    if (!strstr(msg, "\"verified\":true")) {
+        fprintf(stderr, "FAIL: <initial> breakpoint not verified: %s\n", msg);
+        failures++;
+    }
+    free(msg);
+
+    /* 3. another file's breakpoints — wipes <initial> under whole-table clear */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":3,\"command\":\"setBreakpoints\","
+        "\"arguments\":{\"source\":{\"path\":\"<second>\"},"
+        "\"breakpoints\":[{\"line\":1}]}}");
+    msg = dap_read(from_child);
+    if (!msg) { fprintf(stderr, "FAIL: no setBreakpoints(<second>) response\n"); return 1; }
+    free(msg);
+
+    /* 4. clear <second> — must leave <initial> untouched */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":4,\"command\":\"setBreakpoints\","
+        "\"arguments\":{\"source\":{\"path\":\"<second>\"},"
+        "\"breakpoints\":[]}}");
+    msg = dap_read(from_child);
+    if (!msg) { fprintf(stderr, "FAIL: no clear response\n"); return 1; }
+    if (!strstr(msg, "\"breakpoints\":[]")) {
+        fprintf(stderr, "FAIL: clearing <second> echoed breakpoints: %s\n", msg);
+        failures++;
+    }
+    free(msg);
+    fprintf(stderr, "ok: per-file set/clear\n");
+
+    /* 5. configurationDone */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":5,\"command\":\"configurationDone\","
+        "\"arguments\":{}}");
+    msg = dap_read(from_child);
+    if (!msg) { fprintf(stderr, "FAIL: no configurationDone response\n"); return 1; }
+    free(msg);
+
+    /* 6. stopped at entry */
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"")) {
+        fprintf(stderr, "FAIL: no entry stopped: %s\n", msg ? msg : "(null)");
+        free(msg);
+        return 1;
+    }
+    free(msg);
+    fprintf(stderr, "ok: stopped at entry\n");
+
+    /* 7. continue — the <initial> breakpoint must have survived the
+     * <second> set/clear requests */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":6,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);  /* continue response */
+    free(msg);
+
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"") || !strstr(msg, "\"breakpoint\"")) {
+        fprintf(stderr, "FAIL: <initial> breakpoint wiped by another file's "
+                        "setBreakpoints: %s\n", msg ? msg : "(null)");
+        free(msg);
+        failures++;
+        msg = nullptr;   /* no frame to inspect — skip to teardown */
+    }
+    if (msg) {
+        free(msg);
+        /* 8. stackTrace — expect the top frame at line 3 */
+        dap_write(child_in_fd,
+            "{\"type\":\"request\",\"seq\":7,\"command\":\"stackTrace\","
+            "\"arguments\":{\"threadId\":1}}");
+        msg = dap_read(from_child);
+        if (!msg) { fprintf(stderr, "FAIL: no stackTrace response\n"); failures++; }
+        else {
+            char *line = json_get(msg, "line");
+            if (!line || atoi(line) != 3) {
+                fprintf(stderr, "FAIL: stackTrace line != 3 (got %s)\n",
+                        line ? line : "(null)");
+                failures++;
+            } else {
+                fprintf(stderr, "ok: stopped at <initial>:3 after other-file set/clear\n");
+            }
+            free(line);
+            free(msg);
+        }
+    }
+
+    /* 9. continue to termination, then disconnect */
+    signal(SIGPIPE, SIG_IGN);
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":8,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    while ((msg = dap_read(from_child)) != nullptr) free(msg);
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":9,\"command\":\"disconnect\","
+        "\"arguments\":{}}");
+
+    fclose(from_child);
+    close(child_in_fd);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    signal(SIGPIPE, SIG_DFL);
+    if (failures != 0) return failures;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 100;
+    return 0;
+}
+
+TEST(DapDebugger, PerFileBreakpointScope) {
+    int to_child[2], from_child[2];
+    ASSERT_EQ(0, pipe(to_child));
+    ASSERT_EQ(0, pipe(from_child));
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        close(to_child[1]);
+        close(from_child[0]);
+        setenv("QZ_DEBUG", "1", 1);
+        const char *trace = getenv("QZ_DAP_TRACE");
+        if (trace) { freopen(trace, "w", stderr); }
+        int rc = child_main(to_child[0], from_child[1]);
+        _exit(rc);
+    }
+
+    close(to_child[0]);
+    close(from_child[1]);
+    int rc = scope_parent_main(from_child[0], to_child[1], pid);
+    if (rc == 100) {
+        ADD_FAILURE() << "child exited non-zero";
+    } else if (rc != 0) {
+        ADD_FAILURE() << rc << " DAP assertion(s) failed";
+    }
+}
+
 /* ---- M-R1 §13.2/§13.4：DAP stdio 单通道约束 ----
  * 同进程第二个 runtime 缺省 stdio attach（QZ_DEBUG=1 auto-attach）必须
  * 显式失败（qz_dap_attach -2 → ready_err → qz_create NULL），不静默
