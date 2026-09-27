@@ -179,6 +179,9 @@ cmake -B build_dbg -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build b
 cd vscode/qzjs-debug && npm run compile && npm test
 ```
 
+CI 两个门都跑：`debugger` job 执行 `ctest -L dap` 与这些 e2e 测试
+（`QZJS_RUNTIME` 指向该 job 的 `build/qzjs`）。
+
 - `test/smoke.mjs` —— 打在**真实源路径**上的断点会命中：入口暂停 →
   continue → `reason: breakpoint` 的 `stopped`，栈顶帧的路径/行号等于
   VS Code 打断点的那个文件，随后 `terminated`。

@@ -1051,6 +1051,22 @@ jobs:
         run: ctest -L dap --output-on-failure
         working-directory: build
 
+      # 扩展 e2e 以真二进制为被调试端（adapter 内联 DAP 客户端），
+      # 默认找 build_dbg/qzjs——CI 本 job 的构建目录是 build/，用
+      # QZJS_RUNTIME 覆盖（docs/dev/debugging.md Test 节有记载）。
+      - name: Install Node (extension e2e)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install extension deps
+        run: npm --prefix vscode/qzjs-debug ci
+
+      - name: Test (extension e2e)
+        run: |
+          npm --prefix vscode/qzjs-debug run compile
+          QZJS_RUNTIME=$PWD/build/qzjs npm --prefix vscode/qzjs-debug test
+
   # ============================================================================
   # test262: ECMAScript language conformance — guards against QuickJS-ng
   # patch regressions that would reduce JS syntax/API support.

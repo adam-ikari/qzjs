@@ -33,8 +33,9 @@ src/polyfill_host.c
 # Node.js
 node_modules/
 package-lock.json
-# but commit the docs site lockfile (CI reproducibility)
+# but commit lockfiles a CI job installs from (reproducibility)
 !docs/package-lock.json
+!vscode/qzjs-debug/package-lock.json
 
 # IDE / editor
 .vscode/

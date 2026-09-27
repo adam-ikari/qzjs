@@ -227,6 +227,9 @@ cmake -B build_dbg -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build b
 cd vscode/qzjs-debug && npm run compile && npm test
 ```
 
+CI runs both gates: the `debugger` job executes `ctest -L dap` and these
+e2e tests (`QZJS_RUNTIME` points it at that job's `build/qzjs`).
+
 - `test/smoke.mjs` — a breakpoint on the *real* source path fires:
   entry stop → continue → `stopped` with `reason: breakpoint`, top frame's
   path/line equal the file VS Code broke on, then `terminated`.
