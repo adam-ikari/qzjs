@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [build, upstream]
 created: "2026-08-31T11:59:47"
-updated: "2026-09-13T07:11:14"
+updated: "2026-09-27T04:16:03"
 ---
 
 <!-- compiled_truth -->
@@ -16,22 +16,25 @@ updated: "2026-09-13T07:11:14"
 - **quickjs-ng 已升级至 v0.16.2（commit 1009e662，2026-09-12）**：97 commits，三补丁 3way rebase 零冲突；BC_VERSION 26→27；唯一公开 API 破坏为 realloc_func 签名（7 callsite + 3 回调改造）。polyfill.bytecode 须用同版本 qjsc 重编，否则 host_create 全挂（findQjsc 扫描 build* 会静默选到旧 qjsc，已定案：CMake 传 $QJSC 指向当前 build 目录）。
 - **quickjs-ng 已升级至 v0.17.0（commit 6d46d07，2026-09-18）**：32 commits，四补丁（c99-atomics / drain-jobs / bc-reader-hardening / debugger）rebase 零 FAILED（仅 hunk offset 位移）；BC_VERSION 27→28；polyfill.bytecode/worker-boot.bytecode 已用 v0.17.0 qjsc 重编。收获上游安全修复（TypedArray OOB / AsyncDisposableStack UAF / Promise.withResolvers refcount / hash 碰撞）。offline ctest 23/23 + e2e + seeded fuzz 全绿（CI 35451993074）。
 - libuv 已跟进 v1.x HEAD（84af0b18，2026-09-20）：上游 v1.x 线仅 8 commits（BSD/CI 类），零冲突；c99-atomics patch 扩展纳入 io_uring env workaround（见 brain/pages/libuv-io-uring-workaround.md）。master 线为 v2 dev，暂不跟随。
+- **debugger patch 含 pc2line 修复（2026-09-26 行归属 / 2026-09-27 行覆盖）**：quickjs-ng-debugger 352→416 行（行归属 3 处修复）→**522 行 / 20 hunks**（行覆盖：语句入口 marker + phase-3 录制面 + switch 收尾 marker），详见 [[dap-pc2line-line-attribution]]；重建后 a-side 基线已刷新为 configure 时的 v0.17.0 基线（旧文件 stale 在 v0.16.2，靠 offset 也能应用）。
 
 ## 策略（最保守默认）
 
 - **补丁文件随 repo 提交 + CMake configure 阶段 `patch -p1` apply**：保证任何机器 checkout 后重新 configure 即得一致 vmlib（纯 C，无系统依赖）。
 - 上游新 commit 需人工 rebase 三补丁到上游后合入，本地先跑 test262 与 offline ctest 验证再合入：
   - quickjs-ng-c99-atomics（22 行）
-  - quickjs-ng-debugger（352 行）
+  - quickjs-ng-debugger（522 行）
   - libuv-c99-atomics（30 行）
 - 不引入 fork url、不依赖个人仓库。
-- **bytecode 工具链锁定**：polyfill.bytecode 重编必须用与引擎同版本的 qjsc（realloc_func/BC_VERSION 破坏会被静默的旧 qjsc 掩盖，产出的不匹配 bytecode 直接挂 host_create 测试）。
+- **bytecode 工具链锁定**：polyfill.bytecode 重编必须用与引擎同版本 qjsc（realloc_func/BC_VERSION 破坏会被静默的旧 qjsc 掩盖，产出的不匹配 bytecode 直接挂 host_create 测试）。
+- **patch 镜像校验金标准**：`git -C deps/quickjs-ng diff` 是 4 个 configure-time patch 的超集（顺序见 CMakeLists.txt:333-486），单补丁 delta 必须 diff(worktree, HEAD+前序补丁)；验收 = 按 CMake 顺序在 clean HEAD 副本重放 4 补丁后 cmp（quickjs.c/quickjs.h/quickjs-opcode.h/quickjs-c-atomics.h）与工作树相同 + hunk 计数校验 + 已 patch 树 reverse dry-run 全 0。
 
 ## 证据
 
 - `patch --dry-run` OK，补丁可干净回放。
 - v0.16.2 升级：三补丁 3way rebase 零冲突；offline ctest 通过；polyfill.bytecode 重编 155873B。
 - 无补丁状态下 test_compress_gtest 30% flaky（-std=c99 原子行为不稳），补丁后降至 10%，非产品回归。
+- debugger patch 重建（2026-09-27 行覆盖重镜像后）：ctest 26/26、npm test 3/3（SMOKE / DEBUGGER-STMT / LINE-COVERAGE）、gold 4 文件 cmp 全同 + hunk 0 mismatch + reverse dry-run OK——过程与 gotcha 见 [[dap-pc2line-line-attribution]]。
 
 
 ## Timeline
@@ -94,4 +97,16 @@ updated: "2026-09-13T07:11:14"
   kind: decision
   summary: "定性澄清（对 7227ed81 local_count 记录的补充，不改保留结论）：deps/quickjs-ng-bc-localcount.patch 的一致性校验属纵深防御 / CI 稳定性，非安全边界。依据（已核实输入面）：全仓 JS_READ_OBJ_BYTECODE 仅 3 处——src/context.c:178（polyfill 加载，默认 rodata 编译期 const 数组）、src/qzjs.c:222（worker boot，src/worker_boot_default.c git tracked）、.github/workflows/ci.yml:929（fuzz harness 随机 buffer）；跨信任边界传递为零：worker 复用同进程 rodata（worker.c:32-36,149）、process worker fork+exec 不传 bytecode（ipc_process.c:238-287）、挂起序列化（context.c:371）不经 JS_ReadObject → 默认构建无不可信 bytecode 入口；唯一非信入口为 external 模式 QZ_POLYFILL_FILE 指向的磁盘文件（polyfill_load.c:84-170），是否用于生产未证。上游立场：deps/quickjs-ng/SECURITY.md 原文 \"Bytecode hardening is out of scope … Loading untrusted bytecode (JS_ReadObject with JS_READ_OBJ_BYTECODE) is equivalent to executing untrusted native code\"，即 bytecode=本机代码级信任、解析层校验非安全边界；配合 issue #1518 not_planned。设计原则推论：若将来 external/host 模式支持不可信 polyfill，应在加载层建立信任（哈希/签名 + 来源白名单），而非在 reader 逐字段校验——reader 有多个可放大字段（cpool_count/closure_var_count/byte_code_len/var_ref_count/stack_size），逐字段既不完整又拖热路径，且上游明确不接。保留结论不变：补丁保留（用户裁决 + fuzz 门禁稳定 + external 模式损坏文件优雅报错）。"
   source: "2026-09-13 威胁模型核实会话"
+  affects: [quickjs-upstream-merge-strategy]
+
+- time: 2026-09-26T21:18:08
+  kind: decision
+  summary: "debugger patch 行数刷新（352→416 行/12 hunks，pc2line 行归属修复）+ 补 patch 镜像校验金标准，详见 [[dap-pc2line-line-attribution]]"
+  source: "2026-09-26 pc2line 修复定案会话"
+  affects: [quickjs-upstream-merge-strategy]
+
+- time: 2026-09-27T04:16:03
+  kind: decision
+  summary: "debugger patch 行数刷新：416 行/12 hunks → 522 行/20 hunks（2026-09-27 行覆盖修复重镜像），证据行 npm 2/2 → 3/3"
+  source: "2026-09-27 断点行覆盖修复会话"
   affects: [quickjs-upstream-merge-strategy]

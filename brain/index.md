@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-09-26T14:58:51.355Z._
+_Auto-generated. Last updated 2026-09-27T05:21:34.321Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
@@ -11,6 +11,8 @@ _Auto-generated. Last updated 2026-09-26T14:58:51.355Z._
 - [console-output-routing](pages/console-output-routing.md) — category: decision | tags: [console, cli, behavior] | ## compiled_truth
 - [crypto-subtle-gtest](pages/crypto-subtle-gtest.md) — category: decision | tags: [crypto, gtest, webcrypto] | ## 决策
 - [crypto-subtle-wrapkey](pages/crypto-subtle-wrapkey.md) — category: decision | tags: [crypto, webcrypto, wrapkey] | - **背景**：crypto.subtle 此前缺 `wrapKey`/`unwrapKey`（WebCrypto 标准方法）。
+- [dap-pc2line-line-attribution](pages/dap-pc2line-line-attribution.md) — category: decision | tags: [dap, debugger, quickjs, bytecode, pc2line] | ## 决策：pc2line 行归属 + 行覆盖（DAP 断点行正确性，两轮修复）
+- [dap-setbreakpoints-scope](pages/dap-setbreakpoints-scope.md) — category: decision | tags: [dap, debugger] | ## 决策：setBreakpoints 按文件作用域替换
 - [decision-principles](pages/decision-principles.md) — category: decision | tags: [decision, principles, methodology] | ## 决策三原则（用户拍板 2026-09-11，项目级约束）
 - [examples-tree](pages/examples-tree.md) — category: decision | tags: [build, examples] | - 示例程序放在根目录 examples/ 下，每个示例一个子目录（examples/hello, examples/worker），不再放根目录 example.c。
 - [f4-security-audit](pages/f4-security-audit.md) — category: decision | tags: [security, audit] | ## F4 安全审计结论
