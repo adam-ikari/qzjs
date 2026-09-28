@@ -2,12 +2,12 @@
 slug: flow
 title: Key flows
 role: key flows
-updated: "2026-09-28T14:51:17"
+updated: "2026-09-28T17:20:25"
 ---
 
 # Key flows
 
-## End-to-end path of a typical request（宿主→JS 消息；M-P7 目标态 = mailbox）
+## End-to-end path of a typical request（宿主→JS 消息；M-P7 现状 = mailbox）
 
 ```mermaid
 sequenceDiagram
@@ -30,9 +30,11 @@ sequenceDiagram
   Q->>L: uv_stop + join（终止预算冻结在库线程）
 ```
 
-**现状差异（过渡态 M-P6，已实现）**：ISOLATED 下无库侧宿主泵线程——通道句柄挂宿主注入的
-cfg.uv_loop，message_cb 在泵宿主 loop 的线程触发，阻塞 API 就地 NOWAIT 泵，邮箱/唤醒 fd
-不存在；M-P7 实施后本图取代 M-P6 语义（见 [[multi-process-model]]）。
+**M-P7 已落地（现状）**：本图即实现语义。ISOLATED 下库自建宿主侧泵线程+loop，host 方向全部消息
+（JS postMessage、崩溃 {"type":"error"}、CONTROL 回执）入 per-rt FIFO 邮箱，宿主 qz_recv_message
+（0 取到/1 超时/-1 错）消费或挂 qz_message_fd 唤醒 fd 进自身事件系统；三级终止 ≤2s 冻结落在库泵
+线程、调用线程只 join。M-P6 的 cfg.uv_loop 注入 + message_cb 在泵线程触发 + 阻塞 API 就地 NOWAIT 泵
+契约已整体废除（见 [[multi-process-model]]）。
 
 ## Other important flows
 

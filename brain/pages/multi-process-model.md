@@ -4,7 +4,7 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-28T14:48:55"
+updated: "2026-09-28T17:18:17"
 ---
 
 <!-- compiled_truth -->
@@ -12,12 +12,13 @@ ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MOD
 
 **主权原则（用户裁决，凌驾具体形态）**：宿主形态不是 qzjs 能干涉的；qzjs 完全自主管理自己的进程和线程；与宿主通讯只用 postMessage 机制——qzjs 不跨线程调用宿主任何函数。
 
-**宿主侧契约 = M-P7 mailbox 目标态（2026-09-28 再裁决，取代 M-P6 注入契约）**：库自管宿主侧泵线程+loop；host 方向消息（JS postMessage、崩溃 {"type":"error"} 上报、CONTROL 回执）入 per-rt 邮箱队列，宿主在自选线程上消费：qz_recv_message(rt,&json,&len,timeout_ms)（>0 阻塞 / 0 非阻塞 / -1 无限等，返回 NUL 终止 JSON 由 qz_free_message 释放）+ qz_message_fd(rt) 唤醒 fd（可读 = 邮箱非空，挂进任何事件系统皆可，零回调义务）。cfg.uv_loop、message_cb、host_data 回调面整体移除；回调重入规则随之作废；I5②clause 复活（terminate ≤2s 冻结回到库泵线程，宿主调用线程只等 join）。
-**⚠️ 现状 = 过渡态 M-P6**（commit f0178683..6c0ab934，已实施已验证）：宿主经 cfg.uv_loop 注入 loop、message_cb 在泵线程触发、阻塞 API 就地 NOWAIT 泵、pre-ready 帧 create 内同步重放、库永不跑/关宿主 loop。M-P7 落地前，代码/文档/测试仍按 M-P6 语义执行。
+**宿主侧契约 = M-P7 mailbox（现状，2026-09-28 落地并全量验证，取代并废除 M-P6 注入契约）**：库自管宿主侧泵线程+loop（M-P2 形态回归，RT_LOOP=&rt->loop）；host 方向消息（JS postMessage、崩溃 {"type":"error"} 上报、CONTROL 回执顶层 "ctl":true+correl）入 per-rt FIFO 邮箱（msgq 泛化为第二 MPSC 实例 mq_out，ACQ_REL 算法零修改、无 mutex/cond/futex）。宿主在自选线程、自选时机消费：qz_recv_message(rt,&json,&len,timeout_ms)（timeout_ms >0 阻塞 / 0 非阻塞 poll / -1 无限；返回 0=取到 NUL 终止 JSON 由 qz_free_message 释放 / 1=超时 / -1=错误）+ qz_message_fd(rt) 唤醒 fd（eventfd，可读=邮箱非空，先入链后写 fd 保证不丢唤醒，宿主不得 close、free 后失效、Linux-only；挂 fd 等待唯一姿势=①recv(0) 排干并处理→②read(fd) 清至 EAGAIN→③再探 recv(0) 有则回①无才可 poll 阻塞；单消费者：多线程可并发 recv 但同一时刻只一个 fd 等待者）。cfg.uv_loop、message_cb、host_data、qz_get/set_runtime_data 回调面整体移除；回调重入规则随之作废；qz_msg_push 内建 uv_async_send 剥离、唤醒由各入站调用点显式发出；主RT 子进程上行经内部钩子 rt->host_emit，THREAD/worker 分流经 qz_post_to_host（host_emit 上行 / worker_self 丢弃 / 否则入箱）。qz_free 双角色守卫（magic==QZ_MAGIC && thread_joined → 排干邮箱+关 out_efd+释放 config，否则裸 free）。
 
-Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worker（qz_ping_path，tp 回显转发/pfail 快拒）、worker→sub（Worker.prototype.ping）；0=通畅/1=超时(loop 阻塞)/-1=死。M-P6 下 ping/wait_idle 就地泵宿主 loop；M-P7 后改库线程回填 + 条件/原子等待。storage 单所有者（owner=树根主RT，§10.2）非根节点中继上行（N-P4 corr 并发关联）；owner 死 ⇒ 孤儿连锁自杀即设计终点（降级不实施）。
+**I5②clause 复活**：三级终止 ≤2s 冻结回到库泵线程内执行，宿主调用线程只等 join。Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worker（qz_ping_path，tp 回显转发/pfail 快拒）、worker→sub（Worker.prototype.ping）；0=通畅/1=超时(loop 阻塞)/-1=死；ping/wait_idle 的阻塞等待在库泵线程内自旋+sched_yield/原子回填，邮箱不受影响。崩溃帧时序：EOF 里先入箱、后 RELEASE 置 shutting_down，wait_idle 的 acquire spin 退出时帧必在箱内（wait_idle 后、qz_free 前仍可 recv——mp4 stderr 门依赖此序）。
 
-延后项终判：tier-2 超时异步化维持 DEFERRED（①正常路径 ~1ms 仍立；③跨 loop 属主迁移风险仍立；②随 M-P7 回到库线程而恢复原理由）；path u16→u32 YAGNI 维持；§10.2 降级不实施。深度上限 QZ_SELF_PATH_MAX=8、storage 中继单飞行仍为已知缺口。
+storage 单所有者（owner=树根主RT，§10.2）非根节点中继上行（N-P4 corr 并发关联）；owner 死 ⇒ 孤儿连锁自杀即设计终点（降级不实施）。系统级 CONTROL（ready/idle/shutdown/ping 家族，"qzjs" 标记）在 rt_main.c C 读泵就地消费、不入 msgq/JS——否则心跳被控制面当命令回 UNKNOWN_CMD 泄漏进宿主邮箱（M-P7 箱净门捕获）。
+
+延后项终判：tier-2 超时异步化维持 DEFERRED（①正常路径 ~1ms 仍立；③跨 loop 属主迁移风险仍立；②随 M-P7 冻结回到库泵线程而恢复原理由）；path u16→u32 YAGNI 维持；§10.2 降级不实施。深度上限 QZ_SELF_PATH_MAX=8、storage 中继单飞行仍为已知缺口。
 
 
 ## Timeline
@@ -132,4 +133,16 @@ Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worke
   kind: decision
   summary: "compiled truth 更新至 M-P7 再裁决：宿主通讯改 mailbox（qz_recv_message + 唤醒 fd），qzjs 不再调用宿主代码；M-P6 注入形态标注为过渡现状"
   source: "2026-09-28 宿主通讯再裁决会话"
+  affects: [multi-process-model]
+
+- time: 2026-09-28T17:17:52
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [multi-process-model]
+
+- time: 2026-09-28T17:18:17
+  kind: reversal
+  summary: "M-P7 落地并全量验证，取代昨日刚落地的 M-P6 注入契约（commit f0178683..6c0ab934），闭环 M-P6 落地→M-P7 再裁决→M-P7 实施全程：M-P6 让宿主经 cfg.uv_loop 注入 loop、message_cb 在泵线程触发，被判定为对宿主形态的干涉（强加泵义务+libuv 同链接义务+回调重入规则），M-P7 整体废除。变更：①公共 API 删 message_cb/host_data/uv_loop 与 qz_get/set_runtime_data，新增 mailbox 三函数 qz_recv_message/qz_free_message/qz_message_fd（eventfd 唤醒 fd，先入链后写 fd 防丢唤醒，三步消费协议）；②msgq 泛化为第二 MPSC 实例 mq_out（ACQ_REL 零修改、无 mutex/cond/futex），qz_msg_push 剥离内建 uv_async_send→各入站点显式发；③ISOLATED 恢复库自建宿主侧泵线程+loop（基线 f0178683~1，RT_LOOP=&rt->loop，ipc_process 句柄绑定零改动），三级终止 ≤2s 冻结回库线程、调用线程只 join（I5②复活）；④THREAD 统一 mailbox，主RT 子进程上行经内部钩子 rt->host_emit，qz_post_to_host 三分流；⑤崩溃帧先入箱后置 shutting_down（wait_idle 后 free 前仍可 recv，mp4 门依赖）；⑥qz_free 双角色守卫（magic+thread_joined）；⑦CLI 改零 libuv 纯 poll 宿主（输出逐字节不变），examples hello/messages/worker 改 mailbox 宿主。测试：mp5-host-pump→mp7-mailbox 重写（去 libuv、六模式 basic/crash/hung/replay/fd/dual，basic ④ 未消费残留随 teardown 排干=漏 recv 无泄漏门），CMake/CI 接线。文档 EN+zh 33 页契约翻正。关键回归修复：系统级 CONTROL（ready/idle/shutdown/ping）在 rt_main.c C 读泵就地消费不入 msgq/JS（否则心跳回 UNKNOWN_CMD 泄漏进宿主邮箱破坏箱净门）。验证：mock ctest 25/25、THREAD ctest 25/25、ISOLATED Release 绿、mp1-4/mr2/ctl/nested 七 e2e 绿+mp7 全模式绿+ASAN basic/crash 零泄漏（漏排干/双 free 两政策）+worker-pool 520 任务无损。"
+  source: "2026-09-28 M-P7 mailbox 落地会话"
   affects: [multi-process-model]
