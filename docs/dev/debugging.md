@@ -153,6 +153,20 @@ expressions.
 - Conditional breakpoints: a breakpoint's `condition` is evaluated (as JS,
   with frame locals exposed under `locals`, same convention as `evaluate`);
   non-zero stops, zero skips, a throwing condition stops so you see the error.
+- Logpoints: a breakpoint whose `logMessage` is written to the Debug Console
+  instead of stopping — `{expression}` holes are evaluated in the top frame
+  (same `locals.` convention as `evaluate`), the line is printed, and
+  execution continues automatically. A hit fires on every visit (a loop line
+  logs each iteration), and rendering failure degrades to a normal stop —
+  fail-open, a stop is never silently lost.
+- Exception breakpoints (filter **All exceptions** = `all`): every `throw`
+  stops with `reason: exception`, the error message as `text`, and the
+  throw-site frame — caught or uncaught, exactly one stop per throw. Only
+  this filter is offered (see Limitations).
+- `verified` reflects the file system: a breakpoint on a missing file or
+  past a file's last line reports `verified: false` (gray in VS Code); when
+  a response can't be checked against the request 1:1, the engine's answer
+  is kept.
 - `debugger;` statement in your source — stops with reason `breakpoint` even
   when zero breakpoints are set, and regardless of what filename the engine
   recorded for the code.
@@ -178,9 +192,11 @@ expressions.
   - an embedding host that evals `cfg.initial_script` records `<initial>`
     (`qz_eval_internal` hardcodes it), so breakpoints on the real file never
     fire there — entry pause and `debugger;` still work.
-- **`verified: true` means "registered", not "will hit"**: the engine matches
-  breakpoints by byte-exact filename, so a breakpoint only fires if that file
-  is evaluated under the exact same path (see filename matching above).
+- **`verified: true` means "registered and in range", not "will hit"**: the
+  adapter checks the line against the file on disk (missing file or a line
+  past EOF reports `verified: false`), but filename matching stays byte-exact
+  (see filename matching above), so a breakpoint only fires if that file is
+  evaluated under the exact same path.
 - **Closing braces aren't breakable**: a line with no statement bytecode —
   a lone `}` closing a block — has no pc→line entry, so a breakpoint set
   there reports `verified` but never fires.
@@ -192,8 +208,14 @@ expressions.
   line-entry behavior is kept.
 - **No CDP / Chrome DevTools**: DAP only. Chrome DevTools Protocol (CDP over
   WebSocket) is deferred.
-- **No source maps**, no logpoints, no exception
-  breakpoints, no edit-and-continue, no multi-isolate.
+- **Exception breakpoints: `all` only** — there is no *Uncaught* filter
+  (that would need catch-detection on the unwind path) and no separate
+  promise handling: an async rejection is a throw and stops like one.
+  Unknown filters a client sends anyway are answered `verified: false`.
+- **Logpoint holes evaluate in the top frame only** — `{expr}` sees the same
+  `locals.` view `evaluate` has, nothing deeper; a hole that throws falls
+  back to a normal stop at the logpoint (the stop is never lost).
+- **No source maps**, no edit-and-continue, no multi-isolate.
 
 ## Async while paused
 
@@ -216,7 +238,9 @@ running a tiny JS program under `QZ_DEBUG=1`, then acts as the VS Code
 client over a pipe: initialize → setBreakpoints → configurationDone → expects
 `stopped` at the breakpoint → stackTrace/scopes/variables/evaluate → step →
 continue → terminate. It validates the whole stack: engine patch + debug core
-+ DAP layer + the auto-attach path in `qz_create`.
++ DAP layer + the auto-attach path in `qz_create`. It also covers per-file
+breakpoint scope, a mid-run pause, the stdio single-instance constraint, and
+the exception-breakpoint filters (armed: one stop per throw; disarmed: none).
 
 The extension has its own end-to-end tests that drive the inline adapter
 against a debugger-enabled binary (default `build_dbg/qzjs`, override with
@@ -244,6 +268,17 @@ e2e tests (`QZJS_RUNTIME` points it at that job's `build/qzjs`).
   file named via `__native__.nativeEvalScript`) plus a third file's set/clear
   requests: both files' breakpoints must fire, and the other file's requests
   must not wipe them.
+- `test/verified.mjs` — `verified:false` semantics: a line past EOF, a
+  missing file, and cases where the response length doesn't match the
+  request (the engine's answer is kept instead).
+- `test/logpoints.mjs` — a logpoint on a loop line logs all three
+  iterations without stopping while a real breakpoint on the next line
+  still stops twice; program output (`done`) reaches the Debug Console.
+- `test/exception-bp.mjs` — filter `all` armed: a *caught* throw stops with
+  `reason: exception`, `text` carrying the error message, top frame at the
+  throw site, and exactly two stops for the whole session (one throw = one
+  stop — no double-fire); disarmed (`filters: []`): the same throw runs
+  through untouched.
 
 ## Troubleshooting
 

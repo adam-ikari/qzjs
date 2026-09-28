@@ -124,6 +124,16 @@ program 再写一遍。
 - 条件断点：断点的 `condition` 以 JS 求值（帧局部变量同样暴露在 `locals`
   下，与 `evaluate` 同一约定）；非零则停，零则跳过，表达式抛错则停下来让
   你看到错误。
+- 日志点（logpoint）：带 `logMessage` 的断点不暂停，而是把内容写到 Debug
+  Console——`{表达式}` 洞在栈顶帧求值（同样是 `locals.` 约定），打印后自动
+  继续。每次命中都会触发（循环行每次迭代都记录），渲染失败则退化为普通停
+  断点——fail-open，绝不悄悄丢一次停顿。
+- 异常断点（过滤器 **All exceptions** = `all`）：每次 `throw` 都暂停，
+  `reason: exception`、`text` 为错误消息、停在抛出点帧——被 catch 捕获与否
+  都一样，一次抛出恰好停一次。目前只提供这一个过滤器（见限制）。
+- `verified` 反映文件系统：文件不存在或行号超出文件末尾回报 `verified:
+  false`（VS Code 中显示灰色）；当响应与请求无法 1:1 核对时，保留引擎的
+  回答。
 - 源码中的 `debugger;` 语句 —— 即使一个断点都没设也会暂停，`reason` 为
   `breakpoint`；且与引擎为该代码记录的文件名无关。
 - 入口暂停（`stop_on_entry`）。
@@ -141,9 +151,10 @@ program 再写一遍。
   - 嵌入宿主若 eval `cfg.initial_script`，记录为 `<initial>`（`qz_eval_internal`
     写死），此时对真实文件设置的断点永远不会命中——入口暂停与 `debugger;`
     仍然有效。
-- **`verified: true` 表示「已登记」而非「会命中」**：引擎按字节精确的文件名
-  匹配断点，该文件必须以完全相同的路径被求值断点才会触发（见上一条文件名
-  匹配）。
+- **`verified: true` 表示「已登记且行号在范围内」而非「会命中」**：适配器
+  会对照磁盘上的文件核对行号（文件缺失或行号超出文件末尾回报 `verified:
+  false`），但文件名匹配仍是字节精确比较（见上一条），因此该文件必须以
+  完全相同的路径被求值断点才会触发。
 - **右花括号行不可断点**：只有语句入口才有 pc→行号条目；某行没有语句
   字节码——例如单独一个 `}` 收尾块——就没有条目，在那里设的断点会回报
   `verified` 但永远不会命中。
@@ -152,7 +163,13 @@ program 再写一遍。
   条已经执行过的行上的断点可能再触发一次。若把这段代码改挂到未来的行
   号上，会破坏单步语义，故保留按行入口记录的行为。
 - **无 CDP / Chrome DevTools**：仅 DAP。Chrome DevTools 协议（通过 WebSocket 的 CDP）已推迟。
-- **无 source map**，无日志点断点，无异常断点，无编辑并继续，无多隔离。
+- **异常断点只有 `all`**——没有 *Uncaught* 过滤器（需要在展开路径上检测
+  catch），也没有单独的 Promise 处理：异步拒绝就是一次 throw，一样会停。
+  客户端若发送未知过滤器，回 `verified: false`。
+- **日志点的洞只在栈顶帧求值**——`{expr}` 与 `evaluate` 同样只看到
+  `locals.` 视图，没有更深层作用域；洞表达式抛错则退化为在该日志点正常停
+  断点（停顿不会丢）。
+- **无 source map**，无编辑并继续，无多隔离。
 
 ## 暂停期间的异步
 
@@ -169,7 +186,7 @@ cmake -B build -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build build
 ctest --test-dir build -L dap --output-on-failure
 ```
 
-`test/test_dap_gtest.cpp` 是一个进程内嵌入宿主，它 fork 一个子进程，在 `QZ_DEBUG=1` 下运行一个小型 JS 程序，然后通过管道充当 VS Code 客户端：initialize → setBreakpoints → configurationDone → 期望在断点处 `stopped` → stackTrace/scopes/variables/evaluate → step → continue → terminate。它验证了整个技术栈：引擎补丁 + 调试核心 + DAP 层 + `qz_create` 中的自动附加路径。
+`test/test_dap_gtest.cpp` 是一个进程内嵌入宿主，它 fork 一个子进程，在 `QZ_DEBUG=1` 下运行一个小型 JS 程序，然后通过管道充当 VS Code 客户端：initialize → setBreakpoints → configurationDone → 期望在断点处 `stopped` → stackTrace/scopes/variables/evaluate → step → continue → terminate。它验证了整个技术栈：引擎补丁 + 调试核心 + DAP 层 + `qz_create` 中的自动附加路径。此外还覆盖按文件作用域的断点、运行中暂停、stdio 单实例约束，以及异常断点过滤器（武装：一次抛出停一次；解除：不停车）。
 
 扩展自带端到端测试，直接以内联适配器驱动调试构建的二进制
 （默认 `build_dbg/qzjs`，可用 `QZJS_RUNTIME` 覆盖）：
@@ -195,6 +212,14 @@ CI 两个门都跑：`debugger` job 执行 `ctest -L dap` 与这些 e2e 测试
   `__native__.nativeEvalScript` 命名的辅助文件）外加对第三个文件的
   set/clear 请求：两个文件的断点都要命中，且第三个文件的请求不得清掉
   它们。
+- `test/verified.mjs` —— `verified:false` 语义：超出文件末尾的行、缺失的
+  文件，以及响应与请求长度不一致的情形（此时保留引擎的回答）。
+- `test/logpoints.mjs` —— 循环行上的日志点三次迭代全部记录且不停顿，相邻
+  行的真实断点仍正常停两次；程序输出（`done`）能到达 Debug Console。
+- `test/exception-bp.mjs` —— 武装过滤器 `all`：**被 catch 捕获**的
+  throw 也停，`reason: exception`、`text` 带错误消息、栈顶帧在抛出点，
+  整个会话恰好两次停顿（一次抛出 = 一次停顿，不会重复触发）；解除
+  （`filters: []`）：同一个 throw 照常跑完不停。
 
 ## 故障排查
 
