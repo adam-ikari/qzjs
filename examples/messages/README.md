@@ -5,7 +5,8 @@
 `onmessage` 按 `cmd` 字段分派并回复，`message_cb` 打印结果。
 
 - 宿主 → JS：`qz_post_message(rt, json, len)`（线程安全，可任意线程调用）
-- JS → 宿主：`postMessage(value)` 触发 `message_cb`（在 qzjs 线程上）
+- JS → 宿主：`postMessage(value)` 触发 `message_cb`——ISOLATED 进程模型下
+  跑在**泵宿主注入 `cfg.uv_loop` 的线程**上（THREAD 编译才是 qzjs 线程）
 
 ## 构建与运行
 
@@ -35,10 +36,13 @@ cmake --build build --target qz_messages
 - **事件契约由你定义**：qzjs 只搬运 JSON，`cmd` 字段的语义、回复的
   `ok` 形状都是应用层约定。两端对称维护同一张事件表即可（见
   [Host Integration](/guide/host-integration) 的"双端事件分发"节）。
-- `message_cb` 在 qzjs 线程上触发，要保持快且线程安全——重活丢回宿主
-  自己的线程。
+- ISOLATED 下 `message_cb` 在泵宿主 loop 的线程触发，要保持快且**不得在
+  回调内再调任何阻塞宿主 API**（ping/wait_idle 等会就地泵 loop，见
+  `qzjs.h` 契约）——重活丢回宿主自己的线程/工作队列。
 - 未知命令走 `ok:false` 分支，演示错误路径也是消息。
-- 示例用 `usleep` 串行等待往返；真实宿主应在事件循环里等回调。
+- ISOLATED 下示例用「定时闹钟 + `uv_run(UV_RUN_ONCE)`」串行泵 loop 等待
+  往返；THREAD 编译退回 `usleep`。真实宿主本就有事件循环，直接把 loop
+  传进 `cfg.uv_loop` 即可。
 
 ## 相关文档
 
