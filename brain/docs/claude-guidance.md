@@ -9,11 +9,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 qzjs is an embeddable **QuickJS-ng runtime wrapper** written in C99. It exposes a
 small C API on top of the QuickJS-ng engine, plus a WinterTC-compatible
 runtime of standard Web APIs (fetch, console, crypto, streams, timers, fs, …).
-It is **libuv-native**: qzjs owns an internal thread running a libuv event
-loop; the host never touches JS directly and talks to the runtime over JSON
-messages (`qz_post_message` → `message_cb`). It is **standalone** — it
-contains no LLM/agent/business logic and must not reference upper-layer
-applications.
+It is **libuv-native**: qzjs owns its own thread(s) running libuv event
+loops; the host never touches JS directly and **qzjs never runs host code**.
+Inbound: host calls `qz_post_message` (thread-safe). Outbound: every
+host-bound message (JS `postMessage`, crash `{"type":"error"}`, CONTROL
+receipts) is queued into a per-runtime FIFO **mailbox** the host drains
+itself via `qz_recv_message` / `qz_free_message`, optionally waking on
+`qz_message_fd` (an `eventfd`) in its own poll/epoll/select. There is **no host
+callback** and **no loop injection** (M-P7; the old `message_cb` + `cfg.uv_loop`
+contract is gone). It is **standalone** — it contains no
+LLM/agent/business logic and must not reference upper-layer applications.
 
 ## Build & test
 
@@ -113,26 +118,44 @@ the eval.
 The runtime is layered. Read these together to understand it:
 
 - **`include/qzjs/qzjs.h`** — the public surface: `qz_config_t` (initial_script /
-  message_cb / debug / host_data), `qz_ext_t` (extension hooks:
-  `init`/`destroy`/`suspend`/`resume`), and the core API — 6 functions:
-  `qz_create`, `qz_destroy`, `qz_post_message`, `qz_get_runtime_data`,
-  `qz_set_runtime_data`, `qz_free`. The PAL-era `qz_eval`/`qz_tick`
-  APIs are **gone**: the host does not eval JS or drive a loop — it posts JSON
-  messages and receives them via `message_cb`.
+  initial_script_path / initial_bytecode / debug / control_plane /
+  control_pipe_path / worker_backend — **no callback and no loop field**),
+  `qz_ext_t` (extension hooks: `init`/`destroy`/`suspend`/`resume`), and the
+  core API: `qz_create`, `qz_destroy`, `qz_post_message`, `qz_recv_message`,
+  `qz_free_message`, `qz_message_fd`, `qz_wait_idle`, `qz_ping`,
+  `qz_ping_path`, `qz_control`, `qz_free`. The PAL-era `qz_eval`/`qz_tick`
+  APIs are **gone**, and so is the M-P6 `message_cb`/`cfg.uv_loop`/
+  `host_data`/`qz_{get,set}_runtime_data` surface: the host does not eval JS,
+  drive a loop, or receive callbacks — it posts JSON in and drains the mailbox
+  out. Sovereignty rule (M-P7): qzjs never executes host code; the library
+  owns all its threads/loops.
 - **`src/qz_internal.h`** — the real internal layout. `qz_t` holds a fixed
   array of up to `QZ_MAX_CONTEXTS` (64) `qz_ctx_t*`, an embedded `uv_loop_t`
-  (BY VALUE), the internal `uv_thread_t`, a lock-guarded inbound message FIFO,
-  worker/handle tables, and the module bytecode (saved for `qz_reset`
-  re-injection). `QZ_MAGIC` validates the opaque `qz_t*`. The `uv.h`
+  (BY VALUE), the internal `uv_thread_t`, **two lock-free MPSC message queues**
+  (`mq_in` inbound FIFO + `mq_out` outbound mailbox, both `qz_mq_t`) plus the
+  mailbox `eventfd` (`out_efd`), worker/handle tables, and the module bytecode
+  (saved for re-injection). `QZ_MAGIC` validates the opaque `qz_t*`. The `uv.h`
   include switches to `mock_libuv.h` under `QZ_USE_MOCK_LIBUV`.
-- **`src/qzjs.c`** — core lifecycle (`qz_create` spawns the internal thread
-  and blocks until ready, `qz_destroy` shuts it down gracefully,
-  `qz_runtime_init`/`qz_eval_internal`/`qz_thread_teardown` internals).
-- **`src/thread.c`** — the internal thread: runs `uv_run(UV_RUN_ONCE)`, drains
-  the inbound FIFO via `qz_wake_cb`, and flushes all JS microtasks
-  (`qz_flush_microtasks`) after each loop iteration.
-- **`src/msgq.c`** — the lock-guarded inbound message FIFO + `qz_wake_cb`
-  (uv_async wakeup) + message encode/decode.
+- **`src/qzjs.c`** — core lifecycle (`qz_create` — ISOLATED spawns the main-RT
+  process + the library pump thread, THREAD starts the internal thread, both
+  block until ready; `qz_destroy`/`qz_wait_idle` shutdown; `qz_recv_message`/
+  `qz_message_fd` mailbox consumption; `qz_mailbox_teardown` drains `mq_out` +
+  closes `out_efd`; `qz_free` dual-role via `QZ_MAGIC` + `thread_joined`;
+  internals `qz_runtime_init`/`qz_eval_internal`/`qz_thread_teardown`).
+- **`src/rt_host.c`** — the ISOLATED host-side pump thread+loop (library-owned,
+  never the host's): runs `uv_run`, owns the mainRT channel handles, wake
+  async, tx-spill timer; three-tier ≤2s terminate of a frozen mainRT happens on
+  this thread, the calling thread only joins.
+- **`src/thread.c`** — the THREAD-model internal qzjs thread: runs
+  `uv_run(UV_RUN_ONCE)`, drains the inbound `mq_in` via `qz_wake_cb`, and
+  flushes all JS microtasks (`qz_flush_microtasks`) after each loop iteration.
+- **`src/msgq.c`** — the lock-free MPSC queue (ACQ_REL, no mutex/cond/futex)
+  instantiated twice: `mq_in` (host→runtime inbound, drained by `qz_wake_cb`
+  uv_async wakeup) and `mq_out` (the host-facing mailbox — `qz_out_push` links
+  then writes the `out_efd`; `qz_recv_message`/`qz_out_pop` consume). Also the
+  `qz_post_to_host` funnel (`rt->host_emit` uplink for the main-RT child →
+  else → mailbox) and message encode/decode. `qz_msg_push` no longer sends the
+  async internally — each inbound call site wakes explicitly.
 - **`src/uv_io.c`** — direct libuv I/O: timers, fs, HTTP, TLS. The old PAL
   backend logic now calls libuv directly (still exposed to JS via the `pal`
   object / `qz_io_*` functions).
@@ -154,21 +177,32 @@ The runtime is layered. Read these together to understand it:
 
 ### Key execution model
 
-- **Single qzjs thread owns all JS.** qz_create spawns one internal thread
-  (`uv_thread_t`) that runs the embedded `uv_loop_t`. Every JS evaluation, uv
-  callback, and microtask runs on that thread. The host thread never touches
-  `JSContext` directly.
-- **Message boundary, not eval.** Host → runtime: `qz_post_message`
-  (thread-safe, JSON is copied into the FIFO); the loop thread drains the FIFO
-  and dispatches to JS `onmessage`. Runtime → host: JS `postMessage` →
-  `message_cb` (runs on the qzjs thread — the callback must be thread-safe).
+- **JS runs on the library's own thread, never the host's.** Default build
+  ISOLATED: `qz_create` spawns the main-RT child *process* (`qzjs-rt`, its own
+  `uv_loop_t` + JS) **and** a library-internal host-side pump thread+loop in
+  the host process. THREAD build (fallback): a single internal `uv_thread_t`
+  runs the embedded `uv_loop_t`. Either way every JS evaluation, uv callback,
+  and microtask runs on the library thread — the host thread never touches
+  `JSContext`, and qzjs never runs host code.
+- **Message boundary, not eval / not callback.** Host → runtime:
+  `qz_post_message` (thread-safe, JSON copied into `mq_in`; the loop thread
+  drains and dispatches to JS `onmessage`). Runtime → host: JS `postMessage` /
+  crash report / CONTROL receipt → `qz_post_to_host` → the `mq_out` mailbox;
+  the host pulls with `qz_recv_message` (returns 0 got / 1 timeout / -1 error;
+  the buffer is malloc'd, release with `qz_free_message`) or blocks on the
+  `qz_message_fd` `eventfd`. There is no callback and no thread-safety burden
+  on the host — it consumes on whichever thread it picks.
 - **uv callbacks enter JS directly** on the loop thread (no deferred queue —
   the old `qz_defer_callback` mechanism is gone). After each `uv_run`,
   `qz_flush_microtasks` drains the entire `JS_ExecutePendingJob` queue, so
   one `qz_post_message` round-trip implies the prior eval's promise chain
   completed.
-- **Graceful shutdown.** `qz_destroy` requests the loop thread to exit
-  (`uv_stop`), joins it, then frees the runtime.
+- **Graceful shutdown.** `qz_destroy` signals teardown (`shutting_down` +
+  `uv_async_send(wake)`), the library pump/loop thread exits and reaps the
+  main-RT process (ISOLATED) — the ≤2s three-tier terminate of a frozen mainRT
+  runs on the library thread, the caller only joins — then drains/closes the
+  mailbox. After `qz_wait_idle` the mailbox still yields messages until
+  `qz_free` (mutually exclusive with `qz_destroy`).
 
 ### Bridge layer discipline (`src/bridge.c`)
 
