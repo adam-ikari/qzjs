@@ -124,6 +124,13 @@ program 再写一遍。
 - 条件断点：断点的 `condition` 以 JS 求值（帧局部变量同样暴露在 `locals`
   下，与 `evaluate` 同一约定）；非零则停，零则跳过，表达式抛错则停下来让
   你看到错误。
+- 命中次数（条件）断点：断点的 `hitCondition` 在设点时一次性解析（VS Code
+  「命中次数」菜单的写法：`N`/`==N` 恰在第 N 次访问停、`%N` 每第 N 次、另有
+  `>N` `>=N` `<N` `<=N` `!=N`）。命中按「访问」计数：到达该行一次计一次——
+  同一条语句的多个 opcode、以及调用进入 callee 都属于同一次访问，从 callee
+  返回不会重复计数。运行时解析不了的 hitCondition 回报 `verified: false`
+  并附消息（VS Code 灰色未安装 glyph），而不是变成一个永不命中的哑断点。
+  断点被重新登记（任何替换它的 setBreakpoints）时计数清零。
 - 日志点（logpoint）：带 `logMessage` 的断点不暂停，而是把内容写到 Debug
   Console——`{表达式}` 洞在栈顶帧求值（同样是 `locals.` 约定），打印后自动
   继续。每次命中都会触发（循环行每次迭代都记录），渲染失败则退化为普通停
@@ -170,6 +177,9 @@ program 再写一遍。
 - **异常断点只有 `all`**——没有 *Uncaught* 过滤器（需要在展开路径上检测
   catch），也没有单独的 Promise 处理：异步拒绝就是一次 throw，一样会停。
   客户端若发送未知过滤器，回 `verified: false`。
+- **命中计数按登记生效，不跨登记**——setBreakpoints 重新登记某文件的断点时
+  其计数清零。`%N` 计的是「访问」，对循环行而言即每次迭代——`finally` 续段
+  重触发（见上）是新的一次访问，照计。
 - **日志点的洞只在栈顶帧求值**——`{expr}` 与 `evaluate` 同样只看到
   `locals.` 视图，没有更深层作用域；洞表达式抛错则退化为在该日志点正常停
   断点（停顿不会丢）。
@@ -230,9 +240,12 @@ CI 两个门都跑：`debugger` job 执行 `ctest -L dap` 与这些 e2e 测试
   整个会话恰好两次停顿（一次抛出 = 一次停顿，不会重复触发）；解除
   （`filters: []`）：同一个 throw 照常跑完不停。
 - `test/variables-expand.mjs` —— 嵌套对象/数组局部变量从 Locals 作用域
-  下钻三层（`o` → `nested` → `b` → 元素），`evaluate` 结果同样可展开，下
-  一个停顿使上一停顿的引用失效（子项为空），程序 stdout（`r 5`）仍到达
+  下钻三层（`o` → `nested` → `b` → 元素），`evaluate` 结果同样可展开，  下一个停顿使上一停顿的引用失效（子项为空），程序 stdout（`r 5`）仍到达
   Debug Console。
+- `test/hit-condition.mjs` —— 循环行 6 次到达、`hitCondition "%2"` 恰在第
+  2/4/6 次停（每次 continue 后的同语句 resume dispatch 不得虚增计数）；另一
+  个无法解析的 hitCondition 断点回 `verified: false` 附消息，且不被行号
+  on-disk 检查复活；程序 stdout（`s 15`）断言循环跑完。
 
 ## 故障排查
 

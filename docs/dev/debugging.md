@@ -153,6 +153,16 @@ expressions.
 - Conditional breakpoints: a breakpoint's `condition` is evaluated (as JS,
   with frame locals exposed under `locals`, same convention as `evaluate`);
   non-zero stops, zero skips, a throwing condition stops so you see the error.
+- Hit-count (conditional) breakpoints: a breakpoint's `hitCondition` is parsed
+  once at set time (VS Code's "Hit count" menu forms: `N`/`==N` stop exactly on
+  the Nth visit, `%N` every Nth, plus `>N` `>=N` `<N` `<=N` `!=N`). Hit counts
+  are visit-based: one count per arrival at the line — the several opcodes of
+  a statement and a call into a callee all belong to the same visit, and
+  returning out of the callee does not re-count. A hitCondition the runtime
+  cannot parse reports `verified: false` with a message (gray glyph in VS
+  Code) instead of silently becoming a breakpoint that never fires. The count
+  restarts when the breakpoint is re-registered (any setBreakpoints replacing
+  it).
 - Logpoints: a breakpoint whose `logMessage` is written to the Debug Console
   instead of stopping — `{expression}` holes are evaluated in the top frame
   (same `locals.` convention as `evaluate`), the line is printed, and
@@ -218,6 +228,10 @@ expressions.
   (that would need catch-detection on the unwind path) and no separate
   promise handling: an async rejection is a throw and stops like one.
   Unknown filters a client sends anyway are answered `verified: false`.
+- **Hit counts are per registration, not global** — a setBreakpoints request
+  that re-registers a file's breakpoints resets their counts. `%N` counts
+  *visits*, which for a loop line means iterations — except a `finally`
+  re-fire (above), which is a new visit and counts.
 - **Logpoint holes evaluate in the top frame only** — `{expr}` sees the same
   `locals.` view `evaluate` has, nothing deeper; a hole that throws falls
   back to a normal stop at the logpoint (the stop is never lost).
@@ -299,6 +313,12 @@ e2e tests (`QZJS_RUNTIME` points it at that job's `build/qzjs`).
   `evaluate` result expands the same way, the next stop invalidates the
   previous stop's references (children come back empty), and program stdout
   (`r 5`) still reaches the Debug Console.
+- `test/hit-condition.mjs` — a loop line reached 6 times with `hitCondition
+  "%2"` stops exactly on reaches 2, 4 and 6 (the resume dispatches after each
+  continue must not inflate the count); a second breakpoint with an
+  unparseable hitCondition answers `verified: false` with a message and is
+  NOT re-enabled by the line-on-disk check; program stdout (`s 15`) asserts
+  the loop ran to completion.
 
 ## Troubleshooting
 
