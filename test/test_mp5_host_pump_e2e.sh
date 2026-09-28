@@ -5,7 +5,7 @@
 # NULL loop 显式失败、属主线程 ping 不自死锁、洪泛 FIFO+spill 冲刷、
 # wait_idle 后宿主 loop 干净可关、kill -9 主RT 的崩溃上报在 wait_idle
 # 内触发、冻结主RT 的 destroy 在 terminate 预算内收束、pre-ready 帧于
-# create 内重放且回发安全（H1）。
+# create 内重放且回发安全（H1）、双实例复挂同一宿主 loop 互不串扰（⑨）。
 # Usage: bash test/test_mp5_host_pump_e2e.sh <path-to-qzjs>
 set -u
 AM="${1:-./build/qzjs}"
@@ -46,8 +46,15 @@ OUT="$("$H" replay 2>&1)"; RC=$?
 echo "$OUT" | grep -q "ok ⑧a" || fail "replay 缺 ⑧a create 内重放断言" "$OUT"
 echo "$OUT" | grep -q "ok ⑧b" || fail "replay 缺 ⑧b create 内回发断言" "$OUT"
 
+# ── ⑨ dual：双实例复挂同一宿主 loop（交错洪泛/ping/先后拆除）──
+OUT="$("$H" dual 2>&1)"; RC=$?
+[ $RC -eq 0 ] || fail "dual mode (双实例共享宿主 loop)" "$OUT"
+echo "$OUT" | grep -q "ok ⑨a" || fail "dual 缺 ⑨a 交错 FIFO 断言" "$OUT"
+echo "$OUT" | grep -q "ok ⑨b" || fail "dual 缺 ⑨b 双实例 ping 断言" "$OUT"
+echo "$OUT" | grep -q "ok ⑨c" || fail "dual 缺 ⑨c 共享 loop 干净关闭断言" "$OUT"
+
 # ── 无残留 qzjs-rt（各模式 proc 回收 + reap 兜底）──
 AFTER="$(RT_PID_COUNT)"
 [ "$AFTER" -le "$BEFORE" ] || fail "leftover qzjs-rt after run (before=$BEFORE after=$AFTER)"
 
-echo "PASS: M-P6 host-pump e2e — NULL-loop显式失败 / cb线程==泵线程 / ping不自死锁 / 2000帧FIFO+spill冲刷 / wait_idle后loop干净关闭 / kill-9崩溃上报在wait_idle内 / 冻结destroy预算内收束 / pre-ready重放+create内回发无崩溃 / 无残留主RT"
+echo "PASS: M-P6 host-pump e2e — NULL-loop显式失败 / cb线程==泵线程 / ping不自死锁 / 2000帧FIFO+spill冲刷 / wait_idle后loop干净关闭 / kill-9崩溃上报在wait_idle内 / 冻结destroy预算内收束 / pre-ready重放+create内回发无崩溃 / 双实例共享宿主loop交错FIFO+ping+干净关闭 / 无残留主RT"

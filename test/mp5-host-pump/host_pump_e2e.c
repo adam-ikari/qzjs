@@ -3,7 +3,7 @@
  *
  * 真 libuv + 真 qz_full 链接（非 mock）：本 harness 就是宿主——自建
  * uv_loop、经 cfg.uv_loop 注入、message_cb 应跑在泵该 loop 的线程。
- * 覆盖计划 C3 的七项断言（basic 模式合并 ①③④⑤，其余模式各一）：
+ * 覆盖计划 C3 的七项断言（basic 模式合并 ①③④⑤，其余模式各一）+ 评审/场景追加的 ⑧⑨：
  *   ① cb 线程 == 泵 loop 线程（pthread_self 捕获比对）
  *   ② cfg.uv_loop = NULL → qz_create 显式失败（NULL 返回）
  *   ③ loop 属主线程直接调 qz_ping → 0（内部泵不自死锁）
@@ -14,8 +14,10 @@
  *   ⑧ pre-ready 重放语义：初始脚本顶层消息在 create 返回前于调用线程重放，
  *      且重放期 message_cb 内 qz_post_message 回发安全（H1 守卫：wake 先于
  *      start_read_cb 初始化——顺序颠倒即 wake.loop==NULL 崩溃）
+ *   ⑨ dual：两个实例复挂同一宿主 loop（多路复用真实形态）——交错洪泛各自
+ *      FIFO 无损、共享 loop 下双实例 ping、先后拆除后宿主 loop 仍可干净关闭
  *
- * 用法：qz_mp5_host_pump_e2e <basic|null|crash|hung|replay>
+ * 用法：qz_mp5_host_pump_e2e <basic|null|crash|hung|replay|dual>
  * 退出码：0 = 该模式全部断言通过；非 0 = 失败（stderr 带诊断）。
  */
 #include <qzjs/qzjs.h>
@@ -40,6 +42,11 @@ static int g_timed_out;
 /* ⑧ pre-ready 重放：create 返回标志 + 顶层消息/回发/回声观测 */
 static volatile int g_create_returned;
 static int g_replay_mode, g_replay_pre_seen, g_replay_in_create, g_replay_ack;
+/* ⑨ dual：两个实例复挂同一宿主 loop，按 rt 指针路由各自 FIFO 流 */
+static int g_dual_mode;
+static qz_t *g_rt1, *g_rt2;
+static long g_exp1, g_exp2;
+static int g_got1, g_got2, g_seq_bad1, g_seq_bad2, g_pongs;
 
 /* 宿主闹钟：绝对 deadline 到点 uv_stop（所有等待共用的看门狗）。 */
 static uint64_t g_deadline_ms;
@@ -85,6 +92,22 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
     }
     if (g_replay_mode && strstr(json, "\"ack\":4242") != NULL) {
         g_replay_ack = 1;
+        return;
+    }
+    if (g_dual_mode) {
+        if (strstr(json, "\"pong\":") != NULL) { g_pongs++; return; }
+        /* 实例路由：rt1 流 id∈[0,300)，rt2 流 id∈[1000,1300)，各自独立 FIFO */
+        const char *dp = strstr(json, "\"id\":");
+        long v = dp ? strtol(dp + 5, NULL, 10) : -1;
+        if (rt == g_rt1) {
+            if (v != g_exp1++) g_seq_bad1++;
+            g_got1++;
+        } else if (rt == g_rt2) {
+            if (v != g_exp2++) g_seq_bad2++;
+            g_got2++;
+        } else {
+            g_seq_bad1++;   /* 未知实例回调 = 路由错乱 */
+        }
         return;
     }
     const char *p = strstr(json, "\"seq\":");
@@ -258,6 +281,89 @@ static int mode_replay(void) {
     return 0;
 }
 
+/* ── ⑨ dual：两个实例复挂同一宿主 loop（真实多路复用嵌入形态）── */
+static const char *kScriptJobEcho =
+    "onmessage = function (e) {\n"
+    "  if (e.data.pong !== undefined) postMessage({ pong: e.data.pong });\n"
+    "  else postMessage({ id: e.data.id });\n"
+    "};\n";
+
+static int dual_done(void) {
+    return g_got1 >= 300 && g_got2 >= 300 && g_pongs >= 12;
+}
+
+static int mode_dual(void) {
+    loop_setup();
+    g_main_thread = (uv_thread_t)(uintptr_t)pthread_self();
+    g_dual_mode = 1;
+
+    qz_config_t cfg1 = {0}, cfg2 = {0};
+    cfg1.message_cb = on_message;
+    cfg1.uv_loop = &g_loop;
+    cfg1.initial_script = kScriptJobEcho;
+    cfg2 = cfg1;
+    g_rt1 = qz_create(&cfg1);
+    g_rt2 = qz_create(&cfg2);
+    g_exp1 = 0;      /* rt1 流 id 基准 */
+    g_exp2 = 1000;   /* rt2 流 id 基准 */
+    if (!g_rt1 || !g_rt2) {
+        fprintf(stderr, "[dual] qz_create failed（rt1=%p rt2=%p）\n",
+                (void *)g_rt1, (void *)g_rt2);
+        return 1;
+    }
+
+    /* 交替投递：rt1 流 id 0..299、rt2 流 1000..1299；每 50 条另发 pong 旁路帧，
+     * rt1 侧带 16KB pad 逼双通道 spill（pong 不回 id，不扰动 FIFO 期望）*/
+    static char big[16 * 1024 + 64];
+    for (int i = 0; i < 300; i++) {
+        char m[64];
+        int n = sprintf(m, "{\"id\":%d}", i);
+        qz_post_message(g_rt1, m, (size_t)n);
+        n = sprintf(m, "{\"id\":%d}", 1000 + i);
+        qz_post_message(g_rt2, m, (size_t)n);
+        if (i % 50 == 49) {
+            char *p2 = big;
+            p2 += sprintf(p2, "{\"pong\":%d,\"pad\":\"", i);
+            memset(p2, 'y', 16 * 1024); p2 += 16 * 1024;
+            *p2++ = '"'; *p2++ = '}'; *p2 = '\0';
+            qz_post_message(g_rt1, big, strlen(big));
+            n = sprintf(m, "{\"pong\":%d}", 2000 + i);
+            qz_post_message(g_rt2, m, (size_t)n);
+        }
+    }
+    pump_until(dual_done, 20000);
+    if (g_timed_out || g_got1 < 300 || g_got2 < 300) {
+        fprintf(stderr, "[dual] ⑨ 洪泛不完: got1=%d got2=%d timeout=%d\n",
+                g_got1, g_got2, g_timed_out);
+        return 1;
+    }
+    if (g_seq_bad1 || g_seq_bad2) {
+        fprintf(stderr, "[dual] ⑨ FIFO 失序: rt1=%d rt2=%d\n", g_seq_bad1, g_seq_bad2);
+        return 1;
+    }
+    if (g_pongs != 12 || g_cb_wrong_thread) {
+        fprintf(stderr, "[dual] ⑨ pong=%d（期望 12）或 %d 次 cb 不在泵线程\n",
+                g_pongs, g_cb_wrong_thread);
+        return 1;
+    }
+    printf("[dual] ok ⑨a: 双实例交错洪泛 600 帧（含 rt1 大帧 spill）各自 FIFO 无损，全部在泵线程\n");
+
+    /* 共享 loop 下 ping 两实例：内部泵互不干扰 */
+    if (qz_ping(g_rt1, 2000) != 0 || qz_ping(g_rt2, 2000) != 0) {
+        fprintf(stderr, "[dual] ⑨ ping 共享 loop 实例失败\n");
+        return 1;
+    }
+    printf("[dual] ok ⑨b: 共享宿主 loop 下双实例 qz_ping 均返回 0\n");
+
+    qz_wait_idle(g_rt1);
+    qz_free(g_rt1);
+    qz_wait_idle(g_rt2);
+    qz_free(g_rt2);
+    loop_close_expect_clean("dual");
+    printf("[dual] ok ⑨c: 两实例先后 wait_idle 拆除，共享宿主 loop 干净可关\n");
+    return 0;
+}
+
 /* ── ⑥ crash：kill -9 主RT，wait_idle 内收 {"type":"error"} ── */
 static int mode_crash(void) {
     loop_setup();
@@ -336,6 +442,7 @@ int main(int argc, char **argv) {
     if (strcmp(mode, "crash") == 0) return mode_crash();
     if (strcmp(mode, "hung") == 0)  return mode_hung();
     if (strcmp(mode, "replay") == 0) return mode_replay();
-    fprintf(stderr, "usage: %s <basic|null|crash|hung|replay>\n", argv[0]);
+    if (strcmp(mode, "dual") == 0)   return mode_dual();
+    fprintf(stderr, "usage: %s <basic|null|crash|hung|replay|dual>\n", argv[0]);
     return 2;
 }
