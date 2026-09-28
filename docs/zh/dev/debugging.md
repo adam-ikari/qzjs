@@ -140,7 +140,11 @@ program 再写一遍。
 - 逐过程 / 步入 / 步出、继续。
 - 调用栈，包含每个帧的文件/行号/函数。
 - 局部变量作用域（参数 + 局部变量）及其值。
-- `evaluate`（REPL/监视）。全局变量和纯表达式直接求值；帧的局部变量在求值期间暴露在 `locals` 对象上，因此 `locals.x` 读取局部变量。（裸写 `x` 不会绑定——真正的帧内求值需要 QuickJS 未暴露的引擎支持。）
+- 变量展开：Locals 里的对象/数组——`evaluate` 结果同样（hover/监视以相同
+  方式下钻）——可逐层打开自己的可枚举属性 / 数组下标，每层点击一次，每个值
+  带有界预览字符串。引用只在本次停顿内有效：下一个停顿即失效（查询失效引用
+  只会得到空列表）。
+- `evaluate`（REPL/监视）。全局变量和纯表达式直接求值；帧的局部变量在求值期间暴露在 `locals` 对象上，因此 `locals.x` 读取局部变量。（裸写 `x` 不会绑定——真正的帧内求值需要 QuickJS 未暴露的引擎支持。）对象结果携带可展开引用，Debug Console 里的 `locals.o` 可以打开。
 - **暂停时世界冻结**：`fetch`/`setTimeout`/PAL 回调在暂停期间**不会**推进——暂停循环只服务调试协议请求（符合标准调试器「中断即冻结」语义）。
 
 ## 限制（MVP）
@@ -169,6 +173,11 @@ program 再写一遍。
 - **日志点的洞只在栈顶帧求值**——`{expr}` 与 `evaluate` 同样只看到
   `locals.` 视图，没有更深层作用域；洞表达式抛错则退化为在该日志点正常停
   断点（停顿不会丢）。
+- **变量展开只列自身可枚举属性**——不含原型链成员、不含 `Map`/`Set` 内部
+  条目（打开为空）、函数是叶子（不可打开）、跳过 symbol 键，每层最多列 100
+  个子项（其余折叠为一行 `<...>`）。仍在暂时性死区（TDZ）的局部变量显示为
+  `[uninitialized]`（叶子）——断点停在语句入口，此时该语句的初始化式尚未
+  执行。
 - **无 source map**，无编辑并继续，无多隔离。
 
 ## 暂停期间的异步
@@ -186,7 +195,7 @@ cmake -B build -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build build
 ctest --test-dir build -L dap --output-on-failure
 ```
 
-`test/test_dap_gtest.cpp` 是一个进程内嵌入宿主，它 fork 一个子进程，在 `QZ_DEBUG=1` 下运行一个小型 JS 程序，然后通过管道充当 VS Code 客户端：initialize → setBreakpoints → configurationDone → 期望在断点处 `stopped` → stackTrace/scopes/variables/evaluate → step → continue → terminate。它验证了整个技术栈：引擎补丁 + 调试核心 + DAP 层 + `qz_create` 中的自动附加路径。此外还覆盖按文件作用域的断点、运行中暂停、stdio 单实例约束，以及异常断点过滤器（武装：一次抛出停一次；解除：不停车）。
+`test/test_dap_gtest.cpp` 是一个进程内嵌入宿主，它 fork 一个子进程，在 `QZ_DEBUG=1` 下运行一个小型 JS 程序，然后通过管道充当 VS Code 客户端：initialize → setBreakpoints → configurationDone → 期望在断点处 `stopped` → stackTrace/scopes/variables/evaluate → step → continue → terminate。它验证了整个技术栈：引擎补丁 + 调试核心 + DAP 层 + `qz_create` 中的自动附加路径。此外还覆盖按文件作用域的断点、运行中暂停、stdio 单实例约束、异常断点过滤器（武装：一次抛出停一次；解除：不停车），以及变量展开（嵌套对象/数组、evaluate 引用、下一停顿使旧引用失效）。
 
 扩展自带端到端测试，直接以内联适配器驱动调试构建的二进制
 （默认 `build_dbg/qzjs`，可用 `QZJS_RUNTIME` 覆盖）：
@@ -220,6 +229,10 @@ CI 两个门都跑：`debugger` job 执行 `ctest -L dap` 与这些 e2e 测试
   throw 也停，`reason: exception`、`text` 带错误消息、栈顶帧在抛出点，
   整个会话恰好两次停顿（一次抛出 = 一次停顿，不会重复触发）；解除
   （`filters: []`）：同一个 throw 照常跑完不停。
+- `test/variables-expand.mjs` —— 嵌套对象/数组局部变量从 Locals 作用域
+  下钻三层（`o` → `nested` → `b` → 元素），`evaluate` 结果同样可展开，下
+  一个停顿使上一停顿的引用失效（子项为空），程序 stdout（`r 5`）仍到达
+  Debug Console。
 
 ## 故障排查
 

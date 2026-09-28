@@ -174,10 +174,16 @@ expressions.
 - Step over / into / out, continue.
 - Call stack with file/line/function per frame.
 - Locals scope (arguments + local variables) with values.
+- Variables expand: an object or array in Locals — and in an `evaluate`
+  result (hover/watch drills in the same way) — opens into its own
+  enumerable properties / array indices, one level per click, with a bounded
+  preview string per value. References live only for their stop: the next
+  stop invalidates them (asking for a dead one just comes back empty).
 - `evaluate` (REPL/watch). Globals and pure expressions eval directly; a
   frame's locals are exposed on a `locals` object during evaluate, so
   `locals.x` reads a local variable. (Bare `x` won't bind — true eval-in-frame
-  would need engine support QuickJS doesn't expose.)
+  would need engine support QuickJS doesn't expose.) Object results carry an
+  expandable reference, so `locals.o` in the Debug Console can be opened.
 
 ## Limitations (MVP)
 
@@ -215,6 +221,13 @@ expressions.
 - **Logpoint holes evaluate in the top frame only** — `{expr}` sees the same
   `locals.` view `evaluate` has, nothing deeper; a hole that throws falls
   back to a normal stop at the logpoint (the stop is never lost).
+- **Variable expansion shows own enumerable properties only** — no
+  prototype-chain members, no `Map`/`Set` internal entries (they open
+  empty), functions are leaves (not openable), symbol keys are skipped, and
+  each level lists at most 100 children (the remainder appears as one
+  `<...>` row). A local still in its temporal dead zone shows as
+  `[uninitialized]` (leaf) — breakpoints stop at statement entry, before that
+  statement's initializer ran.
 - **No source maps**, no edit-and-continue, no multi-isolate.
 
 ## Async while paused
@@ -239,8 +252,10 @@ client over a pipe: initialize → setBreakpoints → configurationDone → expe
 `stopped` at the breakpoint → stackTrace/scopes/variables/evaluate → step →
 continue → terminate. It validates the whole stack: engine patch + debug core
 + DAP layer + the auto-attach path in `qz_create`. It also covers per-file
-breakpoint scope, a mid-run pause, the stdio single-instance constraint, and
-the exception-breakpoint filters (armed: one stop per throw; disarmed: none).
+breakpoint scope, a mid-run pause, the stdio single-instance constraint, the
+exception-breakpoint filters (armed: one stop per throw; disarmed: none), and
+variable expansion (nested objects/arrays, evaluate references, stale
+references invalidated by the next stop).
 
 The extension has its own end-to-end tests that drive the inline adapter
 against a debugger-enabled binary (default `build_dbg/qzjs`, override with
@@ -279,6 +294,11 @@ e2e tests (`QZJS_RUNTIME` points it at that job's `build/qzjs`).
   throw site, and exactly two stops for the whole session (one throw = one
   stop — no double-fire); disarmed (`filters: []`): the same throw runs
   through untouched.
+- `test/variables-expand.mjs` — a nested object/array local drills from the
+  Locals scope three levels deep (`o` → `nested` → `b` → elements), an
+  `evaluate` result expands the same way, the next stop invalidates the
+  previous stop's references (children come back empty), and program stdout
+  (`r 5`) still reaches the Debug Console.
 
 ## Troubleshooting
 
