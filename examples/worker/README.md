@@ -28,10 +28,9 @@ worker 已创建
 - `Worker` 只接受 `file://` URL；不支持 http(s) 脚本地址。
 - `postMessage` 走结构化克隆——对象按值传递，不共享引用。
 - worker 是**真线程**：并行计算不阻塞父线程的事件循环。
-- 父脚本跑在主RT 进程里；ISOLATED 下宿主侧 `message_cb` 在泵宿主注入
-  `cfg.uv_loop` 的线程触发（THREAD 编译则是 qzjs 线程）。示例用「闹钟
-  定时器 + `uv_run(UV_RUN_ONCE)`」泵 loop 等往返完成，THREAD 编译退回
-  `usleep(500ms)`。
+- 父脚本跑在主RT 进程里；worker 回显经父 JS 转成宿主的 `postMessage` 落进
+  邮箱，宿主 `qz_recv_message` 消费——库不调用宿主回调，两个进程模型同一
+  契约。示例用定时 recv 窗口等往返完成。
 - 多 worker 并行编排见 [`worker-orchestrate`](../worker-orchestrate)。
 
 ## 相关文档

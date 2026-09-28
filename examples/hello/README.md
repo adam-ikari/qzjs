@@ -6,8 +6,9 @@ C 文件，是把 qzjs 嵌进宿主程序的最小可运行形态。
 演示的核心契约：**宿主与运行时只经 JSON 消息通信**。
 
 - 宿主 → JS：`qz_post_message(rt, json, len)`（线程安全）
-- JS → 宿主：`postMessage(value)` 触发 `message_cb`——ISOLATED 进程模型下
-  跑在**泵宿主注入 `cfg.uv_loop` 的线程**上（THREAD 编译才是 qzjs 线程）
+- JS → 宿主：`postMessage(value)` 落进 per-rt **邮箱**（FIFO），宿主用
+  `qz_recv_message(rt, &json, &len, timeout_ms)` 消费——库不调用宿主任何
+  回调，消费线程与时机完全由宿主自选（两个进程模型同一契约）
 
 ## 构建与运行
 
@@ -30,13 +31,13 @@ JS 收到宿主消息: {"cmd":"ping"}
 
 ## 要点
 
-- `qz_config_t cfg = {0}` 零初始化；`cfg.message_cb` 是唯一必填项
-  （ISOLATED 进程模型下还要 `cfg.uv_loop` = 宿主自己的 `uv_loop_t*`）。
+- `qz_config_t cfg = {0}` 零初始化；配置里没有任何回调字段——出站消息走
+  邮箱，`qz_recv_message` 是唯一消费入口（配套 `qz_free_message` 释放、
+  `qz_message_fd` 拿唤醒 fd）。
 - `cfg.initial_script` 是启动即执行的 JS；`onmessage` 是 JS 侧的收信入口。
-- ISOLATED 下示例自建 uv loop、用 `uv_run(UV_RUN_ONCE)` 泵它来收消息
-  （`message_cb` 在泵 loop 的线程触发）；THREAD 编译保持库线程模型，
-  示例退回 `usleep` 等待。真实宿主本就有事件循环，把 loop 传进
-  `cfg.uv_loop` 即可，无需额外线程。
+- 示例以最简的「定时 `qz_recv_message`」排干邮箱（内部经 poll 唤醒，不烧
+  CPU）。宿主若本就有事件循环，把 `qz_message_fd(rt)` 返回的 fd 挂进去、
+  按头文件注释的三步消费协议取件即可，无需额外线程。
 - `qz_create` 失败返回 `NULL`；示例按契约检查。
 - 用 `QZ_RT_SERVER_PATH`（构建系统注入）告诉示例去哪找 `qzjs-rt`；默认
   进程模型是 ISOLATED，运行时跑在独立进程里。
