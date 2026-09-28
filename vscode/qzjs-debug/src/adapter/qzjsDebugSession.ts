@@ -1,8 +1,38 @@
 import { DebugSession, InitializedEvent, TerminatedEvent, OutputEvent } from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { QzjsLaunchConfig } from './descriptorFactory';
+
+/**
+ * Unwrap a JSON-encoded value for display. qz_debug_evaluate JSONStringify's
+ * its result, so strings arrive quoted ("x") — log output wants them plain.
+ */
+function unwrapForDisplay(v: unknown): string {
+  if (typeof v !== 'string') return String(v);
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    try {
+      return JSON.parse(v) as string;
+    } catch {
+      return v;
+    }
+  }
+  return v;
+}
+
+/**
+ * Length of the longest suffix of `buf` that is a prefix of the frame marker
+ * — i.e. how many tail bytes might be a "Content-Length:" split across two
+ * chunks and must not be flushed as program output.
+ */
+function partialMarkerSuffix(buf: string): number {
+  const marker = 'Content-Length:';
+  for (let k = Math.min(marker.length - 1, buf.length); k > 0; k--) {
+    if (buf.endsWith(marker.slice(0, k))) return k;
+  }
+  return 0;
+}
 
 /**
  * Inline DAP session: relays VS Code DAP requests to the qzjs runtime's
@@ -25,6 +55,9 @@ export class QzjsDebugSession extends DebugSession {
   private childSeq = 1;
   private buffer = '';
   private terminatedSent = false;
+  /** logpoints per source path → line → logMessage (replaced per file,
+   * mirroring the C breakpoint table's per-source scoping). */
+  private readonly logpoints = new Map<string, Map<number, string>>();
 
   constructor(cfg: QzjsLaunchConfig) {
     super();
@@ -87,24 +120,55 @@ export class QzjsDebugSession extends DebugSession {
 
   private onChildData(chunk: string): void {
     this.buffer += chunk;
-    // DAP framing: Content-Length: N\r\n\r\n<body>
+    // The child multiplexes DAP frames and the program's raw stdout onto the
+    // same stream: anything that isn't part of a frame is program output and
+    // goes to the Debug Console. (The old parser only forwarded text that
+    // happened to contain \r\n\r\n — plain program output was either held
+    // until a frame arrived and then silently swallowed with the header, or
+    // kept in the buffer forever if the child exited without another frame.)
     for (;;) {
+      const idx = this.buffer.indexOf('Content-Length:');
+      if (idx < 0) {
+        // No frame start in sight — but the tail may be a marker split
+        // across chunks; hold that much back and flush the rest.
+        const hold = partialMarkerSuffix(this.buffer);
+        const flushable = this.buffer.length - hold;
+        if (flushable > 0) {
+          this.sendEvent(new OutputEvent(this.buffer.slice(0, flushable), 'stdout'));
+          this.buffer = this.buffer.slice(flushable);
+        }
+        return;
+      }
+      if (idx > 0) {
+        // Program output sitting before the next frame.
+        this.sendEvent(new OutputEvent(this.buffer.slice(0, idx), 'stdout'));
+        this.buffer = this.buffer.slice(idx);
+      }
       const headerEnd = this.buffer.indexOf('\r\n\r\n');
-      if (headerEnd < 0) break;
-      const header = this.buffer.slice(0, headerEnd);
-      const m = /Content-Length:\s*(\d+)/i.exec(header);
+      if (headerEnd < 0) return; // header incomplete — wait for more
+      const m = /^Content-Length:\s*(\d+)/i.exec(this.buffer.slice(0, headerEnd));
       if (!m) {
-        // non-framed output (e.g. console.log before attach) — forward it
         this.sendEvent(new OutputEvent(this.buffer, 'stdout'));
         this.buffer = '';
         return;
       }
       const len = Number.parseInt(m[1], 10);
       const bodyStart = headerEnd + 4;
-      if (this.buffer.length < bodyStart + len) break; // wait for more
+      if (this.buffer.length < bodyStart + len) return; // body incomplete
       const body = this.buffer.slice(bodyStart, bodyStart + len);
       this.buffer = this.buffer.slice(bodyStart + len);
-      this.dispatchChildMessage(JSON.parse(body));
+      try {
+        this.dispatchChildMessage(JSON.parse(body));
+      } catch (err) {
+        // Not a real frame after all (program printed something that looked
+        // like a header) — surface it and rescan; the next marker realigns.
+        this.sendEvent(
+          new OutputEvent(
+            `qzjs: dropped malformed DAP frame: ${String(err)}\n`,
+            'stderr',
+          ),
+        );
+      }
     }
   }
 
@@ -123,9 +187,73 @@ export class QzjsDebugSession extends DebugSession {
       }
       return;
     }
-    // event: forward to VS Code
+    // event: forward to VS Code — except a breakpoint stop that may be a
+    // logpoint hit, which is intercepted, rendered and auto-continued.
     const ev = msg as DebugProtocol.Event;
+    if (ev.event === 'stopped' && (ev.body as { reason?: string })?.reason === 'breakpoint') {
+      void this.interceptStop(ev);
+      return;
+    }
     this.sendEvent(ev);
+  }
+
+  /**
+   * A breakpoint stop may actually be a logpoint hit: the engine must stop
+   * (it can't know about logpoints), and the adapter decides — emit the
+   * interpolated message to the Debug Console and continue, never telling
+   * the client we stopped. Any failure falls open: the stop is delivered
+   * rather than silently lost.
+   */
+  private async interceptStop(ev: DebugProtocol.Event): Promise<void> {
+    try {
+      const st = await this.sendToChild('stackTrace', {
+        threadId: 1,
+        startFrame: 0,
+        levels: 1,
+      });
+      const top = (
+        st.body as { stackFrames?: { id: number; line: number; source?: { path?: string } }[] }
+      )?.stackFrames?.[0];
+      const srcPath = top?.source?.path;
+      if (top && srcPath !== undefined) {
+        const tpl = this.logpoints.get(srcPath)?.get(top.line);
+        if (tpl !== undefined) {
+          const text = await this.renderLogMessage(tpl, top.id);
+          this.sendEvent(
+            new OutputEvent(text.endsWith('\n') ? text : text + '\n', 'console'),
+          );
+          await this.sendToChild('continue', { threadId: 1 });
+          return; // swallowed: the client never learns we stopped
+        }
+      }
+    } catch {
+      // fall through — fail open
+    }
+    this.sendEvent(ev);
+  }
+
+  /**
+   * DAP logMessage template: literal text with `{expression}` holes, each
+   * evaluated in the paused top frame through the normal evaluate path
+   * (so `locals.x` works here just like in watch).
+   */
+  private async renderLogMessage(tpl: string, frameId: number): Promise<string> {
+    const parts = tpl.split(/(\{[^{}]*\})/g);
+    let out = '';
+    for (const part of parts) {
+      if (part.length >= 2 && part.startsWith('{') && part.endsWith('}')) {
+        const r = await this.sendToChild('evaluate', {
+          expression: part.slice(1, -1),
+          frameId,
+        });
+        out += r.success
+          ? unwrapForDisplay((r.body as { result?: unknown })?.result)
+          : (r.message ?? 'undefined');
+      } else {
+        out += part;
+      }
+    }
+    return out;
   }
 
   private sendToChild(
@@ -173,6 +301,13 @@ export class QzjsDebugSession extends DebugSession {
     response.body.supportsConfigurationDoneRequest = true;
     response.body.supportsEvaluateForHovers = true;
     response.body.supportsTerminateRequest = false;
+    response.body.supportsLogPoints = true;
+    // Only the "all" filter is implemented (stop on every throw, caught or
+    // not); uncaught-only needs catch-detection on the unwind path and is
+    // deliberately not advertised so clients won't request it.
+    response.body.exceptionBreakpointFilters = [
+      { filter: 'all', label: 'All exceptions', default: false },
+    ];
     this.sendResponse(response);
     // The runtime is spawned lazily on attach/launch so the initialize
     // handshake reaches a live DAP server.
@@ -240,9 +375,72 @@ export class QzjsDebugSession extends DebugSession {
     response: DebugProtocol.SetBreakpointsResponse,
     args: DebugProtocol.SetBreakpointsArguments,
   ): void {
-    this.relay(response, 'setBreakpoints', {
+    const srcPath = args.source?.path;
+    if (srcPath) {
+      // Track logpoints for this source — per-file replace, mirroring the C
+      // side's scoped table. A logpoint is registered with C like a normal
+      // breakpoint (the engine must stop there); interceptStop decides later.
+      const byLine = new Map<number, string>();
+      for (const bp of args.breakpoints ?? []) {
+        if (bp.logMessage && typeof bp.line === 'number' && bp.line >= 1) {
+          byLine.set(bp.line, bp.logMessage);
+        }
+      }
+      this.logpoints.set(srcPath, byLine);
+    }
+    this.sendToChild('setBreakpoints', {
       source: args.source,
       breakpoints: args.breakpoints ?? [],
+    }).then(
+      (r) => {
+        if (srcPath) this.applyVerified(r, args.breakpoints ?? [], srcPath);
+        response.body = r.body;
+        this.sendResponse(response);
+      },
+      (err: Error) => {
+        response.success = false;
+        response.message = err.message;
+        this.sendResponse(response);
+      },
+    );
+  }
+
+  protected setExceptionBreakPointsRequest(
+    response: DebugProtocol.SetExceptionBreakpointsResponse,
+    args: DebugProtocol.SetExceptionBreakpointsArguments,
+  ): void {
+    // Thin relay: the C layer arms/disarms the engine's throw hook (filter
+    // "all") and echoes one verified entry per requested filter.
+    this.relay(response, 'setExceptionBreakpoints', {
+      filters: args.filters ?? [],
+    });
+  }
+
+  /**
+   * Override `verified` from the file system's point of view: a missing
+   * source or a line past EOF can never fire, so report verified:false and
+   * let VS Code render the (gray) unverified breakpoint. The C layer answers
+   * "registered"; only the adapter sees the file. If the response doesn't
+   * line up with the request 1:1 (C skipped entries), C's answer is kept.
+   */
+  private applyVerified(
+    r: DebugProtocol.Response,
+    requested: readonly DebugProtocol.SourceBreakpoint[],
+    srcPath: string,
+  ): void {
+    const resp = (r.body as { breakpoints?: { verified?: boolean; line?: number }[] })
+      ?.breakpoints;
+    if (!Array.isArray(resp) || resp.length !== requested.length) return;
+    let lineCount: number | null = null;
+    try {
+      lineCount = readFileSync(srcPath, 'utf8').split(/\r?\n/).length;
+    } catch {
+      lineCount = null; // missing / unreadable / not a file
+    }
+    resp.forEach((b, i) => {
+      const reqLine = requested[i]?.line;
+      const line = typeof reqLine === 'number' ? reqLine : b.line;
+      b.verified = lineCount !== null && typeof line === 'number' && line >= 1 && line <= lineCount;
     });
   }
 

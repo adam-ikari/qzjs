@@ -46,6 +46,20 @@ static const char *kJsProgram =
     "}\n"               /* line 6 */
     "f();\n";           /* line 7 */
 
+/* Program for the exception-breakpoint tests: throws exactly ONCE at line 2
+ * and CAUGHT at line 6 — a caught throw must stop too (the engine hook fires
+ * at JS_Throw, before unwinding decides whether anyone catches). */
+static const char *kJsExceptionProgram =
+    "function boom() {\n"              /* line 1 */
+    "  throw new Error(\"gboom\");\n"  /* line 2 <- throw site */
+    "}\n"                              /* line 3 */
+    "try {\n"                          /* line 4 */
+    "  boom();\n"                      /* line 5 */
+    "} catch (e) {\n"                  /* line 6 */
+    "  1;\n"                           /* line 7 */
+    "}\n"                              /* line 8 */
+    "2;\n";                            /* line 9 */
+
 /* ---- DAP framing helpers (parent side) ---- */
 
 static void dap_write(int fd, const char *json) {
@@ -799,6 +813,230 @@ TEST(DapDebugger, StdioConflictSecondInstanceRejected) {
         ADD_FAILURE() << "child exited non-zero";
     } else if (rc != 0) {
         ADD_FAILURE() << "stdio constraint violated (rc=" << rc << ")";
+    }
+}
+
+/* ---- Exception breakpoints (DAP setExceptionBreakpoints, filter "all") ---- */
+
+static int child_exc_main(int in_fd, int out_fd) {
+    dup2(in_fd, STDIN_FILENO);
+    dup2(out_fd, STDOUT_FILENO);
+    close(in_fd);
+    close(out_fd);
+
+    qz_config_t cfg = {};
+    cfg.initial_script = kJsExceptionProgram;
+    qz_t *rt = qz_create(&cfg);
+    if (!rt) return 1;
+    qz_destroy(rt);
+    return 0;
+}
+
+/* Drives one exception-breakpoint session. arm=1: filter "all" checked →
+ * the caught throw at line 2 must stop with reason=exception (message
+ * carried, throw-site line 2, exactly ONE stop for one throw). arm=0: the
+ * DAP-empty filters:[] (what VS Code sends with nothing checked) must DISARM
+ * → the same throw runs through with no stop at all. */
+static int parent_exc_main(int child_out_fd, int child_in_fd, pid_t pid, int arm)
+{
+    FILE *from_child = fdopen(child_out_fd, "r");
+    if (!from_child) return 1;
+    int failures = 0;
+    char *msg;
+
+    /* 1. initialize — event + response, order not guaranteed */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":1,\"command\":\"initialize\","
+        "\"arguments\":{\"adapterID\":\"qzjs\",\"clientID\":\"test\"}}");
+    int got_event = 0, got_response = 0;
+    for (int tries = 0; tries < 4 && !(got_event && got_response); tries++) {
+        msg = dap_read(from_child);
+        if (!msg) break;
+        if (strstr(msg, "\"event\"") && strstr(msg, "\"initialized\"")) got_event = 1;
+        if (strstr(msg, "\"response\"") && strstr(msg, "\"initialize\"")) got_response = 1;
+        free(msg);
+    }
+    if (!got_event || !got_response) {
+        fprintf(stderr, "FAIL: no initialize handshake\n");
+        return 1;
+    }
+
+    /* 2. setExceptionBreakpoints with the full checked-filter set */
+    if (arm)
+        dap_write(child_in_fd,
+            "{\"type\":\"request\",\"seq\":2,\"command\":\"setExceptionBreakpoints\","
+            "\"arguments\":{\"filters\":[\"all\"]}}");
+    else
+        dap_write(child_in_fd,
+            "{\"type\":\"request\",\"seq\":2,\"command\":\"setExceptionBreakpoints\","
+            "\"arguments\":{\"filters\":[]}}");
+    msg = dap_read(from_child);
+    if (!msg) { fprintf(stderr, "FAIL: no setExceptionBreakpoints response\n"); return 1; }
+    if (arm) {
+        if (!strstr(msg, "\"verified\":true")) {
+            fprintf(stderr, "FAIL: armed filter not verified: %s\n", msg);
+            failures++;
+        }
+    } else if (!strstr(msg, "\"breakpoints\":[]")) {
+        fprintf(stderr, "FAIL: empty filters should echo empty breakpoints: %s\n", msg);
+        failures++;
+    }
+    free(msg);
+    fprintf(stderr, "ok: setExceptionBreakpoints (arm=%d)\n", arm);
+
+    /* 3. configurationDone */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":3,\"command\":\"configurationDone\","
+        "\"arguments\":{}}");
+    msg = dap_read(from_child);  /* response */
+    free(msg);
+
+    /* 4. entry stop (stop_on_entry) */
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"")) {
+        fprintf(stderr, "FAIL: no entry stop: %s\n", msg ? msg : "(null)");
+        free(msg);
+        return 1;
+    }
+    free(msg);
+    fprintf(stderr, "ok: stopped at entry\n");
+
+    /* 5. continue into the program */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":4,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);  /* continue response */
+    free(msg);
+
+    if (arm) {
+        /* 6. the throw must stop with reason=exception + the message */
+        msg = dap_read(from_child);
+        if (!msg || !strstr(msg, "\"stopped\"") || !strstr(msg, "\"exception\"")) {
+            fprintf(stderr, "FAIL: no exception stop: %s\n", msg ? msg : "(null)");
+            free(msg);
+            failures++;
+        } else {
+            char *text = json_get(msg, "text");
+            if (!text || !strstr(text, "gboom")) {
+                fprintf(stderr, "FAIL: stop text lacks gboom: %s\n",
+                        text ? text : "(null)");
+                failures++;
+            } else {
+                fprintf(stderr, "ok: exception stop carries the message\n");
+            }
+            free(text);
+        }
+        free(msg);
+
+        /* 7. stackTrace — top frame is boom() at line 2: the snapshot must be
+         * the throw site (pre-unwind), not the catch handler. */
+        dap_write(child_in_fd,
+            "{\"type\":\"request\",\"seq\":5,\"command\":\"stackTrace\","
+            "\"arguments\":{\"threadId\":1}}");
+        msg = dap_read(from_child);
+        char *line = msg ? json_get(msg, "line") : nullptr;
+        if (!line || atoi(line) != 2) {
+            fprintf(stderr, "FAIL: throw-site line != 2 (got %s)\n",
+                    line ? line : "(null)");
+            failures++;
+        } else {
+            fprintf(stderr, "ok: throw-site line 2\n");
+        }
+        free(line);
+        free(msg);
+
+        /* 8. continue — the catch runs and the script finishes; ONE throw must
+         * yield exactly ONE stop (engine-side restorations are suppressed). */
+        dap_write(child_in_fd,
+            "{\"type\":\"request\",\"seq\":6,\"command\":\"continue\","
+            "\"arguments\":{\"threadId\":1}}");
+        msg = dap_read(from_child);  /* continue response */
+        free(msg);
+        while ((msg = dap_read(from_child)) != nullptr) {
+            if (strstr(msg, "\"stopped\"")) {
+                fprintf(stderr, "FAIL: extra stop after one throw: %s\n", msg);
+                failures++;
+            }
+            free(msg);
+        }
+        fprintf(stderr, "ok: single stop per throw, child drained\n");
+    } else {
+        /* disarmed: drain to EOF; only the entry stop (already consumed) */
+        while ((msg = dap_read(from_child)) != nullptr) {
+            if (strstr(msg, "\"stopped\"")) {
+                fprintf(stderr, "FAIL: disarm failed, stop seen: %s\n", msg);
+                failures++;
+            }
+            free(msg);
+        }
+        fprintf(stderr, "ok: disarmed throw ran through\n");
+    }
+
+    signal(SIGPIPE, SIG_IGN);
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":99,\"command\":\"disconnect\","
+        "\"arguments\":{}}");
+    fclose(from_child);
+    close(child_in_fd);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    signal(SIGPIPE, SIG_DFL);
+    if (failures != 0) return failures;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 100;
+    return 0;
+}
+
+TEST(DapDebugger, ExceptionBreakpointArmed) {
+    int to_child[2], from_child[2];
+    ASSERT_EQ(0, pipe(to_child));
+    ASSERT_EQ(0, pipe(from_child));
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        close(to_child[1]);
+        close(from_child[0]);
+        setenv("QZ_DEBUG", "1", 1);
+        const char *trace = getenv("QZ_DAP_TRACE");
+        if (trace) { freopen(trace, "w", stderr); }
+        int rc = child_exc_main(to_child[0], from_child[1]);
+        _exit(rc);
+    }
+
+    close(to_child[0]);
+    close(from_child[1]);
+    int rc = parent_exc_main(from_child[0], to_child[1], pid, 1);
+    if (rc == 100) {
+        ADD_FAILURE() << "child exited non-zero";
+    } else if (rc != 0) {
+        ADD_FAILURE() << rc << " DAP assertion(s) failed";
+    }
+}
+
+TEST(DapDebugger, ExceptionBreakpointDisarmed) {
+    int to_child[2], from_child[2];
+    ASSERT_EQ(0, pipe(to_child));
+    ASSERT_EQ(0, pipe(from_child));
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        close(to_child[1]);
+        close(from_child[0]);
+        setenv("QZ_DEBUG", "1", 1);
+        int rc = child_exc_main(to_child[0], from_child[1]);
+        _exit(rc);
+    }
+
+    close(to_child[0]);
+    close(from_child[1]);
+    int rc = parent_exc_main(from_child[0], to_child[1], pid, 0);
+    if (rc == 100) {
+        ADD_FAILURE() << "child exited non-zero";
+    } else if (rc != 0) {
+        ADD_FAILURE() << rc << " DAP assertion(s) failed";
     }
 }
 

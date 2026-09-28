@@ -198,6 +198,11 @@ static int dap_poll_message(qz_dap_t *d, int timeout_ms)
  * (continue/step/stop) that should end the paused pump, 0 otherwise. */
 static int dap_handle_request(qz_dap_t *d, const char *command,
                               const char *args, int req_seq);
+/* Request handlers shared across the three pumps (paused / mid-run /
+ * configure) — defined with the other handlers below. */
+static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_seq);
+static void dap_handle_set_exception_breakpoints(qz_dap_t *d, const char *args,
+                                                 int req_seq);
 
 /* The DAP callback for on_stopped. Pumps DAP requests until a flow command.
  * Design note: while paused the world is frozen by design — async JS (timers,
@@ -212,11 +217,32 @@ static void dap_on_stopped(qz_debug_t *dbg, const char *reason, int thread_id)
     qz_dap_t *d = rt ? (qz_dap_t *)rt->dap : NULL;
     if (!d) return;
 
-    /* emit stopped event */
-    char body[256];
-    snprintf(body, sizeof(body),
-        "{\"reason\":\"%s\",\"threadId\":1,\"allThreadsStopped\":true}", reason);
-    dap_send_event(d, "stopped", body);
+    /* emit stopped event — for an exception stop, carry the message so the
+     * client can show "Exception: <text>" at the throw site. cJSON escapes
+     * the (user-controlled) message; the snprintf path stays for the
+     * fixed-shape bodies. */
+    if (strcmp(reason, "exception") == 0) {
+        const char *msg = qz_debug_last_exception(dbg);
+        cJSON *body = cJSON_CreateObject();
+        if (body) {
+            cJSON_AddStringToObject(body, "reason", reason);
+            cJSON_AddStringToObject(body, "description", "Exception");
+            cJSON_AddStringToObject(body, "text", msg ? msg : "exception");
+            cJSON_AddNumberToObject(body, "threadId", 1);
+            cJSON_AddBoolToObject(body, "allThreadsStopped", 1);
+            char *buf = cJSON_PrintUnformatted(body);
+            dap_send_event(d, "stopped",
+                           buf ? buf : "{\"reason\":\"exception\"}");
+            free(buf);
+            cJSON_Delete(body);
+        }
+    } else {
+        char body[256];
+        snprintf(body, sizeof(body),
+            "{\"reason\":\"%s\",\"threadId\":1,\"allThreadsStopped\":true}",
+            reason);
+        dap_send_event(d, "stopped", body);
+    }
 
     /* pump until a flow command */
     for (;;) {
@@ -421,8 +447,21 @@ static int dap_handle_request(qz_dap_t *d, const char *command,
         qz_debug_continue(d->dbg);  /* unblock so JS can exit */
         return 1;
     }
-    /* unknown / unsupported (setExceptionBreakpoints, setFunctionBreakpoints,
-     * source, etc.) — acknowledge success to keep VS Code happy. */
+    if (strcmp(command, "setExceptionBreakpoints") == 0) {
+        /* Toggling the exception filter while paused must take effect for
+         * the very next throw, not silently fall through to the generic ack. */
+        dap_handle_set_exception_breakpoints(d, args, req_seq);
+        return 0;
+    }
+    if (strcmp(command, "setBreakpoints") == 0) {
+        /* Editing breakpoints while paused: without this branch the paused
+         * pump fell through to the generic `{}` ack and the edit was lost
+         * (VS Code would even un-verify the file's breakpoints). */
+        dap_handle_set_breakpoints(d, args, req_seq);
+        return 0;
+    }
+    /* unknown / unsupported (setFunctionBreakpoints, source, etc.) —
+     * acknowledge success to keep VS Code happy. */
     dap_send_response(d, req_seq, command, 1, "{}", NULL);
     return 0;
 }
@@ -482,6 +521,9 @@ void qz_dap_service(qz_t *rt)
             dap_send_response(d, req_seq, "pause", 1, "{}", NULL);
         } else if (strcmp(cmd, "setBreakpoints") == 0) {
             dap_handle_set_breakpoints(d, args, req_seq);
+        } else if (strcmp(cmd, "setExceptionBreakpoints") == 0) {
+            /* mid-run toggles of the exception dropdown */
+            dap_handle_set_exception_breakpoints(d, args, req_seq);
         } else if (strcmp(cmd, "disconnect") == 0) {
             dap_send_response(d, req_seq, "disconnect", 1, "{}", NULL);
             if (rt->dap_timer_active) {
@@ -575,6 +617,52 @@ void qz_dap_detach(qz_t *rt)
  * configuration phase: initialize, setBreakpoints, attach, configurationDone).
  * Called by the host (qz_create auto-attach path) after qz_dap_attach.
  * Returns when configurationDone is received. */
+/* Handle setExceptionBreakpoints: DAP sends the FULL set of checked filters
+ * each time (during configuration and whenever the user toggles the
+ * exception dropdown). MVP supports the "all" filter only — stop on every
+ * throw, caught or not (uncaught-only would need catch-detection on the
+ * unwind path and is not advertised, so clients won't send it; a client
+ * that asks anyway gets verified:false for that filter). Responds with one
+ * breakpoint entry per requested filter. Shared by all three pumps. */
+static void dap_handle_set_exception_breakpoints(qz_dap_t *d, const char *args,
+                                                 int req_seq)
+{
+    int arm = 0;
+    cJSON *resp_bp = cJSON_CreateArray();
+    cJSON *ja = args ? cJSON_Parse(args) : NULL;
+    const cJSON *filters = ja ?
+        cJSON_GetObjectItemCaseSensitive(ja, "filters") : NULL;
+    if (cJSON_IsArray(filters)) {
+        const cJSON *f;
+        cJSON_ArrayForEach(f, filters) {
+            int supported = cJSON_IsString(f) && f->valuestring &&
+                            strcmp(f->valuestring, "all") == 0;
+            if (supported)
+                arm = 1;
+            cJSON *e = cJSON_CreateObject();
+            if (e) {
+                cJSON_AddBoolToObject(e, "verified", supported);
+                cJSON_AddItemToArray(resp_bp, e);
+            }
+        }
+    }
+    qz_debug_set_exception_break(d->dbg, arm);
+
+    cJSON *body = cJSON_CreateObject();
+    if (body) {
+        cJSON_AddItemToObject(body, "breakpoints", resp_bp);
+        char *buf = cJSON_PrintUnformatted(body);
+        dap_send_response(d, req_seq, "setExceptionBreakpoints", 1,
+                          buf ? buf : "", NULL);
+        free(buf);
+        cJSON_Delete(body);
+    } else {
+        cJSON_Delete(resp_bp);
+        dap_send_response(d, req_seq, "setExceptionBreakpoints", 1, "{}", NULL);
+    }
+    cJSON_Delete(ja);
+}
+
 /* Handle a setBreakpoints request: replace the breakpoints of the source in
  * `args` (source.path + breakpoints[].line, optional condition) with the ones
  * in the request, then respond with the verified lines. Scoped per source —
@@ -653,6 +741,10 @@ int qz_dap_configure(qz_t *rt)
             dap_send_response(d, req_seq, "attach", 1, "{}", NULL);
         } else if (strcmp(cmd, "setBreakpoints") == 0) {
             dap_handle_set_breakpoints(d, args, req_seq);
+        } else if (strcmp(cmd, "setExceptionBreakpoints") == 0) {
+            /* armed before the program runs — VS Code sends this during
+             * configuration even when nothing is checked (filters:[]) */
+            dap_handle_set_exception_breakpoints(d, args, req_seq);
         } else if (strcmp(cmd, "configurationDone") == 0) {
             dap_send_response(d, req_seq, "configurationDone", 1, "{}", NULL);
             free(msg); free(cmd); free(args);

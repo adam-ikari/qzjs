@@ -97,6 +97,10 @@ const src = [
   '',
 ].join('\n');
 writeFileSync(SRC, src);
+// The adapter's verified:false reports against the file on disk — and in real
+// sessions the source VS Code sends breakpoints for always is one. Materialize
+// HELPER too (its eval'd contents match the nativeEvalScript string above).
+writeFileSync(HELPER, 'const h = 1;\nif (h) { h; }\n');
 
 let failed = 0;
 const fail = (msg) => { failed++; console.log('FAIL: ' + msg); };

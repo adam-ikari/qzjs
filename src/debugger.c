@@ -58,7 +58,18 @@ struct qz_debug {
     int pause_requested;        /* set by qz_debug_pause / stop_on_entry */
     int stopped;                /* 1 while inside on_stopped (re-entrancy guard) */
     int last_stop_line;         /* line of the last stop (to skip re-hitting the
-                                 * same breakpoint on immediate continue). -1=none */
+                                 * same breakpoint on immediate continue).
+                                 * 0 = guard inactive. */
+    int last_stop_depth;        /* call-frame count at the last stop — tells
+                                 * "resume dispatches of the same statement"
+                                 * (same depth, same file/line) apart from
+                                 * "the stop frame advanced or returned" and
+                                 * from "we are inside a callee" (deeper). */
+    char *last_stop_file;       /* filename of the last stop (strdup'd; owns) */
+    /* exception breakpoints (DAP setExceptionBreakpoints) */
+    int exc_break_mode;         /* 0 = off, 1 = stop on every throw (filter "all") */
+    char *exc_message;          /* message of the current "exception" stop;
+                                 * owned; valid until the next throw-stop or detach */
     /* paused-frame snapshot for frame_id ↔ engine frame mapping */
     JSDebugFrame *frames;
     int frame_count;
@@ -179,6 +190,7 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
      * JS_PcToLine gave us the line; the filename comes from the top frame. */
     const char *filename = NULL;
     char *fn_alloc = NULL;
+    int depth = 0;
     {
         int n = 0;
         JSDebugFrame *one = JS_GetCallFrames(ctx, &n);
@@ -188,6 +200,37 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
         }
         if (one)
             JS_FreeCallFrames(ctx, one, n);
+        depth = n;
+    }
+
+    /* Re-hit guard: after a stop at (file, line, depth), suppress
+     * breakpoint re-fires on the dispatches that merely RESUME the same
+     * statement — but only for as long as that really is the same visit.
+     * (The original guard compared the line only and never expired, so a
+     * breakpoint or logpoint on a loop line fired on the first pass and was
+     * then suppressed on every later visit until some other stop happened at
+     * a different line.)
+     *
+     *   deeper than the stop  → inside a callee: keep the guard — returning
+     *                           to the stop statement must not re-trigger it;
+     *   shallower             → the stop frame returned: fresh world, clear;
+     *   same depth, other
+     *   file/line             → the stop frame advanced past the statement: clear.
+     *
+     * The pop case is always observed here first: the caller dispatches its
+     * own next opcode (one level shallower) before any new frame can be
+     * created at the stop depth, so a recycled frame address cannot be
+     * mistaken for the stop frame. */
+    if (dbg->last_stop_line >= 1) {
+        if (depth < dbg->last_stop_depth) {
+            dbg->last_stop_line = 0;
+        } else if (depth > dbg->last_stop_depth) {
+            /* in a callee — guard stays */
+        } else if (line != dbg->last_stop_line ||
+                   (dbg->last_stop_file && filename &&
+                    strcmp(filename, dbg->last_stop_file) != 0)) {
+            dbg->last_stop_line = 0;
+        }
     }
 
     const char *reason = NULL;
@@ -235,6 +278,9 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
         dbg->step_line = line;
         dbg->step_mode = STEP_NONE;
         dbg->last_stop_line = line;
+        dbg->last_stop_depth = depth;
+        free(dbg->last_stop_file);
+        dbg->last_stop_file = fn_alloc ? strdup(fn_alloc) : NULL;
         dbg->stopped = 1;
 
         /* Free any previous paused-frame snapshot. */
@@ -258,6 +304,79 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
 }
 
 /* ================================================================
+ * The on_throw hook — exception breakpoints
+ * ================================================================ */
+
+/* Called from JS_Throw (the engine's single throw funnel: OP_throw, all
+ * JS_ThrowError* variants, host functions, async rejections) BEFORE the
+ * exception enters the pending slot, with stack frames still intact.
+ * The engine already suppresses restorations of already-thrown exceptions
+ * (js_throw_restored) and build_backtrace re-stores, so one logical throw
+ * notifies exactly once. Armed only while exc_break_mode is set (DAP filter
+ * "all"); otherwise this is one NULL-checked branch per throw. */
+static void qz_debug_on_throw(JSContext *ctx, JSValueConst exception,
+                              void *opaque)
+{
+    qz_debug_t *dbg = (qz_debug_t *)opaque;
+    if (!dbg->exc_break_mode || dbg->stopped)
+        return;
+
+    /* Claim the pause BEFORE running any JS: message conversion may call a
+     * user toString() that itself throws — the re-entrant hook then sees
+     * stopped==1 and returns instead of nesting. */
+    dbg->stopped = 1;
+
+    /* The stop consumes any armed step and pending pause (the next flow
+     * command re-arms) and records this line, mirroring the on_dispatch stop
+     * block. Frames are read eagerly for the line only — the paused snapshot
+     * itself is fetched lazily during the pump, when the stack is still the
+     * throw site. */
+    dbg->step_mode = STEP_NONE;
+    dbg->pause_requested = 0;
+    {
+        int n = 0;
+        JSDebugFrame *fr = JS_GetCallFrames(ctx, &n);
+        if (fr && n > 0)
+            dbg->step_line = fr[0].line;
+        JS_FreeCallFrames(ctx, fr, n);
+    }
+
+    free(dbg->exc_message);
+    dbg->exc_message = NULL;
+    {
+        JSValue msgv = JS_ToString(ctx, exception);
+        if (!JS_IsException(msgv)) {
+            const char *s = JS_ToCString(ctx, msgv);
+            if (s) {
+                dbg->exc_message = strdup(s);
+                JS_FreeCString(ctx, s);
+            }
+            JS_FreeValue(ctx, msgv);
+        }
+        /* Anything raised while stringifying (throwing toString, Symbol, OOM)
+         * sits in the pending slot; drop it — JS_Throw stores the original
+         * right after we return, and the pump must not see the stray. */
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    if (!dbg->exc_message)
+        dbg->exc_message = strdup("<exception>");
+
+    /* Invalidate any previous paused-frame snapshot; ensure_frames refetches
+     * during the pump with the throw-site stack. */
+    if (dbg->frames) {
+        JS_FreeCallFrames(ctx, dbg->frames, dbg->frame_count);
+        dbg->frames = NULL;
+        dbg->frame_count = 0;
+    }
+    dbg->frame_generation++;
+
+    if (dbg->cbs.on_stopped)
+        dbg->cbs.on_stopped(dbg, "exception", 1);
+
+    dbg->stopped = 0;
+}
+
+/* ================================================================
  * Public API
  * ================================================================ */
 
@@ -274,6 +393,7 @@ qz_debug_t *qz_debug_attach(qz_t *rt, const qz_debug_cbs *cbs)
     dbg->step_line = -1;
 
     dbg->hooks.on_dispatch = qz_debug_on_dispatch;
+    dbg->hooks.on_throw = qz_debug_on_throw;
     dbg->hooks.opaque = dbg;
     JS_SetDebuggerHandler(jsrt, &dbg->hooks);
 
@@ -311,6 +431,8 @@ void qz_debug_detach(qz_t *rt, qz_debug_t *dbg)
         }
         free(dbg->bps);
     }
+    free(dbg->last_stop_file);
+    free(dbg->exc_message);
     free(dbg);
 }
 
@@ -412,6 +534,24 @@ void qz_debug_stop_on_entry(qz_debug_t *dbg)
 {
     if (!dbg) return;
     dbg->pause_requested = 1;
+}
+
+/* Exception breakpoints (DAP setExceptionBreakpoints). mode: 0 = off,
+ * 1 = stop on every throw — the DAP "all" filter, caught and uncaught alike.
+ * Uncaught-only detection is not implemented (would need catch-detection on
+ * the unwind path); only "all" is advertised. */
+void qz_debug_set_exception_break(qz_debug_t *dbg, int mode)
+{
+    if (!dbg) return;
+    dbg->exc_break_mode = mode ? 1 : 0;
+}
+
+/* Message of the exception that caused the current (or most recent)
+ * "exception" stop. Owned by dbg — valid until the next throw-stop or
+ * detach. NULL when there is none. */
+const char *qz_debug_last_exception(qz_debug_t *dbg)
+{
+    return dbg ? dbg->exc_message : NULL;
 }
 
 /* ================================================================

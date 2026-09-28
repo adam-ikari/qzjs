@@ -75,6 +75,17 @@ void qz_debug_step_out(qz_debug_t *dbg);
 /* Pause immediately at the next dispatch (used for "stop on entry"). */
 void qz_debug_stop_on_entry(qz_debug_t *dbg);
 
+/* Exception breakpoints (DAP setExceptionBreakpoints). mode: 0 = off,
+ * 1 = stop on every throw — the DAP "all" filter, caught and uncaught alike.
+ * Uncaught-only detection is not implemented (needs catch-detection on the
+ * unwind path), so only "all" is advertised to clients. */
+void qz_debug_set_exception_break(qz_debug_t *dbg, int mode);
+
+/* Message of the exception that caused the current (or most recent)
+ * "exception" stop. Owned by dbg — valid until the next throw-stop or
+ * detach. NULL when there is none. */
+const char *qz_debug_last_exception(qz_debug_t *dbg);
+
 typedef struct qz_debug_var {
     char *name;
     char *value_json;   /* JSON string of the value; NULL if unreadable. Caller frees. */
