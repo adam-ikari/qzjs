@@ -1088,19 +1088,20 @@ if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
     qz_enable_warnings(qz_ctl)
 endif()
 # ============================================================================
-# qz_mp5_host_pump_e2e — M-P6 宿主泵契约 e2e harness。M-P7 过渡：该 harness
-# 断言的注入 loop/message_cb 契约已废除，target 暂时下线，待 P3 重写为
-# qz_mp7_mailbox_e2e（test/mp7-mailbox/）后恢复。
+# qz_mp7_mailbox_e2e — M-P7 邮箱宿主契约 e2e harness（真 qz_full + ISOLATED
+# 后端；mock/test 构建无该路径，仅在真实构建产出）。harness 即宿主：零回调、
+# 零 libuv，邮箱消费全走 qz_recv_message/qz_message_fd。与 qzjs-rt 同目录
+# （QZ_RT_SERVER 解析链经 /proc/self/exe 命中）。
 # ============================================================================
-# if(QZ_PROCESS_MODEL STREQUAL "ISOLATED" AND NOT QZ_BUILD_TESTS)
-#     add_executable(qz_mp5_host_pump_e2e test/mp5-host-pump/host_pump_e2e.c)
-#     target_link_libraries(qz_mp5_host_pump_e2e PRIVATE qz_full)
-#     target_include_directories(qz_mp5_host_pump_e2e PRIVATE
-#         ${CMAKE_SOURCE_DIR}/include)
-#     # uv.h 在 -std=c99 下需 POSIX 宏（pthread_rwlock_t / uv_thread）
-#     target_compile_definitions(qz_mp5_host_pump_e2e PRIVATE _POSIX_C_SOURCE=200809L)
-#     qz_enable_warnings(qz_mp5_host_pump_e2e)
-# endif()
+if(QZ_PROCESS_MODEL STREQUAL "ISOLATED" AND NOT QZ_BUILD_TESTS)
+    add_executable(qz_mp7_mailbox_e2e test/mp7-mailbox/mailbox_e2e.c)
+    target_link_libraries(qz_mp7_mailbox_e2e PRIVATE qz_full)
+    target_include_directories(qz_mp7_mailbox_e2e PRIVATE
+        ${CMAKE_SOURCE_DIR}/include)
+    # pthread / clock_gettime / poll 在 -std=c99 下需 POSIX 宏
+    target_compile_definitions(qz_mp7_mailbox_e2e PRIVATE _POSIX_C_SOURCE=200809L)
+    qz_enable_warnings(qz_mp7_mailbox_e2e)
+endif()
 # ============================================================================
 # Install
 # ============================================================================

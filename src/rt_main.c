@@ -416,6 +416,15 @@ static void process_rx(qz_t *rt)
                      * 向下转发。系统级 CONTROL 已由上方分支消化，不受影响。 */
                     qz_control_route(rt, g_local_id, view.source, view.target,
                                        view.payload, view.payload_len);
+                } else if (is_ctl && view.payload_len > 0 &&
+                           qz_ipc_ctl_classify(view.payload, view.payload_len,
+                                                 &ctl_val) !=
+                               QZ_IPC_CTL_NONE) {
+                    /* 系统级 CONTROL（ready/idle/shutdown/ping 家族，"qzjs"
+                     * 标记）：通道 C 层就地消费，不入 msgq/JS——否则控制面
+                     * 会把心跳当命令回 UNKNOWN_CMD 回执，泄漏进宿主邮箱
+                     * （M-P7 箱净门捕获）。命令类 classify==NONE 已由上方
+                     * CTL-1 分支路由。 */
                 } else {
                     /* kind → msgq flags：CONTROL 交控制面；PORT_TRANSFER 走
                      * 应用派发但 JS 拿到 kind=1，据此走 port 端点路由（M-P3）。 */
