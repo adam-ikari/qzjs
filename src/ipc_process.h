@@ -274,11 +274,14 @@ void qz_proc_start_read(qz_proc_t *proc);
 void qz_proc_start_read_cb(qz_proc_t *proc, qz_proc_msg_cb_t cb,
                              void *user);
 
-/* 宿主 create 握手后半（ISOLATED）：spawn 的 M-P1 握手 ack 之后，主RT 发出
- * 的第一帧恒为 CONTROL{ready}（rt_main.c 在进 server loop 前发出）。在
- * uv_read_start 注册之前用阻塞 raw-fd 帧读把它吃掉——字节精确，后续帧留在
- * socketpair 缓冲由读泵接收。返回 0 = ready 已到（*out_ok：1 成功 / 0 主RT
- * 初始化失败）；-1 = EOF/超时/非 ready 帧（协议错误）。 */
+/* 宿主 create 握手后半（ISOLATED）：spawn 的 M-P1 握手 ack 之后，主RT 先
+ * eval 初始脚本再 emit CONTROL{ready}——顶层 postMessage 帧可先于 ready 落
+ * 通道。在 uv_read_start 注册之前用阻塞 raw-fd 帧读逐帧吃到 ready（字节
+ * 精确，不与读泵抢字节）；ready 前的非-ready 帧暂存 pre_frames，由
+ * qz_proc_start_read_cb 注册读泵后同步 FIFO 重放给 msg_cb。
+ * 返回 0 = ready 已到（*out_ok：1 成功 / 0 主RT 初始化失败）；
+ * -1 = EOF/超时/解码失败/pre-ready 帧超 QZ_PROC_PRE_FRAMES_MAX/分配失败
+ *      （显式失败语义，§5.3）。 */
 int qz_proc_wait_ready_raw(qz_proc_t *proc, int64_t deadline_ms, int *out_ok);
 
 /* Opaque handle lifecycle — worker.c (compiled in mock test builds too)

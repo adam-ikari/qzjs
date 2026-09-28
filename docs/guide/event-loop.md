@@ -30,9 +30,10 @@ flowchart TB
 
 The host owns its loop and its pumping schedule; the library only borrows it.
 `qz_create` spawns the main-RT process, completes the handshake on a
-synchronous raw-fd read (no pumping, no callbacks during create — pre-ready
-script messages are buffered and replayed in FIFO order once the read pump is
-registered), then attaches its channel handles to `cfg.uv_loop`. Passing
+synchronous raw-fd read (the host loop is never pumped during the handshake —
+pre-ready script messages are buffered and replayed in FIFO order to
+`message_cb` synchronously on the calling thread just before `qz_create`
+returns), then attaches its channel handles to `cfg.uv_loop`. Passing
 `cfg.uv_loop = NULL` under ISOLATED makes `qz_create` fail explicitly — the
 library never falls back to an internal host thread. Host and libqzjs must
 link the **same** libuv.

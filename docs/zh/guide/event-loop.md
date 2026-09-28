@@ -26,7 +26,7 @@ flowchart TB
     end
 ```
 
-宿主拥有自己的 loop 和泵的节奏；库只是借用。`qz_create` spawn 主RT 进程后，在同步 raw-fd 读上完成握手（期间不泵循环、不触发回调——ready 前的脚本消息会被缓冲，读泵注册后按 FIFO 重放），然后把通道句柄挂到 `cfg.uv_loop` 上。ISOLATED 下传 `cfg.uv_loop = NULL` 会让 `qz_create` 显式失败——库绝不回退到内部宿主线程。宿主与 libqzjs 必须链接**同一个** libuv。
+宿主拥有自己的 loop 和泵的节奏；库只是借用。`qz_create` spawn 主RT 进程后，在同步 raw-fd 读上完成握手（握手期间绝不泵宿主 loop——ready 前的脚本消息会被缓冲，在 `qz_create` 返回前于调用线程上同步按 FIFO 重放给 `message_cb`），然后把通道句柄挂到 `cfg.uv_loop` 上。ISOLATED 下传 `cfg.uv_loop = NULL` 会让 `qz_create` 显式失败——库绝不回退到内部宿主线程。宿主与 libqzjs 必须链接**同一个** libuv。
 
 ## 谁在运行循环（THREAD 构建）
 

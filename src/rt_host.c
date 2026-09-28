@@ -61,7 +61,9 @@ int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
      * §4.1 既定槽位（同 qz_ping），tp 是 payload 扩展字段——信封 schema
      * 零改动。tp[0] 作信封 target（根的直接子槽位，N-P3 同款）。 */
     int32_t seq = __atomic_add_fetch(&rt->ping_seq, 1, __ATOMIC_ACQ_REL);
-    char msg[64];
+    /* 预算：前缀 ~27B + 8 槽位 ×6B（u16 最坏 5 位+逗号）+ 尾 2B ≈ 77B，
+     * 64 会把合法深路径在 snprintf 守卫处误拒成 -1。 */
+    char msg[128];
     int off = snprintf(msg, sizeof msg, "{\"qzjs\":1,\"ping\":%d,\"tp\":[",
                        seq);
     if (off < 0 || off >= (int)sizeof msg) return -1;
@@ -194,9 +196,13 @@ static void host_proc_msg_cb(void *user, int8_t kind, int32_t source,
     if (rt->config.message_cb) {
         /* 与 THREAD 后端（qz_msg_push 的 len+1 拷贝）同语义：message_cb 收到
          * NUL 终止的 JSON（len 不含终止符）。信封 payload 是 rbuf 视图，
-         * 不可就地终止，做一次拷贝。 */
+         * 不可就地终止，做一次拷贝。拷贝失败不静默吞消息——至少留诊断。 */
         char *copy = (char *)malloc((size_t)len + 1);
-        if (!copy) return;
+        if (!copy) {
+            fprintf(stderr, "qzjs: message_cb payload OOM, dropped %u bytes\n",
+                    len);
+            return;
+        }
         memcpy(copy, payload, len);
         copy[len] = '\0';
         rt->config.message_cb(rt, copy, len, rt->host_data);
@@ -344,10 +350,13 @@ int qz_host_start(qz_t *rt)
         return -1;
     }
 
-    /* ready 握手：主RT 的第一帧恒为 CONTROL{ready}（spawn 握手 ack 之后、
-     * 进 server loop 之前发出）。在读泵注册之前用阻塞 raw-fd 帧读吃掉——
-     * 不泵宿主 loop、不触发 message_cb，create 期间宿主 loop 完全归宿主。
-     * ready:0 / EOF / 超时 / 协议错误 = 显式失败（§5.3，不静默降级）。 */
+    /* ready 握手：主RT 先 eval 初始脚本再 emit ready（rt_main.c），顶层
+     * postMessage 帧可先于 CONTROL{ready} 落通道。在读泵注册之前用阻塞
+     * raw-fd 帧读逐帧吃到 ready——不泵宿主 loop、不触发 message_cb；
+     * ready 前的帧暂存，随后由 start_read_cb 同步 FIFO 重放（发生在
+     * qz_create 返回前，仍在调用线程上）。
+     * ready:0 / EOF / 超时 / 解码失败 / pre-ready 帧超上限 = 显式失败
+     * （§5.3，不静默降级）。 */
     int ready_ok = 0;
     int rw = qz_proc_wait_ready_raw(rt->proc,
                                       qz_now_ms() + QZ_IPC_HANDSHAKE_TIMEOUT_MS,
@@ -361,15 +370,20 @@ int qz_host_start(qz_t *rt)
     }
     __atomic_store_n(&rt->thread_ready, 1, __ATOMIC_RELEASE);
 
-    /* 入站：信封 → host_proc_msg_cb（读泵跑在泵宿主 loop 的线程）。 */
-    qz_proc_start_read_cb(rt->proc, host_proc_msg_cb, rt);
-
+    /* wake 必须先于 start_read_cb 初始化：start_read_cb 注册读泵后立即同步
+     * 重放 pre-ready 帧——其 message_cb 若调 qz_post_message，qz_msg_push 会
+     * uv_async_send(&rt->wake)；wake 未 init（loop==NULL）即空指针崩溃。
+     * 重放期的投递照常入队，创建返回后由宿主首泵经 host_wake_cb 装机发送。 */
     rt->wake.data = rt;
     if (uv_async_init(rt->host_loop, &rt->wake, host_wake_cb) != 0) {
         rt->ready_err = -1;
         host_teardown(rt);
         return -1;
     }
+
+    /* 入站：信封 → host_proc_msg_cb（读泵跑在泵宿主 loop 的线程）+
+     * pre-ready 帧同步重放（见上）。 */
+    qz_proc_start_read_cb(rt->proc, host_proc_msg_cb, rt);
     return 0;
 }
 
@@ -385,6 +399,9 @@ int qz_host_post(qz_t *rt, const char *json, size_t len)
 void qz_host_wait_idle(qz_t *rt)
 {
     if (!rt || rt->magic != QZ_MAGIC) return;
+    /* 幂等：已拆除（wait_idle 二次调用/destroy 之后）绝不再 push——
+     * wake 已 close 且回调已跑（loop==NULL），uv_async_send 即 UB。 */
+    if (__atomic_load_n(&rt->thread_joined, __ATOMIC_ACQUIRE)) return;
     __atomic_store_n(&rt->wait_idle, 1, __ATOMIC_RELEASE);
     /* CONTROL{idle} 走同一 FIFO：排在所有已投递宿主消息之后。 */
     if (qz_msg_push(rt, QZ_IPC_CTL_IDLE_REQ,

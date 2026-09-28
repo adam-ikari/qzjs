@@ -99,7 +99,8 @@ typedef enum {
  * ================================================================ */
 
 /* 创建 qzjs。ISOLATED：spawn 主RT 进程 → 握手 → 阻塞等待其 CONTROL{ready}
- * （同步通道读，不泵宿主 loop、不触发 message_cb）→ 通道句柄挂上
+ * （同步通道读，握手期间不泵宿主 loop；ready 前脚本帧于 create 返回前在
+ * 调用线程同步 FIFO 重放给 message_cb）→ 通道句柄挂上
  * cfg->uv_loop 就绪返回；cfg->uv_loop 为 NULL 或 ready 失败 → 返回 NULL。
  * THREAD：起内部线程，阻塞到线程 ready；initial_script 在 JS 线程上 eval，
  * 抛异常则返回 NULL。返回的 rt 由宿主线程调用 qz_destroy 销毁。 */

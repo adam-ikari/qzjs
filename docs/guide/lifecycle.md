@@ -44,8 +44,10 @@ if (!rt) {
 
 `qz_create` blocks until the runtime is ready and `initial_script` has been
 eval'd. Under ISOLATED the ready handshake is a synchronous raw-fd read —
-**no pumping and no callbacks fire during create**; script messages that
-arrive before the read pump is registered are buffered and replayed FIFO.
+**the host loop is never pumped during the handshake**; script messages that
+arrive before the read pump is registered are buffered and replayed FIFO to
+`message_cb` synchronously on the calling thread just before `qz_create`
+returns.
 The runtime owns all of its resources.
 to keep alive.
 

@@ -28,7 +28,9 @@ JSON messages.
 pass your own `uv_loop_t` as `cfg.uv_loop` (`NULL` → `qz_create` fails
 explicitly — no internal host-thread fallback): `qz_create` spawns the
 main-RT process (`qzjs-rt`), completes its ready handshake on a synchronous
-raw-fd read — no pumping, no callbacks during create — then binds its
+raw-fd read — the host loop is never pumped during the handshake; pre-ready
+script messages replay FIFO to `message_cb` synchronously on the calling
+thread before `qz_create` returns — then binds its
 host-side channel handles (pipe read pump, wake async, tx-spill timer) onto
 your loop. Under **THREAD** it starts qzjs's internal thread and embedded
 libuv loop instead. Either way it **blocks until ready** — when it returns,

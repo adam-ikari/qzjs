@@ -32,8 +32,8 @@ if (!rt) {
 5. 在内部线程上求值 `initial_script` — 抛出异常会使 `qz_create` 返回 `NULL`
 
 `qz_create` 会阻塞，直到运行时就绪且 `initial_script` 已求值。ISOLATED 下 ready 握手走
-同步 raw-fd 读——create 期间不泵宿主 loop、不触发回调；ready 前的脚本消息会被缓冲，
-读泵注册后按 FIFO 重放。传 `cfg.uv_loop = NULL` 会让 `qz_create` 显式失败，库绝不回退到
+同步 raw-fd 读——握手期间绝不泵宿主 loop；ready 前的脚本消息会被缓冲，在 create 返回前
+于调用线程上同步按 FIFO 重放给 `message_cb`。传 `cfg.uv_loop = NULL` 会让 `qz_create` 显式失败，库绝不回退到
 内部宿主线程。运行时拥有其全部 JS 侧资源。
 
 ## 销毁运行时

@@ -22,7 +22,8 @@ description: 在 C 应用中嵌入 qzjs 的主机集成路径 —— create、JS
 ## 1. Create
 
 ISOLATED（默认）下 [`qz_create`](/zh/c-api/runtime) spawn 主RT 进程（`qzjs-rt`）、在同步
-raw-fd 读上完成 ready 握手（期间不泵循环、不触发回调），再把宿主侧通道句柄挂到你经
+raw-fd 读上完成 ready 握手（握手期间不泵宿主 loop；ready 前的脚本帧在 create 返回前于
+调用线程同步 FIFO 重放给 `message_cb`），再把宿主侧通道句柄挂到你经
 `cfg.uv_loop` 注入的宿主 loop 上——传 NULL 会让 `qz_create` 显式失败。THREAD 构建下则
 启动 qzjs 内部线程、拉起 libuv 循环。两种形态下它都阻塞到就绪才返回，这时运行时已活、
 `initial_script` 已跑完。

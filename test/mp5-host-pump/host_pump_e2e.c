@@ -11,8 +11,11 @@
  *   ⑤ qz_wait_idle 后 uv_loop_close(&loop) == 0（库句柄全关，无泄漏进宿主 loop）
  *   ⑥ kill -9 主RT：qz_wait_idle 内收到 {"type":"error"} message_cb
  *   ⑦ SIGSTOP 冻结主RT：qz_destroy 在 terminate 预算内完成（tier 升级）
+ *   ⑧ pre-ready 重放语义：初始脚本顶层消息在 create 返回前于调用线程重放，
+ *      且重放期 message_cb 内 qz_post_message 回发安全（H1 守卫：wake 先于
+ *      start_read_cb 初始化——顺序颠倒即 wake.loop==NULL 崩溃）
  *
- * 用法：qz_mp5_host_pump_e2e <basic|null|crash|hung>
+ * 用法：qz_mp5_host_pump_e2e <basic|null|crash|hung|replay>
  * 退出码：0 = 该模式全部断言通过；非 0 = 失败（stderr 带诊断）。
  */
 #include <qzjs/qzjs.h>
@@ -34,6 +37,9 @@ static int g_seq_bad;           /* ④ 失序计数 */
 static int g_got_total;         /* ④ 收到总数 */
 static int g_error_reported;    /* ⑥ 崩溃上报标志 */
 static int g_timed_out;
+/* ⑧ pre-ready 重放：create 返回标志 + 顶层消息/回发/回声观测 */
+static volatile int g_create_returned;
+static int g_replay_mode, g_replay_pre_seen, g_replay_in_create, g_replay_ack;
 
 /* 宿主闹钟：绝对 deadline 到点 uv_stop（所有等待共用的看门狗）。 */
 static uint64_t g_deadline_ms;
@@ -69,6 +75,18 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
         g_error_reported = 1;
         return;
     }
+    /* ⑧ pre-ready 顶层帧：在 create 内的重放回调里回发 post_message——
+     * wake 若未先于重放初始化，这里直接段错误（H1 守卫的活体证明）。 */
+    if (g_replay_mode && strstr(json, "\"pre\":") != NULL) {
+        g_replay_pre_seen++;
+        if (!g_create_returned) g_replay_in_create = 1;
+        qz_post_message(rt, "{\"n\":4242}", 10);
+        return;
+    }
+    if (g_replay_mode && strstr(json, "\"ack\":4242") != NULL) {
+        g_replay_ack = 1;
+        return;
+    }
     const char *p = strstr(json, "\"seq\":");
     if (p) {
         long v = strtol(p + 6, NULL, 10);
@@ -85,6 +103,10 @@ static const char *kScriptEcho =
 static const char *kScriptEchoAlive =
     "onmessage = function (e) { postMessage({ seq: e.data.n }); };\n"
     "setInterval(function () {}, 50);\n";
+/* ⑧：顶层 postMessage 先于 ready 落通道（pre-ready 帧），onmessage 回声 ack。 */
+static const char *kScriptReplay =
+    "onmessage = function (e) { postMessage({ ack: e.data.n }); };\n"
+    "postMessage({ pre: 1 });\n";
 
 static void loop_setup(void) {
     uv_loop_init(&g_loop);
@@ -186,9 +208,53 @@ static int mode_basic(void) {
 
     /* ⑤ wait_idle 后宿主 loop 干净可关 */
     qz_wait_idle(rt);
+    qz_wait_idle(rt);  /* 二次调用 = no-op（M4 幂等守卫：不得触已 close 的 wake） */
     qz_free(rt);   /* wait_idle 已拆除运行时：只释放实例（契约禁再 qz_destroy） */
     loop_close_expect_clean("basic");
     printf("[basic] ok ⑤: qz_wait_idle 后 uv_loop_close==0（无库句柄残留）\n");
+    return 0;
+}
+
+/* ── ⑧ replay：pre-ready 重放 + create 内回调回发（H1 守卫）── */
+static int replay_done(void) { return g_replay_ack; }
+
+static int mode_replay(void) {
+    loop_setup();
+    g_main_thread = (uv_thread_t)(uintptr_t)pthread_self();
+    g_replay_mode = 1;
+
+    qz_config_t cfg = {0};
+    cfg.message_cb = on_message;
+    cfg.uv_loop = &g_loop;
+    cfg.initial_script = kScriptReplay;
+    qz_t *rt = qz_create(&cfg);
+    g_create_returned = 1;
+    if (!rt) { fprintf(stderr, "[replay] qz_create failed\n"); return 1; }
+
+    if (g_replay_pre_seen != 1 || !g_replay_in_create) {
+        fprintf(stderr, "[replay] ⑧a 顶层 pre-ready 消息未于 create 内重放"
+                        "（seen=%d in_create=%d）\n",
+                g_replay_pre_seen, g_replay_in_create);
+        return 1;
+    }
+    printf("[replay] ok ⑧a: 顶层消息于 qz_create 返回前在调用线程同步重放\n");
+
+    /* 重放 cb 内已回发 {"n":4242}（wake 须已 init）；JS 回声须经首泵到达 */
+    pump_until(replay_done, 5000);
+    if (!g_replay_ack) {
+        fprintf(stderr, "[replay] ⑧b create 内回发的 post_message 未获 JS 回声"
+                        "（timeout=%d）\n", g_timed_out);
+        return 1;
+    }
+    if (g_cb_wrong_thread) {
+        fprintf(stderr, "[replay] ① %d 次 message_cb 不在泵线程\n", g_cb_wrong_thread);
+        return 1;
+    }
+    printf("[replay] ok ⑧b: create 内重放回调中 qz_post_message 回发 → JS 回声到达（无崩溃）\n");
+
+    qz_wait_idle(rt);
+    qz_free(rt);
+    loop_close_expect_clean("replay");
     return 0;
 }
 
@@ -269,6 +335,7 @@ int main(int argc, char **argv) {
     if (strcmp(mode, "basic") == 0) return mode_basic();
     if (strcmp(mode, "crash") == 0) return mode_crash();
     if (strcmp(mode, "hung") == 0)  return mode_hung();
-    fprintf(stderr, "usage: %s <basic|null|crash|hung>\n", argv[0]);
+    if (strcmp(mode, "replay") == 0) return mode_replay();
+    fprintf(stderr, "usage: %s <basic|null|crash|hung|replay>\n", argv[0]);
     return 2;
 }

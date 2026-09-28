@@ -10,7 +10,7 @@ qz_t *qz_create(const qz_config_t *config);
 
 创建一个新的 qzjs 运行时。宿主侧发生什么取决于构建的进程模型（`QZ_PROCESS_MODEL`，缺省 `ISOLATED`）：
 
-- **ISOLATED** — 库在宿主侧**不拥有任何线程和循环**：你必须通过 `config.uv_loop` 注入自己的 `uv_loop_t`（传 `NULL` → `qz_create` 显式失败；没有内部宿主线程回退）。`qz_create` spawn 主RT 进程（`qzjs-rt`），在同步 raw-fd 读上完成 ready 握手——**期间不泵循环、不触发回调**；ready 前的脚本消息会被缓冲，读泵注册后按 FIFO 重放——然后把宿主侧通道句柄（管道读泵、wake async、发送溢出定时器）挂到 `config.uv_loop` 上。JS（含 `initial_script`）在主RT 进程内、库自有的 loop 上运行。
+- **ISOLATED** — 库在宿主侧**不拥有任何线程和循环**：你必须通过 `config.uv_loop` 注入自己的 `uv_loop_t`（传 `NULL` → `qz_create` 显式失败；没有内部宿主线程回退）。`qz_create` spawn 主RT 进程（`qzjs-rt`），在同步 raw-fd 读上完成 ready 握手——**握手期间绝不泵宿主 loop**；ready 前的脚本消息会被缓冲，在 `qz_create` 返回前于调用线程上同步按 FIFO 重放给 `message_cb`——然后把宿主侧通道句柄（管道读泵、wake async、发送溢出定时器）挂到 `config.uv_loop` 上。JS（含 `initial_script`）在主RT 进程内、库自有的 loop 上运行。
 - **THREAD** — qzjs 启动自己的内部线程和嵌入式 libuv 循环；`qz_create` 阻塞，直到线程就绪且 `initial_script` 已在该线程上求值。
 
 注册的扩展集在编译期通过 `QZ_EXTENSIONS` 宏固定；没有运行时扩展列表。宿主与 libqzjs 必须链接**同一个** libuv。
@@ -37,7 +37,7 @@ qz_t *qz_create(const qz_config_t *config);
 
 ISOLATED（缺省）：
 
-1. Spawn 主RT 进程（`qzjs-rt`），在同步 raw-fd 读上等待其 `CONTROL{ready}`——创建期间不泵宿主 loop、不触发回调
+1. Spawn 主RT 进程（`qzjs-rt`），在同步 raw-fd 读上逐帧吃到其 `CONTROL{ready}`——握手期间不泵宿主 loop；ready 前的脚本帧暂存，在 create 返回前于调用线程同步 FIFO 重放给 `message_cb`
 2. 在主RT 进程内部：初始化库自有 libuv 循环，创建 `JSRuntime` 和初始上下文，注册编译期扩展集（`QZ_EXTENSIONS` 表），注入 WinterTC 兼容运行时，求值 `initial_script`，若设置了 `initial_bytecode` 再求值字节码
 3. 把宿主侧通道句柄（管道读泵、wake async、发送溢出定时器）挂到 `config.uv_loop` 上，返回
 

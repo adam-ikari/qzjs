@@ -44,7 +44,8 @@ int main(void) {
 ```
 
 `qz_create` 会阻塞，直到运行时就绪且 `initial_script` 已求值（ISOLATED 下握手走同步
-raw-fd 读，create 期间不泵循环、不触发回调）。宿主通过
+raw-fd 读，握手期间不泵宿主 loop；ready 前的脚本帧在 create 返回前于调用线程同步
+FIFO 重放给 `message_cb`）。宿主通过
 `qz_post_message`（两模型下均线程安全）发送消息，并通过 `message_cb` 接收回复——
 ISOLATED 下该回调在泵 `cfg.uv_loop` 的宿主线程上触发；THREAD 下在 qzjs 线程上触发
 （因此你的回调必须线程安全）。`qz_destroy` 执行优雅关闭。

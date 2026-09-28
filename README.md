@@ -97,9 +97,10 @@ int main(void) {
 
 `qz_create` spawns/blocks until the runtime is ready and `initial_script`
 has been evaluated (a thrown exception makes `qz_create` return NULL). Under
-ISOLATED the ready handshake is a synchronous raw-fd read — no pumping and
-no callbacks during create; pre-ready script messages are buffered and
-replayed FIFO. `message_cb` fires for every `postMessage` from JS — on the
+ISOLATED the ready handshake reads on a synchronous raw-fd path (no host-loop
+pumping during the handshake); pre-ready script messages are buffered and
+replayed FIFO to `message_cb` on the calling thread before `qz_create`
+returns. `message_cb` fires for every `postMessage` from JS — on the
 thread pumping your `cfg.uv_loop` under ISOLATED, on the internal qzjs
 thread under THREAD — and must be thread-safe. In a THREAD build the same
 program needs no `uv_loop`.

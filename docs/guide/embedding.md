@@ -51,7 +51,9 @@ int main(void) {
 
 `qz_create` blocks until the runtime is ready and `initial_script` has been
 eval'd (under ISOLATED the ready handshake is a synchronous raw-fd read —
-no pumping, no callbacks during create). The host sends messages via
+the host loop is never pumped during the handshake; pre-ready script
+messages replay FIFO to `message_cb` on the calling thread just before
+`qz_create` returns). The host sends messages via
 `qz_post_message` (thread-safe under both models) and receives replies
 through `message_cb`, which under ISOLATED fires on the thread pumping
 `cfg.uv_loop` — keep it fast and never call a blocking host API from inside

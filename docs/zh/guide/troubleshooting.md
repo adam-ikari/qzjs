@@ -59,7 +59,7 @@ profile 会翻转 `QZ_WITH_*` 功能开关。`minimal` 保留 WebAssembly、
 ### `qz_create` 返回 `NULL`
 
 `qz_create` 会阻塞到运行时就绪且 `initial_script` 执行完毕（ISOLATED 下握手走同步
-raw-fd 读，期间不泵宿主 loop、不触发回调；THREAD 下等内部线程就绪）；任一环节失败即
+raw-fd 读，握手期间不泵宿主 loop；THREAD 下等内部线程就绪）；任一环节失败即
 返回 `NULL`。原因：
 
 1. **`initial_script` 抛异常。** 初始脚本中的任何异常都会中止创建——运行时

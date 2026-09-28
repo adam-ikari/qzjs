@@ -15,9 +15,10 @@ build's process model (`QZ_PROCESS_MODEL`, default `ISOLATED`):
   inject your own `uv_loop_t` via `config.uv_loop` (`NULL` → `qz_create`
   fails explicitly; there is no internal host-thread fallback). `qz_create`
   spawns the main-RT process (`qzjs-rt`), completes the ready handshake on a
-  synchronous raw-fd read — **no pumping and no callbacks during create**;
-  pre-ready script messages are buffered and replayed in FIFO order once the
-  read pump is registered — then attaches its host-side channel handles
+  synchronous raw-fd read — **the host loop is never pumped during the
+  handshake**; pre-ready script messages are buffered and replayed in FIFO
+  order to `message_cb` **synchronously on the calling thread before
+  `qz_create` returns** — then attaches its host-side channel handles
   (pipe read pump, wake async, tx-spill timer) to `config.uv_loop`. JS —
   including `initial_script` — runs inside the main-RT process, on the
   library-owned loop there.
