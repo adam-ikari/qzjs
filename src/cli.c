@@ -16,6 +16,13 @@
 
 #define QZ_CLI_VERSION "qzjs 0.2.0"
 
+/* ISOLATED 生产构建：宿主侧无库线程，message_cb 跑在泵 cfg.uv_loop 的线程
+ * ——CLI 因此自建并泵一个 uv loop（dogfood 宿主用 uv 公共库，不碰内部头）。
+ * THREAD 构建 / mock 测试构建：库自带线程泵，CLI 维持 sched_yield 自旋。 */
+#if defined(QZ_PROCESS_MODEL_ISOLATED) && !defined(QZ_USE_MOCK_LIBUV)
+#define QZ_CLI_HOSTS_UV_LOOP 1
+#endif
+
 /* CTL-2：控制面档位 / 端点路径（--control-plane / --control-pipe，main 解析、
  * run_code 应用到 qz_config_t）。-1 = 缺省（OFF）。 */
 static int g_control_plane = -1;
@@ -121,13 +128,14 @@ static int json_unescape(const char *s, char *out, size_t out_cap) {
     return (int)n;
 }
 
-/* message_cb: runs on the qzjs thread; CLI receives eval results.
+/* message_cb: ISOLATED = runs on the thread pumping the CLI's own uv loop
+ * (可能经 qz_wait_idle/qz_destroy 的内部泵重入); THREAD = qzjs internal thread.
+ * CLI receives eval results.
  * json: {"ok":true,"v":"..."} or {"ok":false,"e":"..."}.
  * Decodes the v/e payload into host->result for printing by the caller
  * (script mode prints errors to stderr; the REPL prints every result). */
 static void cli_message_cb(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)data;
-    cli_host_t *h = (cli_host_t *)qz_get_runtime_data(rt);
+    (void)data;    cli_host_t *h = (cli_host_t *)qz_get_runtime_data(rt);
     if (!h) return;
     /* 精确判断：信封由 JSON.stringify 生成，无空格，恒以 {"ok":true 或
      * {"ok":false 开头。不能用 strstr 子串匹配 —— 错误消息/成功值的正文里
@@ -374,11 +382,23 @@ static int run_code(const char *code, const char *file,
     cfg.initial_script = bootstrap;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+    uv_loop_t loop;
+    if (uv_loop_init(&loop) != 0) {
+        fprintf(stderr, "qzjs: uv_loop_init failed\n");
+        free(bootstrap);
+        return 1;
+    }
+    cfg.uv_loop = &loop;   /* ISOLATED：message_cb 跑在泵这个 loop 的线程 */
+#endif
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
     if (!rt) {
         fprintf(stderr, "qzjs: runtime init failed\n");
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        uv_loop_close(&loop);
+#endif
         return 1;
     }
     qz_set_runtime_data(rt, &host);
@@ -387,6 +407,9 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        uv_loop_close(&loop);
+#endif
         return 1;
     }
     char *file_json = file ? json_escape(file) : NULL;
@@ -395,6 +418,9 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        uv_loop_close(&loop);
+#endif
         return 1;
     }
     /* json_escape 上界 strlen*6+3，故按 cmd_json/file_json 实际长度 + 固定信封
@@ -407,6 +433,9 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        uv_loop_close(&loop);
+#endif
         return 1;
     }
     int wrote = snprintf(cmd, cmd_cap,
@@ -419,14 +448,24 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        uv_loop_close(&loop);
+#endif
         return 1;
     }
     qz_post_message(rt, cmd, strlen(cmd));
     free(cmd);
 
-    /* lock-free wait: spin on done (qzjs thread release-stores, acquire-load here) */
+    /* 等 eval 回包。ISOLATED：泵自己的 loop（UV_RUN_ONCE 阻塞在事件上——
+     * wake async + 通道 pipe 恒活动，不会空转；message 到达即 message_cb →
+     * done）。THREAD：库线程泵 loop，此处维持自旋。 */
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+    while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
+        uv_run(&loop, UV_RUN_ONCE);
+#else
     while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
         sched_yield();
+#endif
     int exit_code = host.exit_code;
     if (exit_code) {
         /* script error — cli_message_cb decoded the "e" payload into result */
@@ -447,6 +486,9 @@ static int run_code(const char *code, const char *file,
     }
     exit_code = host.exit_code;
     qz_free(rt);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+    uv_loop_close(&loop);   /* 库句柄已在 wait_idle 内部泵中 close 完毕 */
+#endif
     return exit_code;
 }
 
@@ -468,11 +510,23 @@ static int repl_loop(void) {
     cfg.initial_script = bootstrap;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+    uv_loop_t loop;
+    if (uv_loop_init(&loop) != 0) {
+        fprintf(stderr, "qzjs: uv_loop_init failed\n");
+        free(bootstrap);
+        return 1;
+    }
+    cfg.uv_loop = &loop;
+#endif
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
     if (!rt) {
         fprintf(stderr, "qzjs: runtime init failed\n");
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        uv_loop_close(&loop);
+#endif
         return 1;
     }
     qz_set_runtime_data(rt, &host);
@@ -516,8 +570,13 @@ static int repl_loop(void) {
         }
         qz_post_message(rt, cmd, strlen(cmd));
         free(cmd);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
+            uv_run(&loop, UV_RUN_ONCE);
+#else
         while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
             sched_yield();
+#endif
 
         printf("%s\n", host.result);
         fflush(stdout);
@@ -528,6 +587,9 @@ static int repl_loop(void) {
     printf("\n");
 
     qz_destroy(rt);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+    uv_loop_close(&loop);   /* destroy 内部泵已收完库句柄 close 回调 */
+#endif
     return exit_code;
 }
 
@@ -605,20 +667,36 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     cfg.initial_bytecode_len = (size_t)sz;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+    uv_loop_t loop;
+    if (uv_loop_init(&loop) != 0) {
+        fprintf(stderr, "qzjs: uv_loop_init failed\n");
+        free(bootstrap);
+        free(bc);
+        return 1;
+    }
+    cfg.uv_loop = &loop;
+#endif
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
     if (!rt) {
         fprintf(stderr, "qzjs: bytecode error or runtime init failed\n");
         free(bc);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+        uv_loop_close(&loop);
+#endif
         return 1;
     }
     qz_set_runtime_data(rt, &host);
-    qz_wait_idle(rt);
+    qz_wait_idle(rt);   /* 内部泵 loop：bootstrap 的 console 输出经 message_cb 在此到达 */
     int exit_code = host.exit_code;
     if (exit_code && !host.reported) fprintf(stderr, "%s\n", host.result);
     free(bc);
     qz_free(rt);
+#ifdef QZ_CLI_HOSTS_UV_LOOP
+    uv_loop_close(&loop);
+#endif
     return exit_code;
 }
 
