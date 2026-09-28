@@ -169,6 +169,9 @@ typedef void (*qz_proc_msg_cb_t)(void *user, int8_t kind, int32_t source,
                                    int32_t corr,
                                    const uint8_t *payload, uint32_t len);
 
+/* pre-ready 帧暂存硬上限：超过 = 协议异常，create 显式失败（§5.3）。 */
+#define QZ_PROC_PRE_FRAMES_MAX 256
+
 struct qz_proc_s {
     uv_pipe_t pipe;           /* duplex pipe to child (parent end) */
     pid_t     pid;            /* child PID */
@@ -193,6 +196,19 @@ struct qz_proc_s {
      * 标记 DEAD。 */
     void              *msg_user;
     qz_proc_msg_cb_t msg_cb;
+    /* create 期 pre-ready 帧缓冲（M-P6）：主RT 形态初始脚本的顶层
+     * postMessage 可先于 CONTROL{ready} 落通道。qz_proc_wait_ready_raw 把
+     * ready 之前的非-ready 帧暂存到这里，qz_proc_start_read_cb 注册读泵后
+     * 按 FIFO 序重放给 msg_cb。payload 逐帧 malloc，重放后/proc 回收时释放。 */
+    struct qz_proc_pre_frame {
+        int8_t   kind;
+        int32_t  source;
+        int32_t  corr;
+        uint32_t len;
+        uint8_t *payload;
+    } *pre_frames;
+    int   n_pre_frames;
+    int   cap_pre_frames;
     /* libuv-idiomatic multi-handle reclaim: proc 内嵌两个 handle（pipe +
      * tx flush timer），qz_proc_free 对两者都 uv_close，proc 内存在
      * 最后一个 close 回调里释放（close_pending 统计未完成的 close 数）。
@@ -257,6 +273,13 @@ void qz_proc_start_read(qz_proc_t *proc);
  * （父 loop 线程 = JS 线程，可直接 JS_Call）。cb 传 NULL 恢复 msgq 模式。 */
 void qz_proc_start_read_cb(qz_proc_t *proc, qz_proc_msg_cb_t cb,
                              void *user);
+
+/* 宿主 create 握手后半（ISOLATED）：spawn 的 M-P1 握手 ack 之后，主RT 发出
+ * 的第一帧恒为 CONTROL{ready}（rt_main.c 在进 server loop 前发出）。在
+ * uv_read_start 注册之前用阻塞 raw-fd 帧读把它吃掉——字节精确，后续帧留在
+ * socketpair 缓冲由读泵接收。返回 0 = ready 已到（*out_ok：1 成功 / 0 主RT
+ * 初始化失败）；-1 = EOF/超时/非 ready 帧（协议错误）。 */
+int qz_proc_wait_ready_raw(qz_proc_t *proc, int64_t deadline_ms, int *out_ok);
 
 /* Opaque handle lifecycle — worker.c (compiled in mock test builds too)
  * only sees the pointer; the uv_pipe_t body stays private to ipc_process.c

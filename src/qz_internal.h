@@ -24,6 +24,12 @@ typedef struct qz_ctx_s qz_ctx_t;   /* 前置声明：qz_proc_handle_t 用指针
 #include <uv.h>
 #endif
 
+/* 句柄归属统一取环：ISOLATED 宿主 rt 的 cfg->uv_loop 注入后存 host_loop
+ * （rt_host.c），其全部宿主侧句柄挂在宿主自己的 loop 上（message_cb 由
+ * 泵该 loop 的宿主线程派发，库不再有宿主侧线程/loop）；其余 rt（THREAD
+ * 后端、主RT/worker 进程）恒 host_loop == NULL，走内嵌自持 loop。 */
+#define RT_LOOP(rt) ((rt)->host_loop ? (rt)->host_loop : &(rt)->loop)
+
 /* C 层 JSON 一律用 vendored cJSON（<cjson.h>，deps/cjson/）——使用方
  * （control.c / ipc_process.c / debugger_dap.c）各自 include。 */
 #include <stdint.h>
@@ -286,8 +292,12 @@ struct qz_t {
     uint32_t magic;      /* QZ_MAGIC — set in qz_create, validates opaque ptr */
     JSRuntime *jsrt;
 
-    /* thread + loop (execution model A: qzjs owns a thread running the libuv loop) */
+    /* thread + loop (execution model A: qzjs owns a thread running the libuv
+     * loop). ISOLATED 宿主 rt 例外：不自带线程也不自带 loop——cfg.uv_loop
+     * （宿主注入，经 RT_LOOP 取环）承载其全部宿主侧句柄；此时 loop/thread
+     * 字段闲置。 */
     uv_loop_t loop;
+    uv_loop_t *host_loop;  /* ISOLATED 宿主：注入的宿主 loop；其余恒 NULL */
     uv_thread_t thread;
     uv_async_t wake;         /* host post_message wakeup; data = rt */
 
@@ -302,7 +312,7 @@ struct qz_t {
     int wait_idle;       /* atomic: qz_wait_idle requested: auto-exit when idle */
     int thread_ready;    /* atomic: ready handshake: thread init complete */
     int ready_err;       /* init failure code (0 ok; non-zero -> qz_create returns NULL) */
-    int thread_joined;   /* atomic: uv_thread_join already done (wait_idle joins; destroy must not re-join — double pthread_join is UB) */
+    int thread_joined;   /* atomic: 拆除已完成（线程后端 = uv_thread_join 已做，双 join 是 UB；ISOLATED 宿主 = host_teardown 已跑，幂等门） */
 
     /* config copy (initial_script strdup'd by qz_create, freed by destroy) */
     qz_config_t config;
@@ -374,8 +384,8 @@ struct qz_t {
     uint32_t proc_handle_seq;   /* handle id 单调分配器（0 = 无效） */
 
     /* ── M-P2 宿主↔主RT 通道（QZ_PROCESS_MODEL=ISOLATED）──
-     * 宿主进程：proc = 主RT 子进程通道（由宿主 loop 线程独占读写）；主RT 进程：
-     * ipc_channel_pipe = parent-fd 读管道。后者恒活动（duplex 读泵），必须被
+     * 宿主进程：proc = 主RT 子进程通道（句柄挂宿主注入 loop，由泵该 loop 的
+     * 宿主线程独占读写）；主RT 进程：ipc_channel_pipe = parent-fd 读管道。后者恒活动（duplex 读泵），必须被
      * wait_idle 的 idle 判定豁免，否则主RT 永不判 idle（与 JS-managed worker
      * pipe 同因，见 qz_proc_handle_is_pipe）。进程自身只有一个对端通道，指针
      * 级判定即足够。THREAD 编译下恒为 NULL（宿主走线程后端）。 */
@@ -501,9 +511,11 @@ int qz_loop_idle(qz_t *rt);
 /* M-P2：宿主↔主RT 进程分离路径已编入（ISOLATED 非 mock 构建）。 */
 #if defined(QZ_PROCESS_MODEL_ISOLATED) && !defined(QZ_USE_MOCK_LIBUV)
 #define QZ_HOST_SPLIT 1
-/* rt_host.c — 宿主侧主RT 通道后端：spawn 主RT 进程 + 通道 I/O loop 线程。
- * qz_host_start 返回 0 = 主RT 已就绪（CONTROL{ready} 到）；非 0 = 显式失败
- * （不降级到线程后端，§5.3）。qz_host_destroy 释放 rt 本身。 */
+/* rt_host.c — 宿主侧主RT 通道后端：spawn 主RT 进程 + 阻塞 raw-fd 等 ready，
+ * 通道句柄挂宿主注入的 cfg.uv_loop（无宿主侧库线程；message_cb 跑在泵宿主
+ * loop 的线程）。qz_host_start 返回 0 = 主RT 已就绪（CONTROL{ready} 经同步
+ * 通道读收到）；非 0 = 显式失败（uv_loop 为 NULL 或不降级，§5.3）。
+ * qz_host_destroy 释放 rt 本身。 */
 int  qz_host_start(qz_t *rt);
 int  qz_host_post(qz_t *rt, const char *json, size_t len);
 void qz_host_wait_idle(qz_t *rt);

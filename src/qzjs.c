@@ -93,8 +93,9 @@ qz_t *qz_create(const qz_config_t *config)
 
 #ifdef QZ_HOST_SPLIT
     /* ── ISOLATED（M-P2）：宿主↔主RT 进程分离 ──
-     * spawn 主RT 进程 + 握手 + 阻塞到就绪（CONTROL{ready}）；失败显式返回 NULL，
-     * 不降级到线程后端（§5.3）。C API 契约不变：宿主见到的仍是一个 qz_t。 */
+     * cfg.uv_loop 必填（宿主注入自己的 loop，message_cb 跑在泵它的线程）；
+     * spawn 主RT 进程 + 握手 + 阻塞 raw-fd 等 CONTROL{ready}；失败显式返回
+     * NULL，不降级到线程后端（§5.3）。C API 签名不变：宿主见到的仍是一个 qz_t。 */
     if (qz_host_start(rt) != 0) {
         free((void *)rt->config.initial_script);
         free((void *)rt->config.initial_bytecode);

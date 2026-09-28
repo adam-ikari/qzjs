@@ -365,7 +365,7 @@ int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
     proc->pid = pid;
 
     /* uv_pipe_open the parent end */
-    uv_loop_t *loop = parent ? &parent->loop : uv_default_loop();
+    uv_loop_t *loop = parent ? RT_LOOP(parent) : uv_default_loop();
     if (uv_pipe_init(loop, &proc->pipe, 0) != 0) {
         close(sv[0]);
         goto kill_fail;
@@ -678,6 +678,9 @@ static void proc_reclaim(qz_proc_t *proc)
 {
     if (proc && --proc->close_pending == 0) {
         free(proc->rbuf);
+        for (int i = 0; i < proc->n_pre_frames; i++)
+            free(proc->pre_frames[i].payload);
+        free(proc->pre_frames);
         free(proc);
     }
 }
@@ -1058,6 +1061,75 @@ void qz_proc_start_read_cb(qz_proc_t *proc, qz_proc_msg_cb_t cb,
     proc->msg_user = user_data;
     proc->pipe.data = proc;
     uv_read_start((uv_stream_t *)&proc->pipe, proc_alloc_cb, proc_read_cb);
+
+    /* 重放 create 期暂存的 pre-ready 帧（FIFO 序先于后续读泵帧）。重放走
+     * cb 直调（读泵已注册但此刻无新帧：同一宿主线程内顺序执行）。 */
+    for (int i = 0; i < proc->n_pre_frames; i++) {
+        struct qz_proc_pre_frame *pf = &proc->pre_frames[i];
+        cb(user_data, pf->kind, pf->source, pf->corr, pf->payload, pf->len);
+        free(pf->payload);
+    }
+    free(proc->pre_frames);
+    proc->pre_frames = NULL;
+    proc->n_pre_frames = 0;
+    proc->cap_pre_frames = 0;
+}
+
+/* 宿主 create 握手后半（ISOLATED）：见 ipc_process.h 声明处注释。与 spawn
+ * 握手同一 raw-fd 路径（uv_read_start 尚未注册，帧不会与读泵抢字节）。 */
+int qz_proc_wait_ready_raw(qz_proc_t *proc, int64_t deadline_ms, int *out_ok)
+{
+    if (!proc || proc->state != QZ_PROC_RUN || !out_ok) return -1;
+    uv_os_fd_t osfd;
+    if (uv_fileno((uv_handle_t *)&proc->pipe, &osfd) != 0) return -1;
+
+    /* 循环吃帧直到 CONTROL{ready}：主RT 初始脚本的顶层 postMessage 会先于
+     * ready 落通道（eval 在 emit ready 之前），这些 pre-ready 帧暂存到
+     * proc->pre_frames，由 qz_proc_start_read_cb 注册读泵后按 FIFO 重放。 */
+    for (;;) {
+        uint8_t *frame = NULL;
+        size_t flen = 0;
+        if (qz_ipc_read_frame((int)(intptr_t)osfd, &frame, &flen,
+                              deadline_ms) < 0)
+            return -1;
+
+        ipc_envelope_view_t view;
+        if (ipc_envelope_decode(frame, flen, &view) < 0) {
+            free(frame);
+            return -1;
+        }
+        if (view.kind == IPC_ENV_KIND_CONTROL) {
+            int val = 0;
+            if (qz_ipc_ctl_classify(view.payload, view.payload_len,
+                                      &val) == QZ_IPC_CTL_READY) {
+                free(frame);
+                *out_ok = val;
+                return 0;
+            }
+        }
+        if (proc->n_pre_frames >= QZ_PROC_PRE_FRAMES_MAX) {
+            free(frame);
+            return -1;   /* 协议异常：ready 前堆积过多帧 = 显式失败（§5.3） */
+        }
+        if (proc->n_pre_frames >= proc->cap_pre_frames) {
+            int cap = proc->cap_pre_frames ? proc->cap_pre_frames * 2 : 8;
+            void *p = realloc(proc->pre_frames, (size_t)cap * sizeof(*proc->pre_frames));
+            if (!p) { free(frame); return -1; }
+            proc->pre_frames = p;
+            proc->cap_pre_frames = cap;
+        }
+        uint8_t *copy = (uint8_t *)malloc(view.payload_len ? view.payload_len : 1);
+        if (!copy) { free(frame); return -1; }
+        if (view.payload_len) memcpy(copy, view.payload, view.payload_len);
+        struct qz_proc_pre_frame *pf =
+            &proc->pre_frames[proc->n_pre_frames++];
+        pf->kind = view.kind;
+        pf->source = view.source;
+        pf->corr = view.corr;
+        pf->len = view.payload_len;
+        pf->payload = copy;
+        free(frame);
+    }
 }
 
 /* 恒活动 IPC pipe 的 idle 豁免检查（spawn 分层化 Phase C + M-P2）：

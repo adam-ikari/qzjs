@@ -25,7 +25,9 @@ typedef struct qz_config_s {
     const char *initial_script_path;
     const uint8_t *initial_bytecode;
     size_t         initial_bytecode_len;
-    /* 出站消息回调：跑在 qzjs 线程，必须线程安全。nullptr 表示宿主不接收消息。 */
+    /* 出站消息回调。线程：ISOLATED 编译 = 泵 cfg->uv_loop 的宿主线程（库不再
+     * 自带宿主线程；阻塞宿主 API 内部泵时可能重入触发，见 uv_loop 注释）；
+     * THREAD 编译 = qzjs 内部线程。必须线程安全。nullptr 表示宿主不接收消息。 */
     void (*message_cb)(qz_t *rt, const char *json, size_t len, void *data);
     int  debug;                      /* 沿用 DAP bit 语义 */
     void *host_data;                 /* per-runtime opaque ptr，可经 qz_get_runtime_data 读取 */
@@ -41,6 +43,17 @@ typedef struct qz_config_s {
      * 粒度 per-rt：同一 qz_t 的全部 worker 同后端。M-P1 缺省 THREAD；
      * M-P2 起 ISOLATED 编译缺省 PROCESS（编译模型驱动缺省，§1.4）。 */
     int worker_backend;              /* qz_worker_backend_t 值 */
+    /* ISOLATED 编译专用（THREAD 编译忽略）：宿主自己的 uv loop（uv_loop_t*
+     * 擦 void* 传入，保本头 uv-free）。库把宿主侧全部句柄（通道读泵 pipe、
+     * tx spill 冲刷 timer、wake async）绑到这个 loop 上，message_cb 跑在泵
+     * 该 loop 的线程——库不再自带宿主线程与宿主侧 loop。ISOLATED 下 NULL →
+     * qz_create 显式失败（不静默降级）。宿主与 libqzjs 必须链接同一个 libuv。
+     * 阻塞 API（qz_ping/qz_ping_path/qz_wait_idle/qz_destroy）等待期间就地
+     * 泵该 loop（UV_RUN_NOWAIT 轮询）：message_cb 及宿主挂在该 loop 上的
+     * 其他回调可能在阻塞调用内部重入触发；规则——message_cb 内不得再调任何
+     * 阻塞宿主 API。qz_post_message/qz_control 不受影响（MPSC 入队 +
+     * uv_async_send，任意线程可调；实际投递到通道 = 宿主下一次泵）。 */
+    const void *uv_loop;
 } qz_config_t;
 
 /* 把 JS 源码编译为字节码 blob。独立函数（无需 qz_t/运行时）。
@@ -84,31 +97,39 @@ typedef enum {
  * Core API
  * ================================================================ */
 
-/* 创建 qzjs：阻塞到内部线程 ready。initial_script 在 qzjs 线程上 eval，
- * 抛异常则返回 NULL。宿主回调 message_cb 跑在 qzjs 线程，必须线程安全。
- * 返回的 rt 由宿主线程调用 qz_destroy 销毁。 */
+/* 创建 qzjs。ISOLATED：spawn 主RT 进程 → 握手 → 阻塞等待其 CONTROL{ready}
+ * （同步通道读，不泵宿主 loop、不触发 message_cb）→ 通道句柄挂上
+ * cfg->uv_loop 就绪返回；cfg->uv_loop 为 NULL 或 ready 失败 → 返回 NULL。
+ * THREAD：起内部线程，阻塞到线程 ready；initial_script 在 JS 线程上 eval，
+ * 抛异常则返回 NULL。返回的 rt 由宿主线程调用 qz_destroy 销毁。 */
 qz_t *qz_create(const qz_config_t *config);
 
-/* 优雅关停：请求内部线程退出 → join → 释放 runtime → free。NULL-safe。
- * 只允许宿主线程调用（与 qz_create 同一线程）。 */
+/* 优雅关停：强制终止主RT（进程/线程）→ 回收 → free。ISOLATED 下最坏阻塞 =
+ * 主RT 无视 shutdown 的三级终止预算（≤2s）。只允许宿主线程调用，不得在
+ * message_cb 内调用（等待时会泵宿主 loop，造成嵌套 uv_run）。 */
 void qz_destroy(qz_t *rt);
 
 /* 线程安全入站消息（任何线程可调）。json 会被拷贝。返回 0 成功，-1 失败。 */
 int qz_post_message(qz_t *rt, const char *json, size_t len);
 /* Request auto-exit once there is no pending async work (CLI use), and block
- * until the thread has exited. Thread-safe; mutually exclusive with
- * qz_destroy (call one or the other, never both). After this returns the
- * runtime is torn down and must not be used (no further post_message).
- * Do NOT call qz_destroy after this: destroy forces shutdown and would
- * cancel pending async work (e.g. a live timer). */
+ * until the main runtime has exited (ISOLATED: the qzjs-rt process; THREAD:
+ * the internal thread). ISOLATED 等待期间就地泵 cfg->uv_loop —— message_cb
+ * （含崩溃 {"type":"error"} 上报）可能在本调用内部触发；不得从 message_cb
+ * 内调用。Thread-safe; mutually exclusive with qz_destroy (call one or the
+ * other, never both). After this returns the runtime is torn down and must
+ * not be used (no further post_message). Do NOT call qz_destroy after this:
+ * destroy forces shutdown and would cancel pending async work (e.g. a live
+ * timer). */
 void qz_wait_idle(qz_t *rt);
 
-/* Liveness ping（ISOLATED 编译，宿主→主RT 进程）：发 CONTROL ping（corr =
+/* Liveness ping（宿主→主RT 进程，ISOLATED 编译）：发 CONTROL ping（corr =
  * 单调 seq）并阻塞等待主RT C 层读泵直回的 PONG（不经 JS/msgq——pong 延迟
- * 只反映主RT 进程 uv loop 的健康度，JS 忙不误报）。返回 0 = loop 通畅
- * （deadline 内 PONG 命中）；1 = 超时 = 对端 loop 阻塞（或对端极度繁忙但
- * 读泵 starvation，见设计文档）；-1 = 参数/状态错误（未 ready、正在关停、
- * 通道已死——进程死亡另有 EOF 路径）。timeout_ms 建议 100–1000。 */
+ * 只反映主RT 进程 uv loop 的健康度，JS 忙不误报）。等待期间就地泵
+ * cfg->uv_loop（PONG 经宿主 loop 读泵回填）；不得从 message_cb 内调用。
+ * 返回 0 = loop 通畅（deadline 内 PONG 命中）；1 = 超时 = 对端 loop 阻塞
+ * （或对端极度繁忙但读泵 starvation，见设计文档）；-1 = 参数/状态错误
+ * （未 ready、正在关停、通道已死——进程死亡另有 EOF 路径）。timeout_ms
+ * 建议 100–1000。 */
 int qz_ping(qz_t *rt, int32_t timeout_ms);
 
 /* Liveness ping 到树中任意 worker（§8.2 path 寻址，仅 ISOLATED）：path =
@@ -117,15 +138,17 @@ int qz_ping(qz_t *rt, int32_t timeout_ms);
  * 目标 loop 阻塞；-1 = 参数/状态错误/路径不存在/中间通道死（转发失败由
  * 中间节点回执快速判 -1，不白等 timeout）。PING 按链逐跳下投（读泵 C 层
  * 转发，不消费不进 JS），目标读泵直回 PONG（回显路径作过境标记）沿树上
- * 行；中间节点目标级 JS 零参与。timeout_ms 建议 100–1000。 */
+ * 行；中间节点目标级 JS 零参与。等待期间就地泵 cfg->uv_loop；不得从
+ * message_cb 内调用。timeout_ms 建议 100–1000。 */
 int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
                    int32_t timeout_ms);
 
 /* 控制命令入队（线程安全，任何线程可调）。bytes 为命令 JSON，内部拷贝。
  * control_plane=OFF 时恒返回 -1。返回 0 成功，-1 失败（OFF/OOM/参数非法）。
- * 命令由 qzjs 线程在自己事件循环的安全点自主执行；结果经 message_cb 异步
- * 回传，回执 JSON 顶层带 "ctl":true 标记位，correl 原样透传供配对。
- * 设计：docs/plans/2026-09-04-control-plane-design.md §1-§3。 */
+ * 命令由主执行体（ISOLATED = 主RT 进程 / THREAD = qzjs 线程）在自己的事件
+ * 循环安全点自主执行；结果经 message_cb 异步回传（ISOLATED = 宿主泵
+ * cfg->uv_loop 的线程），回执 JSON 顶层带 "ctl":true 标记位，correl 原样
+ * 透传供配对。设计：docs/plans/2026-09-04-control-plane-design.md §1-§3。 */
 int qz_control(qz_t *rt, const char *bytes, size_t len);
 
 void *qz_get_runtime_data(qz_t *rt);
