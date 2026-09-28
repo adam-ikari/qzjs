@@ -36,6 +36,7 @@ Create `hello.c`:
 
 ```c
 #include <qzjs/qzjs.h>
+#include <uv.h>
 #include <stdio.h>
 
 static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
@@ -44,10 +45,18 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
 }
 
 int main(void) {
-    // Create the runtime — qzjs starts its own internal thread and loop
+    // The host owns its event loop: under ISOLATED (the default) the
+    // library starts no host-side thread — it binds its channel handles
+    // onto the loop you inject below, and on_message fires on the thread
+    // that pumps it. (Host and libqzjs must link the same libuv.)
+    uv_loop_t loop;
+    uv_loop_init(&loop);
+
+    // Create the runtime — blocks until JS is ready (evals initial_script)
     qz_config_t cfg = {0};
     cfg.initial_script = "console.log('Hello from qzjs!'); postMessage(1 + 1);";
     cfg.message_cb = on_message;
+    cfg.uv_loop = &loop;
     qz_t *rt = qz_create(&cfg);
     if (!rt) {
         fprintf(stderr, "Failed to create runtime\n");
@@ -57,11 +66,19 @@ int main(void) {
     // Drive the runtime by posting JSON messages
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
 
-    // Clean up — graceful shutdown
+    // Pump the host loop — replies arrive in on_message here
+    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+
+    // Clean up — graceful shutdown (library handles on the loop are closed)
     qz_destroy(rt);
+    uv_loop_close(&loop);
     return 0;
 }
 ```
+
+In a `THREAD` build (`-DQZ_PROCESS_MODEL=THREAD`) the same program needs no
+`uv_loop` at all: qzjs runs an internal thread and loop, and `message_cb`
+fires there while the host pumps nothing.
 
 Compile and link with pkg-config (pulls the full static link line — all vendored archives):
 

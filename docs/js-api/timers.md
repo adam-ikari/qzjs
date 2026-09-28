@@ -5,7 +5,7 @@ description: Timer APIs in qzjs — setTimeout, clearTimeout, setInterval, clear
 
 # Timers API
 
-Standard `setTimeout` / `setInterval` with millisecond resolution. Backed by libuv timers (`uv_timer_*`) on qzjs's internal thread (~1ms precision).
+Standard `setTimeout` / `setInterval` with millisecond resolution. Backed by libuv timers (`uv_timer_*`) on the runtime's own loop (the `qzjs-rt` process under ISOLATED, the internal `qzjs` thread under THREAD; ~1ms precision).
 
 ## Globals
 
@@ -74,14 +74,14 @@ uv_timer_start(1s, one-shot) on qzjs's internal loop
     │
     ▼  (1000ms passes, loop wakes)
     │
-timer callback fires on the qzjs thread → cb() called
+timer callback fires on the runtime loop → cb() called
 ```
 
 For `setInterval`, the uv timer repeats; each fire re-runs the callback until it is cleared.
 
 ## Context Lifecycle
 
-- Timers are managed per context on qzjs's internal thread
+- Timers are managed per context on the runtime's own loop
 - Timers are automatically cancelled when the runtime shuts down (`qz_destroy`)
 - No timers survive a restart — create them fresh in `initial_script`
 

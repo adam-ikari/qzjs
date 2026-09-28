@@ -9,10 +9,11 @@ description: 在 C 应用程序中嵌入 qzjs 的模式 — 宿主数据、自�
 
 ## 基本嵌入
 
-qzjs 拥有自己的内部线程和 libuv 事件循环。所有 JS 都运行在该线程上；宿主通过 JSON 消息与运行时通信。
+ISOLATED（默认）下 JS 跑在独立的主RT 进程里（库自有 loop/线程）；库的宿主侧不拥有线程，宿主经 `cfg.uv_loop` 注入并泵动自己的 loop，`message_cb` 在泵 loop 的线程上触发。THREAD 构建下 qzjs 拥有自己的内部线程和 libuv 事件循环，所有 JS 都运行在该线程上，宿主什么都不用泵。两种形态下宿主都通过 JSON 消息与运行时通信。
 
 ```c
 #include <qzjs/qzjs.h>
+#include <uv.h>
 #include <stdio.h>
 
 static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
@@ -21,23 +22,32 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
 }
 
 int main(void) {
+    uv_loop_t loop;
+    uv_loop_init(&loop);
+
     qz_config_t cfg = {0};
     cfg.initial_script = "postMessage({hello: 'world'});";
     cfg.message_cb = on_message;
+    cfg.uv_loop    = &loop;           // 宿主 loop 注入（ISOLATED 必填）
     qz_t *rt = qz_create(&cfg);
     if (!rt) return 1;
 
     // 你的应用程序逻辑：通过发送 JSON 消息驱动运行时
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
 
+    while (uv_run(&loop, UV_RUN_ONCE)) { /* 泵宿主 loop，直到回复到齐 */ }
+
     qz_destroy(rt);
+    uv_loop_close(&loop);
     return 0;
 }
 ```
 
-`qz_create` 会阻塞，直到 qzjs 的内部线程就绪且 `initial_script` 已求值。宿主通过
-`qz_post_message`（线程安全）发送消息，并通过 `message_cb` 接收回复，该回调在
-qzjs 线程上触发（因此你的回调必须线程安全）。`qz_destroy` 执行优雅关闭。
+`qz_create` 会阻塞，直到运行时就绪且 `initial_script` 已求值（ISOLATED 下握手走同步
+raw-fd 读，create 期间不泵循环、不触发回调）。宿主通过
+`qz_post_message`（两模型下均线程安全）发送消息，并通过 `message_cb` 接收回复——
+ISOLATED 下该回调在泵 `cfg.uv_loop` 的宿主线程上触发；THREAD 下在 qzjs 线程上触发
+（因此你的回调必须线程安全）。`qz_destroy` 执行优雅关闭。
 
 ## 从 JS 调用 C 函数
 
@@ -90,14 +100,16 @@ cfg.initial_script =
     "    postMessage({ doubled: d.value * 2, ok: true });"
     "};";
 cfg.message_cb = on_message;
+cfg.uv_loop = &loop;   // 宿主 loop 注入（ISOLATED 必填）
 qz_t *rt = qz_create(&cfg);
 
 // 将输入作为 JSON 消息发送；回复通过 message_cb 到达
+// （ISOLATED 下需泵宿主 loop 才会到达）
 qz_post_message(rt, "{\"cmd\":\"process\",\"value\":21}", 28);
 // on_message 打印：JS returned: {"doubled":42,"ok":true}
 ```
 
-JSON 会被 `qz_post_message` 拷贝（线程安全，可从任何线程调用）。没有同步的 `qz_call` — 结果总是以消息的形式回流。
+JSON 会被 `qz_post_message` 拷贝（两模型下均线程安全，可从任何线程调用）。没有同步的 `qz_call` — 结果总是以消息的形式回流。
 
 ## 按请求隔离上下文
 
@@ -118,15 +130,20 @@ JSON 会被 `qz_post_message` 拷贝（线程安全，可从任何线程调用�
 由于 qzjs 具有零全局状态，你可以运行多个 `qz_t` 实例 — 每个实例拥有自己的内部线程、libuv 循环和 JS 状态：
 
 ```c
+uv_loop_t loop;
+uv_loop_init(&loop);                  // 一个宿主 loop 可被多个实例共享
+
 static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
     (void)rt;
     printf("%s: %.*s\n", (const char *)data, (int)len, json);
 }
 
 qz_config_t cfg1 = { .initial_script = "postMessage('rt1');",
-                       .message_cb = on_message, .host_data = "rt1" };
+                       .message_cb = on_message, .host_data = "rt1",
+                       .uv_loop = &loop };
 qz_config_t cfg2 = { .initial_script = "postMessage('rt2');",
-                       .message_cb = on_message, .host_data = "rt2" };
+                       .message_cb = on_message, .host_data = "rt2",
+                       .uv_loop = &loop };
 
 qz_t *rt1 = qz_create(&cfg1);
 qz_t *rt2 = qz_create(&cfg2);
@@ -135,11 +152,14 @@ qz_t *rt2 = qz_create(&cfg2);
 qz_post_message(rt1, "{\"cmd\":\"echo\",\"data\":\"a\"}", 26);
 qz_post_message(rt2, "{\"cmd\":\"echo\",\"data\":\"b\"}", 26);
 
+while (uv_run(&loop, UV_RUN_ONCE)) { /* ISOLATED：泵宿主 loop 直到回复到齐 */ }
+
 qz_destroy(rt1);
 qz_destroy(rt2);
+uv_loop_close(&loop);
 ```
 
-每个运行时自驱运行。
+每个运行时自驱运行自己的 JS；ISOLATED 下宿主仍要泵注入的 `cfg.uv_loop` 才能收到各实例的回复（THREAD 构建无需泵）。
 
 ## 错误处理模式
 
@@ -160,5 +180,5 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
 ## 内存管理
 
 - `qz_free` 仍然存在，用于释放 qzjs 返回的 malloc 块（`qz_free(NULL)` 是安全的）— 不再有 `qz_eval`/`qz_call` 的结果需要释放
-- 运行时拥有其所有内部资源（线程、libuv 循环、上下文）— `qz_destroy` 在优雅关闭时释放一切
+- 运行时拥有其所有内部资源（线程、libuv 循环、上下文）— `qz_destroy` 在优雅关闭时释放一切；ISOLATED 下挂在宿主 `cfg.uv_loop` 上的库侧通道句柄也随 teardown 全部关闭，宿主 loop 之后可干净 `uv_loop_close`
 - 每个运行时的宿主数据：在 `qz_create` 之前设置 `config.host_data`；扩展的 `init` 钩子在创建期间通过 `qz_get_runtime_data(rt)` 读取它（rt 在 init 内部有效，在宿主接收到之前）。注意：`qz_ext_t.user_data` 位于共享的编译期扩展结构体上 — 对于每个实例的数据，请使用 `qz_get_runtime_data`/`qz_set_runtime_data`，而非 `user_data`（它在运行时之间共享）。

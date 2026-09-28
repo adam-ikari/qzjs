@@ -39,9 +39,10 @@ description: qzjs 常见问题 — Node.js 兼容性、进程模型、内存、A
 
 ### 是多线程的吗？JS 能并行吗？
 
-**主运行时是单线程的。** 所有 JS 在 qzjs 自有的内部线程上运行，该线程同时
-驱动内嵌的 libuv loop；宿主线程从不调用 JS。并发来自异步 I/O，不是主上下文
-中的并行 JS。
+**主运行时是单线程的。** 所有 JS 在 qzjs 自有的内部线程上运行（ISOLATED 下这是
+主RT 进程内库自有的线程/loop；THREAD 下是库的内部线程），该线程同时驱动内嵌的
+libuv loop；宿主线程从不执行 JS。ISOLATED 下宿主侧的 `message_cb` 在泵自己
+`cfg.uv_loop` 的线程上触发。并发来自异步 I/O，不是主上下文中的并行 JS。
 
 Web Worker **确实**并行——按后端不同以线程或子进程形式——但通过结构化克隆
 消息通信。
@@ -51,8 +52,11 @@ Web Worker **确实**并行——按后端不同以线程或子进程形式—�
 `QZ_PROCESS_MODEL` 选择默认的 worker 后端：
 
 - **`ISOLATED`**（默认）——每个 `new Worker(...)` 经 fork+exec 在专用子进程
-  （`qzjs-rt`）中运行。隔离性更强，有 IPC 开销。
-- **`THREAD`**——worker 是同一进程内的线程。开销更低，共享地址空间。
+  （`qzjs-rt`）中运行。隔离性更强，有 IPC 开销。宿主侧形态也随之改变：JS 跑在
+  主RT 进程里，库的宿主侧不拥有线程，宿主经 `cfg.uv_loop` 注入并泵自己的循环，
+  `message_cb` 在泵 loop 的线程上触发。见[事件循环](/zh/guide/event-loop)。
+- **`THREAD`**——worker 是同一进程内的线程。开销更低，共享地址空间。库自带内部
+  qzjs 线程跑一切，宿主什么都不用泵。
 
 两者都不是针对恶意脚本的安全边界。见
 [多上下文与 Web Worker](/zh/guide/multi-context)。
@@ -95,7 +99,8 @@ Web Worker **确实**并行——按后端不同以线程或子进程形式—�
 ### 宿主能直接调用 JS，比如 `qz_eval` 吗？
 
 不能。公开 C API 上**没有 `qz_eval`**。宿主与运行时只通过 JSON 消息通信——
-`qz_post_message` 入站、`message_cb` 出站。这让 JS 执行边界保持显式，宿主
+`qz_post_message` 入站、`message_cb` 出站（ISOLATED 下出站回调在泵宿主 `cfg.uv_loop`
+的线程上触发）。这让 JS 执行边界保持显式，宿主
 无需 eval 通道。见[主机集成](/zh/guide/host-integration)。
 
 ### 为什么测试里定时器表现怪异？
@@ -133,7 +138,8 @@ qzjs 要能嵌入 C99 宿主应用——设备固件与边缘服务——并与�
 
 ### `qz_create` 为什么返回 NULL？
 
-初始脚本抛异常，或线程/loop 初始化失败。见
+初始脚本抛异常，或线程/loop 初始化失败；ISOLATED 下 `cfg.uv_loop` 为 `NULL`
+（宿主 loop 必填）也会显式失败。见
 [常见问题排查](/zh/guide/troubleshooting#运行时创建)。
 
 ### 怎么调试 JS？

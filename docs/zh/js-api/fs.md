@@ -129,7 +129,7 @@ await updateConfig('theme', 'dark');
 
 ## 平台依赖
 
-文件系统操作运行在 qzjs 的内部线程上。失败时方法以纯**字符串**消息 reject（见各方法的错误节）——没有错误码对象，也没有 `DOMException` 类型。
+文件系统操作运行在运行时自有的 libuv 循环上（ISOLATED 为 `qzjs-rt` 进程，THREAD 为内部 `qzjs` 线程），由 libuv 异步文件 I/O 支持。失败时方法以纯**字符串**消息 reject（见各方法的错误节）——没有错误码对象，也没有 `DOMException` 类型。
 
 ## 注意事项
 

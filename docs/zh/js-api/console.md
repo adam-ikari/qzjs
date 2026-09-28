@@ -72,7 +72,7 @@ console.debug('请求头:', JSON.stringify(headers));
 
 ## 实现
 
-`console.*` 在 qzjs 的内部线程上运行，并写入宿主进程的标准错误，格式为 `[qzjs:<level>] <message>`。console 没有宿主回调 — 输出直接进入 stderr。
+`console.*` 运行在运行时自有的 loop 上（ISOLATED 为 `qzjs-rt` 进程，THREAD 为内部 `qzjs` 线程），并写入标准错误，格式为 `[qzjs:<level>] <message>`。console 没有宿主回调 — 输出直接进入 stderr。
 
 ## 格式化
 

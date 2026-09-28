@@ -5,8 +5,10 @@ description: How qzjs executes JavaScript — initial_script, message-driven eva
 
 # JS Execution
 
-All JavaScript runs on qzjs's internal thread. The host never evaluates or
-calls into JS directly. Code is executed in one of four ways:
+All JavaScript runs inside the runtime — in the separate main-RT process
+under the default ISOLATED model, on qzjs's internal thread under THREAD.
+The host never evaluates or calls into JS directly. Code is executed in one
+of four ways:
 
 1. **`initial_script`** — a script eval'd once when the runtime starts
 2. **Message-driven** — JSON messages posted from the host run handlers in JS
@@ -16,8 +18,8 @@ calls into JS directly. Code is executed in one of four ways:
 
 ## 1. Initial Script
 
-`qz_create` eval's `config.initial_script` on the internal thread before it
-returns. A throw makes `qz_create` return `NULL`:
+`qz_create` eval's `config.initial_script` in the runtime (its own
+thread/process) before it returns. A throw makes `qz_create` return `NULL`:
 
 ```c
 qz_config_t cfg = {
@@ -45,8 +47,10 @@ host  ◀── message_cb(json)       ───  JS: postMessage(value)
   from any host thread.
 - The message arrives as a JS object/string via `onmessage`; `e.data` is the
   parsed payload.
-- `message_cb` fires on the qzjs thread with the JSON serialized from
-  `postMessage`, so the callback must be thread-safe.
+- `message_cb` fires with the JSON serialized from `postMessage`: under
+  ISOLATED on the thread pumping your `cfg.uv_loop`, under THREAD on the
+  qzjs thread — so the callback must be thread-safe, and under ISOLATED it
+  must never call a blocking host API (it can fire reentrantly inside one).
 
 This is the only channel for host ↔ JS data. There is no synchronous return
 value — results always flow back through `message_cb`.
@@ -102,7 +106,9 @@ Register the extension at compile time (see [Extensions](/guide/extensions)).
 
 ## Asynchronous Execution
 
-Promises, `async`/`await`, and timers are driven by the embedded libuv loop on
-the internal thread. Microtasks are flushed naturally between loop iterations —
+Promises, `async`/`await`, and timers are driven by the embedded libuv loop
+on the runtime's internal thread — in the main-RT process under ISOLATED,
+in-process under THREAD. Microtasks are flushed naturally between loop
+iterations —
 A `setTimeout`/`fetch`/stream
 continues to make progress until it settles; see [Event Loop](/guide/event-loop).

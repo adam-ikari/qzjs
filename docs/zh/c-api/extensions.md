@@ -96,7 +96,8 @@ qz_ext_t my_extension = {
 `qz_ext_t.user_data` 在所有运行时之间共享。对于每个实例的状态，使用 `config.host_data`：
 
 ```c
-qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state };
+qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state,
+                      .uv_loop = my_loop /* uv_loop_t*，ISOLATED 下必填 */ };
 qz_t *rt = qz_create(&cfg);
 
 // 在扩展 init 内部：

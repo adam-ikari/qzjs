@@ -130,5 +130,6 @@ timers, URL, TextEncoder, …).
 
 ## Next Steps
 
-- [Event Loop](/guide/event-loop) — how the internal thread and libuv loop work
+- [Event Loop](/guide/event-loop) — how the host-injected loop (ISOLATED) and
+  the internal qzjs thread (THREAD) drive the loop
 - [Embedding](/guide/embedding) — the C API for host applications

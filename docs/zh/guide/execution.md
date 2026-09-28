@@ -25,6 +25,7 @@ qz_config_t cfg = {
         "console.log('hello from qzjs');"
         "globalThis.onmessage = function (e) { postMessage('got: ' + e.data); };",
     .message_cb = on_message,
+    .uv_loop    = &loop,   // 宿主 loop 注入（ISOLATED 必填）
 };
 qz_t *rt = qz_create(&cfg);   // initial_script 抛错时为 NULL
 ```
@@ -40,10 +41,12 @@ host  ── qz_post_message(json) ──▶  JS: globalThis.onmessage(e)
 host  ◀── message_cb(json)       ───  JS: postMessage(value)
 ```
 
-- `qz_post_message` **线程安全**（JSON 被拷贝），可从任意宿主线程调用。
+- `qz_post_message` **线程安全**（JSON 被拷贝），两模型下均可从任意宿主线程调用；ISOLATED 下投递延迟等于你的泵频。
 - 消息以 JS 对象/字符串经 `onmessage` 到达；`e.data` 是解析后的负载。
-- `message_cb` 在 qzjs 线程上触发，携带从 `postMessage` 序列化的 JSON，
-  因此回调必须线程安全。
+- `message_cb` 携带从 `postMessage` 序列化的 JSON；触发线程看模型——ISOLATED 下在
+  **泵宿主 loop（`cfg.uv_loop`）的线程**上触发（阻塞宿主 API 会在内部就地泵，回调可能
+  在调用内重入触发，不要在回调内再调阻塞宿主 API）；THREAD 下在 qzjs 线程上触发，
+  回调须线程安全。
 
 这是宿主 ↔ JS 的唯一数据通道。**没有同步返回值** — 结果总是经
 `message_cb` 流回。

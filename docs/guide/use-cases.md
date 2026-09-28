@@ -21,8 +21,10 @@ The defining case: run JS on resource-constrained targets.
 - **Low-overhead scripting** — a single `initial_script` or a message-driven
   handler replaces a hand-written C state machine.
 
-The host stays in C; JS runs on qzjs's own internal thread with its own libuv
-loop.
+The host stays in C. Under the default ISOLATED model the library owns no
+host-side thread: JS runs in a separate main-RT process and the host simply
+injects and pumps its own `uv_loop`. Under THREAD, JS runs on qzjs's own
+internal thread with its own libuv loop and the host pumps nothing.
 
 ## Extending a C Application with Scripting
 

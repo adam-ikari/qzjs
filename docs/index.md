@@ -20,7 +20,7 @@ hero:
 features:
   - icon: 🔌
     title: Message-based host boundary
-    details: Host and runtime exchange JSON over `qz_post_message` / `message_cb`. Inbound is thread-safe; outbound fires on the runtime thread. No `eval`, no `tick`.
+    details: Host and runtime exchange JSON over `qz_post_message` / `message_cb`. Inbound is thread-safe; outbound fires on the thread pumping your injected `uv_loop` (ISOLATED, default) or on the runtime thread (THREAD build). No `eval`, no `tick`.
   - icon: 🪶
     title: Low overhead
     details: ~2.45 MiB stripped, <5 ms startup — fits embedded and edge targets where Node/bun can't.
@@ -53,6 +53,7 @@ cmake --build build -j$(nproc)
 
 ```c
 #include <qzjs/qzjs.h>
+#include <uv.h>
 #include <stdio.h>
 
 static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
@@ -61,13 +62,19 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
 }
 
 int main(void) {
+    uv_loop_t loop;
+    uv_loop_init(&loop);
+
     qz_config_t cfg = {0};
-    cfg.initial_script = "postMessage({hello: 'world'});";
+    cfg.initial_script = "globalThis.onmessage = function (e) { postMessage(e.data); };";
     cfg.message_cb = on_message;
+    cfg.uv_loop = &loop;        /* host loop (required under ISOLATED) */
     qz_t *rt = qz_create(&cfg);
     if (!rt) return 1;
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
+    while (uv_run(&loop, UV_RUN_ONCE)) { /* pump: message_cb fires here */ }
     qz_destroy(rt);
+    uv_loop_close(&loop);
     return 0;
 }
 ```
@@ -81,7 +88,7 @@ flowchart TB
     subgraph AM["qzjs"]
         direction TB
         Core["qzjs.c (core API)"]
-        Thread["thread.c — internal thread + libuv loop"]
+        Thread["runtime-owned libuv loop — ISOLATED: in the qzjs-rt process · THREAD: internal qzjs thread (thread.c)"]
         Msgq["msgq.c — message queue"]
         Worker["worker.c — dispatch (onmessage/postMessage)"]
         UvIO["uv_io.c — libuv I/O"]
@@ -94,6 +101,6 @@ flowchart TB
         Worker -.injects.-> JS
     end
     HOST["Host"] -->|"qz_post_message: JSON in"| Msgq
-    Worker -->|"message_cb: JSON out"| HOST
+    Worker -->|"message_cb: JSON out — on the thread pumping your cfg.uv_loop (ISOLATED) · on the qzjs thread (THREAD)"| HOST
     UvIO --> LIBUV["libuv"]
 ```

@@ -7,14 +7,14 @@ description: qzjs is an embeddable runtime in strict C99 — a WinterTC-compatib
 
 qzjs is an **embeddable runtime** written in **strict C99**. It provides a small C API and a **WinterTC-compatible runtime**, and communicates with the host over JSON messages.
 
-For a C application that wants part of its logic in JavaScript, qzjs supplies the runtime; the host builds no event loop or thread of its own.
+For a C application that wants part of its logic in JavaScript, qzjs supplies the runtime; under the default ISOLATED model the host keeps pumping its own event loop — you inject your `uv_loop_t` via `cfg.uv_loop` and the library owns no host-side thread (under THREAD, qzjs runs everything on an internal thread and the host pumps nothing).
 
 ## How the Host Fits
 
 ![qzjs architecture](../assets/qzjs-arch.svg)
 
 - **Message-based host boundary** — `qz_post_message` (in) / `message_cb` (out), JSON in both directions
-- **Isolated runtime model** — each instance runs JS on its own internal thread; internal locks and atomics coordinate the thread, host, and worker boundaries, never JS execution
+- **Isolated runtime model** — JS runs in a separate main-RT process (`qzjs-rt`) under the default ISOLATED model, or on the instance's internal qzjs thread under THREAD; internal locks and atomics coordinate the process/thread, host, and worker boundaries, never JS execution
 - **ECMAScript engine (ES2023)** — full ES2023 support, fast startup, low memory
 - **WinterTC-compatible runtime** — `fetch`, `console`, `crypto.subtle`, `ReadableStream`, timers, `fs`, `URL`, `TextEncoder`, WebSocket, `serve()`, and more (see the [JS API](/js-api/) index)
 - **Native extensions** — compression (miniz), crypto (mbedTLS), text codec, WebAssembly (WAMR, wasm3 optional)
@@ -37,7 +37,7 @@ The Guide follows the order a host developer works in:
 
 | Use Case | Why qzjs |
 |----------|----------|
-| **Embedded / edge scripting** | C99, tiny footprint, libuv event loop built in |
+| **Embedded / edge scripting** | C99, tiny footprint, libuv event loop in the runtime |
 | **Plugin systems** | Per-runtime isolation, multi-context handled inside the runtime |
 | **Host applications needing scripting** | Script your C app's behavior in JS without shipping Node.js |
 | **Edge compute** | WinterTC APIs feel familiar to JS developers |

@@ -5,7 +5,7 @@ description: qzjs 中的定时器 API —— setTimeout、clearTimeout、setInte
 
 # 定时器 API
 
-标准的 `setTimeout` / `setInterval`，支持毫秒级精度。由 qzjs 内部线程上的 libuv 定时器（`uv_timer_*`）支持（约 1ms 精度）。
+标准的 `setTimeout` / `setInterval`，支持毫秒级精度。由运行时自有 loop 上的 libuv 定时器（`uv_timer_*`）支持（ISOLATED 为 `qzjs-rt` 进程，THREAD 为内部 `qzjs` 线程；约 1ms 精度）。
 
 ## 全局对象
 
@@ -74,14 +74,14 @@ uv_timer_start(1s, 单次) 在 qzjs 的内部循环上
     │
     ▼  （1000ms 后，循环唤醒）
     │
-定时器回调在 qzjs 线程上触发 → cb() 被调用
+定时器回调在运行时自有 loop 上触发 → cb() 被调用
 ```
 
 对于 `setInterval`，uv 定时器会重复；每次触发都会重新运行回调，直到被清除。
 
 ## 上下文生命周期
 
-- 定时器在 qzjs 的内部线程上按上下文管理
+- 定时器在运行时自有 loop 上按上下文管理
 - 运行时关闭时（`qz_destroy`）定时器会自动取消
 - 没有定时器能跨重启存活 — 请在 `initial_script` 中重新创建它们
 

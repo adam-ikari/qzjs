@@ -96,7 +96,8 @@ qz_ext_t my_extension = {
 `qz_ext_t.user_data` is shared across all runtimes. For per-instance state, use `config.host_data`:
 
 ```c
-qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state };
+qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state,
+                      .uv_loop = my_loop /* uv_loop_t*, required under ISOLATED */ };
 qz_t *rt = qz_create(&cfg);
 
 // Inside extension init:

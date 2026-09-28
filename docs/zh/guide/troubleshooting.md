@@ -58,19 +58,22 @@ profile 会翻转 `QZ_WITH_*` 功能开关。`minimal` 保留 WebAssembly、
 
 ### `qz_create` 返回 `NULL`
 
-`qz_create` 会阻塞到内部线程就绪且 `initial_script` 执行完毕；任一环节失败即
-返回 `NULL`。两种原因：
+`qz_create` 会阻塞到运行时就绪且 `initial_script` 执行完毕（ISOLATED 下握手走同步
+raw-fd 读，期间不泵宿主 loop、不触发回调；THREAD 下等内部线程就绪）；任一环节失败即
+返回 `NULL`。原因：
 
 1. **`initial_script` 抛异常。** 初始脚本中的任何异常都会中止创建——运行时
    不会降级启动。
 2. **线程或 loop 初始化失败**（资源耗尽）。
+3. **ISOLATED 下 `cfg.uv_loop` 为 `NULL`。** 宿主 loop 注入是必填项，缺失则显式失败——库绝不回退到内部宿主线程。主RT 进程（`qzjs-rt`）spawn 失败同样返回 `NULL`。
 
 CLI 在同一条件下打印 `qzjs: runtime init failed`。
 
 ```c
 qz_t *rt = qz_create(&cfg);
 if (!rt) {
-    /* initial_script 抛异常，或线程/loop 初始化失败 */
+    /* initial_script 抛异常，或线程/loop 初始化失败；
+       ISOLATED 下 cfg.uv_loop 为 NULL 也会显式失败 */
     return 1;
 }
 ```
@@ -93,7 +96,10 @@ if (!rt) {
 
 `message_cb` 是**出站**（JS → 宿主）通道，必须在 `qz_create` 之前于
 `qz_config_t` 中设置。`message_cb` 为 null 时宿主收不到任何消息。出站发送只在
-脚本确实调用 `postMessage(...)` 时发生。见
+脚本确实调用 `postMessage(...)` 时发生。**ISOLATED 下还有一个常见原因：宿主没有泵
+`cfg.uv_loop`**——读泵挂在你的 loop 上，不泵就不会有回调到达（阻塞宿主 API 会在内部
+就地泵，但常规收消息依赖你自己的泵循环）。见
+[事件循环](/zh/guide/event-loop) 与
 [主机集成](/zh/guide/host-integration)。
 
 ## Worker 与进程模型

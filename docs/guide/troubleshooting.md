@@ -58,12 +58,16 @@ for you. See [Building](/guide/building#cmake-options).
 
 ### `qz_create` returns `NULL`
 
-`qz_create` blocks until the internal thread is ready and `initial_script` has
-run; it returns `NULL` when either fails. The two causes:
+`qz_create` blocks until the runtime is ready and `initial_script` has run;
+it returns `NULL` when either fails. The causes:
 
 1. **`initial_script` threw.** Any exception in the initial script aborts
    creation — the runtime does not start degraded.
 2. **Thread or loop init failed** (resource exhaustion).
+3. **Under ISOLATED: `cfg.uv_loop` is `NULL`.** The host loop injection is
+   mandatory; the library never falls back to an internal host thread, so
+   create fails explicitly. (Host and libqzjs must also link the **same**
+   libuv.)
 
 The CLI prints `qzjs: runtime init failed` for the same condition.
 
@@ -96,7 +100,11 @@ does fire before exit.
 `message_cb` is the **outbound** (JS → host) channel and must be set in
 `qz_config_t` before `qz_create`. A null `message_cb` means the host receives
 nothing. Outbound sends only happen if the script actually calls
-`postMessage(...)`. See [Host Integration](/guide/host-integration).
+`postMessage(...)`. Under ISOLATED there is one more precondition: the
+callback fires only while the host pumps `cfg.uv_loop` (directly, or inside
+a blocking host API) — a host that never pumps never sees a reply. See
+[Host Integration](/guide/host-integration) and
+[Event Loop](/guide/event-loop).
 
 ## Workers & the Process Model
 

@@ -124,5 +124,5 @@ CLI 有意**不暴露**任何 Node 风格的全局——没有 `process`，没�
 
 ## 下一步
 
-- [事件循环](/zh/guide/event-loop) — 内部线程与 libuv loop 如何工作
+- [事件循环](/zh/guide/event-loop) — ISOLATED 宿主 uv_loop 注入/泵与 THREAD 内部线程如何工作
 - [嵌入](/zh/guide/embedding) — 面向宿主应用的 C API

@@ -18,7 +18,7 @@ flowchart TB
         D["crypto<br/>timers<br/>Blob<br/>qzjs.store"]
         E["streams<br/>TextEncoder<br/>EventTarget<br/>navigator"]
     end
-    B --> G["qzjs 内部线程上的 libuv 循环"]
+    B --> G["运行时自有的 libuv 循环<br/>（ISOLATED: qzjs-rt 进程 · THREAD: 内部 qzjs 线程）"]
 ```
 
 ## API 分类

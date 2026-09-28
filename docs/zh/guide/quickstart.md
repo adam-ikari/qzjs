@@ -36,6 +36,7 @@ cmake --build build -j$(nproc)
 
 ```c
 #include <qzjs/qzjs.h>
+#include <uv.h>
 #include <stdio.h>
 
 static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
@@ -44,10 +45,15 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
 }
 
 int main(void) {
-    // 创建运行时 — qzjs 启动自己的内部线程和循环
+    uv_loop_t loop;
+    uv_loop_init(&loop);
+
+    // 创建运行时 — ISOLATED（默认）下 JS 跑在独立主RT 进程里，
+    // 宿主注入并泵动自己的 loop；THREAD 构建不需要 cfg.uv_loop
     qz_config_t cfg = {0};
     cfg.initial_script = "console.log('Hello from qzjs!'); postMessage(1 + 1);";
     cfg.message_cb = on_message;
+    cfg.uv_loop    = &loop;           // 宿主 loop 注入（ISOLATED 必填）
     qz_t *rt = qz_create(&cfg);
     if (!rt) {
         fprintf(stderr, "Failed to create runtime\n");
@@ -57,8 +63,12 @@ int main(void) {
     // 通过发送 JSON 消息驱动运行时
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
 
-    // 清理 — 优雅关闭
+    // 泵宿主 loop：回复到达时 on_message 在本线程触发
+    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+
+    // 清理 — 优雅关闭（库句柄已随 teardown 关闭）
     qz_destroy(rt);
+    uv_loop_close(&loop);
     return 0;
 }
 ```

@@ -127,8 +127,10 @@ await updateConfig('theme', 'dark');
 
 ## Platform Dependency
 
-Filesystem operations run on qzjs's internal thread, backed by libuv's
-asynchronous file I/O. On failure the methods reject with a plain **string**
+Filesystem operations run inside the runtime, on its own libuv loop (the
+`qzjs-rt` process under ISOLATED, the internal `qzjs` thread under THREAD),
+backed by libuv's asynchronous file I/O. On failure the methods reject with a
+plain **string**
 message (see each method's Errors section) — there are no error codes or
 `DOMException` types.
 

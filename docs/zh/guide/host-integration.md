@@ -21,13 +21,20 @@ description: 在 C 应用中嵌入 qzjs 的主机集成路径 —— create、JS
 
 ## 1. Create
 
-[`qz_create`](/zh/c-api/runtime) 启动 qzjs 内部线程、拉起 libuv 循环、执行
-`cfg.initial_script`。它阻塞到就绪才返回，这时运行时已活、`initial_script` 已跑完。
+ISOLATED（默认）下 [`qz_create`](/zh/c-api/runtime) spawn 主RT 进程（`qzjs-rt`）、在同步
+raw-fd 读上完成 ready 握手（期间不泵循环、不触发回调），再把宿主侧通道句柄挂到你经
+`cfg.uv_loop` 注入的宿主 loop 上——传 NULL 会让 `qz_create` 显式失败。THREAD 构建下则
+启动 qzjs 内部线程、拉起 libuv 循环。两种形态下它都阻塞到就绪才返回，这时运行时已活、
+`initial_script` 已跑完。
 
 ```c
+uv_loop_t loop;
+uv_loop_init(&loop);
+
 qz_config_t cfg = {0};
 cfg.initial_script = "postMessage({ready: true});";
 cfg.message_cb = on_message;      // 出站 JS→host
+cfg.uv_loop    = &loop;           // 宿主 loop 注入（ISOLATED 必填）
 qz_t *rt = qz_create(&cfg);   // 阻塞直到就绪
 ```
 
@@ -46,18 +53,21 @@ qz_t *rt = qz_create(&cfg);   // 阻塞直到就绪
 
 宿主和 JS 双向都以 JSON 字符串交换数据：不传指针，不共享内存对象。
 
-qzjs 自己管线程和循环。宿主不调用 JS 让它运行，运行时也不阻塞宿主线程。
+ISOLATED 下库不拥有宿主侧线程：宿主经 `cfg.uv_loop` 注入自己的 loop 并负责泵它，
+JS 执行在主RT 进程内进行。THREAD 下 qzjs 自己管线程和循环，宿主什么都不用泵。
+两种形态下宿主都不调用 JS 让它运行；ISOLATED 下阻塞宿主 API 会在内部就地泵宿主
+loop（见下方规则）。
 
 | 方向 | 机制 | 线程 |
 |-----------|-----------|--------|
 | 主机 → JS | `qz_post_message(rt, json, len)` | 线程安全，任意线程可调 |
-| JS → 主机 | `cfg.message_cb(rt, json, len, data)` | 在 qzjs 线程上触发 |
+| JS → 主机 | `cfg.message_cb(rt, json, len, data)` | ISOLATED：在泵宿主 loop 的线程上触发；THREAD：在 qzjs 线程上触发 |
 
 规则：
 
 - **两个方向都是 JSON 字符串。** 不传指针，不共享内存对象，只传可序列化的数据。
-- **`qz_post_message` 线程安全。** 可从任意主机线程调用；它入队到 qzjs 的入站队列。
-- **`message_cb` 在 qzjs 线程上运行。** 保持快速且线程安全，它和事件循环、所有 JS 共享这个线程。
+- **`qz_post_message` 线程安全。** 可从任意主机线程调用；它入队到 qzjs 的入站队列。ISOLATED 下投递延迟等于你的泵频；同一 runtime 的 FIFO 顺序保持。
+- **`message_cb` 的线程归属看模型。** ISOLATED 下它在泵你 `cfg.uv_loop` 的线程上运行——保持轻量，且**不要在回调内调用阻塞宿主 API**（`qz_ping`、`qz_wait_idle`、`qz_destroy` 会在内部就地泵宿主 loop，回调可能在调用内重入触发）；THREAD 下它与事件循环、所有 JS 共享 qzjs 线程，回调须线程安全。
 - **有界队列。** 运行时忙（或者 JS 一直不读）时，入站消息会在队列边界积压。
   你的主机代码要能接受 `qz_post_message` 不会马上排空。
 
@@ -126,6 +136,7 @@ JSON 字符串）路由到对应 C 处理器：
 
 ```c
 #include <qzjs/qzjs.h>
+#include <uv.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -140,9 +151,13 @@ static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
 }
 
 int main(void) {
+    uv_loop_t loop;
+    uv_loop_init(&loop);
+
     qz_config_t cfg = {0};
     cfg.message_cb = on_message;
     cfg.initial_script = "/* 上面的 JS 转发器 */";
+    cfg.uv_loop = &loop;                    // ISOLATED 必填（THREAD 构建不需要）
     qz_t *rt = qz_create(&cfg);
 
     const char *ping = "{\"type\":\"ping\",\"payload\":{}}";
@@ -150,7 +165,11 @@ int main(void) {
     const char *add  = "{\"type\":\"add\",\"payload\":{\"a\":2,\"b\":3}}";
     qz_post_message(rt, add, strlen(add));              // → on_add
 
-    qz_destroy(rt);
+    /* ISOLATED：泵宿主 loop 直到回复全部到达；THREAD 下这一步可省略 */
+    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+
+    qz_destroy(rt);                         // 库句柄已随 teardown 关闭
+    uv_loop_close(&loop);
     return 0;
 }
 ```
@@ -168,8 +187,10 @@ int main(void) {
 
 ## 5. Destroy
 
-[`qz_destroy`](/zh/c-api/runtime) 执行优雅关闭：通知内部线程、排空待处理工作、
-释放运行时。运行时不再需要时从宿主调用。完整生命周期与内存模型见
+[`qz_destroy`](/zh/c-api/runtime) 执行优雅关闭：ISOLATED 下它是阻塞宿主 API，在内部就地泵
+`cfg.uv_loop` 直到主RT 进程 teardown 完成，结束后挂在宿主 loop 上的库句柄已全部关闭（宿主
+loop 可以干净 `uv_loop_close`）；THREAD 下通知内部线程、排空待处理工作、释放运行时。运行时
+不再需要时从宿主调用。完整生命周期与内存模型见
 [运行时生命周期](/zh/guide/lifecycle)。
 
 ---

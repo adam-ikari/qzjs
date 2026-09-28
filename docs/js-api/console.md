@@ -72,8 +72,9 @@ Each method maps to a numeric log level included in the output prefix:
 
 ## Implementation
 
-`console.*` runs on qzjs's internal thread and writes to the host process's
-standard error, formatted as `[qzjs:<level>] <message>`. There is no host
+`console.*` runs on the runtime's own loop (the `qzjs-rt` process under
+ISOLATED, the internal `qzjs` thread under THREAD) and writes to standard
+error, formatted as `[qzjs:<level>] <message>`. There is no host
 callback for console — output goes straight to stderr.
 
 ## Formatting
