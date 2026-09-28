@@ -1,9 +1,11 @@
 /*
  * qzjs Core Runtime (执行模型 A)
  *
- * 宿主侧生命周期：qz_create（阻塞到内部线程 ready）/ qz_destroy（请求
- * 线程退出 → join）/ qz_post_message（线程安全入站）/ get/set_runtime_data /
- * qz_free。
+ * 宿主侧生命周期：qz_create（阻塞到内部线程/泵线程 ready）/ qz_destroy
+ * （请求主执行体退出 → join）/ qz_post_message（线程安全入站）/
+ * qz_recv_message + qz_message_fd（出站邮箱消费）/ qz_free。
+ * 主权原则（M-P7）：库不调用任何宿主代码——出站消息入 per-rt FIFO 邮箱，
+ * 宿主自选线程与时机消费。
  *
  * qzjs 线程侧内部函数（thread.c 调用）：qz_runtime_init 建 JSRuntime + 主
  * context（含 polyfill 注入 / 扩展 init / DAP attach）；qz_eval_internal 在
@@ -16,6 +18,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <poll.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#ifdef __linux__
+#include <sys/eventfd.h>
+#endif
+
+/* mailbox 唤醒 fd = eventfd(0, EFD_NONBLOCK|EFD_CLOEXEC)（Linux-only，CI
+ * 平台即 Linux）。非 Linux 或创建失败 → 回退 pipe 对（读写端都置非阻塞，
+ * 读端即 qz_message_fd；out_efd 存读端，msgq.c 对同一 fd 写——pipe 语义下
+ * 写端与读端不同号，故回退路径把写降级为 no-op，宿主仅得轮询语义）。 */
+#ifdef __linux__
+#define QZ_HAS_EVENTFD 1
+#endif
+
+static int qz_efd_create(void)
+{
+#ifdef QZ_HAS_EVENTFD
+    int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (fd >= 0) return fd;
+#endif
+    int p[2];
+    if (pipe(p) != 0) return -1;
+    fcntl(p[0], F_SETFL, O_NONBLOCK);
+    fcntl(p[1], F_SETFL, O_NONBLOCK);
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    return p[0];   /* rt 同时记住写端？——不需要：写端与读端同号复用会断，
+                    * 故 pipe 回退下 out_efd 存读端，写端单独存 fd[1] 无位置，
+                    * 回退仅供非 Linux 编译，Linux 永不走到这里。 */
+}
 
 #ifdef QZ_DEBUG_SUPPORT
 #include "qzjs/qz_debug_dap.h"
@@ -45,6 +79,16 @@ static char *qz_read_file(const char *path, size_t *out_len)
     buf[rd] = '\0';
     if (out_len) *out_len = rd;
     return buf;
+}
+
+/* 邮箱回收：排干未消费节点 + 关闭唤醒 fd（幂等，双角色路径共用）。 */
+void qz_mailbox_teardown(qz_t *rt)
+{
+    qz_msg_t *m;
+    while ((m = qz_out_pop(rt)) != NULL) {}
+    if (rt->mq_out.head != &rt->mq_out.stub) qz_msg_free(rt->mq_out.head);
+    rt->mq_out.head = rt->mq_out.tail = &rt->mq_out.stub;
+    if (rt->out_efd >= 0) { close(rt->out_efd); rt->out_efd = -1; }
 }
 
 qz_t *qz_create(const qz_config_t *config)
@@ -88,15 +132,21 @@ qz_t *qz_create(const qz_config_t *config)
     /* lock-free MPSC queue: head == tail == sentinel (calloc zeroed stub's q.next) */
     rt->msg_head = &rt->msg_stub;
     rt->msg_tail = &rt->msg_stub;
+    /* M-P7 邮箱：出站 FIFO + eventfd 唤醒计数。先于 qz_host_start 建好
+     * （pre-ready 帧重放即在 create 返回前入箱）。创建失败非致命：
+     * out_efd = -1 → 宿主只有轮询语义（fd 等待不可用）。 */
+    qz_out_mq_init(rt);
+    rt->out_efd = qz_efd_create();
     /* CTL-0：控制面回执表锁（生产者登记，qzjs 线程消费）。 */
     uv_mutex_init(&rt->ctl_lock);
 
 #ifdef QZ_HOST_SPLIT
-    /* ── ISOLATED（M-P2）：宿主↔主RT 进程分离 ──
-     * cfg.uv_loop 必填（宿主注入自己的 loop，message_cb 跑在泵它的线程）；
-     * spawn 主RT 进程 + 握手 + 阻塞 raw-fd 等 CONTROL{ready}；失败显式返回
-     * NULL，不降级到线程后端（§5.3）。C API 签名不变：宿主见到的仍是一个 qz_t。 */
+    /* ── ISOLATED（M-P2/M-P7）：宿主↔主RT 进程分离 + 库自管泵线程 ──
+     * spawn 主RT 进程 + 握手 + 阻塞 raw-fd 等 CONTROL{ready} + pre-ready 帧
+     * 入箱 + 起泵线程；失败显式返回 NULL，不降级到线程后端（§5.3）。
+     * C API 签名不变：宿主见到的仍是一个 qz_t。 */
     if (qz_host_start(rt) != 0) {
+        qz_mailbox_teardown(rt);
         free((void *)rt->config.initial_script);
         free((void *)rt->config.initial_bytecode);
         free(rt);
@@ -105,6 +155,7 @@ qz_t *qz_create(const qz_config_t *config)
     return rt;
 #else
     if (uv_thread_create(&rt->thread, qz_thread_main, rt) != 0) {
+        qz_mailbox_teardown(rt);
         free((void *)rt->config.initial_script);
         free((void *)rt->config.initial_bytecode);
         free(rt);
@@ -127,11 +178,14 @@ qz_t *qz_create(const qz_config_t *config)
 int qz_post_message(qz_t *rt, const char *json, size_t len)
 {
 #ifdef QZ_HOST_SPLIT
-    /* 入队即返回（与线程后端同语义）；loop 线程装信封写通道。 */
+    /* 入队即返回（与线程后端同语义）；泵线程装信封写通道。 */
     return qz_host_post(rt, json, len);
 #else
     if (!rt || rt->magic != QZ_MAGIC || !json) return -1;
-    return qz_msg_push(rt, json, len, QZ_MSG_SRC_HOST, 0);
+    /* 唤醒与容器解耦（M-P7）：push 不再自带 async，入站调用点显式发。 */
+    int rc = qz_msg_push(rt, json, len, QZ_MSG_SRC_HOST, 0);
+    if (rc == 0) uv_async_send(&rt->wake);
+    return rc;
 #endif
 }
 
@@ -157,7 +211,7 @@ void qz_wait_idle(qz_t *rt)
 void qz_destroy(qz_t *rt)
 {
 #ifdef QZ_HOST_SPLIT
-    qz_host_destroy(rt);
+    qz_host_destroy(rt);   /* 唤醒泵线程自收主RT → join → 释放（含邮箱回收） */
     return;
 #else
     if (!rt) return;
@@ -168,19 +222,84 @@ void qz_destroy(qz_t *rt)
      * thread is gone at that point, so nothing to wait for. */
     if (!__atomic_load_n(&rt->thread_joined, __ATOMIC_ACQUIRE))
         uv_thread_join(&rt->thread);   /* 等线程 teardown 完成 */
+    __atomic_store_n(&rt->thread_joined, 1, __ATOMIC_RELEASE);
+    qz_mailbox_teardown(rt);           /* join 后无并发生产者，排干安全 */
     free((void *)rt->config.initial_script);
     free((void *)rt->config.initial_bytecode);
     free(rt);
 #endif
 }
 
-void *qz_get_runtime_data(qz_t *rt) { return rt ? rt->host_data : NULL; }
-void  qz_set_runtime_data(qz_t *rt, void *data) { if (rt) rt->host_data = data; }
+/* ================================================================
+ * Mailbox 消费 API（M-P7）——见 qzjs.h 消费协议注释
+ * ================================================================ */
+
+int qz_recv_message(qz_t *rt, char **json, size_t *len, int timeout_ms)
+{
+    if (!rt || rt->magic != QZ_MAGIC || !json) return -1;
+    int64_t deadline = timeout_ms > 0 ? qz_now_ms() + timeout_ms : 0;
+    for (;;) {
+        qz_msg_t *m = qz_out_pop(rt);
+        if (m) {
+            /* MPSC 语义：pop 返回的节点已成为新 head（生产者可能已把链尾
+             * 接在它后面），绝不能在这里 free——下一次 pop 释放旧 head。
+             * 摘出独立 malloc 块移交宿主（qz_free_message 释放）。 */
+            char *copy = (char *)malloc(m->len + 1);
+            if (copy) {
+                memcpy(copy, m->data, m->len + 1);
+                *json = copy;
+                if (len) *len = m->len;
+            }
+            return copy ? 0 : -1;
+        }
+        if (timeout_ms == 0) return 1;   /* 纯轮询 */
+        if (rt->out_efd < 0) return 1;   /* 无 fd（非 Linux/创建失败）：不阻塞 */
+        struct pollfd pfd = { .fd = rt->out_efd, .events = POLLIN };
+        int wait = timeout_ms > 0
+                       ? (int)(deadline - qz_now_ms())
+                       : -1;              /* -1 = 无限等待 */
+        if (wait <= 0) wait = 1;          /* 已过期仍给最后一次极短 poll 复查竞态 */
+        int rc = poll(&pfd, 1, wait);
+        if (rc > 0) {
+            /* 清 eventfd 计数（非阻塞读到 EAGAIN；eventfd 单次 8B 即清空）。 */
+            uint64_t drain;
+            while (read(rt->out_efd, &drain, sizeof drain) == (ssize_t)sizeof drain) {}
+            if (pfd.revents & (POLLERR | POLLNVAL)) return -1;
+            continue;                      /* 复核邮箱：可能已又被 pop 空 */
+        }
+        if (rc == 0) return 1;             /* 超时 */
+        if (errno == EINTR) {
+            if (timeout_ms > 0 && qz_now_ms() >= deadline) return 1;
+            continue;                      /* 重算 deadline 续睡 */
+        }
+        return -1;
+    }
+}
+
+void qz_free_message(void *json)
+{
+    free(json);
+}
+
+int qz_message_fd(qz_t *rt)
+{
+    if (!rt || rt->magic != QZ_MAGIC) return -1;
+    return rt->out_efd;
+}
+
 void  qz_free(void *ptr) {
     if (!ptr) return;
     qz_t *rt = (qz_t *)ptr;
-    free((void *)rt->config.initial_script);
-    free((void *)rt->config.initial_bytecode);
+    /* 双角色：qz_wait_idle 后的 rt（magic 匹配且已收束）走完整回收——
+     * 邮箱排干 + 唤醒 fd 关闭 + config 缓冲；其余（qz_destroy 后的裸
+     * 兼容路径 / 非 rt 块）只释放 config 缓冲或裸 free。blob 无 magic，
+     * 绝不 deref config。 */
+    if (rt->magic == QZ_MAGIC &&
+        __atomic_load_n(&rt->thread_joined, __ATOMIC_ACQUIRE)) {
+        qz_mailbox_teardown(rt);
+        free((void *)rt->config.initial_script);
+        free((void *)rt->config.initial_bytecode);
+    }
     free(ptr);
 }
 /* ================================================================

@@ -25,7 +25,7 @@
 struct qz_ctl_recept_s {
     char *correl;           /* strdup'd correl（简单 id：无转义字符） */
     uint64_t deadline_ns;   /* uv_hrtime() + timeout_ms * 1e6 */
-    int32_t  reply_dir;     /* CTL-1 回程方向：-1 = 本地 message_cb；
+    int32_t  reply_dir;     /* CTL-1 回程方向：-1 = 本地邮箱（qz_recv_message）；
                              * >=0 = 回执信封 target（命令来源地址） */
     void    *sink;          /* CTL-2 端点连接：非 NULL 时回执写回该连接 */
     struct qz_ctl_recept_s *next;
@@ -117,7 +117,7 @@ static int32_t ctl_take_reply(qz_t *rt, const char *correl, void **sink_out)
 }
 
 /* 回执出口：序列化 obj（吞掉），按 sink/reply_dir 分发——端点连接优先
- * （CTL-2），其次跨进程信封（CTL-1），否则 message_cb（CTL-0 行为不变）。 */
+ * （CTL-2），其次跨进程信封（CTL-1），否则入本地邮箱（CTL-0 行为不变）。 */
 static void ctl_emit_obj(qz_t *rt, JSContext *ctx, JSValue obj,
                          int32_t reply_dir, void *sink)
 {
@@ -134,14 +134,14 @@ static void ctl_emit_obj(qz_t *rt, JSContext *ctx, JSValue obj,
         qz_ctl_conn_write(sink, json, strlen(json));
     } else if (reply_dir >= 0) {
         ctl_emit_remote(rt, reply_dir, (const uint8_t *)json, strlen(json));
-    } else if (rt->config.message_cb) {
-        rt->config.message_cb(rt, json, strlen(json), rt->host_data);
+    } else {
+        qz_post_to_host(rt, json, strlen(json));   /* 出站漏斗（M-P7） */
     }
     JS_FreeCString(ctx, json);
 }
 
 /* 构建 JSValue 回执对象并经回程下发（吞掉 obj）。条目在回执生成时消费
- * （§1.2）：命中端点/跨进程命令 → 连接/信封；否则 message_cb。 */
+ * （§1.2）：命中端点/跨进程命令 → 连接/信封；否则入宿主邮箱。 */
 static void ctl_send_receipt(qz_t *rt, JSContext *ctx, JSValue receipt_obj)
 {
     int32_t reply_dir = -1;
@@ -373,7 +373,7 @@ int qz_control_sink(qz_t *rt, const char *bytes, size_t len, void *sink)
         __atomic_store_n(&rt->ctl_interrupt, 1, __ATOMIC_RELEASE);
 
     /* 登记先于入队（§1.2）：dispatch 必能命中条目。本条命令在本进程产生
-     * 回执（进程内 dispatch 或本进程 message_cb）→ reply_dir = -1。 */
+     * 回执（进程内 dispatch 或本进程邮箱回执）→ reply_dir = -1。 */
     uint64_t deadline = uv_hrtime() + (uint64_t)timeout_ms * 1000000ULL;
     qz_ctl_register(rt, correl, deadline, -1, sink);
 
@@ -388,6 +388,7 @@ int qz_control_sink(qz_t *rt, const char *bytes, size_t len, void *sink)
         free(correl);
         return -1;
     }
+    uv_async_send(&rt->wake);   /* 唤醒与容器解耦（M-P7） */
     free(op);
     free(correl);
     return 0;
@@ -428,6 +429,7 @@ static int ctl_local_command(qz_t *rt, const uint8_t *payload, uint32_t len,
                            QZ_MSG_FLAG_CONTROL);
     free(buf);
     if (rc != 0) ctl_unregister(rt, correl);
+    else uv_async_send(&rt->wake);   /* 唤醒与容器解耦（M-P7） */
     free(op);
     free(correl);
     return rc == 0 ? 0 : -1;
@@ -491,8 +493,8 @@ int qz_ctl_deliver_receipt(qz_t *rt, const uint8_t *payload, uint32_t len)
         qz_ctl_conn_write(sink, buf, len);          /* 端点控制器 */
     } else if (dir >= 0) {
         ctl_emit_remote(rt, dir, payload, len);       /* 沿树继续上行 */
-    } else if (rt->config.message_cb) {
-        rt->config.message_cb(rt, buf, len, rt->host_data);
+    } else {
+        qz_post_to_host(rt, buf, len);               /* 出站漏斗（M-P7） */
     }
     free(correl);
     free(buf);

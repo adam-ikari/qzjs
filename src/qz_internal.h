@@ -24,11 +24,9 @@ typedef struct qz_ctx_s qz_ctx_t;   /* 前置声明：qz_proc_handle_t 用指针
 #include <uv.h>
 #endif
 
-/* 句柄归属统一取环：ISOLATED 宿主 rt 的 cfg->uv_loop 注入后存 host_loop
- * （rt_host.c），其全部宿主侧句柄挂在宿主自己的 loop 上（message_cb 由
- * 泵该 loop 的宿主线程派发，库不再有宿主侧线程/loop）；其余 rt（THREAD
- * 后端、主RT/worker 进程）恒 host_loop == NULL，走内嵌自持 loop。 */
-#define RT_LOOP(rt) ((rt)->host_loop ? (rt)->host_loop : &(rt)->loop)
+/* 句柄统一挂 rt 内嵌自持 loop（M-P7 主权裁决：库自管全部线程与 loop，
+ * 宿主不注入任何东西，qzjs.h 保持 uv-free）。 */
+#define RT_LOOP(rt) (&(rt)->loop)
 
 /* C 层 JSON 一律用 vendored cJSON（<cjson.h>，deps/cjson/）——使用方
  * （control.c / ipc_process.c / debugger_dap.c）各自 include。 */
@@ -224,6 +222,15 @@ typedef struct qz_msg_s {
     uint8_t flags;        /* QZ_MSG_FLAG_* */
 } qz_msg_t;
 
+/* Lock-free MPSC 容器（msgq.c 算法逐字复用）：tail 由生产者 ACQ_REL
+ * exchange，head 恒为消费者独占，stub 为常驻哨兵。入站队列沿用 rt 内
+ * 历史散装字段（msg_head/msg_tail/msg_stub），本容器用于出站邮箱。 */
+typedef struct qz_mq_s {
+    qz_msg_t *head;
+    qz_msg_t *tail;
+    qz_msg_t stub;
+} qz_mq_t;
+
 /* Per-context state — holds JSContext*, handle tables, timer data,
  * extensions, and polyfill config for reset re-injection. */
 struct qz_ctx_s {
@@ -293,11 +300,9 @@ struct qz_t {
     JSRuntime *jsrt;
 
     /* thread + loop (execution model A: qzjs owns a thread running the libuv
-     * loop). ISOLATED 宿主 rt 例外：不自带线程也不自带 loop——cfg.uv_loop
-     * （宿主注入，经 RT_LOOP 取环）承载其全部宿主侧句柄；此时 loop/thread
-     * 字段闲置。 */
+     * loop)。ISOLATED 宿主 rt 同样自带线程与 loop——该线程即库宿主侧泵线程
+     * （M-P7 主权裁决：库自管一切线程/loop，宿主零注入零回调）。 */
     uv_loop_t loop;
-    uv_loop_t *host_loop;  /* ISOLATED 宿主：注入的宿主 loop；其余恒 NULL */
     uv_thread_t thread;
     uv_async_t wake;         /* host post_message wakeup; data = rt */
 
@@ -308,15 +313,25 @@ struct qz_t {
     qz_msg_t *msg_head;
     qz_msg_t *msg_tail;
     qz_msg_t msg_stub;
+
+    /* outbound mailbox（M-P7）：库 → 宿主方向消息的 per-rt FIFO。生产者 =
+     * 库泵线程/JS 线程（读泵解帧、CONTROL 回执、崩溃上报），单消费者 = 宿主
+     * recv 线程（qzjs.h 消费协议）。out_efd = eventfd 唤醒计数（push 先入链
+     * 后 write）；free 时未消费节点连同 stub 排干释放。 */
+    qz_mq_t mq_out;
+    int out_efd;             /* eventfd；-1 = 未创建/已关闭 */
+
     int shutting_down;   /* atomic: set by destroy -> thread leaves main loop */
     int wait_idle;       /* atomic: qz_wait_idle requested: auto-exit when idle */
     int thread_ready;    /* atomic: ready handshake: thread init complete */
     int ready_err;       /* init failure code (0 ok; non-zero -> qz_create returns NULL) */
-    int thread_joined;   /* atomic: 拆除已完成（线程后端 = uv_thread_join 已做，双 join 是 UB；ISOLATED 宿主 = host_teardown 已跑，幂等门） */
+    int thread_joined;   /* atomic: 拆除已完成（线程后端 = uv_thread_join 已做，双 join 是 UB；ISOLATED 宿主 = 库泵线程已收尸，幂等门） */
 
     /* config copy (initial_script strdup'd by qz_create, freed by destroy) */
     qz_config_t config;
-    void *host_data;     /* per-runtime opaque ptr；qz_get_runtime_data 读取 */
+    /* 内部出站钩子（非公共 API）：仅主RT 子进程由 rt_main.c 挂
+     * server_emit_cb → qz_post_to_host 走进程上行；宿主 rt 恒 NULL → 入邮箱。 */
+    void (*host_emit)(qz_t *rt, const char *json, size_t len);
     int debug;
 
     /* uv_io.c in-memory storage（storage_get/set/del 的键值区，destroy 回收） */
@@ -496,11 +511,18 @@ struct qz_t {
 extern "C" {
 #endif
 
-/* msgq.c — thread-safe inbound FIFO */
+/* msgq.c — thread-safe inbound FIFO + outbound mailbox（同一 MPSC 算法两实例） */
 int qz_msg_push(qz_t *rt, const char *data, size_t len, int source, int flags);
 qz_msg_t *qz_msg_pop(qz_t *rt);
 int qz_msg_has_pending(qz_t *rt);   /* 消费者线程内检查队列非空（无锁读） */
 void qz_msg_free(qz_msg_t *m);
+
+void qz_out_mq_init(qz_t *rt);                  /* create 期初始化邮箱 */
+int  qz_out_push(qz_t *rt, const char *json, size_t len); /* 入箱 + eventfd 写 */
+qz_msg_t *qz_out_pop(qz_t *rt);                 /* 宿主 recv 线程（单消费者） */
+int  qz_out_has_pending(qz_t *rt);
+void qz_post_to_host(qz_t *rt, const char *json, size_t len); /* 出站唯一漏斗 */
+void qz_mailbox_teardown(qz_t *rt); /* 排干邮箱+关 out_efd（幂等；qzjs.c，join 后调用） */
 
 /* thread.c — the qzjs thread: uv loop + wake dispatch + microtask flush */
 void qz_thread_main(void *arg);
@@ -511,10 +533,13 @@ int qz_loop_idle(qz_t *rt);
 /* M-P2：宿主↔主RT 进程分离路径已编入（ISOLATED 非 mock 构建）。 */
 #if defined(QZ_PROCESS_MODEL_ISOLATED) && !defined(QZ_USE_MOCK_LIBUV)
 #define QZ_HOST_SPLIT 1
-/* rt_host.c — 宿主侧主RT 通道后端：spawn 主RT 进程 + 阻塞 raw-fd 等 ready，
- * 通道句柄挂宿主注入的 cfg.uv_loop（无宿主侧库线程；message_cb 跑在泵宿主
- * loop 的线程）。qz_host_start 返回 0 = 主RT 已就绪（CONTROL{ready} 经同步
- * 通道读收到）；非 0 = 显式失败（uv_loop 为 NULL 或不降级，§5.3）。
+/* rt_host.c — 宿主侧主RT 通道后端 + 库自管泵线程（M-P7 主权回归）：
+ * loop_init → blob 落盘 → spawn 主RT → raw-fd 同步等 CONTROL{ready}
+ * （pre-ready 帧暂存）→ wake init → 读泵注册（pre-ready 帧重放入邮箱）→
+ * 起库泵线程（uv_run ONCE 循环 + EOF/DEAD 检测 + 退出路径上自收主RT：
+ * ≤2s 三级终止预算冻结在泵线程内，调用线程只 join）。通道句柄挂 rt 内嵌
+ * loop；出站消息一律入邮箱，qzjs 不调用任何宿主函数。
+ * qz_host_start 返回 0 = 已就绪；非 0 = 显式失败（不降级，§5.3）。
  * qz_host_destroy 释放 rt 本身。 */
 int  qz_host_start(qz_t *rt);
 int  qz_host_post(qz_t *rt, const char *json, size_t len);
@@ -678,7 +703,7 @@ int qz_ctl_interrupt_handler(JSRuntime *jsrt, void *opaque);
 /* 本节点在父树中的槽位 id（宿主 0 / 主RT 1 / worker --worker-id）。 */
 int32_t qz_ctl_local_id(qz_t *rt);
 /* 回执表：登记 correl 条目（producer 线程，锁内插入）。reply_dir 为
- * 跨进程回程方向（CTL-1）：-1 = 本地 message_cb；>=0 = 回执信封 target
+ * 跨进程回程方向（CTL-1）：-1 = 本地邮箱；>=0 = 回执信封 target
  * （命令来源地址，逐跳相对寻址语义，见 control.c qz_control_route）。
  * sink 为 CTL-2 端点连接（非 NULL 时回执写回该连接，优先于 reply_dir）。 */
 void qz_ctl_register(qz_t *rt, const char *correl, uint64_t deadline_ns,
@@ -714,7 +739,7 @@ int32_t qz_ctl_cmd_target(const char *json, size_t len);
 /* ── CTL-2：本地端点 + 端点回执 sink（§2.3）──
  *
  * 端点只做生产者：连接上的每行 JSON 走 qz_control_sink 同一入口（不引入
- * 第二执行路径），回执按条目 sink 写回该连接；无 sink 则走 message_cb/信封。
+ * 第二执行路径），回执按条目 sink 写回该连接；无 sink 则走邮箱/信封。
  * control_endpoint.c 仅在真实 libuv 构建编入（mock 构建无 uv_pipe）；mock 下
  * qz_ctl_endpoint_* 由 control.c 提供 no-op stub。 */
 int  qz_ctl_endpoint_init(qz_t *rt);    /* 0 = 已监听（bind+listen+0600） */
@@ -725,13 +750,13 @@ void qz_ctl_conn_drop(qz_t *rt, void *conn);
 /* 端点连接回写（一行一条回执；loop 线程独占）。 */
 void qz_ctl_conn_write(void *conn, const char *json, size_t len);
 /* 入站 CONTROL 回执投递（target 命中本地）：按回执表条目把回执交给端点
- * 连接 / 继续沿树上行 / message_cb，并消费条目。 */
+ * 连接 / 继续沿树上行/邮箱，并消费条目。 */
 int qz_ctl_deliver_receipt(qz_t *rt, const uint8_t *payload, uint32_t len);
 /* 端点命令入口：命令 JSON 的 target 决定本地执行还是树转发；回执一律写回
  * sink 连接（CTL-2 §2.3：端点只是生产者，执行路径与 qz_control 同一套）。 */
 int qz_control_endpoint_cmd(qz_t *rt, const char *bytes, size_t len,
                               void *sink);
-/* 命令入队 + 指定回执 sink（NULL = 进程内 message_cb / 跨进程信封路径）。 */
+/* 命令入队 + 指定回执 sink（NULL = 进程内邮箱 / 跨进程信封路径）。 */
 int qz_control_sink(qz_t *rt, const char *bytes, size_t len, void *sink);
 
 /* Monotonic clock in milliseconds. Ignores clock_gettime failure (same

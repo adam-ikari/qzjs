@@ -1,23 +1,24 @@
 /*
- * qzjs Host-side main-RT channel backend (M-P2, QZ_PROCESS_MODEL=ISOLATED)
+ * qzjs Host-side main-RT channel backend (M-P7, QZ_PROCESS_MODEL=ISOLATED)
  *
- * 宿主进程侧实现：qz_create 内部 spawn 主RT 进程（qzjs-rt --qzjs-rt-server）
- * 并完成 M-P1 握手 + CONTROL{ready} 同步读取；此后宿主与主RT 之间只有一条
- * uv_pipe 通道（socketpair）。宿主 C API 的签名与线程后端逐一对应：
+ * 宿主进程侧实现：qz_create 内部 spawn 主RT 进程（qzjs-rt --qzjs-rt-server），
+ * 完成 M-P1 握手 + CONTROL{ready} raw-fd 同步读取，再起**库自有的宿主侧泵线
+ * 程**跑 rt->loop。此后宿主与主RT 之间只有一条 uv_pipe 通道（socketpair），
+ * 宿主与库之间只有一组入站 API + 一个 FIFO 邮箱——qzjs 不调用任何宿主代码：
  *
- *   qz_post_message  → 宿主入站 FIFO（MPSC，宿主线程推）→ 泵 loop 时装信封写通道
- *   message_cb       → 通道读泵解信封 → 回调解出 payload（JSON 文本）
- *   qz_wait_idle     → 发 CONTROL{idle} → 主RT 排空后回 ack 并自身退出 → 拆除
- *   qz_destroy       → 三级终止（§9.2）→ 收尸 → 拆除 → 释放
+ *   qz_post_message  → 宿主入站 FIFO（MPSC，宿主线程推）→ 泵线程装信封写通道
+ *   通道读泵解信封   → 出站消息入 rt->mq_out 邮箱 → 宿主 qz_recv_message 取
+ *   qz_wait_idle     → 发 CONTROL{idle} → 主RT 排空后回 ack 并自身退出 → join 泵线程
+ *   qz_destroy       → 唤泵线程自收主RT（§9.2 三级终止，≤2s 冻结在泵线程）→ join → 释放
  *
- * 线程模型（用户裁决，翻转 M-P2 原「库自带宿主 loop 线程」设计）：库在宿主
- * 侧**不自带线程、不自带 loop**——全部通道句柄（pipe 读泵、tx spill timer、
- * wake async）挂在宿主注入的 cfg->uv_loop（RT_LOOP 取环）上，message_cb 跑
- * 在泵该 loop 的宿主线程。阻塞 API（ping/wait_idle/destroy）等待期间就地
- * NOWAIT 泵该 loop：message_cb 可能在阻塞调用内部重入触发；message_cb 内
- * 不得再调阻塞宿主 API。库绝不以 DEFAULT 模式跑、也绝不 close 宿主 loop。
+ * 线程模型（M-P7 主权裁决，翻转 M-P6 的 cfg.uv_loop 注入契约）：库完全自管
+ * 线程与 loop——宿主侧句柄（pipe 读泵、tx spill timer、wake async）挂库内
+ * rt->loop，由库泵线程独占泵；阻塞 API（ping/wait_idle/destroy）在调用线程
+ * 自旋等泵线程回填的原子标志，绝不触碰 loop。主RT 挂死时三级终止的墙钟冻结
+ * 落在**泵线程**（I5②：调用线程只等 join），宿主事件系统不受牵连。邮箱写入
+ * 用 MPSC + eventfd（msgq.c），与泵线程无竞争。
  *
- * Design: docs/plans/2026-09-04-multi-process-model.md §3.3, §6, §9.2, M-P2.
+ * Design: docs/plans/2026-09-04-multi-process-model.md §3.3, §6, §9.2, M-P2/M-P7.
  */
 
 #include "qz_internal.h"
@@ -29,17 +30,6 @@
 #include <errno.h>
 #include <sched.h>
 #include <cJSON.h>
-
-/* ── 就地泵宿主 loop（等待阻塞标志时用）──
- * 无库侧宿主线程后，「等某标志被读泵回填」的自旋必须自己推进 loop：
- * NOWAIT 处理已就绪事件（pipe 帧、spill timer、wake async）即返回，
- * 未命中再 sched_yield 让位（与原线程后端自旋的 CPU 形态一致）。
- * 绝不用 UV_RUN_DEFAULT——loop 属宿主。 */
-static void host_pump(qz_t *rt)
-{
-    uv_run(rt->host_loop, UV_RUN_NOWAIT);
-    sched_yield();
-}
 
 /* ── 跨层 liveness ping/pong（宿主→树中任意 worker，§8.2 path 寻址）──
  *
@@ -91,7 +81,8 @@ int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
             return -1;  /* pfail：转发失败/路径不存在/通道死 */
         if (qz_now_ms() >= deadline) return 1;   /* 超时 = 目标 loop 阻塞 */
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE)) return -1;
-        host_pump(rt);   /* PONG/pfail 经宿主 loop 读泵回填，须就地泵 */
+        /* PONG/pfail 由库泵线程的读泵回填；调用线程只自旋（M-P7：不泵环）。 */
+        sched_yield();
     }
 }
 
@@ -132,13 +123,14 @@ static char *host_write_script(const char *code)
     return host_write_blob(code, strlen(code));
 }
 
-/* ── 入站回调（宿主 loop 线程，读泵内）──
- * 信封解码结果 → 宿主语义：
+/* ── 入站分发（泵线程，读泵内）──
+ * 信封解码结果 → 宿主语义（全部入邮箱，库不调用任何宿主函数）：
  *   payload == NULL → 主RT 已退出/死亡（EOF，proc 已收尸）；
- *   kind == MESSAGE → message_cb；
- *   kind == CONTROL → M-P2 协议（idle ack）就地消化；其余 CONTROL
- *   （控制面回执等）同样交 message_cb，与线程后端一致。
- * READY 不在此列：create 期已由 qz_proc_wait_ready_raw 同步吃掉。 */
+ *   kind == MESSAGE → 邮箱；
+ *   kind == CONTROL → M-P2 协议（idle ack / pong / pfail）就地消化；其余
+ *   CONTROL（控制面回执等）同样入邮箱，与线程后端一致。
+ * READY 不在此列：create 期已由 qz_proc_wait_ready_raw 同步吃掉；pre-ready
+ *   帧由 start_read_cb 重放路径入邮箱（qz_create 返回前即就位）。 */
 static void host_proc_msg_cb(void *user, int8_t kind, int32_t source,
                              int32_t corr,
                              const uint8_t *payload, uint32_t len)
@@ -148,11 +140,13 @@ static void host_proc_msg_cb(void *user, int8_t kind, int32_t source,
     QZ_UNUSED(corr);
 
     if (!payload) {
-        /* 主RT 退出：宿主 loop 收束，wait_idle/destroy 的 join 随之返回。
-         * 未 ready 即死 → ready_err（qz_create 显式失败，不静默降级 §5.3）。
+        /* 主RT 退出：泵线程收束（DEAD 检测/flag），wait_idle/destroy 的
+         * join 随之返回。未 ready 即死 → ready_err（qz_create 显式失败，
+         * 不静默降级 §5.3）。
          * M-P4 §9.3 崩溃检测：已 ready 且属非预期退出（既非 idle 自退 ack、
-         * 又非宿主主动 shutdown）→ message_cb 收 {"type":"error",...}，宿主
-         * 据此决定重启还是报错退出；qz_wait_idle 随之立即返回。 */
+         * 又非宿主主动 shutdown）→ 错误帧入邮箱，宿主 wait_idle 后首条
+         * recv 即得。时序（G）：先入箱、后置 shutting_down——wait_idle 的
+         * acquire 自旋退出时帧必然已在箱内。 */
         int was_ready = __atomic_load_n(&rt->thread_ready, __ATOMIC_ACQUIRE);
         int expected = __atomic_load_n(&rt->idle_ack, __ATOMIC_ACQUIRE) ||
                        __atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE);
@@ -160,12 +154,12 @@ static void host_proc_msg_cb(void *user, int8_t kind, int32_t source,
             rt->ready_err = -1;
             __atomic_store_n(&rt->thread_ready, 1, __ATOMIC_RELEASE);
         }
-        __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
-        if (was_ready && !expected && rt->config.message_cb) {
+        if (was_ready && !expected) {
             static const char *kExitErr =
                 "{\"type\":\"error\",\"error\":\"main-runtime-process-exited-unexpectedly\"}";
-            rt->config.message_cb(rt, kExitErr, strlen(kExitErr), rt->host_data);
+            qz_out_push(rt, kExitErr, strlen(kExitErr));
         }
+        __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
         return;
     }
 
@@ -181,7 +175,7 @@ static void host_proc_msg_cb(void *user, int8_t kind, int32_t source,
              * pong_seq 供 qz_ping_path 配对——单跳 qz_ping 的 seq 与跨层
              * seq 同源单调，两 API 都按「pong_seq >= seq」判定，无需第二槽
              * 位。无 tp 的 PONG 不可能是过境帧（tp 只由 qz_ping_path 下
-             * 发），语义不变。PONG 不进 message_cb。 */
+             * 发），语义不变。PONG 不入邮箱。 */
             __atomic_store_n(&rt->pong_seq, (int32_t)corr, __ATOMIC_RELEASE);
             return;
         }
@@ -193,24 +187,11 @@ static void host_proc_msg_cb(void *user, int8_t kind, int32_t source,
         }
     }
 
-    if (rt->config.message_cb) {
-        /* 与 THREAD 后端（qz_msg_push 的 len+1 拷贝）同语义：message_cb 收到
-         * NUL 终止的 JSON（len 不含终止符）。信封 payload 是 rbuf 视图，
-         * 不可就地终止，做一次拷贝。拷贝失败不静默吞消息——至少留诊断。 */
-        char *copy = (char *)malloc((size_t)len + 1);
-        if (!copy) {
-            fprintf(stderr, "qzjs: message_cb payload OOM, dropped %u bytes\n",
-                    len);
-            return;
-        }
-        memcpy(copy, payload, len);
-        copy[len] = '\0';
-        rt->config.message_cb(rt, copy, len, rt->host_data);
-        free(copy);
-    }
+    /* 与线程后端同语义的 payload 拷贝在 qz_out_push 内完成（len+1、NUL）。 */
+    qz_out_push(rt, (const char *)payload, len);
 }
 
-/* ── 出站唤醒（宿主 loop 线程）──
+/* ── 入站唤醒（泵线程）──
  * 排空宿主入站 FIFO → 装信封写通道。FIFO 有序性是 idle 协议的基础：CONTROL{idle}
  * 与宿主消息同队列同序，主RT 收到 idle 请求时其前面的宿主消息必然已入通道
  * （§6.1 的「未决写计数 W」由单通道有序性保证，无需显式计数）。 */
@@ -237,55 +218,75 @@ static void host_wake_cb(uv_async_t *a)
     }
 }
 
-/* ── 宿主侧拆除（wait_idle / destroy / create 失败共用，thread_joined 幂等）──
- * 无库侧线程后不再「通知线程退出 + join」，改为在调用线程上收束：
- *   shutting_down（host_wake_cb/qz_host_post 短路，EOF 路径同置此标志）
- *   → 关 wake → 三级终止主RT（§9.2；挂死主RT 最坏 ≤2s 冻结落在调用线程，
- *   I5 已知偏差的宿主侧形态）→ qz_proc_free（uv_close pipe+tx timer，proc
- *   内存在最后一个 close 回调里释放）→ 两轮 NOWAIT 排干收 close 回调。
- * 绝不 UV_RUN_DEFAULT / uv_loop_close——loop 属宿主。 */
-static void host_teardown(qz_t *rt)
+/* ── 库宿主侧泵线程（M-P2 形态回归）──
+ * 只做通道 I/O（JS 在主RT 进程里跑）+ 出站入邮箱。退出路径上由本线程
+ * 独占收束：三级终止主RT（§9.2，挂死主RT 的 ≤2s 墙钟冻结落在这里，调用
+ * 线程只 join——I5② clause 复活）→ 关句柄 → 排干 close 回调 → 收 loop。 */
+static void host_thread_main(void *arg)
 {
-    if (__atomic_load_n(&rt->thread_joined, __ATOMIC_ACQUIRE)) return;
+    qz_t *rt = (qz_t *)arg;
 
-    __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
-    if (rt->wake.loop && !uv_is_closing((uv_handle_t *)&rt->wake))
-        uv_close((uv_handle_t *)&rt->wake, NULL);
+    while (!__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE)) {
+        uv_run(&rt->loop, UV_RUN_ONCE);
+        if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE)) break;
+        /* 主RT 退出（idle 自退 / 崩溃）→ 通道 EOF → proc DEAD → 泵线程收束。 */
+        if (rt->proc && rt->proc->state == QZ_PROC_DEAD) {
+            __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
+            break;
+        }
+    }
+
     /* msgq 约定：pop 只释放上一个 head，最后被消费（或未消费）的节点恒挂
-     * msg_head——与 qz_thread_teardown 步 1 同款收尾：排干入站队列并释放尾
-     * 挂节点，否则最后一条 CONTROL{idle} 随 rt 一起漏出。消费线程即调用
-     * 线程（宿主泵），shutting_down 已置，无并发消费者。 */
+     * msg_head——排干入站队列并释放尾挂节点（否则最后一条 CONTROL{idle}
+     * 随 rt 一起漏出）。本线程是入站 FIFO 的最后消费者，shutting_down 已置。 */
     qz_msg_t *m;
     while ((m = qz_msg_pop(rt)) != NULL) {}
     if (rt->msg_head != &rt->msg_stub) qz_msg_free(rt->msg_head);
     rt->msg_head = &rt->msg_stub;
+
+    /* 主RT 若仍活着（destroy 路径）：三级终止（§9.2）——CONTROL{shutdown} →
+     * 超时 → SIGKILL + waitpid 收尸。等价于线程后端的 join：destroy 阻塞到
+     * 主RT 真正退出（最坏 = 终止超时），但冻结在本线程。 */
     if (rt->proc) {
         qz_proc_terminate(rt->proc, QZ_IPC_TERMINATE_TIMEOUT_MS);
         qz_proc_free(rt->proc);
         rt->proc = NULL;
     }
-    /* libuv 保证 uv_close 回调在下一轮 uv_run 内处理；两轮封顶。 */
-    uv_run(rt->host_loop, UV_RUN_NOWAIT);
-    uv_run(rt->host_loop, UV_RUN_NOWAIT);
+    if (!uv_is_closing((uv_handle_t *)&rt->wake))
+        uv_close((uv_handle_t *)&rt->wake, NULL);
+    uv_run(&rt->loop, UV_RUN_DEFAULT);   /* close 回调（含 proc reclaim）跑完 */
+    uv_loop_close(&rt->loop);
 
-    __atomic_store_n(&rt->thread_joined, 1, __ATOMIC_RELEASE);
+    if (!__atomic_load_n(&rt->thread_ready, __ATOMIC_ACQUIRE)) {
+        rt->ready_err = -1;
+        __atomic_store_n(&rt->thread_ready, 1, __ATOMIC_RELEASE);
+    }
+}
+
+/* 停泵线程并收尾（不释放 rt —— 调用方决定是 create 失败清理还是 destroy）。
+ * thread_joined 幂等门：双 join 是 UB。 */
+static void host_stop_thread(qz_t *rt)
+{
+    if (!__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
+        uv_async_send(&rt->wake);
+    }
+    if (!__atomic_load_n(&rt->thread_joined, __ATOMIC_ACQUIRE)) {
+        uv_thread_join(&rt->thread);
+        __atomic_store_n(&rt->thread_joined, 1, __ATOMIC_RELEASE);
+    }
 }
 
 int qz_host_start(qz_t *rt)
 {
-    /* 宿主注入 loop（M-P6 裁决）：ISOLATED 下缺失 = 显式失败，不降级（§5.3）。 */
-    rt->host_loop = (uv_loop_t *)(uintptr_t)rt->config.uv_loop;
-    rt->host_data = rt->config.host_data;
-    if (!rt->host_loop) {
-        fprintf(stderr,
-                "qzjs: cfg->uv_loop must be a host-owned uv_loop_t under "
-                "QZ_PROCESS_MODEL=ISOLATED (no library-owned host thread)\n");
-        return -1;
-    }
+    /* loop 必须先 init：qz_proc_spawn 用 parent->loop 做 uv_pipe_init。 */
+    if (uv_loop_init(&rt->loop) != 0) return -1;
 
     char *tmp = host_write_script(rt->config.initial_script);
-    if (rt->config.initial_script && !tmp)
+    if (rt->config.initial_script && !tmp) {
+        uv_loop_close(&rt->loop);
         return -1;
+    }
     /* 字节码与脚本独立叠加（先脚本后字节码，同 qzjs.h 语义）：各自写
      * 临时文件，经 --script / --bytecode 传给主RT。 */
     char *bc_tmp = NULL;
@@ -294,6 +295,7 @@ int qz_host_start(qz_t *rt)
                                  rt->config.initial_bytecode_len);
         if (!bc_tmp) {
             if (tmp) { unlink(tmp); free(tmp); }
+            uv_loop_close(&rt->loop);
             return -1;
         }
     }
@@ -335,6 +337,7 @@ int qz_host_start(qz_t *rt)
     if (!rt->proc) {
         if (tmp) { unlink(tmp); free(tmp); }
         if (bc_tmp) { unlink(bc_tmp); free(bc_tmp); }
+        uv_loop_close(&rt->loop);
         return -1;
     }
 
@@ -347,16 +350,17 @@ int qz_host_start(qz_t *rt)
     if (rc != 0) {
         qz_proc_free(rt->proc);
         rt->proc = NULL;
+        uv_loop_close(&rt->loop);
         return -1;
     }
 
     /* ready 握手：主RT 先 eval 初始脚本再 emit ready（rt_main.c），顶层
      * postMessage 帧可先于 CONTROL{ready} 落通道。在读泵注册之前用阻塞
-     * raw-fd 帧读逐帧吃到 ready——不泵宿主 loop、不触发 message_cb；
-     * ready 前的帧暂存，随后由 start_read_cb 同步 FIFO 重放（发生在
-     * qz_create 返回前，仍在调用线程上）。
-     * ready:0 / EOF / 超时 / 解码失败 / pre-ready 帧超上限 = 显式失败
-     * （§5.3，不静默降级）。 */
+     * raw-fd 帧读逐帧吃到 ready——ready 前的帧暂存（超上限 = 协议异常，
+     * 显式失败 §5.3），随后由 start_read_cb 重放路径直接入邮箱（发生在
+     * qz_create 返回前，仍在调用线程上；邮箱是 MPSC + fd 信号，与泵线程
+     * 启动后的写入无竞争，也无需 wake async——pre-ready 重放不回发唤醒）。
+     * ready:0 / EOF / 超时 / 解码失败 = 显式失败（§5.3，不静默降级）。 */
     int ready_ok = 0;
     int rw = qz_proc_wait_ready_raw(rt->proc,
                                       qz_now_ms() + QZ_IPC_HANDSHAKE_TIMEOUT_MS,
@@ -365,25 +369,40 @@ int qz_host_start(qz_t *rt)
         fprintf(stderr, "qzjs: mainRT ready handshake failed (%s)\n",
                 rw < 0 ? "read error / EOF / timeout" : "ready reported error");
         rt->ready_err = -1;
-        host_teardown(rt);
+        if (rt->proc) { qz_proc_free(rt->proc); rt->proc = NULL; }
+        uv_run(&rt->loop, UV_RUN_DEFAULT);
+        uv_loop_close(&rt->loop);
         return -1;
     }
     __atomic_store_n(&rt->thread_ready, 1, __ATOMIC_RELEASE);
 
-    /* wake 必须先于 start_read_cb 初始化：start_read_cb 注册读泵后立即同步
-     * 重放 pre-ready 帧——其 message_cb 若调 qz_post_message，qz_msg_push 会
-     * uv_async_send(&rt->wake)；wake 未 init（loop==NULL）即空指针崩溃。
-     * 重放期的投递照常入队，创建返回后由宿主首泵经 host_wake_cb 装机发送。 */
+    /* wake 必须先于 start_read_cb 初始化（H1 不变量，M-P6 教训保留）：
+     * start_read_cb 注册读泵后立即同步重放 pre-ready 帧——重放消息若触发
+     * 任何 uv 路径或后续调用方 post，wake 未 init（loop==NULL）即空指针
+     * 崩溃；泵线程启动同样以 wake 就绪为前提。 */
     rt->wake.data = rt;
-    if (uv_async_init(rt->host_loop, &rt->wake, host_wake_cb) != 0) {
+    if (uv_async_init(&rt->loop, &rt->wake, host_wake_cb) != 0) {
         rt->ready_err = -1;
-        host_teardown(rt);
+        if (rt->proc) { qz_proc_free(rt->proc); rt->proc = NULL; }
+        uv_run(&rt->loop, UV_RUN_DEFAULT);
+        uv_loop_close(&rt->loop);
         return -1;
     }
 
-    /* 入站：信封 → host_proc_msg_cb（读泵跑在泵宿主 loop 的线程）+
-     * pre-ready 帧同步重放（见上）。 */
+    /* 入站：信封 → host_proc_msg_cb（读泵在库泵线程）+ pre-ready 帧同步
+     * 重放入邮箱（见上）。 */
     qz_proc_start_read_cb(rt->proc, host_proc_msg_cb, rt);
+
+    if (uv_thread_create(&rt->thread, host_thread_main, rt) != 0) {
+        rt->ready_err = -1;
+        __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
+        if (rt->proc) { qz_proc_free(rt->proc); rt->proc = NULL; }
+        if (!uv_is_closing((uv_handle_t *)&rt->wake))
+            uv_close((uv_handle_t *)&rt->wake, NULL);
+        uv_run(&rt->loop, UV_RUN_DEFAULT);
+        uv_loop_close(&rt->loop);
+        return -1;
+    }
     return 0;
 }
 
@@ -409,21 +428,23 @@ void qz_host_wait_idle(qz_t *rt)
                       QZ_MSG_SRC_HOST, 1) == 0)
         uv_async_send(&rt->wake);
 
-    /* 阻塞至 ack 或 EOF（§6.1）。无库线程后由本调用就地泵宿主 loop：
-     * host_wake_cb 排空 FIFO 把 idle 请求发出去、读泵收 ack/EOF 回填标志；
-     * 崩溃 EOF 的 message_cb {"type":"error"} 上报也随之在本调用内触发
-     * （CLI/宿主依赖此时序）。 */
+    /* 阻塞至 ack 或 EOF（§6.1），再 join：主RT 排空后回 ack 并自身退出，
+     * 泵线程见 EOF/DEAD 收束 → join 返回（对应线程后端 join RT 线程）。
+     * 崩溃 EOF 的错误帧先于 shutting_down 入箱（host_proc_msg_cb 时序 G），
+     * 自旋退出时帧必然已在邮箱——wait_idle 返回后、free 前 recv 即得。 */
     while (!__atomic_load_n(&rt->idle_ack, __ATOMIC_ACQUIRE) &&
            !__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE))
-        host_pump(rt);
-    host_teardown(rt);
+        sched_yield();
+    uv_thread_join(&rt->thread);
+    __atomic_store_n(&rt->thread_joined, 1, __ATOMIC_RELEASE);
 }
 
-/* ── Liveness ping（宿主→主RT,检测对端 uv loop 是否阻塞）──
- * 发 CONTROL{"qzjs":1,"ping":1}（corr = 单调 seq）→ 阻塞等待 PONG（对端
- * C 层读泵就地直回,不经 JS/msgq）→ 回显 seq 命中 = loop 通畅;deadline 内
- * 未命中 = 对端 loop 阻塞（或死亡——死亡另有 EOF 路径）。单飞行:同一 rt
- * 同时只有一个 ping 在途（宿主线程 API,线程不安全由调用方保证）。 */
+/* ── Liveness ping（宿主→主RT，检测对端 uv loop 是否阻塞）──
+ * 发 CONTROL{"qzjs":1,"ping":1}（corr = 单调 seq）→ 自旋等待 PONG（对端
+ * C 层读泵就地直回,不经 JS/msgq；回填由库泵线程完成）→ 回显 seq 命中 =
+ * loop 通畅;deadline 内未命中 = 对端 loop 阻塞（或死亡——死亡另有 EOF
+ * 路径）。单飞行:同一 rt 同时只有一个 ping 在途（宿主线程 API,线程不安全
+ * 由调用方保证）。 */
 int qz_ping(qz_t *rt, int32_t timeout_ms)
 {
     if (!rt || rt->magic != QZ_MAGIC) return -1;
@@ -441,7 +462,7 @@ int qz_ping(qz_t *rt, int32_t timeout_ms)
     while (__atomic_load_n(&rt->pong_seq, __ATOMIC_ACQUIRE) < seq) {
         if (qz_now_ms() >= deadline) return 1;   /* 超时 = 对端 loop 阻塞 */
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE)) return -1;
-        host_pump(rt);   /* PONG 经宿主 loop 读泵回填，须就地泵 */
+        sched_yield();
     }
     return 0;   /* deadline 内 PONG 命中 = 对端 loop 通畅 */
 }
@@ -449,7 +470,8 @@ int qz_ping(qz_t *rt, int32_t timeout_ms)
 void qz_host_destroy(qz_t *rt)
 {
     if (!rt || rt->magic != QZ_MAGIC) return;
-    host_teardown(rt);   /* 终止主RT + 收尸 + close 排干（幂等，wait_idle 已做则立即返回） */
+    host_stop_thread(rt);   /* 主RT 终止+收尸在泵线程内完成，这里只 join */
+    qz_mailbox_teardown(rt);
     free((void *)rt->config.initial_script);
     free((void *)rt->config.initial_bytecode);
     free(rt);

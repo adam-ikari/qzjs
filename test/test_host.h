@@ -1,4 +1,6 @@
-// test_host.h — 新宿主契约测试桩（gtest 用）
+// test_host.h — 新宿主契约测试桩（gtest 用）。
+// M-P7：库不调用宿主函数——出站消息经 qz_recv_message 邮箱消费，shim 把
+// 箱内消息抽进本地 FIFO（单线程测试宿主 = 天然单消费者，无锁）。
 #pragma once
 #include "qzjs/qzjs.h"
 #ifdef QZ_USE_MOCK_LIBUV
@@ -42,20 +44,21 @@ static inline std::string JSON_string(const char *s) {
 
 struct HostCtx {
     qz_t *rt = nullptr;
-    uv_mutex_t m; uv_cond_t c;
-    std::deque<std::string> inbox;   /* lock-guarded message FIFO (no overwrite loss) */
-    long replies = 0;                /* lock-guarded message_cb count */
+    std::deque<std::string> inbox;   /* 邮箱抽取的本地 FIFO（单线程宿主，无锁） */
+    long replies = 0;                /* 累计收到的消息数 */
     int eval_id = 0;                 /* 递增 eval 请求 id，用于响应配对 */
 };
 
-static inline void host_msg_cb(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)rt;
-    auto *h = (HostCtx*)data;
-    uv_mutex_lock(&h->m);
-    h->inbox.emplace_back(json, len);
-    h->replies++;
-    uv_cond_signal(&h->c);
-    uv_mutex_unlock(&h->m);
+// 抽邮箱进本地 inbox（单消费者）；timeout_ms > 0 时首条至多等这么久。
+static inline void host_fill(HostCtx *h, int timeout_ms = 0) {
+    for (;;) {
+        char *json = nullptr; size_t len = 0;
+        if (qz_recv_message(h->rt, &json, &len, timeout_ms) != 0) return;
+        h->inbox.emplace_back(json, len);
+        qz_free_message(json);
+        h->replies++;
+        timeout_ms = 0;   /* 首条已到 → 其余纯排干 */
+    }
 }
 
 // 标准测试引导脚本：onmessage 命令通道（eval/echo）。
@@ -76,11 +79,8 @@ globalThis.onmessage = function (e) {
 
 static inline HostCtx *host_create(const char *script = kTestBootstrap) {
     auto *h = new HostCtx();
-    uv_mutex_init(&h->m); uv_cond_init(&h->c);
     qz_config_t cfg = {};
     cfg.initial_script = script;
-    cfg.message_cb = host_msg_cb;
-    cfg.host_data = h;
     h->rt = qz_create(&cfg);
     if (!h->rt) { delete h; return nullptr; }
     return h;
@@ -89,7 +89,6 @@ static inline HostCtx *host_create(const char *script = kTestBootstrap) {
 static inline void host_destroy(HostCtx *h) {
     if (!h) return;
     qz_destroy(h->rt);
-    uv_cond_destroy(&h->c); uv_mutex_destroy(&h->m);
     delete h;
 }
 
@@ -104,28 +103,26 @@ static inline void host_destroy(HostCtx *h) {
 
 // 等待宿主收到一条消息；返回 true 并把内容写进 out。timeout_ms 内没到则 false。
 static inline bool host_wait_msg(HostCtx *h, std::string *out, int timeout_ms = 5000) {
-    uv_mutex_lock(&h->m);
-    while (h->inbox.empty()) {
-        if (uv_cond_timedwait(&h->c, &h->m, timeout_ms) != 0) {
-            /* 超时：丢弃堆积的 eval 响应残留，防止下一条 eval 弹出旧响应导致
-             * 消息错位（一条 eval 超时后，其响应稍后到达会留在 inbox，污染
-             * 后续所有 host_eval 的"发一条/等一条"配对）。只清 eval 响应
-             * （{"ok":…} / {"type":"error…}），保留 worker/异步回调等其他
-             * 消息，避免误删其他测试依赖的异步消息。 */
-            while (!h->inbox.empty()) {
-                const std::string &f = h->inbox.front();
-                if (f.compare(0, 6, "{\"ok\":") == 0 || f.compare(0, 16, "{\"type\":\"error") == 0)
-                    h->inbox.pop_front();
-                else break;
-            }
-            uv_mutex_unlock(&h->m);
-            return false;
-        }
+    // 本地 FIFO 空 → 抽邮箱（poll 语义在 recv 内部：首条至多等 timeout_ms）。
+    if (h->inbox.empty()) host_fill(h, timeout_ms);
+    if (!h->inbox.empty()) {
+        *out = std::move(h->inbox.front());
+        h->inbox.pop_front();
+        return true;
     }
-    *out = std::move(h->inbox.front());
-    h->inbox.pop_front();
-    uv_mutex_unlock(&h->m);
-    return true;
+    /* 超时：丢弃堆积的 eval 响应残留，防止下一条 eval 弹出旧响应导致
+     * 消息错位（一条 eval 超时后，其响应稍后到达会留在 inbox，污染
+     * 后续所有 host_eval 的"发一条/等一条"配对）。只清 eval 响应
+     * （{"ok":…} / {"type":"error…}），保留 worker/异步回调等其他
+     * 消息，避免误删其他测试依赖的异步消息。 */
+    host_fill(h, 0);
+    while (!h->inbox.empty()) {
+        const std::string &f = h->inbox.front();
+        if (f.compare(0, 6, "{\"ok\":") == 0 || f.compare(0, 16, "{\"type\":\"error") == 0)
+            h->inbox.pop_front();
+        else break;
+    }
+    return false;
 }
 
 // 宿主对 qzjs 求值（经命令通道）；返回 {ok, v|e} 的原始 JSON。
@@ -152,8 +149,8 @@ static inline bool host_eval(HostCtx *h, const char *code, std::string *out, int
 }
 
 /* ── CTL-0 控制面 helpers ──
- * 回执经 message_cb 进 inbox（顶层 "ctl":true 标记），与普通 postMessage
- * 输出分流。等待时跳过非 ctl 回执（eval 响应等），按 correl 配对。 */
+ * 回执经邮箱进 inbox（顶层 "ctl":true 标记），与普通 postMessage 输出分流。
+ * 等待时跳过非 ctl 回执（eval 响应等），按 correl 配对。 */
 
 // 发送控制命令。返回 0 成功，-1 失败（OFF 档等）。
 static inline int host_control(HostCtx *h, const std::string &json) {
@@ -179,22 +176,14 @@ static inline bool host_wait_ctl(HostCtx *h, const char *correl,
         int remain = (int)(deadline - mono_ms());
         if (remain <= 0) {
             /* 超时：把跳过的消息放回 inbox，避免污染后续测试 */
-            uv_mutex_lock(&h->m);
             for (auto it = skip.rbegin(); it != skip.rend(); ++it)
                 h->inbox.push_front(*it);
-            uv_mutex_unlock(&h->m);
             return false;
         }
         std::string raw;
         if (!host_wait_msg(h, &raw, remain)) {
-            uv_mutex_lock(&h->m);
-            bool restored = false;
-            for (auto it = skip.rbegin(); it != skip.rend(); ++it) {
+            for (auto it = skip.rbegin(); it != skip.rend(); ++it)
                 h->inbox.push_front(*it);
-                restored = true;
-            }
-            uv_mutex_unlock(&h->m);
-            (void)restored;
             return false;
         }
         if (raw.compare(0, 11, "{\"ctl\":true") == 0) {

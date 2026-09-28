@@ -88,11 +88,12 @@ static void child_wake_cb(uv_async_t *a)
 }
 
 /* ── 主RT 形态：宿主边界出站（§6.2）──
- * bridge.c 的宿主 postMessage 路径调 config.message_cb（JSON 文本），此处把它
- * 装成 MESSAGE 信封上行给宿主。跑在 JS 线程 = loop 线程，tx 写路径单线程独占。 */
-static void server_emit_cb(qz_t *rt, const char *json, size_t len, void *data)
+ * bridge.c / control.c 的出站路径走 qz_post_to_host 漏斗，主RT 子进程把
+ * rt->host_emit 挂成本函数（JSON 文本），装成 MESSAGE 信封上行给宿主。
+ * 跑在 JS 线程 = loop 线程，tx 写路径单线程独占。 */
+static void server_emit_cb(qz_t *rt, const char *json, size_t len)
 {
-    QZ_UNUSED(rt); QZ_UNUSED(data);
+    QZ_UNUSED(rt);
     qz_ipc_child_emit(QZ_IPC_MAIN_ID, QZ_IPC_HOST_ID,
                         IPC_ENV_KIND_MESSAGE,
                         0,
@@ -676,15 +677,20 @@ int main(int argc, char **argv)
     rt->config.control_plane = 0;
     rt->msg_head = &rt->msg_stub;
     rt->msg_tail = &rt->msg_stub;
+    /* 子进程不消费邮箱（出站经 host_emit 上行 / worker 丢弃）：out_efd
+     * 显式 -1，防 calloc 的 0 被误当 fd 写（= stdin）。 */
+    qz_out_mq_init(rt);
+    rt->out_efd = -1;
 
     qz_worker_t *w = NULL;
 
     /* 运行时角色：worker 形态标记 worker_self（bridge.c 的 pal 按 worker 绑定）；
      * 主RT 形态保持 worker_self == NULL = 父运行时语义（可自行 spawn worker
-     * 进程 = §1.1 树形拓扑的主RT 层），并把宿主边界出站接到信封上行。 */
+     * 进程 = §1.1 树形拓扑的主RT 层），并把宿主边界出站钩子接成信封上行
+     * （M-P7：内部钩子，非公共回调）。 */
     if (is_server) {
         if (worker_backend >= 0) rt->config.worker_backend = worker_backend;
-        rt->config.message_cb = server_emit_cb;
+        rt->host_emit = server_emit_cb;
     } else {
         /* qzjs-rt --qzjs-worker 进程按构造即 PROCESS 后端 worker（THREAD
          * worker 是同进程线程，不 exec 本二进制）。强制置位让 worker 侧

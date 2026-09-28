@@ -29,15 +29,11 @@
  * 与 workers ×N 平级挂在同一 rt」的公开可观测入口（§14.1 两张表）。 */
 static HostCtx *host_create_ctl_plane(int plane) {
     auto *h = new HostCtx();
-    uv_mutex_init(&h->m); uv_cond_init(&h->c);
     qz_config_t cfg = {};
     cfg.initial_script = kTestBootstrap;
-    cfg.message_cb = host_msg_cb;
-    cfg.host_data = h;
     cfg.control_plane = plane;
     h->rt = qz_create(&cfg);
     if (!h->rt) {
-        uv_cond_destroy(&h->c); uv_mutex_destroy(&h->m);
         delete h;
         return nullptr;
     }

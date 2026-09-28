@@ -6,22 +6,20 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <qzjs/qzjs.h>
-#include <uv.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <poll.h>
+#include <stdint.h>
 
 #define QZ_CLI_VERSION "qzjs 0.2.0"
 
-/* ISOLATED 生产构建：宿主侧无库线程，message_cb 跑在泵 cfg.uv_loop 的线程
- * ——CLI 因此自建并泵一个 uv loop（dogfood 宿主用 uv 公共库，不碰内部头）。
- * THREAD 构建 / mock 测试构建：库自带线程泵，CLI 维持 sched_yield 自旋。 */
-#if defined(QZ_PROCESS_MODEL_ISOLATED) && !defined(QZ_USE_MOCK_LIBUV)
-#define QZ_CLI_HOSTS_UV_LOOP 1
-#endif
+/* M-P7：CLI 是零 libuv 的纯 poll 宿主——不调任何 uv API，出站消息经
+ * qz_recv_message 邮箱消费（两个进程模型同一姿势）。qzjs 库自管线程与
+ * loop，CLI 只等自己的邮箱 fd。 */
 
 /* CTL-2：控制面档位 / 端点路径（--control-plane / --control-pipe，main 解析、
  * run_code 应用到 qz_config_t）。-1 = 缺省（OFF）。 */
@@ -70,7 +68,7 @@ typedef struct {
  *
  * 为何留在 CLI（不引 cJSON、不走 JS_ParseJSON）：cli.c 刻意
  * 只 include 公共头 qzjs/qzjs.h，是 libqzjs 的 dogfood 宿主（引擎内部
- * API 与库内部依赖均不可见）；message_cb 在宿主回调窗口，不在引擎内。
+ * API 与库内部依赖均不可见）；邮箱消费在宿主自己的等待循环里，不在引擎内。
  * 裁决：docs/architecture/c-js-layering.md §6.6。 */
 static int json_unescape(const char *s, char *out, size_t out_cap) {
     if (!s || *s != '"') {
@@ -128,19 +126,17 @@ static int json_unescape(const char *s, char *out, size_t out_cap) {
     return (int)n;
 }
 
-/* message_cb: ISOLATED = runs on the thread pumping the CLI's own uv loop
- * (可能经 qz_wait_idle/qz_destroy 的内部泵重入); THREAD = qzjs internal thread.
+/* 邮箱消费（M-P7）：宿主从 qz_recv_message 取出的 JSON 在此解码。
  * CLI receives eval results.
  * json: {"ok":true,"v":"..."} or {"ok":false,"e":"..."}.
  * Decodes the v/e payload into host->result for printing by the caller
  * (script mode prints errors to stderr; the REPL prints every result). */
-static void cli_message_cb(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)data;    cli_host_t *h = (cli_host_t *)qz_get_runtime_data(rt);
+static void cli_consume_msg(cli_host_t *h, const char *json, size_t len) {
     if (!h) return;
     /* 精确判断：信封由 JSON.stringify 生成，无空格，恒以 {"ok":true 或
      * {"ok":false 开头。不能用 strstr 子串匹配 —— 错误消息/成功值的正文里
      * 可能含 "ok":false 字样导致误判。
-     * M-P4 §9.3：主RT 意外退出时 message_cb 收 {"type":"error","error":<msg>}
+     * M-P4 §9.3：主RT 意外退出时邮箱收 {"type":"error","error":<msg>}
      * （rt_host.c 崩溃检测）——同样精确前缀判定，如实上抛（打印 + 退出码 1），
      * 与 bad-json 路径（qz_dispatch_message）同形。 */
     if (strncmp(json, "{\"type\":\"error\"", 14) == 0) {
@@ -181,6 +177,43 @@ static void cli_message_cb(qz_t *rt, const char *json, size_t len, void *data) {
         h->exit_code = 0;
     }
     __atomic_store_n(&h->done, 1, __ATOMIC_RELEASE);
+}
+
+/* ── 邮箱消费协议（qzjs.h mailbox 段）：①排干 recv(0) → ②清 fd 计数至
+ * EAGAIN → ③复核 recv(0)，有则回①，无方可 poll。done（可选谓词）命中即
+ * 早退。返回 1 = done 命中。 */
+static int cli_drain_mbox(qz_t *rt, cli_host_t *h,
+                          int (*done)(const cli_host_t *)) {
+    int fd = qz_message_fd(rt);
+    for (;;) {
+        char *json = NULL; size_t len = 0;
+        if (qz_recv_message(rt, &json, &len, 0) != 0) return 0;
+        cli_consume_msg(h, json, len);
+        qz_free_message(json);
+        if (done && done(h)) return 1;
+        uint64_t cnt;
+        while (fd >= 0 && read(fd, &cnt, sizeof cnt) > 0) {}
+    }
+}
+
+/* 等 eval 回包（host.done）：排干 → poll 邮箱 fd → 复核，纯 poll 宿主，
+ * 无 uv 依赖。 */
+static int cli_done_flag(const cli_host_t *h) {
+    return __atomic_load_n(&h->done, __ATOMIC_ACQUIRE);
+}
+
+static void cli_wait_done(qz_t *rt, cli_host_t *h) {
+    for (;;) {
+        if (cli_drain_mbox(rt, h, cli_done_flag)) return;
+        int fd = qz_message_fd(rt);
+        if (fd < 0) { sched_yield(); continue; }   /* 无 fd 退化：轮询 */
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int rc = poll(&pfd, 1, 50);                /* 短 tick：done 也可由外部置位 */
+        if (rc > 0) {
+            uint64_t cnt;
+            while (read(fd, &cnt, sizeof cnt) > 0) {}
+        }
+    }
 }
 
 /* ── WinterTC bridge + onmessage command channel ──
@@ -340,10 +373,9 @@ static char *build_bootstrap(const char *const *args, int nargs) {
     return bootstrap;
 }
 
-/* shared execution path: create runtime → eval code → wait for result →
- * wait_idle → destroy. host is bound to rt via qz_set_runtime_data;
- * cli_message_cb fetches it with qz_get_runtime_data(rt) (callable
- * repeatedly; host is not shared). */
+/* shared execution path: create runtime → eval code → wait for result（邮箱
+ * 消费）→ wait_idle → 排干打印 → free. M-P7：CLI 是零 libuv 纯 poll 宿主，
+ * host 状态本地持有（无回调、无 runtime_data）。 */
 /* e2e/test hook: QZ_WORKER_BACKEND=process|thread 覆盖 worker 后端（缺省随编译
  * 模型：ISOLATED 编译 = PROCESS，THREAD 编译 = THREAD）。THREAD 覆盖用于 §1.5
  * 双后端 parity：同一脚本两后端跑一遍，stdout 逐行比对。 */
@@ -378,38 +410,21 @@ static int run_code(const char *code, const char *file,
     }
     qz_config_t cfg;
     memset(&cfg, 0, sizeof cfg);
-    cfg.message_cb = cli_message_cb;
     cfg.initial_script = bootstrap;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-    uv_loop_t loop;
-    if (uv_loop_init(&loop) != 0) {
-        fprintf(stderr, "qzjs: uv_loop_init failed\n");
-        free(bootstrap);
-        return 1;
-    }
-    cfg.uv_loop = &loop;   /* ISOLATED：message_cb 跑在泵这个 loop 的线程 */
-#endif
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
     if (!rt) {
         fprintf(stderr, "qzjs: runtime init failed\n");
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        uv_loop_close(&loop);
-#endif
         return 1;
     }
-    qz_set_runtime_data(rt, &host);
     char *cmd_json = json_escape(code);
     if (!cmd_json) {
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        uv_loop_close(&loop);
-#endif
         return 1;
     }
     char *file_json = file ? json_escape(file) : NULL;
@@ -418,9 +433,6 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        uv_loop_close(&loop);
-#endif
         return 1;
     }
     /* json_escape 上界 strlen*6+3，故按 cmd_json/file_json 实际长度 + 固定信封
@@ -433,9 +445,6 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        uv_loop_close(&loop);
-#endif
         return 1;
     }
     int wrote = snprintf(cmd, cmd_cap,
@@ -448,27 +457,16 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: out of memory\n");
         qz_wait_idle(rt);
         qz_free(rt);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        uv_loop_close(&loop);
-#endif
         return 1;
     }
     qz_post_message(rt, cmd, strlen(cmd));
     free(cmd);
 
-    /* 等 eval 回包。ISOLATED：泵自己的 loop（UV_RUN_ONCE 阻塞在事件上——
-     * wake async + 通道 pipe 恒活动，不会空转；message 到达即 message_cb →
-     * done）。THREAD：库线程泵 loop，此处维持自旋。 */
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-    while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
-        uv_run(&loop, UV_RUN_ONCE);
-#else
-    while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
-        sched_yield();
-#endif
+    /* 等 eval 回包：排干邮箱 → poll 唤醒 fd → 复核（消费协议）。 */
+    cli_wait_done(rt, &host);
     int exit_code = host.exit_code;
     if (exit_code) {
-        /* script error — cli_message_cb decoded the "e" payload into result */
+        /* script error — cli_consume_msg decoded the "e" payload into result */
         fprintf(stderr, "%s\n", host.result);
         host.reported = 1;
     }
@@ -476,19 +474,17 @@ static int run_code(const char *code, const char *file,
     /* wait for pending async work (fetch/timer) to complete; the runtime
      * auto-exits when the loop is empty and the thread is joined here. Do not
      * call qz_destroy after this (would double-join); free the struct only.
-     * M-P4 §9.3：主RT 在此期间崩溃（kill -9 / 段错误）→ 宿主 message_cb 收
-     * {type:'error'}（rt_host.c）——此刻补报（脚本自身错误已在上面打过，
-     * reported 去重），退出码取最终值（非零，宿主感知崩溃）。 */
+     * M-P4 §9.3：主RT 在此期间崩溃（kill -9 / 段错误）→ 错误帧入邮箱
+     * （rt_host.c，wait_idle 返回时必已就位）——此刻末次排干补报（脚本自身
+     * 错误已在上面打过，reported 去重），退出码取最终值（非零，宿主感知崩溃）。 */
     qz_wait_idle(rt);
+    cli_drain_mbox(rt, &host, NULL);
     if (host.exit_code && !host.reported) {
         fprintf(stderr, "%s\n", host.result);
         host.reported = 1;
     }
     exit_code = host.exit_code;
     qz_free(rt);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-    uv_loop_close(&loop);   /* 库句柄已在 wait_idle 内部泵中 close 完毕 */
-#endif
     return exit_code;
 }
 
@@ -506,30 +502,16 @@ static int repl_loop(void) {
     }
     qz_config_t cfg;
     memset(&cfg, 0, sizeof cfg);
-    cfg.message_cb = cli_message_cb;
     cfg.initial_script = bootstrap;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-    uv_loop_t loop;
-    if (uv_loop_init(&loop) != 0) {
-        fprintf(stderr, "qzjs: uv_loop_init failed\n");
-        free(bootstrap);
-        return 1;
-    }
-    cfg.uv_loop = &loop;
-#endif
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
     if (!rt) {
         fprintf(stderr, "qzjs: runtime init failed\n");
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        uv_loop_close(&loop);
-#endif
         return 1;
     }
-    qz_set_runtime_data(rt, &host);
     printf("%s (WinterTC runtime) — type JS, Ctrl-D to exit\n",
            QZ_CLI_VERSION);
     fflush(stdout);
@@ -570,26 +552,20 @@ static int repl_loop(void) {
         }
         qz_post_message(rt, cmd, strlen(cmd));
         free(cmd);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
-            uv_run(&loop, UV_RUN_ONCE);
-#else
-        while (!__atomic_load_n(&host.done, __ATOMIC_ACQUIRE))
-            sched_yield();
-#endif
+        cli_wait_done(rt, &host);
 
         printf("%s\n", host.result);
         fflush(stdout);
         if (host.exit_code) {
             exit_code = 1;
         }
+        /* 每轮清扫：fgets 阻塞期间到达的 console/异步回声不进 stdin 等待，
+         * 此处排干一次（含 fd 清理，防计数滞留让下轮 poll 空转）。 */
+        cli_drain_mbox(rt, &host, NULL);
     }
     printf("\n");
 
     qz_destroy(rt);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-    uv_loop_close(&loop);   /* destroy 内部泵已收完库句柄 close 回调 */
-#endif
     return exit_code;
 }
 
@@ -661,42 +637,25 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     if (!bootstrap) { free(bc); return 1; }
     qz_config_t cfg;
     memset(&cfg, 0, sizeof cfg);
-    cfg.message_cb = cli_message_cb;
     cfg.initial_script = bootstrap;
     cfg.initial_bytecode = bc;
     cfg.initial_bytecode_len = (size_t)sz;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-    uv_loop_t loop;
-    if (uv_loop_init(&loop) != 0) {
-        fprintf(stderr, "qzjs: uv_loop_init failed\n");
-        free(bootstrap);
-        free(bc);
-        return 1;
-    }
-    cfg.uv_loop = &loop;
-#endif
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
     if (!rt) {
         fprintf(stderr, "qzjs: bytecode error or runtime init failed\n");
         free(bc);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-        uv_loop_close(&loop);
-#endif
         return 1;
     }
-    qz_set_runtime_data(rt, &host);
-    qz_wait_idle(rt);   /* 内部泵 loop：bootstrap 的 console 输出经 message_cb 在此到达 */
+    qz_wait_idle(rt);   /* 库线程自泵；崩溃/回声帧入邮箱 */
+    cli_drain_mbox(rt, &host, NULL);   /* 末次排干：bootstrap console 输出在此消费 */
     int exit_code = host.exit_code;
     if (exit_code && !host.reported) fprintf(stderr, "%s\n", host.result);
     free(bc);
     qz_free(rt);
-#ifdef QZ_CLI_HOSTS_UV_LOOP
-    uv_loop_close(&loop);
-#endif
     return exit_code;
 }
 

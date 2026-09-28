@@ -25,13 +25,7 @@ typedef struct qz_config_s {
     const char *initial_script_path;
     const uint8_t *initial_bytecode;
     size_t         initial_bytecode_len;
-    /* 出站消息回调。json 为 NUL 终止的 UTF-8 JSON（len 不含终止符，两个
-     * 进程模型同语义）。线程：ISOLATED 编译 = 泵 cfg->uv_loop 的宿主线程（库不再
-     * 自带宿主线程；阻塞宿主 API 内部泵时可能重入触发，见 uv_loop 注释）；
-     * THREAD 编译 = qzjs 内部线程。必须线程安全。nullptr 表示宿主不接收消息。 */
-    void (*message_cb)(qz_t *rt, const char *json, size_t len, void *data);
     int  debug;                      /* 沿用 DAP bit 语义 */
-    void *host_data;                 /* per-runtime opaque ptr，可经 qz_get_runtime_data 读取 */
     /* 控制面三档（CTL-0/CTL-2）：OFF（默认，qz_control 恒 -1）/
      * IN_PROC（进程内宿主线程命令）/ LOCAL（IN_PROC + 本机 uv_pipe 端点）。
      * 见 docs/plans/2026-09-04-control-plane-design.md §4.1。 */
@@ -44,17 +38,6 @@ typedef struct qz_config_s {
      * 粒度 per-rt：同一 qz_t 的全部 worker 同后端。M-P1 缺省 THREAD；
      * M-P2 起 ISOLATED 编译缺省 PROCESS（编译模型驱动缺省，§1.4）。 */
     int worker_backend;              /* qz_worker_backend_t 值 */
-    /* ISOLATED 编译专用（THREAD 编译忽略）：宿主自己的 uv loop（uv_loop_t*
-     * 擦 void* 传入，保本头 uv-free）。库把宿主侧全部句柄（通道读泵 pipe、
-     * tx spill 冲刷 timer、wake async）绑到这个 loop 上，message_cb 跑在泵
-     * 该 loop 的线程——库不再自带宿主线程与宿主侧 loop。ISOLATED 下 NULL →
-     * qz_create 显式失败（不静默降级）。宿主与 libqzjs 必须链接同一个 libuv。
-     * 阻塞 API（qz_ping/qz_ping_path/qz_wait_idle/qz_destroy）等待期间就地
-     * 泵该 loop（UV_RUN_NOWAIT 轮询）：message_cb 及宿主挂在该 loop 上的
-     * 其他回调可能在阻塞调用内部重入触发；规则——message_cb 内不得再调任何
-     * 阻塞宿主 API。qz_post_message/qz_control 不受影响（MPSC 入队 +
-     * uv_async_send，任意线程可调；实际投递到通道 = 宿主下一次泵）。 */
-    const void *uv_loop;
 } qz_config_t;
 
 /* 把 JS 源码编译为字节码 blob。独立函数（无需 qz_t/运行时）。
@@ -96,38 +79,40 @@ typedef enum {
 
 /* ================================================================
  * Core API
- * ================================================================ */
+ * ================================================================
+ * 主权原则：qzjs 从不执行宿主代码——库不调用任何宿主回调，公共 API 无函数
+ * 指针字段；宿主与库的全部通讯走「邮箱」（见下）+ 入站 API。库完全自主
+ * 管理自己的线程与 loop（ISOLATED = 主RT 子进程 + 库内宿主侧泵线程；
+ * THREAD = 库内 qzjs 线程）。宿主可把 qzjs 嵌进任何事件系统（poll/epoll/
+ * select/自己的线程模型），无 libuv 同链接义务。 */
 
-/* 创建 qzjs。ISOLATED：spawn 主RT 进程 → 握手 → 阻塞等待其 CONTROL{ready}
- * （同步通道读，握手期间不泵宿主 loop；ready 前脚本帧于 create 返回前在
- * 调用线程同步 FIFO 重放给 message_cb）→ 通道句柄挂上
- * cfg->uv_loop 就绪返回；cfg->uv_loop 为 NULL 或 ready 失败 → 返回 NULL。
- * THREAD：起内部线程，阻塞到线程 ready；initial_script 在 JS 线程上 eval，
- * 抛异常则返回 NULL。返回的 rt 由宿主线程调用 qz_destroy 销毁。 */
+/* 创建 qzjs。ISOLATED：spawn 主RT 进程 → 库内起宿主侧泵线程 → 阻塞等待
+ * 主RT 的 CONTROL{ready}（ready 前到达的消息帧已在 create 返回前重放进邮
+ * 箱，宿主第一次 recv 即得）。THREAD：起内部 qzjs 线程，阻塞到线程 ready；
+ * initial_script 在 JS 线程上 eval，抛异常则返回 NULL。失败返回 NULL。
+ * rt 由调用线程销毁（qz_destroy 或 qz_wait_idle + qz_free）。 */
 qz_t *qz_create(const qz_config_t *config);
 
-/* 优雅关停：强制终止主RT（进程/线程）→ 回收 → free。ISOLATED 下最坏阻塞 =
- * 主RT 无视 shutdown 的三级终止预算（≤2s）。只允许宿主线程调用，不得在
- * message_cb 内调用（等待时会泵宿主 loop，造成嵌套 uv_run）。 */
+/* 优雅关停：强制终止主执行体（ISOLATED = 主RT 进程 + 库泵线程；THREAD =
+ * 内部线程）→ 回收 → free。ISOLATED 最坏阻塞 = 主RT 无视 shutdown 的三级
+ * 终止预算（≤2s，冻结在库线程内处理，调用线程只等收尸）。关停后邮箱中未
+ * 消费的消息被释放——如需读取，先 qz_recv_message(rt,NULL,NULL,0) 排干。 */
 void qz_destroy(qz_t *rt);
 
 /* 线程安全入站消息（任何线程可调）。json 会被拷贝。返回 0 成功，-1 失败。 */
 int qz_post_message(qz_t *rt, const char *json, size_t len);
-/* Request auto-exit once there is no pending async work (CLI use), and block
- * until the main runtime has exited (ISOLATED: the qzjs-rt process; THREAD:
- * the internal thread). ISOLATED 等待期间就地泵 cfg->uv_loop —— message_cb
- * （含崩溃 {"type":"error"} 上报）可能在本调用内部触发；不得从 message_cb
- * 内调用。Thread-safe; mutually exclusive with qz_destroy (call one or the
- * other, never both). After this returns the runtime is torn down and must
- * not be used (no further post_message). Do NOT call qz_destroy after this:
- * destroy forces shutdown and would cancel pending async work (e.g. a live
- * timer). */
+/* 请求「无待处理异步工作时自动退出」，并阻塞直到主执行体退出（ISOLATED =
+ * qzjs-rt 进程 + 库泵线程；THREAD = 内部线程）。等待期间出站消息（含崩溃
+ * {"type":"error"} 上报）照常入邮箱，返回后、qz_free 前仍可 qz_recv_message
+ * 取净。Thread-safe; mutually exclusive with qz_destroy (call one or the
+ * other, never both)。返回后 rt 不得再使用（禁 post）；勿再 qz_destroy：
+ * destroy 强制关停会取消 pending 异步工作（如活 timer），只可 qz_free。 */
 void qz_wait_idle(qz_t *rt);
 
-/* Liveness ping（宿主→主RT 进程，ISOLATED 编译）：发 CONTROL ping（corr =
- * 单调 seq）并阻塞等待主RT C 层读泵直回的 PONG（不经 JS/msgq——pong 延迟
- * 只反映主RT 进程 uv loop 的健康度，JS 忙不误报）。等待期间就地泵
- * cfg->uv_loop（PONG 经宿主 loop 读泵回填）；不得从 message_cb 内调用。
+/* Liveness ping（宿主→主RT，ISOLATED 编译）：发 CONTROL ping（corr =
+ * 单调 seq）并等待主RT C 层读泵直回的 PONG（不经 JS/msgq——pong 延迟只反
+ * 映主RT 进程 uv loop 的健康度，JS 忙不误报）。阻塞等待发生在库泵线程，
+ * 调用线程仅自旋至回执；邮箱不受影响。
  * 返回 0 = loop 通畅（deadline 内 PONG 命中）；1 = 超时 = 对端 loop 阻塞
  * （或对端极度繁忙但读泵 starvation，见设计文档）；-1 = 参数/状态错误
  * （未 ready、正在关停、通道已死——进程死亡另有 EOF 路径）。timeout_ms
@@ -140,26 +125,60 @@ int qz_ping(qz_t *rt, int32_t timeout_ms);
  * 目标 loop 阻塞；-1 = 参数/状态错误/路径不存在/中间通道死（转发失败由
  * 中间节点回执快速判 -1，不白等 timeout）。PING 按链逐跳下投（读泵 C 层
  * 转发，不消费不进 JS），目标读泵直回 PONG（回显路径作过境标记）沿树上
- * 行；中间节点目标级 JS 零参与。等待期间就地泵 cfg->uv_loop；不得从
- * message_cb 内调用。timeout_ms 建议 100–1000。 */
+ * 行；中间节点目标级 JS 零参与。timeout_ms 建议 100–1000。 */
 int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
                    int32_t timeout_ms);
 
 /* 控制命令入队（线程安全，任何线程可调）。bytes 为命令 JSON，内部拷贝。
  * control_plane=OFF 时恒返回 -1。返回 0 成功，-1 失败（OFF/OOM/参数非法）。
  * 命令由主执行体（ISOLATED = 主RT 进程 / THREAD = qzjs 线程）在自己的事件
- * 循环安全点自主执行；结果经 message_cb 异步回传（ISOLATED = 宿主泵
- * cfg->uv_loop 的线程），回执 JSON 顶层带 "ctl":true 标记位，correl 原样
- * 透传供配对。设计：docs/plans/2026-09-04-control-plane-design.md §1-§3。 */
+ * 循环安全点自主执行；回执异步入邮箱（qz_recv_message 取），JSON 顶层带
+ * "ctl":true 标记位，correl 原样透传供配对。
+ * 设计：docs/plans/2026-09-04-control-plane-design.md §1-§3。 */
 int qz_control(qz_t *rt, const char *bytes, size_t len);
 
-void *qz_get_runtime_data(qz_t *rt);
-void  qz_set_runtime_data(qz_t *rt, void *data);
+/* ================================================================
+ * Mailbox（出站消息邮箱）
+ * ================================================================
+ * 库 → 宿主方向的全部消息（JS postMessage、崩溃 {"type":"error"} 上报、
+ * CONTROL 回执）进入 per-rt 的 FIFO 邮箱；qzjs 不调用任何宿主函数，宿主
+ * 自选线程、自选时机消费。json 为 NUL 终止 UTF-8（len 不含终止符）。
+ *
+ * 消费协议（挂 fd 等待时的唯一正确姿势，防丢唤醒）：
+ *   1. qz_recv_message(rt,&json,&len,0) 循环取空并处理；
+ *   2. read(qz_message_fd(rt),...) 清计数直到 EAGAIN；
+ *   3. 再探一次 qz_recv_message(...,0)——有消息回步骤 1，无才可 poll 阻塞。
+ * （先清箱后清 fd 再复核：入箱先于写 fd，此序保证不丢唤醒。）
+ *
+ * 单消费者规则：同一 rt 的 qz_recv_message 允许多线程并发轮询消费（timeout
+ * 0/正值均可，锁-free 弹出互斥），但同一时刻只应有一个线程做「fd 等待协
+ * 程」；跨线程分发由宿主自行保证消息所有权移交。
+ * 未消费的消息在 qz_destroy/qz_free 时释放（不泄漏，也不再可达）。
+ * out fd 归 rt 所有：宿主不得 close；qz_free 后 fd 失效。
+ * Linux-only（eventfd）。 */
 
-/* 释放 qz_create 返回的运行时实例（等价 qz_destroy 的最终 free；历史兼容）。
- * ⚠ 仅接受 qz_t 指针——内部按 qz_t 结构释放其 config 缓冲。任意 malloc 块
- * 请用 free()。NULL-safe。 */
+/* 从邮箱取出一条消息。timeout_ms：0 = 纯轮询不等待；>0 = 至多等待该时长；
+ * -1 = 无限等待。返回 0 = 取到（*json 为 malloc 缓冲，用 qz_free_message 释
+ * 放）；1 = 超时（*json 不变）；-1 = 参数/状态错误。 */
+int qz_recv_message(qz_t *rt, char **json, size_t *len, int timeout_ms);
+
+/* 释放 qz_recv_message 返回的消息缓冲。NULL-safe。 */
+void qz_free_message(void *json);
+
+/* 返回该 rt 邮箱的唤醒 fd（eventfd，单调计数；非阻塞读、CLOEXEC）。
+ * 与宿主自己的 poll/epoll/select/kevent（自行适配）一起等待；0 条可读时
+ * read 返回 EAGAIN。等待本体在 qz_recv_message 内部已用之——宿主仅在
+ * 「自己组织事件循环」时需要。失败（极少）返回 -1。 */
+int qz_message_fd(qz_t *rt);
+
+/* 释放对象（NULL-safe）。双角色：传入 qz_create 的 rt（已 qz_wait_idle 收束、
+ * 或已 qz_destroy 之外的路径）→ 排干邮箱、关闭唤醒 fd、释放 config 缓冲与
+ * rt；传入 qz_compile 等产出的裸 malloc 块 → 直接 free。内部按 magic 判别。 */
 void qz_free(void *ptr);
+
+/* ================================================================
+ * Extension interface
+ * ================================================================ */
 
 /* ================================================================
  * Extension interface

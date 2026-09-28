@@ -326,8 +326,10 @@ void qz_worker_post(qz_t *parent, qz_worker_t *w, const uint8_t *bytes,
 {
     QZ_UNUSED(parent);
     if (!w || __atomic_load_n(&w->shutting_down, __ATOMIC_ACQUIRE)) return;
-    if (w->self)
+    if (w->self) {
         qz_msg_push(w->self, (const char *)bytes, len, QZ_MSG_SRC_HOST, flags);
+        uv_async_send(&w->self->wake);   /* 唤醒与容器解耦（M-P7） */
+    }
 }
 
 void qz_worker_terminate(qz_t *parent, qz_worker_t *w)

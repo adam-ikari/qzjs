@@ -16,8 +16,8 @@
  *       resolve/reject on the qzjs thread), and hands ownership of the
  *       resolving funcs to a qz_cb_data_t. The streaming HTTP path
  *       (uv_io_http_request_stream) JS_Calls on_headers/on_data/on_end.
- *   postMessage — host boundary: JSON out (rt->config.message_cb on qzjs
- *       thread); __qz_dispatch__ handles inbound host JSON (source 0).
+ *   postMessage — host boundary: JSON out (qz_post_to_host → mailbox /
+ *       main-RT uplink); __qz_dispatch__ handles inbound host JSON (source 0).
  */
 
 #include "qz_internal.h"
@@ -1414,10 +1414,10 @@ static JSValue js_pal_post_message(JSContext *ctx, JSValueConst this_val,
     qz_t *rt = qz_get_rt_from_ctx(ctx);
     if (!rt) return JS_EXCEPTION;
     if (argc < 1) return JS_UNDEFINED;
-    if (!rt->config.message_cb) return JS_UNDEFINED;
 
-    /* JSON 序列化 JS 值 → C 字符串，再交给宿主（plan §7：JS_JSONStringify
-     * → message_cb；data 需 JSON 可序列化）。 */
+    /* JSON 序列化 JS 值 → C 字符串，再交出站漏斗（M-P7：宿主 rt = 邮箱，
+     * 主RT 子进程 = 上行通道；库不调用宿主函数，无「宿主没接回调就丢弃」
+     * 的分支——没人消费也只是箱内滞留，free 时统一回收）。 */
     JSValue str = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
     if (JS_IsException(str)) return JS_EXCEPTION;
     size_t len = 0;
@@ -1427,7 +1427,7 @@ static JSValue js_pal_post_message(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
-    rt->config.message_cb(rt, json, len, rt->host_data);
+    qz_post_to_host(rt, json, len);
     JS_FreeCString(ctx, json);
     JS_FreeValue(ctx, str);
     return JS_UNDEFINED;
@@ -2051,6 +2051,8 @@ static JSValue js_pal_worker_emit(JSContext *ctx, JSValueConst this_val,
         rc = qz_msg_push(w->parent, (const char *)bytes, len, w->id,
                            kind == IPC_ENV_KIND_PORT_TRANSFER
                                ? QZ_MSG_FLAG_PORT_TRANSFER : 0);
+        /* 唤醒与容器解耦（M-P7）：入站调用点显式 wake 父 qzjs 线程。 */
+        if (rc == 0) uv_async_send(&w->parent->wake);
     }
 #ifndef QZ_USE_MOCK_LIBUV
     else if (qz_ipc_child_channel() >= 0) {
@@ -2311,10 +2313,8 @@ void qz_dispatch_message(qz_t *rt, qz_msg_t *m)
                 JS_FreeValue(ctx, data);
                 JS_FreeValue(ctx, kind);
                 JS_FreeValue(ctx, fn);
-                if (rt->config.message_cb) {
-                    static const char *bad = "{\"type\":\"error\",\"error\":\"bad-json\"}";
-                    rt->config.message_cb(rt, bad, strlen(bad), rt->host_data);
-                }
+                static const char *bad = "{\"type\":\"error\",\"error\":\"bad-json\"}";
+                qz_post_to_host(rt, bad, strlen(bad));
                 return;
             }
         } else {
@@ -2383,7 +2383,8 @@ JSValue qz_create_pal_object_ctx(qz_t *rt, qz_ctx_t *ctx)
 
     /* Host message boundary / Web Worker (Task 4).
      * worker runtime（rt->worker_self 非 NULL）：postMessage → 父入站（克隆
-     * 字节），另有 workerClose；无宿主 message_cb，但持有进程原语以支持
+     * 字节），另有 workerClose；worker 无宿主邮箱可见性（qz_post_to_host 丢弃），
+     * 但持有进程原语以支持
      * §1.1 嵌套 spawn（worker 内 new Worker 起子进程）。父 runtime：
      * postMessage → 宿主 JSON，另有 spawnWorker / workerPost / workerTerminate。 */
     /* §8.2 path 链（父/worker runtime 都可查；JS port 层的端点身份来源） */

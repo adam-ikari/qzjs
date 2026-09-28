@@ -8,11 +8,8 @@
 // 与 host_create 相同，但 cfg.control_plane = QZ_CONTROL_IN_PROC。
 static HostCtx *host_create_ctl() {
     auto *h = new HostCtx();
-    uv_mutex_init(&h->m); uv_cond_init(&h->c);
     qz_config_t cfg = {};
     cfg.initial_script = kTestBootstrap;
-    cfg.message_cb = host_msg_cb;
-    cfg.host_data = h;
     cfg.control_plane = QZ_CONTROL_IN_PROC;
     h->rt = qz_create(&cfg);
     if (!h->rt) { delete h; return nullptr; }
