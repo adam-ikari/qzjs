@@ -4,7 +4,7 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-28T13:59:40"
+updated: "2026-09-28T14:27:57"
 ---
 
 <!-- compiled_truth -->
@@ -114,4 +114,9 @@ Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worke
 - time: 2026-09-28T13:59:40
   kind: decision
   summary: "wake 初始化先于读泵注册；pre-ready 帧在 qz_create 内同步重放可触发 message_cb"
+  affects: [multi-process-model]
+
+- time: 2026-09-28T14:27:57
+  kind: decision
+  summary: "库不在宿主进程私起线程/loop，宿主形态（线程拓扑/loop归属/泵节奏）qzjs 不干涉；库所需线程与进程全部置于库自治域"
   affects: [multi-process-model]
