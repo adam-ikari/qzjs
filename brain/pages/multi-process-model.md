@@ -4,19 +4,20 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-28T14:27:57"
+updated: "2026-09-28T14:48:55"
 ---
 
 <!-- compiled_truth -->
-## 当前共识（compiled truth）
-
 ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MODEL=THREAD 回退）：宿主进程 ⇄ 独立主RT 进程（qzjs-rt）经单条 socketpair uv_pipe 通信，JS/loop/微任务全在主RT 进程内；worker 进程树经嵌套 spawn（N-P1）展开，端点身份为 §8.2 path 链（u16[]，根起逐级槽位 id；LCA 前缀比较路由，零路由表；PORT_TRANSFER 变长头；信封 source/target int32 冻结 schema 零改动）。控制面 CTL-1/CTL-2：qzjs-ctl CLI + AF_UNIX 端点 + SO_PEERCRED，树路由经 target_path。
 
-**宿主侧契约（M-P6，2026-09-28 翻转，取代原「库自带宿主 loop 线程」设计）**：库在宿主侧不拥有任何线程/loop——宿主必须经 cfg.uv_loop 注入 uv_loop_t（NULL → qz_create 显式失败，§5.3 不降级），message_cb 在泵宿主 loop 的线程触发。qz_create 的 ready 握手走同步 raw-fd 帧读：create 期间不泵不回调，pre-ready 脚本帧缓冲后 FIFO 重放。阻塞宿主 API（qz_ping/qz_ping_path/qz_wait_idle/qz_destroy）就地泵（UV_RUN_NOWAIT+yield）→ message_cb 可在调用内重入 → cb 内禁调阻塞宿主 API。库永不 UV_RUN_DEFAULT/uv_loop_close 宿主 loop；teardown 后库句柄全关（wait_idle 后用 qz_free）。message_cb payload 两模型同语义 NUL 终止（len 不含终止符）。THREAD 模型与主RT 进程内部不变。
+**主权原则（用户裁决，凌驾具体形态）**：宿主形态不是 qzjs 能干涉的；qzjs 完全自主管理自己的进程和线程；与宿主通讯只用 postMessage 机制——qzjs 不跨线程调用宿主任何函数。
 
-Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worker（qz_ping_path，tp 回显转发/pfail 快拒）、worker→sub（Worker.prototype.ping）；0=通畅/1=超时(loop 阻塞)/-1=死。storage 单所有者（owner=树根主RT，§10.2）非根节点中继上行（N-P4 corr 并发关联）；owner 死 ⇒ 孤儿连锁自杀即设计终点（降级不实施）。
+**宿主侧契约 = M-P7 mailbox 目标态（2026-09-28 再裁决，取代 M-P6 注入契约）**：库自管宿主侧泵线程+loop；host 方向消息（JS postMessage、崩溃 {"type":"error"} 上报、CONTROL 回执）入 per-rt 邮箱队列，宿主在自选线程上消费：qz_recv_message(rt,&json,&len,timeout_ms)（>0 阻塞 / 0 非阻塞 / -1 无限等，返回 NUL 终止 JSON 由 qz_free_message 释放）+ qz_message_fd(rt) 唤醒 fd（可读 = 邮箱非空，挂进任何事件系统皆可，零回调义务）。cfg.uv_loop、message_cb、host_data 回调面整体移除；回调重入规则随之作废；I5②clause 复活（terminate ≤2s 冻结回到库泵线程，宿主调用线程只等 join）。
+**⚠️ 现状 = 过渡态 M-P6**（commit f0178683..6c0ab934，已实施已验证）：宿主经 cfg.uv_loop 注入 loop、message_cb 在泵线程触发、阻塞 API 就地 NOWAIT 泵、pre-ready 帧 create 内同步重放、库永不跑/关宿主 loop。M-P7 落地前，代码/文档/测试仍按 M-P6 语义执行。
 
-延后项终判：tier-2 超时异步化维持 DEFERRED（理由②因 M-P6 作废——宿主侧 terminate ≤2s 冻结现落在调用线程；①③仍立）；path u16→u32 YAGNI 维持；§10.2 降级不实施。深度上限 QZ_SELF_PATH_MAX=8、storage 中继单飞行仍为已知缺口。
+Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worker（qz_ping_path，tp 回显转发/pfail 快拒）、worker→sub（Worker.prototype.ping）；0=通畅/1=超时(loop 阻塞)/-1=死。M-P6 下 ping/wait_idle 就地泵宿主 loop；M-P7 后改库线程回填 + 条件/原子等待。storage 单所有者（owner=树根主RT，§10.2）非根节点中继上行（N-P4 corr 并发关联）；owner 死 ⇒ 孤儿连锁自杀即设计终点（降级不实施）。
+
+延后项终判：tier-2 超时异步化维持 DEFERRED（①正常路径 ~1ms 仍立；③跨 loop 属主迁移风险仍立；②随 M-P7 回到库线程而恢复原理由）；path u16→u32 YAGNI 维持；§10.2 降级不实施。深度上限 QZ_SELF_PATH_MAX=8、storage 中继单飞行仍为已知缺口。
 
 
 ## Timeline
@@ -119,4 +120,16 @@ Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worke
 - time: 2026-09-28T14:27:57
   kind: decision
   summary: "库不在宿主进程私起线程/loop，宿主形态（线程拓扑/loop归属/泵节奏）qzjs 不干涉；库所需线程与进程全部置于库自治域"
+  affects: [multi-process-model]
+
+- time: 2026-09-28T14:48:28
+  kind: reversal
+  summary: "cfg.uv_loop 注入契约与 message_cb 回调一并废除：库完全自管线程/进程（宿主侧泵线程回归），host 方向消息入内部邮箱队列由宿主自取（阻塞带超时/非阻塞 poll/唤醒 fd），qzjs 不跨线程执行任何宿主代码；M-P6 注入形态为实现现状、M-P7 为裁决目标态，待实施"
+  source: "2026-09-28 宿主通讯再裁决会话"
+  affects: [multi-process-model]
+
+- time: 2026-09-28T14:48:55
+  kind: decision
+  summary: "compiled truth 更新至 M-P7 再裁决：宿主通讯改 mailbox（qz_recv_message + 唤醒 fd），qzjs 不再调用宿主代码；M-P6 注入形态标注为过渡现状"
+  source: "2026-09-28 宿主通讯再裁决会话"
   affects: [multi-process-model]

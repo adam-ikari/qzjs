@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-09-28T14:27:57.109Z._
+_Auto-generated. Last updated 2026-09-28T14:53:28.441Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
@@ -31,11 +31,11 @@ _Auto-generated. Last updated 2026-09-28T14:27:57.109Z._
 - [httpserver-ws-protocol](pages/httpserver-ws-protocol.md) — category: decision | tags: [http-server, websocket, protocol] | polyfill/src/http-server.js（纯 JS 层 WS 协议）：
 - [libuv-io-uring-workaround](pages/libuv-io-uring-workaround.md) — category: decision | tags: [libuv, io-uring, linux, workaround] | ## 现状（2026-09-20 更新）
 - [liveness-ping](pages/liveness-ping.md) — category: decision | tags: [liveness, ping, pong, host, worker] | <current best understanding — replace this with the real content>
-- [multi-process-model](pages/multi-process-model.md) — category: decision | ## 当前共识（compiled truth）
+- [multi-process-model](pages/multi-process-model.md) — category: decision | ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MODEL=THREAD 回退）：宿主进程 ⇄ 独立主RT 进程（qzjs-rt）经单条 socketpair uv_pipe 通信，JS/loop/微任务全在主RT 进程内；worker 进程
 - [oss-library-policy](pages/oss-library-policy.md) — category: decision | tags: [deps, policy, oss] | # 开源库引入与替换原则
 - [polyfill-bundling-policy](pages/polyfill-bundling-policy.md) — category: decision | tags: [polyfill, bundling, memory] | ## 启动加速决策链（2026-09-10 用户拍板）
 - [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## 现状
-- [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新）
+- [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
 - [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | <current best understanding — replace this with the real content>
 - [runtime-perf-baseline](pages/runtime-perf-baseline.md) — category: reference | tags: [perf, worker, runtime, baseline] | > **测试策略（2026-09-09 用户拍板）：性能基准一律在 CI 环境（GitHub Actions ubuntu-latest）执行，不使用本机。
