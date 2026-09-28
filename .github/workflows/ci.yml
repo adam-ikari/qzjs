@@ -920,6 +920,11 @@ jobs:
           bash test/test_mp4_storage_crash_e2e.sh ./build/qzjs
           bash test/test_mr2_composition_e2e.sh ./build/qzjs
 
+      # M-P6：宿主泵契约（message_cb 跑在泵宿主注入 uv loop 的线程）。
+      - name: e2e — host-pump contract (M-P6)
+        run: |
+          bash test/test_mp5_host_pump_e2e.sh ./build/qzjs
+
       # 控制面 CTL-1/CTL-2（本地端点 + 信封 CONTROL 树路由到 worker）。
       - name: e2e — control plane (CTL-1 tree routing / CTL-2 endpoint + qzjs-ctl)
         run: |

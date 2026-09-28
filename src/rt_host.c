@@ -191,8 +191,17 @@ static void host_proc_msg_cb(void *user, int8_t kind, int32_t source,
         }
     }
 
-    if (rt->config.message_cb)
-        rt->config.message_cb(rt, (const char *)payload, len, rt->host_data);
+    if (rt->config.message_cb) {
+        /* 与 THREAD 后端（qz_msg_push 的 len+1 拷贝）同语义：message_cb 收到
+         * NUL 终止的 JSON（len 不含终止符）。信封 payload 是 rbuf 视图，
+         * 不可就地终止，做一次拷贝。 */
+        char *copy = (char *)malloc((size_t)len + 1);
+        if (!copy) return;
+        memcpy(copy, payload, len);
+        copy[len] = '\0';
+        rt->config.message_cb(rt, copy, len, rt->host_data);
+        free(copy);
+    }
 }
 
 /* ── 出站唤醒（宿主 loop 线程）──
@@ -236,6 +245,14 @@ static void host_teardown(qz_t *rt)
     __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
     if (rt->wake.loop && !uv_is_closing((uv_handle_t *)&rt->wake))
         uv_close((uv_handle_t *)&rt->wake, NULL);
+    /* msgq 约定：pop 只释放上一个 head，最后被消费（或未消费）的节点恒挂
+     * msg_head——与 qz_thread_teardown 步 1 同款收尾：排干入站队列并释放尾
+     * 挂节点，否则最后一条 CONTROL{idle} 随 rt 一起漏出。消费线程即调用
+     * 线程（宿主泵），shutting_down 已置，无并发消费者。 */
+    qz_msg_t *m;
+    while ((m = qz_msg_pop(rt)) != NULL) {}
+    if (rt->msg_head != &rt->msg_stub) qz_msg_free(rt->msg_head);
+    rt->msg_head = &rt->msg_stub;
     if (rt->proc) {
         qz_proc_terminate(rt->proc, QZ_IPC_TERMINATE_TIMEOUT_MS);
         qz_proc_free(rt->proc);

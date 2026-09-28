@@ -25,7 +25,8 @@ typedef struct qz_config_s {
     const char *initial_script_path;
     const uint8_t *initial_bytecode;
     size_t         initial_bytecode_len;
-    /* 出站消息回调。线程：ISOLATED 编译 = 泵 cfg->uv_loop 的宿主线程（库不再
+    /* 出站消息回调。json 为 NUL 终止的 UTF-8 JSON（len 不含终止符，两个
+     * 进程模型同语义）。线程：ISOLATED 编译 = 泵 cfg->uv_loop 的宿主线程（库不再
      * 自带宿主线程；阻塞宿主 API 内部泵时可能重入触发，见 uv_loop 注释）；
      * THREAD 编译 = qzjs 内部线程。必须线程安全。nullptr 表示宿主不接收消息。 */
     void (*message_cb)(qz_t *rt, const char *json, size_t len, void *data);
