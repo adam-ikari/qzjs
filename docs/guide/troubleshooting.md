@@ -63,11 +63,12 @@ it returns `NULL` when either fails. The causes:
 
 1. **`initial_script` threw.** Any exception in the initial script aborts
    creation — the runtime does not start degraded.
-2. **Thread or loop init failed** (resource exhaustion).
-3. **Under ISOLATED: `cfg.uv_loop` is `NULL`.** The host loop injection is
-   mandatory; the library never falls back to an internal host thread, so
-   create fails explicitly. (Host and libqzjs must also link the **same**
-   libuv.)
+2. **Thread or loop init failed** (resource exhaustion). All threads and
+   loops are owned by the library — the host injects nothing.
+3. **Under ISOLATED: the main-RT child process (`qzjs-rt`) failed to
+   spawn.** `qz_create` spawns it first, then starts the library's own
+   host-side pump thread and loop; if the binary cannot be located or the
+   spawn fails, create returns `NULL`.
 
 The CLI prints `qzjs: runtime init failed` for the same condition.
 
@@ -95,14 +96,27 @@ need work to survive past the script, keep the runtime alive from the host —
 do not expect the script's end to be a barrier. A pending 50 ms `setTimeout`
 does fire before exit.
 
-### `message_cb` is never called
+### `qz_recv_message` never returns a message
 
-`message_cb` is the **outbound** (JS → host) channel and must be set in
-`qz_config_t` before `qz_create`. A null `message_cb` means the host receives
-nothing. Outbound sends only happen if the script actually calls
-`postMessage(...)`. Under ISOLATED there is one more precondition: the
-callback fires only while the host pumps `cfg.uv_loop` (directly, or inside
-a blocking host API) — a host that never pumps never sees a reply. See
+`qz_recv_message` is the **outbound** (JS → host) consumption channel —
+nothing is ever pushed into a host callback. If it never yields a message,
+check, in order:
+
+1. **The script never calls `postMessage(...)`.** Outbound sends only happen
+   when JS actually posts; a runtime that stays silent has nothing in the
+   mailbox.
+2. **You passed `timeout_ms = 0` everywhere.** `0` is a pure poll — it
+   returns `1` immediately when the mailbox is empty at that instant. Wait
+   with `timeout_ms > 0` (or `-1` to block), or integrate
+   `qz_message_fd(rt)` (the wake fd, a Linux `eventfd`) into your own
+   poll/epoll/select loop — readable means ≥1 message pending.
+3. **Another consumer took it first.** Concurrent `qz_recv_message` calls on
+   one rt are safe, but each message is delivered to exactly **one** caller
+   (single-consumer rule); cross-thread handoff is the host's job.
+
+Crash reports are ordinary mailbox messages too: the `{"type":"error"}`
+frame arrives via `qz_recv_message` — notably after `qz_wait_idle` returns,
+when you do the final `recv(0)` drain. See
 [Host Integration](/guide/host-integration) and
 [Event Loop](/guide/event-loop).
 

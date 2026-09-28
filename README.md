@@ -16,10 +16,13 @@ JavaScript in C applications. It provides a WinterTC-compatible runtime of
 standard Web APIs (fetch, console, crypto, streams, timers, fs, …) and a small,
 thread-safe C API for host ↔ runtime messaging and multi-context execution.
 JS runs on a library-owned event loop — in a separate main-RT process
-(`qzjs-rt`) under the default ISOLATED build, where the host injects its own
-`uv_loop_t` via `cfg.uv_loop` and receives `message_cb` on the thread that
-pumps it; on an internal `qzjs` thread under the THREAD build. The host never
-touches JS directly.
+(`qzjs-rt`) under the default ISOLATED build, or on an internal `qzjs` thread
+under the THREAD build. The library owns all its threads and loops and **never
+runs host code**: every host-bound message (JS `postMessage`, the crash report
+`{"type":"error"}`, control receipts) is delivered to a per-runtime FIFO
+**mailbox** that the host drains on its own thread at its own time via
+`qz_recv_message` / `qz_free_message` (waking on `qz_message_fd`). The host
+never touches JS directly.
 
 ## Features
 
@@ -29,7 +32,7 @@ touches JS directly.
 - **Streaming HTTP + TLS** — mbedTLS for HTTPS, chunked transfer decoding, certificate verification
 - **Native extensions** — compression (miniz), crypto (mbedTLS), text codec (UTF-8/Base64), WebAssembly (WAMR default, wasm3 alternative)
 - **Multi-context + Web Workers** — spawn isolated contexts (soft suspend/resume to disk); `new Worker(url)` runs real parallel threads, or dedicated processes when built with `-DQZ_PROCESS_MODEL=ISOLATED` (the default since the multi-process M-P2 milestone)
-- **Host ↔ runtime messaging** — JSON messages via `qz_post_message` / `message_cb`; `postMessage` / `onmessage` on the JS side
+- **Host ↔ runtime mailbox** — thread-safe inbound JSON via `qz_post_message`; every outbound message (JS `postMessage`, crash reports, control receipts) queues in a per-runtime FIFO mailbox the host consumes on its own thread via `qz_recv_message` / `qz_free_message` (wake fd `qz_message_fd`); `postMessage` / `onmessage` on the JS side
 
 ## Quick Start
 
@@ -64,46 +67,43 @@ for scripts that never touch `WebAssembly`.
 
 ```c
 #include <qzjs/qzjs.h>
-#include <uv.h>
 #include <stdio.h>
 
-static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)rt; (void)data;
-    printf("received: %.*s\n", (int)len, json);
-}
-
 int main(void) {
-    uv_loop_t loop;
-    uv_loop_init(&loop);
-
     qz_config_t cfg = {0};
     cfg.initial_script = "globalThis.onmessage = function (e) { postMessage('pong'); };";
-    cfg.message_cb = on_message;
-    cfg.uv_loop = &loop;   /* host loop injection (required under ISOLATED) */
-    qz_t *rt = qz_create(&cfg);
+    qz_t *rt = qz_create(&cfg);   /* no callback, no loop injection */
     if (!rt) return 1;
 
     /* thread-safe inbound message; the runtime processes it on its own loop */
     qz_post_message(rt, "{\"cmd\":\"ping\"}", 14);
 
-    /* pump the host loop: message_cb fires on this thread */
-    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+    /* drain the mailbox on this thread — the library never runs host code */
+    for (;;) {
+        char *json = NULL; size_t len = 0;
+        int r = qz_recv_message(rt, &json, &len, 1000);  /* wait up to 1 s */
+        if (r != 0) break;                               /* 1 = timeout, -1 = error */
+        printf("received: %.*s\n", (int)len, json);
+        qz_free_message(json);                           /* release the malloc buffer */
+    }
 
     qz_destroy(rt);  /* graceful shutdown: terminate main RT → reap → free */
-    uv_loop_close(&loop);
     return 0;
 }
 ```
 
 `qz_create` spawns/blocks until the runtime is ready and `initial_script`
 has been evaluated (a thrown exception makes `qz_create` return NULL). Under
-ISOLATED the ready handshake reads on a synchronous raw-fd path (no host-loop
-pumping during the handshake); pre-ready script messages are buffered and
-replayed FIFO to `message_cb` on the calling thread before `qz_create`
-returns. `message_cb` fires for every `postMessage` from JS — on the
-thread pumping your `cfg.uv_loop` under ISOLATED, on the internal qzjs
-thread under THREAD — and must be thread-safe. In a THREAD build the same
-program needs no `uv_loop`.
+ISOLATED the library spawns the main-RT process plus **its own** host-side pump
+thread and loop (never yours); frames that arrived before the ready handshake
+are already replayed into the mailbox, so the host's very first `qz_recv_message`
+picks them up. Every `postMessage` from JS lands in the per-runtime mailbox —
+the library never calls back into host code — and the host consumes it on
+whichever thread and at whichever time it chooses: `qz_recv_message` takes
+`timeout_ms` `0` for a pure poll, `>0` to wait up to that many ms, `-1` to block
+forever, and returns a malloc'd NUL-terminated JSON buffer you release with
+`qz_free_message`. `qz_message_fd(rt)` exposes an `eventfd` you can add to your
+own poll/epoll/select. The same program runs unchanged under the THREAD build.
 
 ### Examples
 
@@ -159,13 +159,14 @@ make build                       # produces build/qzjs build/qzc build/qzjs-rt
 flowchart TB
     subgraph HOST["Host process"]
         App["C application"]
-        HLoop["host uv_loop (cfg.uv_loop — ISOLATED)"]
-        HLoop -- "uv_run pump → message_cb" --> App
+        MB["mailbox drain (qz_recv_message / qz_free_message)"]
+        App -- "consume on own thread, own timing" --> MB
     end
     subgraph AM["qz_t (one qzjs = one JSRuntime)"]
-        Thread["runtime-owned loop — ISOLATED: qzjs-rt process · THREAD: internal thread (uv_thread_t)"]
+        Thread["library-owned loop — ISOLATED: qzjs-rt process + host-side pump thread · THREAD: internal qzjs thread (uv_thread_t)"]
         Ctx["JSContext + contexts"]
         Msg["message FIFO (inbound)"]
+        Mailbox["outbound mailbox (per-rt FIFO)"]
         IOBridge["bridge.c — JS ↔ libuv (uv_io.c)"]
         Thread --> Ctx
         IOBridge --> Thread
@@ -173,7 +174,8 @@ flowchart TB
     App -- "qz_post_message (thread-safe, JSON)" --> Msg
     Msg --> Thread
     Ctx -- "postMessage" --> IOBridge
-    IOBridge -- "message_cb: JSON out (ISOLATED: via host loop read pump; THREAD: on qzjs thread)" --> HLoop
+    IOBridge -- "JSON out → mailbox (wake fd: qz_message_fd; never runs host code)" --> Mailbox
+    Mailbox --> MB
     Ctx -. "new Worker(url) → new qz_t (own loop: thread or process)" .-> AM
 ```
 
@@ -181,15 +183,16 @@ By default (`QZ_PROCESS_MODEL=ISOLATED`, multi-process M-P2) the host and the
 main runtime are **separate processes**: `qz_create` spawns
 `qzjs-rt --qzjs-rt-server`, then the two sides exchange FlatBuffers-framed
 envelopes over a socketpair — a runtime crash (or a hard-killed runtime) cannot
-take the host down. On the host side the library owns **no thread and no
-loop**: you inject your own `uv_loop_t` via `cfg.uv_loop` (required — `NULL`
-makes `qz_create` fail) and the library binds its host-side channel handles
-(pipe read pump, wake async, tx-spill timer) to it, so `message_cb` fires on
-the thread pumping your loop. Build with `-DQZ_PROCESS_MODEL=THREAD` for the
-single-process baseline (one internal qzjs thread per runtime, `message_cb`
-on that thread, host pumps nothing). In both models JS runs on the runtime's
-own loop: the host drives work by posting JSON messages (`qz_post_message`,
-thread-safe) and receiving replies through `message_cb`.
+take the host down. The library owns the host-side channel **and its pump
+thread/loop** itself: it never runs host code, asks for no injected `uv_loop`,
+and fires no callback. All outbound messages land in a per-runtime FIFO mailbox
+the host drains on its own thread via `qz_recv_message` / `qz_free_message`,
+optionally waking on `qz_message_fd` (an `eventfd` you integrate into your own
+poll/epoll/select). Build with `-DQZ_PROCESS_MODEL=THREAD` for the
+single-process baseline (one internal qzjs thread per runtime; same mailbox,
+host pumps nothing). In both models JS runs on the runtime's own loop: the host
+drives work by posting JSON messages (`qz_post_message`, thread-safe) and
+consuming replies from the mailbox.
 
 ## API Reference
 
@@ -197,21 +200,26 @@ thread-safe) and receiving replies through `message_cb`.
 
 | Function | Description |
 |----------|-------------|
-| `qz_create(config)` | Create runtime. ISOLATED: spawns the main-RT process, handshakes on a synchronous raw-fd read (no pumping/callbacks), attaches channel handles to `cfg.uv_loop` (NULL → fails). THREAD: starts the internal thread. Blocks until ready + `initial_script` eval'd. Returns NULL on failure. |
-| `qz_destroy(rt)` | Graceful shutdown: terminate main RT (process/thread) → reap → free. Pumps `cfg.uv_loop` while waiting (ISOLATED) — never call from `message_cb`. Host thread only, NULL-safe. |
+| `qz_create(config)` | Create runtime. ISOLATED: spawns the main-RT process plus the library's own host-side pump thread + loop (never the host's), blocks until mainRT's `CONTROL{ready}`; frames that arrived before ready are replayed into the mailbox. THREAD: starts the internal qzjs thread. Blocks until ready + `initial_script` eval'd. Returns NULL on failure. |
+| `qz_destroy(rt)` | Graceful force-terminate: shutdown main RT (process/thread) → reap → free (ISOLATED worst-case ≤2s, handled inside the library thread). Unconsumed mailbox messages are freed — drain first via `qz_recv_message` if you need them. Host thread only, NULL-safe. |
 | `qz_post_message(rt, json, len)` | Thread-safe inbound JSON message (copied). Returns 0 / -1. |
-| `qz_get_runtime_data(rt)` / `qz_set_runtime_data(rt, data)` | Per-runtime opaque pointer accessors. |
-| `qz_free(ptr)` | Free malloc'd blocks. NULL-safe. |
+| `qz_recv_message(rt, json, len, timeout_ms)` | Pop one message from the outbound mailbox. `timeout_ms`: `0`=pure poll, `>0`=wait up to N ms, `-1`=block forever. Returns `0`=got one (`*json` malloc, NUL-terminated; release with `qz_free_message`), `1`=timeout, `-1`=param/state error. |
+| `qz_free_message(json)` | Release a `qz_recv_message` buffer. NULL-safe. |
+| `qz_message_fd(rt)` | The rt's wake fd (`eventfd`) — add to your own poll/epoll/select; readable ⇒ ≥1 message pending. Owned by rt: never close it; invalid after `qz_free`. Linux-only. |
+| `qz_wait_idle(rt)` | Request auto-exit when no async work pending, block until the main body exits. Messages keep entering the mailbox during the wait; after it returns, drain with `qz_recv_message` then free with `qz_free` (not `qz_destroy`). |
+| `qz_free(ptr)` | Dual-role: a torn-down rt → drains mailbox, closes wake fd, frees config buffers + rt; a plain malloc blob (e.g. from `qz_compile`) → plain free. NULL-safe. |
 
 ### Configuration (`qz_config_t`)
 
 | Field | Description |
 |-------|-------------|
 | `initial_script` | Eval'd inside the runtime at create (main-RT process under ISOLATED, qzjs thread under THREAD); a throw → `qz_create` returns NULL. |
-| `message_cb` | Outbound message callback (NUL-terminated JSON, `len` excludes the terminator). Fires on the thread pumping `cfg.uv_loop` (ISOLATED) or the qzjs thread (THREAD); must be thread-safe and must never call blocking host APIs. |
-| `uv_loop` | `const void *` (`uv_loop_t *`) — host's own loop, **required under ISOLATED** (NULL → `qz_create` fails), ignored under THREAD. Host and libqzjs must link the same libuv. |
 | `debug` | DAP debugger bits (see Debugging). |
-| `host_data` | Per-runtime opaque pointer, read via `qz_get_runtime_data`. |
+
+`qz_config_t` carries no callback and no loop: the library never runs host
+code, so host-bound output is pulled from the mailbox (`qz_recv_message`), not
+pushed to a callback. See [Embedding](docs/guide/embedding.md) for the full config
+(`control_plane`, `worker_backend`, `initial_script_path`, `initial_bytecode`).
 
 ### Multi-context
 
@@ -348,11 +356,11 @@ polyfill 构建期引入 npm 依赖（esbuild + 3 个库），均 devDependencie
 
 ## Thread Safety
 
-- **All JS runs on the runtime's own single loop** — the `qzjs-rt` process under ISOLATED (default), the internal `qzjs` thread under THREAD; the host never calls into JS directly.
-- `qz_create` / `qz_destroy` are host-thread calls. The blocking host APIs (`qz_ping`, `qz_ping_path`, `qz_wait_idle`, `qz_destroy`) pump `cfg.uv_loop` internally under ISOLATED (`UV_RUN_NOWAIT` + yield), so `message_cb` may fire **reentrantly** inside them — never call one from `message_cb`. After `qz_wait_idle` free the runtime with `qz_free(rt)`, not `qz_destroy`.
-- `qz_post_message` is **thread-safe** in both models (any thread may call it; the JSON is copied). Under ISOLATED delivery latency equals your pump frequency; FIFO order per runtime is preserved.
-- `message_cb` fires on the thread pumping your injected `cfg.uv_loop` (ISOLATED) or on the internal qzjs thread (THREAD) — the host callback must be thread-safe. The JSON payload is NUL-terminated (`len` excludes the terminator) in both models.
-- The library never calls `uv_run(UV_RUN_DEFAULT)` or `uv_loop_close` on your loop; after `qz_wait_idle`/`qz_destroy` all library handles are closed so `uv_loop_close` on the host loop succeeds. Host and libqzjs must link the **same** libuv.
+- **All JS runs on the runtime's own single loop** — the `qzjs-rt` process under ISOLATED (default), the internal `qzjs` thread under THREAD; the library additionally owns a host-side pump thread under ISOLATED. The host never calls into JS directly, and the library never calls back into host code.
+- `qz_create` / `qz_destroy` are host-thread calls. The blocking host APIs (`qz_ping`, `qz_ping_path`, `qz_wait_idle`, `qz_destroy`) do their waiting on the **library's** pump thread; the mailbox is unaffected and stays readable from any host thread. After `qz_wait_idle` free the runtime with `qz_free(rt)`, not `qz_destroy`.
+- `qz_post_message` is **thread-safe** in both models (any thread may call it; the JSON is copied). FIFO order per runtime is preserved.
+- **Mailbox consumption:** any thread may call `qz_recv_message`; the lock-free pop is mutually exclusive, so concurrent pollers are safe. Keep at most one thread as the "fd waiter". The JSON payload is NUL-terminated (`len` excludes the terminator); release each buffer with `qz_free_message`. Cross-thread message ownership handoff is the host's job.
+- There is **no host loop to pump and no same-link libuv requirement**: add `qz_message_fd` (an `eventfd`) to your own poll/epoll/select. It is owned by the runtime — never close it; it becomes invalid after `qz_free`. Unconsumed messages are freed at `qz_destroy`/`qz_free`. Linux-only. When waiting on the fd, drain (`qz_recv_message(...,0)`) → clear the fd (`read` until `EAGAIN`) → re-probe once before blocking, so no wakeup is lost.
 - Worker contexts each run on their own loop — thread or process depending on the worker backend (real parallelism).
 
 ## Debugging

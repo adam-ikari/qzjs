@@ -1,6 +1,6 @@
 ---
 title: Extensions
-description: Build-time native C extensions for qzjs — qz_ext_t interface, QZ_EXTENSIONS macro, lifecycle hooks, and per-runtime data.
+description: Build-time native C extensions for qzjs — qz_ext_t interface, QZ_EXTENSIONS macro, lifecycle hooks, and per-runtime state.
 ---
 
 # Extensions
@@ -121,26 +121,20 @@ instead of `QZ_DEFAULT_EXTENSIONS`.
 
 All hooks receive both the extension and the runtime. Get the active `JSContext*` via `qz_get_active_jsctx(rt)` (internal, `src/qz_internal.h`).
 
-### Per-runtime data in init
+### Per-runtime state in init
 
 The `qz_ext_t.user_data` field lives on the **shared compile-time** extension
-struct — it is NOT per-instance. To get per-runtime data inside `init` (which
-runs during `qz_create`, before the host has the `rt`), set
-`config.host_data` before `qz_create` and read it via
-`qz_get_runtime_data(rt)`:
+struct — it is NOT per-instance. The public API has no per-runtime opaque
+pointer: there is no `host_data` config field and no runtime-data accessor, and
+the library never invokes host callbacks (all host-bound output goes to the
+mailbox). An extension that needs per-runtime state keeps its own table keyed by
+the `qz_t *` handle it receives in every hook:
 
 ```c
-/* host: */
-qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state };
-qz_t *rt = qz_create(&cfg);
-
-/* extension init: */
+/* extension init: init runs on the JS thread during qz_create, before the
+ * host holds the rt — but rt is a valid key from inside the hook. */
 static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
-    my_state_t *st = (my_state_t *)qz_get_runtime_data(rt);
-    /* st is the per-instance data the host set via config */
+    my_state_t *st = my_registry_get_or_create(rt);  /* your own per-rt table */
     ...
 }
 ```
-
-This resolves the init-time ordering deadlock: the `rt` is valid inside `init`
-even though the host hasn't received it yet.

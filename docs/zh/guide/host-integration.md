@@ -1,19 +1,19 @@
 ---
 title: 主机集成
-description: 在 C 应用中嵌入 qzjs 的主机集成路径 —— create、JSON 消息契约、向 JavaScript 出借能力、优雅销毁。
+description: 在 C 应用中嵌入 qzjs 的主机集成路径 —— create、JSON 邮箱消息契约、向 JavaScript 出借能力、优雅销毁。
 ---
 
 # 主机集成
 
-在 C 应用里嵌入 qzjs 分五步。宿主和运行时只通过 JSON 消息通信。
+在 C 应用里嵌入 qzjs 分五步。宿主和运行时只通过 JSON 消息通信。且 qzjs 从不执行宿主代码——没有任何回调：所有出站消息进入邮箱，由宿主在自己的线程上自选时机消费。
 
 ## 五步
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. create      qz_create(&cfg)   — 线程 + 循环 + JS 就绪    │
+│ 1. create      qz_create(&cfg)   — 运行时已活、JS 就绪        │
 │ 2. script      initial_script            — JS 先跑什么        │
-│ 3. communicate qz_post_message ⇄ message_cb  — JSON 契约   │
+│ 3. communicate qz_post_message ⇄ qz_recv_message — 邮箱契约  │
 │ 4. lend        暴露 C 函数、serve/fs/worker/crypto 给 JS      │
 │ 5. destroy     qz_destroy(rt)    — 优雅销毁                 │
 └─────────────────────────────────────────────────────────────┘
@@ -21,21 +21,15 @@ description: 在 C 应用中嵌入 qzjs 的主机集成路径 —— create、JS
 
 ## 1. Create
 
-ISOLATED（默认）下 [`qz_create`](/zh/c-api/runtime) spawn 主RT 进程（`qzjs-rt`）、在同步
-raw-fd 读上完成 ready 握手（握手期间不泵宿主 loop；ready 前的脚本帧在 create 返回前于
-调用线程同步 FIFO 重放给 `message_cb`），再把宿主侧通道句柄挂到你经
-`cfg.uv_loop` 注入的宿主 loop 上——传 NULL 会让 `qz_create` 显式失败。THREAD 构建下则
-启动 qzjs 内部线程、拉起 libuv 循环。两种形态下它都阻塞到就绪才返回，这时运行时已活、
-`initial_script` 已跑完。
+ISOLATED（默认）下 [`qz_create`](/zh/c-api/runtime) spawn 主RT 进程（`qzjs-rt`），随后
+**库自己启动宿主侧的泵线程 + loop**——宿主什么都不用注入、什么都不用泵。它阻塞等待
+mainRT 的 `CONTROL{ready}` 回执；ready 前到达的帧已被重放进邮箱，宿主的第一个
+`qz_recv_message` 就能拿到它们。THREAD 构建下则启动 qzjs 内部线程、拉起 libuv 循环。
+两种形态下它都阻塞到就绪才返回，这时运行时已活、`initial_script` 已跑完。失败返回 `NULL`。
 
 ```c
-uv_loop_t loop;
-uv_loop_init(&loop);
-
 qz_config_t cfg = {0};
 cfg.initial_script = "postMessage({ready: true});";
-cfg.message_cb = on_message;      // 出站 JS→host
-cfg.uv_loop    = &loop;           // 宿主 loop 注入（ISOLATED 必填）
 qz_t *rt = qz_create(&cfg);   // 阻塞直到就绪
 ```
 
@@ -54,36 +48,59 @@ qz_t *rt = qz_create(&cfg);   // 阻塞直到就绪
 
 宿主和 JS 双向都以 JSON 字符串交换数据：不传指针，不共享内存对象。
 
-ISOLATED 下库不拥有宿主侧线程：宿主经 `cfg.uv_loop` 注入自己的 loop 并负责泵它，
-JS 执行在主RT 进程内进行。THREAD 下 qzjs 自己管线程和循环，宿主什么都不用泵。
-两种形态下宿主都不调用 JS 让它运行；ISOLATED 下阻塞宿主 API 会在内部就地泵宿主
-loop（见下方规则）。
+qzjs **从不执行宿主代码**——公共 API 里不存在任何回调。所有发往宿主的消息——JS
+`postMessage`、崩溃上报 `{"type":"error"}`、CONTROL 回执——都进入每个 runtime 一条的
+FIFO **邮箱**，由宿主在自己的线程上自选时机排干。两种形态下库都自主管理线程与 loop
+（ISOLATED：mainRT 子进程 + 库内部宿主侧泵线程；THREAD：内部 qzjs 线程）；宿主只需读邮箱。
 
 | 方向 | 机制 | 线程 |
 |-----------|-----------|--------|
 | 主机 → JS | `qz_post_message(rt, json, len)` | 线程安全，任意线程可调 |
-| JS → 主机 | `cfg.message_cb(rt, json, len, data)` | ISOLATED：在泵宿主 loop 的线程上触发；THREAD：在 qzjs 线程上触发 |
+| JS → 主机 | 邮箱，经 `qz_recv_message(rt, &json, &len, timeout_ms)` 消费 | 宿主自选线程、自选时机 |
+
+```c
+int  qz_recv_message(qz_t *rt, char **json, size_t *len, int timeout_ms);
+void qz_free_message(void *json);
+int  qz_message_fd(qz_t *rt);
+```
+
+- **`qz_recv_message`** —— `timeout_ms`：`0` = 纯轮询（不等待），`>0` = 最多等待该
+  毫秒数，`-1` = 永久阻塞。返回 `0` = 取到消息（`*json` 是 malloc 缓冲区，**必须**用
+  `qz_free_message` 释放），`1` = 超时（`*json` 不变），`-1` = 参数/状态错误。
+  `json` 为 NUL 结尾的 UTF-8；`len` 不含结尾符。
+- **`qz_message_fd`** —— 该 runtime 的唤醒 fd（`eventfd`）。可读 ⇒ 至少一条消息待取。
+  可接入你自己的 poll/epoll/select。归 rt 所有：宿主不得 close，`qz_free` 后失效。
+  仅 Linux。
+- **`qz_free_message`** —— 释放 `qz_recv_message` 返回的缓冲区。NULL 安全。
 
 规则：
 
 - **两个方向都是 JSON 字符串。** 不传指针，不共享内存对象，只传可序列化的数据。
-- **`qz_post_message` 线程安全。** 可从任意主机线程调用；它入队到 qzjs 的入站队列。ISOLATED 下投递延迟等于你的泵频；同一 runtime 的 FIFO 顺序保持。
-- **`message_cb` 的线程归属看模型。** ISOLATED 下它在泵你 `cfg.uv_loop` 的线程上运行——保持轻量，且**不要在回调内调用阻塞宿主 API**（`qz_ping`、`qz_wait_idle`、`qz_destroy` 会在内部就地泵宿主 loop，回调可能在调用内重入触发）；THREAD 下它与事件循环、所有 JS 共享 qzjs 线程，回调须线程安全。
+- **`qz_post_message` 线程安全。** 可从任意主机线程调用；它入队到运行时的入站队列。同一 runtime 的 FIFO 顺序保持；投递不依赖宿主的调度——库自己的泵线程双向搬运帧。
+- **消费完全由宿主掌控。** 任意线程、任意时机。多个线程可并发对同一 runtime 调 `qz_recv_message`（出队互斥），但「等 fd 的人」最多一个；跨线程的消息所有权交接由宿主负责。
+- **阻塞型宿主 API（`qz_ping`、`qz_ping_path`、`qz_wait_idle`、`qz_destroy`）在库的泵线程上等待**，不依赖你运行任何东西。没有需要保持轻量的回调，也没有嵌套要避免——随时排干邮箱即可，哪怕另一个线程正阻塞在其中某个调用里。
+- **未消费的消息在 `qz_destroy`/`qz_free` 时被释放**——不泄漏，但需要就先排干。
 - **有界队列。** 运行时忙（或者 JS 一直不读）时，入站消息会在队列边界积压。
   你的主机代码要能接受 `qz_post_message` 不会马上排空。
 
 ```c
-static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)rt; (void)data;
-    // json 是完整 JSON 字符串；在主机侧解析并分发
-    handle_json(json, len);
+static void host_drain(qz_t *rt, int timeout_ms) {
+    for (;;) {
+        char *json = NULL; size_t len = 0;
+        int r = qz_recv_message(rt, &json, &len, timeout_ms);
+        if (r != 0) break;
+        // json 是完整 JSON 字符串；在主机侧解析并分发
+        handle_json(json, len);
+        qz_free_message(json);
+        timeout_ms = 0;   // 首条到达后转纯轮询排干
+    }
 }
 
 // 任意主机线程：
 qz_post_message(rt, "{\"cmd\":\"start\",\"n\":42}", 22);
 ```
 
-反方向（JS 调 C）也一样：JS 里 `postMessage` 会落到 `message_cb`，或者把 C 函数
+反方向（JS 调 C）也一样：JS 里 `postMessage` 会进入邮箱，或者把 C 函数
 注册成 JS 全局。见 [扩展](/zh/guide/extensions) 和 [嵌入模式](/zh/guide/embedding)。
 
 ### 发送代码执行
@@ -106,15 +123,15 @@ globalThis.onmessage = function (e) {
 ```c
 // 宿主侧——发送要执行的代码
 qz_post_message(rt, "{\"cmd\":\"eval\",\"code\":\"2 + 2\"}", 26);
-// message_cb 收到：{"result":4}
+// qz_recv_message 取到：{"result":4}
 ```
 
-代码片段由运行时的 JS `eval` 执行，结果像任何其他回复一样经 `message_cb` 流回。
+代码片段由运行时的 JS `eval` 执行，结果像任何其他回复一样经邮箱流回。
 
 ### 双端事件分发
 
 两端都按事件类型分发。约定一个形状——`{"type": ..., "payload": ...}`——并给**每一端**
-各自的转发器：JS 侧在 `onmessage` 里路由入站宿主消息，C 侧在 `message_cb` 里路由
+各自的转发器：JS 侧在 `onmessage` 里路由入站宿主消息，C 侧在排干邮箱时路由
 入站 JS 回复。
 
 **JS 侧**——一个处理事件表并回复的转发器：
@@ -132,45 +149,42 @@ globalThis.onmessage = function (e) {
 };
 ```
 
-**宿主侧**——在 `message_cb` 里镜像同样的分发，把每条入站事件（一个 `{type, payload}`
+**宿主侧**——在排干邮箱时镜像同样的分发，把每条入站事件（一个 `{type, payload}`
 JSON 字符串）路由到对应 C 处理器：
 
 ```c
 #include <qzjs/qzjs.h>
-#include <uv.h>
 #include <stdio.h>
 #include <string.h>
 
 static void on_ping(const char *json)  { puts("[host] ping:reply"); }
 static void on_add(const char *json)   { puts("[host] add:reply"); }
 
-static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)rt; (void)data;
+static void dispatch_message(const char *json) {
     /* 用宿主语言的 JSON 库解析 type 再分发；此处为简洁用子串匹配 */
     if (strstr(json, "\"type\":\"ping:reply\"")) on_ping(json);
     else if (strstr(json, "\"type\":\"add:reply\"")) on_add(json);
 }
 
 int main(void) {
-    uv_loop_t loop;
-    uv_loop_init(&loop);
-
     qz_config_t cfg = {0};
-    cfg.message_cb = on_message;
     cfg.initial_script = "/* 上面的 JS 转发器 */";
-    cfg.uv_loop = &loop;                    // ISOLATED 必填（THREAD 构建不需要）
-    qz_t *rt = qz_create(&cfg);
+    qz_t *rt = qz_create(&cfg);          // 线程与 loop 归库所有
 
     const char *ping = "{\"type\":\"ping\",\"payload\":{}}";
     qz_post_message(rt, ping, strlen(ping));            // → on_ping
     const char *add  = "{\"type\":\"add\",\"payload\":{\"a\":2,\"b\":3}}";
     qz_post_message(rt, add, strlen(add));              // → on_add
 
-    /* ISOLATED：泵宿主 loop 直到回复全部到达；THREAD 下这一步可省略 */
-    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+    /* 在本线程消费邮箱：预期两条回复，各最多等 2 秒 */
+    for (int i = 0; i < 2; i++) {
+        char *json = NULL; size_t len = 0;
+        if (qz_recv_message(rt, &json, &len, 2000) != 0) break;
+        dispatch_message(json);
+        qz_free_message(json);
+    }
 
-    qz_destroy(rt);                         // 库句柄已随 teardown 关闭
-    uv_loop_close(&loop);
+    qz_destroy(rt);
     return 0;
 }
 ```
@@ -188,10 +202,10 @@ int main(void) {
 
 ## 5. Destroy
 
-[`qz_destroy`](/zh/c-api/runtime) 执行优雅关闭：ISOLATED 下它是阻塞宿主 API，在内部就地泵
-`cfg.uv_loop` 直到主RT 进程 teardown 完成，结束后挂在宿主 loop 上的库句柄已全部关闭（宿主
-loop 可以干净 `uv_loop_close`）；THREAD 下通知内部线程、排空待处理工作、释放运行时。运行时
-不再需要时从宿主调用。完整生命周期与内存模型见
+[`qz_destroy`](/zh/c-api/runtime) 执行优雅的强制终止：ISOLATED 下对卡死的 mainRT
+最坏是 ≤2 秒的三级终止，全程在库自己的线程内处理——调用方只等待回收；THREAD 下
+通知内部线程并 join。两种形态下都会排空待处理工作并释放运行时。**此时尚未消费的
+邮箱消息会被释放**，需要就先排干。运行时不再需要时从宿主调用。完整生命周期与内存模型见
 [运行时生命周期](/zh/guide/lifecycle)。
 
 ---
@@ -201,7 +215,7 @@ loop 可以干净 `uv_loop_close`）；THREAD 下通知内部线程、排空待�
 | 主题 | 页面 |
 |-------|------|
 | 线程所有权、就绪、关闭 | [运行时生命周期](/zh/guide/lifecycle) |
-| 谁驱动循环、背压 | [事件循环](/zh/guide/event-loop) |
+| 库自有线程、唤醒 fd、排干邮箱 | [事件循环](/zh/guide/event-loop) |
 | 单运行时内多个隔离上下文 | [多上下文](/zh/guide/multi-context) |
 | 注册 C 函数 / 结构化数据 | [嵌入模式](/zh/guide/embedding) |
 | C API 参考 | [C API](/zh/c-api/) |

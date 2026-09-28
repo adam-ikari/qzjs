@@ -58,14 +58,16 @@ profile 会翻转 `QZ_WITH_*` 功能开关。`minimal` 保留 WebAssembly、
 
 ### `qz_create` 返回 `NULL`
 
-`qz_create` 会阻塞到运行时就绪且 `initial_script` 执行完毕（ISOLATED 下握手走同步
-raw-fd 读，握手期间不泵宿主 loop；THREAD 下等内部线程就绪）；任一环节失败即
+`qz_create` 会阻塞到运行时就绪且 `initial_script` 执行完毕（ISOLATED 下先
+spawn 独立主RT 进程、再启动库自持的宿主侧泵线程与 loop；THREAD 下等库内部
+qzjs 线程就绪——线程与 loop 全部归库所有，宿主不注入任何东西）；任一环节失败即
 返回 `NULL`。原因：
 
 1. **`initial_script` 抛异常。** 初始脚本中的任何异常都会中止创建——运行时
    不会降级启动。
 2. **线程或 loop 初始化失败**（资源耗尽）。
-3. **ISOLATED 下 `cfg.uv_loop` 为 `NULL`。** 宿主 loop 注入是必填项，缺失则显式失败——库绝不回退到内部宿主线程。主RT 进程（`qzjs-rt`）spawn 失败同样返回 `NULL`。
+3. **ISOLATED 下主RT 进程（`qzjs-rt`）spawn 失败。** 找不到该二进制或派生
+   失败时，`qz_create` 直接返回 `NULL`——库不依赖宿主注入任何循环，没有回退路径。
 
 CLI 在同一条件下打印 `qzjs: runtime init failed`。
 
@@ -73,7 +75,7 @@ CLI 在同一条件下打印 `qzjs: runtime init failed`。
 qz_t *rt = qz_create(&cfg);
 if (!rt) {
     /* initial_script 抛异常，或线程/loop 初始化失败；
-       ISOLATED 下 cfg.uv_loop 为 NULL 也会显式失败 */
+       ISOLATED 下主RT 进程 spawn 失败同样返回 NULL */
     return 1;
 }
 ```
@@ -92,13 +94,23 @@ if (!rt) {
 运行时存活——不要指望脚本结束是屏障。待处理的 50ms `setTimeout` 会在退出前
 触发。
 
-### `message_cb` 从不被调用
+### `qz_recv_message` 从不返回消息
 
-`message_cb` 是**出站**（JS → 宿主）通道，必须在 `qz_create` 之前于
-`qz_config_t` 中设置。`message_cb` 为 null 时宿主收不到任何消息。出站发送只在
-脚本确实调用 `postMessage(...)` 时发生。**ISOLATED 下还有一个常见原因：宿主没有泵
-`cfg.uv_loop`**——读泵挂在你的 loop 上，不泵就不会有回调到达（阻塞宿主 API 会在内部
-就地泵，但常规收消息依赖你自己的泵循环）。见
+`qz_recv_message` 是**出站**（JS → 宿主）消费通道——不会再有任何消息被推送进
+宿主回调。若它始终取不到消息，按顺序排查：
+
+1. **脚本从未调用 `postMessage(...)`。** 出站发送只在 JS 真正 post 时发生；
+   静默的运行时邮箱里本来就没有东西。
+2. **处处传了 `timeout_ms = 0`。** `0` 是纯轮询——那一刻邮箱为空就立即返回
+   `1`。要用 `timeout_ms > 0`（限时等）或 `-1`（无限等）消费，或把
+   `qz_message_fd(rt)`（唤醒 fd，Linux `eventfd`）接入你自己的
+   poll/epoll/select 循环——可读即表示至少有一条消息待取。
+3. **消息被另一个消费者先取走了。** 同一 rt 上并发调用 `qz_recv_message`
+   是安全的，但每条消息恰好交付给**一个**调用者（单消费者规则）；跨线程的
+   消息交接由宿主自己负责。
+
+崩溃上报同样是普通的邮箱消息：`{"type":"error"}` 帧经 `qz_recv_message`
+取到——尤其是 `qz_wait_idle` 返回后做最后一次 `recv(0)` 终排时。见
 [事件循环](/zh/guide/event-loop) 与
 [主机集成](/zh/guide/host-integration)。
 

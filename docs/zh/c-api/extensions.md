@@ -22,7 +22,7 @@ typedef struct qz_ext_t {
 | `destroy` | 在上下文销毁时调用 — 释放扩展资源。JSContext 清理是自动的。 |
 | `suspend` | 在上下文挂起时调用 — 保存状态、暂停定时器、关闭连接。 |
 | `resume` | 在上下文恢复时调用 — 恢复状态、恢复定时器、重新打开连接。 |
-| `user_data` | 不透明的扩展状态。**注意：** 这在所有运行时之间共享 — 对于每个实例的数据，使用 `config.host_data`。 |
+| `user_data` | 不透明的扩展状态。**注意：** 这在所有运行时之间共享——qzjs 不提供每运行时的宿主数据通道，如需每实例状态，请在你自己的结构中按 `rt` 等键索引。 |
 
 ## 注册模型
 
@@ -93,16 +93,26 @@ qz_ext_t my_extension = {
 
 ## 每个运行时的数据
 
-`qz_ext_t.user_data` 在所有运行时之间共享。对于每个实例的状态，使用 `config.host_data`：
+qzjs 为扩展**不提供每运行时的宿主数据通道**：没有 `qz_get_runtime_data` /
+`qz_set_runtime_data` 访问器，也没有 `config.host_data` 字段。
+`qz_ext_t.user_data` 在所有运行时之间共享。如果扩展需要每实例状态，请在其
+自有结构中索引——每个生命周期钩子收到的 `rt`（以及 `JSContext *`）就是稳定
+的身份标识：
 
 ```c
-qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state,
-                      .uv_loop = my_loop /* uv_loop_t*，ISOLATED 下必填 */ };
-qz_t *rt = qz_create(&cfg);
+typedef struct { qz_t *rt; my_state_t *state; } ext_instance_t;
 
-// 在扩展 init 内部：
-my_state_t *st = (my_state_t *)qz_get_runtime_data(rt);
+static ext_instance_t instances[MAX];   // 或以 rt 为键的哈希表
+
+static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
+    ext_instance_t *inst = find_or_create_instance(instances, rt);
+    inst->state = my_per_rt_state_new();
+    return 0;
+}
 ```
+
+发往宿主的消息经运行时邮箱（`qz_recv_message`）流转，而不是经扩展回调——
+见[运行时生命周期 / 邮箱](/zh/c-api/runtime#邮箱)。
 
 ## 参见
 

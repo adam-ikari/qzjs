@@ -36,24 +36,17 @@ cmake --build build -j$(nproc)
 
 ```c
 #include <qzjs/qzjs.h>
-#include <uv.h>
 #include <stdio.h>
 
-static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)rt; (void)data;
-    printf("received: %.*s\n", (int)len, json);
-}
-
 int main(void) {
-    uv_loop_t loop;
-    uv_loop_init(&loop);
+    // qzjs 完全自主管理自己的线程与 loop——宿主不注入任何事件循环，
+    // 也不会被回调。JS 的一切出站消息（postMessage、崩溃上报）都进入
+    // 每个运行时一条的 FIFO 邮箱，宿主在自己的线程上、自选时机经
+    // qz_recv_message 消费。
 
-    // 创建运行时 — ISOLATED（默认）下 JS 跑在独立主RT 进程里，
-    // 宿主注入并泵动自己的 loop；THREAD 构建不需要 cfg.uv_loop
+    // 创建运行时 — 阻塞直到 JS 就绪（求值 initial_script）
     qz_config_t cfg = {0};
     cfg.initial_script = "console.log('Hello from qzjs!'); postMessage(1 + 1);";
-    cfg.message_cb = on_message;
-    cfg.uv_loop    = &loop;           // 宿主 loop 注入（ISOLATED 必填）
     qz_t *rt = qz_create(&cfg);
     if (!rt) {
         fprintf(stderr, "Failed to create runtime\n");
@@ -63,15 +56,36 @@ int main(void) {
     // 通过发送 JSON 消息驱动运行时
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
 
-    // 泵宿主 loop：回复到达时 on_message 在本线程触发
-    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+    // 从邮箱消费回复：首条最多等 1 秒，之后转纯轮询直到排干。
+    char *json;
+    size_t len;
+    int timeout_ms = 1000;
+    while (qz_recv_message(rt, &json, &len, timeout_ms) == 0) {
+        printf("received: %.*s\n", (int)len, json);
+        qz_free_message(json);
+        timeout_ms = 0;
+    }
 
-    // 清理 — 优雅关闭（库句柄已随 teardown 关闭）
-    qz_destroy(rt);
-    uv_loop_close(&loop);
+    // 请求无异步工作时自动退出并等待主脚本体结束，再做一次纯轮询终排——
+    // 等待期间到达的消息（含崩溃 {"type":"error"} 上报）仍在邮箱里可取。
+    qz_wait_idle(rt);
+    while (qz_recv_message(rt, &json, &len, 0) == 0) {
+        printf("received: %.*s\n", (int)len, json);
+        qz_free_message(json);
+    }
+
+    // 清理 — 释放邮箱、关闭唤醒 fd、回收 rt
+    qz_free(rt);
     return 0;
 }
 ```
+
+宿主可以把 qzjs 嵌进任何事件系统：`qz_message_fd(rt)` 返回该运行时的唤醒
+fd（Linux `eventfd`）——可读即表示至少有一条消息待取，可与自己的 fd 一起
+`poll()`/`epoll`/`select`。消费时先排干邮箱、再清该 fd 计数（消费协议见
+[主机集成](/zh/guide/host-integration)）。`THREAD` 构建
+（`-DQZ_PROCESS_MODEL=THREAD`）下这段程序一字不改：JS 跑在 qzjs 的内部
+线程上，宿主依旧只消费邮箱。
 
 使用 pkg-config 编译并链接（自动带出完整静态链接行 — 全部 vendored 归档）：
 

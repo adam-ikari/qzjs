@@ -21,10 +21,12 @@ The defining case: run JS on resource-constrained targets.
 - **Low-overhead scripting** — a single `initial_script` or a message-driven
   handler replaces a hand-written C state machine.
 
-The host stays in C. Under the default ISOLATED model the library owns no
-host-side thread: JS runs in a separate main-RT process and the host simply
-injects and pumps its own `uv_loop`. Under THREAD, JS runs on qzjs's own
-internal thread with its own libuv loop and the host pumps nothing.
+The host stays in C. qzjs fully owns its threads and loops and never runs
+host code: under ISOLATED, JS lives in a separate main-RT process and the
+library keeps its own host-side pump thread; under THREAD, JS runs on
+qzjs's internal thread. Everything bound for the host — JS `postMessage`
+output — lands in a FIFO mailbox the host drains on its own thread with
+`qz_recv_message`, picking its own timing.
 
 ## Extending a C Application with Scripting
 
@@ -32,7 +34,7 @@ Give your C app a scripting surface without a full interpreter integration.
 
 - Ship logic as `initial_script` so it can be updated at runtime.
 - Drive the runtime over JSON messages — your app's domain events become JS
-  handler calls, and JS results flow back through `message_cb`.
+  handler calls, and JS results arrive in the mailbox via `qz_recv_message`.
 - Expose your C functions to JS through a compiled-in extension
   ([Examples](/guide/examples), `extension/`).
 

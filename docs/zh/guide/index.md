@@ -6,16 +6,18 @@ description: qzjs 是一个严格 C99 的可嵌入运行时 —— WinterTC 兼�
 # 概述
 
 qzjs 是一个用**严格 C99** 编写的**可嵌入运行时**。它提供精简的 C API 和
-**WinterTC 兼容的运行时**——ISOLATED（默认）下 JS 跑在独立的主RT 进程里、宿主经
-`cfg.uv_loop` 注入并泵动自己的循环；THREAD 下库自带内部线程和 libuv 循环——通过
-JSON 消息与宿主通信。
+**WinterTC 兼容的运行时**——ISOLATED（默认）下 JS 跑在独立的主RT 进程里，
+THREAD 下跑在库自有的内部线程上；库自主管理线程与 loop，从不执行宿主代码——
+通过 JSON 消息与宿主通信。
 
-C 应用想把一部分逻辑放进 JavaScript 的话，qzjs 提供运行时；ISOLATED 下宿主只需注入
-并泵自己的 `uv_loop`，THREAD 下连泵都不用。
+C 应用想把一部分逻辑放进 JavaScript 的话，qzjs 提供运行时；宿主无需注入、也
+无需泵动任何循环——发往宿主的消息（JS `postMessage`、崩溃上报、CONTROL 回执）
+一律进入每运行时一条的 FIFO 邮箱，宿主在自己的线程上、自选时机经
+`qz_recv_message` 消费。
 
 ![qzjs 架构图](../../assets/qzjs-arch.svg)
 
-- **基于消息的宿主边界** — `qz_post_message`（入）/ `message_cb`（出），双向 JSON
+- **基于消息的宿主边界** — `qz_post_message`（入）/ FIFO 邮箱经 `qz_recv_message` 消费（出），双向 JSON
 - **隔离运行时模型** — 每个实例在自己的内部线程上运行 JS；内部锁与原子操作协调线程、宿主与 worker 边界，从不参与 JS 执行
 - **ECMAScript 引擎（ES2023）** — 完整 ES2023 支持，启动快，内存占用低
 - **WinterTC 兼容运行时** — `fetch`、`console`、`crypto.subtle`、`ReadableStream`、定时器、`fs`、`URL`、`TextEncoder`、WebSocket、`serve()` 等（见 [JS API](/zh/js-api/) 索引）

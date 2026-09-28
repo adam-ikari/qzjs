@@ -22,7 +22,7 @@ typedef struct qz_ext_t {
 | `destroy` | Called on context destruction — free extension resources. JSContext cleanup is automatic. |
 | `suspend` | Called on context suspend — save state, pause timers, close connections. |
 | `resume` | Called on context resume — restore state, resume timers, reopen connections. |
-| `user_data` | Opaque extension state. **Note:** This is shared across all runtimes — for per-instance data, use `config.host_data`. |
+| `user_data` | Opaque extension state. **Note:** This is shared across all runtimes — qzjs provides no per-runtime host-data channel, so key per-instance state inside your own structures (e.g. by `rt`) if you need it. |
 
 ## Registration Model
 
@@ -93,16 +93,28 @@ qz_ext_t my_extension = {
 
 ## Per-Runtime Data
 
-`qz_ext_t.user_data` is shared across all runtimes. For per-instance state, use `config.host_data`:
+qzjs provides **no per-runtime host-data channel** for extensions: there are
+no `qz_get_runtime_data` / `qz_set_runtime_data` accessors and no
+`config.host_data` field. `qz_ext_t.user_data` is shared across all runtimes.
+If an extension needs per-instance state, key it inside its own structures —
+the `rt` (and `JSContext *`) passed to every lifecycle hook is a stable
+identity:
 
 ```c
-qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state,
-                      .uv_loop = my_loop /* uv_loop_t*, required under ISOLATED */ };
-qz_t *rt = qz_create(&cfg);
+typedef struct { qz_t *rt; my_state_t *state; } ext_instance_t;
 
-// Inside extension init:
-my_state_t *st = (my_state_t *)qz_get_runtime_data(rt);
+static ext_instance_t instances[MAX];   // or a hash map keyed by rt
+
+static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
+    ext_instance_t *inst = find_or_create_instance(instances, rt);
+    inst->state = my_per_rt_state_new();
+    return 0;
+}
 ```
+
+Host-bound messages flow through the runtime mailbox (`qz_recv_message`),
+not through extension callbacks — see
+[Runtime Lifecycle / Mailbox](/c-api/runtime#mailbox).
 
 ## See Also
 

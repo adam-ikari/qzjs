@@ -7,13 +7,13 @@ description: qzjs is an embeddable runtime in strict C99 — a WinterTC-compatib
 
 qzjs is an **embeddable runtime** written in **strict C99**. It provides a small C API and a **WinterTC-compatible runtime**, and communicates with the host over JSON messages.
 
-For a C application that wants part of its logic in JavaScript, qzjs supplies the runtime; under the default ISOLATED model the host keeps pumping its own event loop — you inject your `uv_loop_t` via `cfg.uv_loop` and the library owns no host-side thread (under THREAD, qzjs runs everything on an internal thread and the host pumps nothing).
+For a C application that wants part of its logic in JavaScript, qzjs supplies the runtime: the library owns all of its threads and loops and never executes host code (under ISOLATED, JS runs in a separate main-RT process; under THREAD, on an internal qzjs thread). Everything bound for the host — JS `postMessage` output, crash reports, control receipts — lands in a per-runtime FIFO mailbox that the host drains on its own thread, at its own time, via `qz_recv_message`.
 
 ## How the Host Fits
 
 ![qzjs architecture](../assets/qzjs-arch.svg)
 
-- **Message-based host boundary** — `qz_post_message` (in) / `message_cb` (out), JSON in both directions
+- **Message-based host boundary** — `qz_post_message` (in) / FIFO mailbox drained with `qz_recv_message` (out), JSON in both directions
 - **Isolated runtime model** — JS runs in a separate main-RT process (`qzjs-rt`) under the default ISOLATED model, or on the instance's internal qzjs thread under THREAD; internal locks and atomics coordinate the process/thread, host, and worker boundaries, never JS execution
 - **ECMAScript engine (ES2023)** — full ES2023 support, fast startup, low memory
 - **WinterTC-compatible runtime** — `fetch`, `console`, `crypto.subtle`, `ReadableStream`, timers, `fs`, `URL`, `TextEncoder`, WebSocket, `serve()`, and more (see the [JS API](/js-api/) index)

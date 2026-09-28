@@ -41,8 +41,10 @@ description: qzjs 常见问题 — Node.js 兼容性、进程模型、内存、A
 
 **主运行时是单线程的。** 所有 JS 在 qzjs 自有的内部线程上运行（ISOLATED 下这是
 主RT 进程内库自有的线程/loop；THREAD 下是库的内部线程），该线程同时驱动内嵌的
-libuv loop；宿主线程从不执行 JS。ISOLATED 下宿主侧的 `message_cb` 在泵自己
-`cfg.uv_loop` 的线程上触发。并发来自异步 I/O，不是主上下文中的并行 JS。
+libuv loop；宿主线程从不执行 JS，也不会被回调——qzjs 从不执行宿主代码，发往
+宿主的消息（JS `postMessage`、崩溃上报、CONTROL 回执）一律进入每运行时一条的
+FIFO 邮箱，等宿主在自己的线程上用 `qz_recv_message` 消费。并发来自异步 I/O，
+不是主上下文中的并行 JS。
 
 Web Worker **确实**并行——按后端不同以线程或子进程形式——但通过结构化克隆
 消息通信。
@@ -53,10 +55,11 @@ Web Worker **确实**并行——按后端不同以线程或子进程形式—�
 
 - **`ISOLATED`**（默认）——每个 `new Worker(...)` 经 fork+exec 在专用子进程
   （`qzjs-rt`）中运行。隔离性更强，有 IPC 开销。宿主侧形态也随之改变：JS 跑在
-  主RT 进程里，库的宿主侧不拥有线程，宿主经 `cfg.uv_loop` 注入并泵自己的循环，
-  `message_cb` 在泵 loop 的线程上触发。见[事件循环](/zh/guide/event-loop)。
+  主RT 进程里，库自持宿主侧泵线程与 loop，发往宿主的消息全部进入 FIFO 邮箱，
+  由宿主经 `qz_recv_message` 消费——无需注入、也无需泵动任何循环。见
+  [事件循环](/zh/guide/event-loop)。
 - **`THREAD`**——worker 是同一进程内的线程。开销更低，共享地址空间。库自带内部
-  qzjs 线程跑一切，宿主什么都不用泵。
+  qzjs 线程跑一切，宿主同样只需消费邮箱。
 
 两者都不是针对恶意脚本的安全边界。见
 [多上下文与 Web Worker](/zh/guide/multi-context)。
@@ -99,8 +102,9 @@ Web Worker **确实**并行——按后端不同以线程或子进程形式—�
 ### 宿主能直接调用 JS，比如 `qz_eval` 吗？
 
 不能。公开 C API 上**没有 `qz_eval`**。宿主与运行时只通过 JSON 消息通信——
-`qz_post_message` 入站、`message_cb` 出站（ISOLATED 下出站回调在泵宿主 `cfg.uv_loop`
-的线程上触发）。这让 JS 执行边界保持显式，宿主
+`qz_post_message` 入站；出站（JS `postMessage`、崩溃上报、CONTROL 回执）进入
+每运行时一条的 FIFO **邮箱**，宿主在自己的线程上用 `qz_recv_message` /
+`qz_free_message` 消费——qzjs 从不执行宿主代码。这让 JS 执行边界保持显式，宿主
 无需 eval 通道。见[主机集成](/zh/guide/host-integration)。
 
 ### 为什么测试里定时器表现怪异？
@@ -138,8 +142,8 @@ qzjs 要能嵌入 C99 宿主应用——设备固件与边缘服务——并与�
 
 ### `qz_create` 为什么返回 NULL？
 
-初始脚本抛异常，或线程/loop 初始化失败；ISOLATED 下 `cfg.uv_loop` 为 `NULL`
-（宿主 loop 必填）也会显式失败。见
+初始脚本抛异常，或线程/loop 初始化失败；ISOLATED 下主RT 进程（`qzjs-rt`）
+spawn 失败同样返回 `NULL`——库不依赖宿主注入任何循环。见
 [常见问题排查](/zh/guide/troubleshooting#运行时创建)。
 
 ### 怎么调试 JS？

@@ -24,8 +24,6 @@ qz_config_t cfg = {
     .initial_script =
         "console.log('hello from qzjs');"
         "globalThis.onmessage = function (e) { postMessage('got: ' + e.data); };",
-    .message_cb = on_message,
-    .uv_loop    = &loop,   // 宿主 loop 注入（ISOLATED 必填）
 };
 qz_t *rt = qz_create(&cfg);   // initial_script 抛错时为 NULL
 ```
@@ -38,18 +36,18 @@ qz_t *rt = qz_create(&cfg);   // initial_script 抛错时为 NULL
 
 ```
 host  ── qz_post_message(json) ──▶  JS: globalThis.onmessage(e)
-host  ◀── message_cb(json)       ───  JS: postMessage(value)
+host  ◀── qz_recv_message(json) ──  邮箱 ◀── JS: postMessage(value)
 ```
 
-- `qz_post_message` **线程安全**（JSON 被拷贝），两模型下均可从任意宿主线程调用；ISOLATED 下投递延迟等于你的泵频。
+- `qz_post_message` **线程安全**（JSON 被拷贝），两模型下均可从任意宿主线程调用。
 - 消息以 JS 对象/字符串经 `onmessage` 到达；`e.data` 是解析后的负载。
-- `message_cb` 携带从 `postMessage` 序列化的 JSON；触发线程看模型——ISOLATED 下在
-  **泵宿主 loop（`cfg.uv_loop`）的线程**上触发（阻塞宿主 API 会在内部就地泵，回调可能
-  在调用内重入触发，不要在回调内再调阻塞宿主 API）；THREAD 下在 qzjs 线程上触发，
-  回调须线程安全。
+- 从 `postMessage` 序列化的 JSON 进入每运行时一条的 FIFO **邮箱**：宿主用
+  `qz_recv_message` 自取（任意线程、任意时机，可限时可纯轮询），每条缓冲用
+  `qz_free_message` 释放；`qz_message_fd(rt)` 提供唤醒 fd（`eventfd`），可接入
+  宿主自己的 poll/epoll/select 循环。qzjs 从不执行宿主代码——没有回调线程，
+  也没有需要提防的重入。
 
-这是宿主 ↔ JS 的唯一数据通道。**没有同步返回值** — 结果总是经
-`message_cb` 流回。
+这是宿主 ↔ JS 的唯一数据通道。**没有同步返回值** — 结果总是经邮箱流回。
 
 ## 3. Web Worker
 

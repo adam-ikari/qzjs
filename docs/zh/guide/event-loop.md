@@ -1,23 +1,25 @@
 ---
 title: 事件循环
-description: qzjs 事件循环双形态 — ISOLATED 下宿主注入 uv_loop 并在泵线程回调 message_cb；THREAD 下库自带内部线程。
+description: qzjs 双形态事件循环 — 库自主管理线程与 loop（ISOLATED：mainRT 子进程 + 库内部宿主侧泵线程；THREAD：内部 qzjs 线程），从不执行宿主代码；宿主不运行也不注入 loop，只在自己的线程上自选时机消费邮箱，可选用唤醒 fd 接入自身 poll/epoll/select。
 ---
 
 # 事件循环
 
-qzjs 的事件循环有两种形态，由构建期 `QZ_PROCESS_MODEL`（缺省 `ISOLATED`）决定：
+qzjs 的事件循环有两种形态，由构建期 `QZ_PROCESS_MODEL`（缺省 `ISOLATED`）决定。两种形态的故事是同一个：**库泵自己的 loop/线程，从不执行宿主代码**。宿主不运行也不注入 loop——只在自己的线程上自选时机消费邮箱：
 
-- **ISOLATED** — JS 跑在独立的主RT *进程*（`qzjs-rt`）里。库的宿主侧**不拥有任何线程和循环**：你通过 `cfg.uv_loop` 注入自己的 `uv_loop_t`，库把宿主侧通道句柄（管道读泵、wake async、发送溢出定时器）挂在它上面，`message_cb` **在泵你 loop 的线程上触发**。
-- **THREAD** — 库启动一个内部 `qzjs` 线程运行嵌入式 libuv 循环。所有 JS 与 `message_cb` 都在该线程上运行；宿主什么都不用泵。
+- **ISOLATED** — JS 跑在独立的主RT *进程*（`qzjs-rt`）里；此外库还在宿主进程内启动**自己的宿主侧泵线程 + loop**。所有发往宿主的消息（JS `postMessage`、崩溃上报 `{"type":"error"}`、CONTROL 回执）都写入每个 runtime 一条的 FIFO **邮箱**，用 `qz_recv_message` 排干。
+- **THREAD** — 库启动一个内部 `qzjs` 线程运行嵌入式 libuv 循环。所有 JS 都在该线程上运行；输出进入同一个邮箱。
 
 ## 谁在运行循环（ISOLATED — 缺省）
 
 ```mermaid
 flowchart TB
     subgraph HOSTP["宿主进程"]
-        HLOOP["宿主 uv_loop（cfg.uv_loop 注入）"]
-        HLOOP -->|"uv_run（宿主泵）"| HLOOP
-        HLOOP -->|"读泵到达 → message_cb"| HCB["宿主线程执行回调"]
+        PUMP["库自有泵线程 + loop（库创建、库泵）"]
+        MB["邮箱 FIFO"]
+        HT["宿主线程 — 自选时机 qz_recv_message"]
+        PUMP -->|"帧到达 → 写入邮箱"| MB
+        MB -->|"qz_recv_message / 唤醒 fd"| HT
     end
     HOSTP -->|"qz_post_message: JSON 入（MPSC + uv_async）"| RT
     subgraph RTP["主RT 进程（qzjs-rt）"]
@@ -26,61 +28,69 @@ flowchart TB
     end
 ```
 
-宿主拥有自己的 loop 和泵的节奏；库只是借用。`qz_create` spawn 主RT 进程后，在同步 raw-fd 读上完成握手（握手期间绝不泵宿主 loop——ready 前的脚本消息会被缓冲，在 `qz_create` 返回前于调用线程上同步按 FIFO 重放给 `message_cb`），然后把通道句柄挂到 `cfg.uv_loop` 上。ISOLATED 下传 `cfg.uv_loop = NULL` 会让 `qz_create` 显式失败——库绝不回退到内部宿主线程。宿主与 libqzjs 必须链接**同一个** libuv。
+边界两侧的每一个线程和 loop 都归库所有，不向宿主借用任何东西。`qz_create` spawn 主RT 进程后，在同步 raw-fd 读上完成 ready 握手，并启动库的宿主侧泵线程。ready 前到达的帧已被重放进邮箱，宿主的第一个 `qz_recv_message` 就能拿到。宿主不注入 loop、不泵任何东西，宿主与 libqzjs 之间也**没有同链接 libuv 的义务**——libuv 是库的内部依赖（宿主可把 qzjs 嵌入任何事件系统：poll/epoll/select、自己的线程，或什么都不用）。
 
 ## 谁在运行循环（THREAD 构建）
 
-`qz_create` 启动一个专用内部线程（`uv_thread_t`），该线程运行一个 libuv 循环（嵌入式在运行时中的 `uv_loop_t`）。该循环驱动所有异步工作 — HTTP、文件 I/O、定时器 — 且所有 JS 都在同一线程上运行，因此 Promise 微任务在循环迭代之间自然排空。宿主线程从不触碰循环。
+`qz_create` 启动一个专用内部线程（`uv_thread_t`），该线程运行一个 libuv 循环（嵌入式在运行时中的 `uv_loop_t`）。该循环驱动所有异步工作 — HTTP、文件 I/O、定时器 — 且所有 JS 都在同一线程上运行，因此 Promise 微任务在循环迭代之间自然排空。宿主线程从不触碰循环；它只读邮箱。
 
-## 宿主如何驱动工作（ISOLATED）
+## 宿主如何消费输出（ISOLATED）
 
 ```c
 #include <qzjs/qzjs.h>
-#include <uv.h>
 #include <stdio.h>
-#include <string.h>
 
-static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)rt; (void)data;
-    printf("received: %.*s\n", (int)len, json);
+static void host_drain(qz_t *rt, int timeout_ms) {
+    for (;;) {
+        char *json = NULL; size_t len = 0;
+        int r = qz_recv_message(rt, &json, &len, timeout_ms);
+        if (r != 0) break;
+        printf("received: %.*s\n", (int)len, json);
+        qz_free_message(json);
+        timeout_ms = 0;   /* 首条到达后转纯轮询排干 */
+    }
 }
 
 int main(void) {
-    uv_loop_t loop;
-    uv_loop_init(&loop);
-
     qz_config_t cfg = {0};
     cfg.initial_script =
         "globalThis.onmessage = function (e) { postMessage('pong'); };";
-    cfg.message_cb = on_message;
-    cfg.uv_loop    = &loop;            /* 宿主 loop 注入（ISOLATED 必填） */
 
     qz_t *rt = qz_create(&cfg);
     if (!rt) return 1;
 
     qz_post_message(rt, "{\"cmd\":\"ping\"}", 14);
 
-    /* 泵宿主 loop：reply 到达时 on_message 在本线程触发。宿主自己的
-       事件调度可完全接管这里 —— 有 loop 要转的宿主天然就兼容。 */
-    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+    /* 在本线程、按自己的节奏消费邮箱 —— 库自己泵，宿主无需驱动任何东西。 */
+    host_drain(rt, 2000);
 
-    qz_destroy(rt);                     /* 库句柄已随 teardown 关闭 */
-    uv_loop_close(&loop);
+    qz_destroy(rt);
     return 0;
 }
 ```
 
-THREAD 构建下同一程序完全不需要 `uv_loop`：`message_cb` 在库的 qzjs 线程上触发，宿主做自己的事即可。
+这个程序是纯 POSIX 的：没有 libuv，也没有要运行的 loop。THREAD 构建下同一程序原样可用。
+
+### 接入你自己的事件系统（唤醒 fd）
+
+若想在既有的 poll/epoll/select 循环里避免纯阻塞等待，把 `qz_message_fd(rt)` 加进你的 fd 集合：它是一个 `eventfd`（单调计数、非阻塞、CLOEXEC），当有 ≥1 条消息待取时变为可读。等 fd 时遵循以下协议——消息是先链入邮箱、后写 eventfd，所以「先排干、再清 fd、再复查」的顺序不会丢唤醒：
+
+1. `qz_recv_message(rt, &json, &len, 0)` —— 排干并**处理**，直到返回非 0。
+2. `read(qz_message_fd(rt), ...)` —— 清 eventfd 计数，直到 `EAGAIN`。
+3. 再探一次 `qz_recv_message(..., 0)` —— 若取到消息就回到第 1 步处理；只有确认为空时才可以安全地 `poll()` 阻塞。
+
+fd 归 runtime 所有：不得 close；`qz_free` 后失效。仅 Linux。
 
 ## 线程与重入规则
 
-- `qz_post_message` 两个模型下都是线程安全的（JSON 会被拷贝）——可从任何线程调用。ISOLATED 下投递延迟等于你的泵频；同一 runtime 的 FIFO 顺序保持。
-- ISOLATED 下阻塞型宿主 API（`qz_ping`、`qz_ping_path`、`qz_wait_idle`、`qz_destroy`）**在内部就地泵 `cfg.uv_loop`**（`UV_RUN_NOWAIT` + yield）——否则单线程宿主会自死锁。推论：`message_cb`（含崩溃 `{"type":"error"}` 上报）可能**在这些调用内重入触发**。
-- 因此：**不要在 `message_cb` 内调用任何阻塞宿主 API**（嵌套 `uv_run`），并让回调保持轻量——它跑在你 loop 的线程上。重活放回你自己的线程/队列。
-- 库从不对你的 loop 调 `uv_run(UV_RUN_DEFAULT)` 或 `uv_loop_close`；`qz_wait_idle`/`qz_destroy` 之后挂在上面的库句柄已全部关闭，宿主 loop 的 `uv_loop_close` 可以成功返回。
+- `qz_post_message` 两个模型下都是线程安全的（JSON 会被拷贝）——可从任何线程调用。同一 runtime 的 FIFO 顺序保持；投递由库自己的泵线程驱动，不依赖宿主的调度。
+- `qz_recv_message` 可被多个线程并发调用（邮箱出队互斥）。但「等 fd 的人」最多**一个**；取走消息的跨线程所有权交接由宿主负责。
+- 阻塞型 API（`qz_ping`、`qz_ping_path`、`qz_wait_idle`、`qz_destroy`）的等待发生在**库的泵线程**上；调用方只是阻塞返回。邮箱不受影响——等待期间出站消息（含崩溃 `{"type":"error"}` 上报）持续进入邮箱，`qz_wait_idle` 返回后、`qz_free` 之前 `qz_recv_message` 依然可用。
+- 没有需要绕开的重入隐患：qzjs 从不执行宿主代码，任何库线程都不会回调进你。在你喜欢的那个线程上排干邮箱即可。
+- 未消费的消息在 `qz_destroy`/`qz_free` 时被释放（不泄漏，此后不可达）——需要就先排干。
 
 ## 为什么这样设计
 
-- ISOLATED 让宿主掌好自己的事件循环：零库侧宿主线程，集成方式就是「传入你的 loop、继续你的泵」。
+- 宿主可把 qzjs 嵌入**任何**事件系统——poll/epoll/select、自己的线程、或什么都不用：库自主管理线程与 loop，从不执行宿主代码；宿主只需自选线程、自选时机消费邮箱。
 - JS 执行与所有异步事件在主RT 进程的单一 loop 内串行化——运行时内部无锁、无竞争。
 - 微任务在循环迭代之间自动排空（ISOLATED 在主RT 进程内，THREAD 在 qzjs 线程上）。

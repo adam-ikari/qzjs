@@ -26,7 +26,6 @@ qz_config_t cfg = {
     .initial_script =
         "console.log('hello from qzjs');"
         "globalThis.onmessage = function (e) { postMessage('got: ' + e.data); };",
-    .message_cb = on_message,
 };
 qz_t *rt = qz_create(&cfg);   // NULL if initial_script threw
 ```
@@ -40,20 +39,22 @@ The host drives JS by posting JSON messages; JS replies with `postMessage`:
 
 ```
 host  ── qz_post_message(json) ──▶  JS: globalThis.onmessage(e)
-host  ◀── message_cb(json)       ───  JS: postMessage(value)
+host  ◀── qz_recv_message(json) ──  mailbox ◀── JS: postMessage(value)
 ```
 
 - `qz_post_message` is **thread-safe** (the JSON is copied) and may be called
   from any host thread.
 - The message arrives as a JS object/string via `onmessage`; `e.data` is the
   parsed payload.
-- `message_cb` fires with the JSON serialized from `postMessage`: under
-  ISOLATED on the thread pumping your `cfg.uv_loop`, under THREAD on the
-  qzjs thread — so the callback must be thread-safe, and under ISOLATED it
-  must never call a blocking host API (it can fire reentrantly inside one).
+- JS output serialized from `postMessage` lands in a per-runtime FIFO
+  **mailbox**. The host pulls it with `qz_recv_message` (any thread, any
+  time, with or without a timeout) and releases each buffer with
+  `qz_free_message`; `qz_message_fd(rt)` exposes a wake fd (`eventfd`) for
+  embedding in your own poll/epoll/select loop. qzjs never executes host
+  code, so there is no callback thread and no reentrancy to guard against.
 
 This is the only channel for host ↔ JS data. There is no synchronous return
-value — results always flow back through `message_cb`.
+value — results always flow back through the mailbox.
 
 ## 3. Web Workers
 

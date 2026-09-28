@@ -1,6 +1,6 @@
 ---
 title: 扩展
-description: qzjs 构建时原生 C 扩展 — qz_ext_t 接口、QZ_EXTENSIONS 宏、生命周期钩子和每运行时数据。
+description: qzjs 构建时原生 C 扩展 — qz_ext_t 接口、QZ_EXTENSIONS 宏、生命周期钩子和每运行时状态。
 ---
 
 # 扩展
@@ -118,25 +118,18 @@ add_subdirectory(deps/qzjs)
 
 所有钩子都接收扩展和运行时。通过 `qz_get_active_jsctx(rt)` 获取活跃的 `JSContext*`（内部辅助，声明于 `src/qz_internal.h`）。
 
-### init 中的每运行时数据
+### init 中的每运行时状态
 
 `qz_ext_t.user_data` 字段位于**共享的编译时**扩展结构体上 — 它不是每实例的。
-要在 `init` 中获取每运行时数据（`init` 在 `qz_create` 期间运行，此时宿主尚未获得 `rt`），
-在 `qz_create` 之前设置 `config.host_data` 并通过
-`qz_get_runtime_data(rt)` 读取：
+公共 API 没有每运行时的不透明指针：既没有 `host_data` 配置字段，也没有
+runtime-data 访问器，且库从不回调宿主（所有发往宿主的消息都进邮箱）。需要每运
+行时状态的扩展，自行维护一张以每个钩子收到的 `qz_t *` 句柄为键的表：
 
 ```c
-/* 宿主端： */
-qz_config_t cfg = { .pal = pal, .host_data = my_per_rt_state };
-qz_t *rt = qz_create(&cfg);
-
-/* 扩展 init： */
+/* 扩展 init：init 在 qz_create 期间于 JS 线程上运行，此时宿主尚未拿到 rt —
+ * 但在钩子内部 rt 是有效的键。 */
 static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
-    my_state_t *st = (my_state_t *)qz_get_runtime_data(rt);
-    /* st 是宿主通过 config 设置的每实例数据 */
+    my_state_t *st = my_registry_get_or_create(rt);  /* 你自己的每-rt 表 */
     ...
 }
 ```
-
-这解决了初始化时的排序死锁：`rt` 在 `init` 内部是有效的，
-即使宿主尚未收到它。

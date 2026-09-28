@@ -36,27 +36,17 @@ Create `hello.c`:
 
 ```c
 #include <qzjs/qzjs.h>
-#include <uv.h>
 #include <stdio.h>
 
-static void on_message(qz_t *rt, const char *json, size_t len, void *data) {
-    (void)rt; (void)data;
-    printf("received: %.*s\n", (int)len, json);
-}
-
 int main(void) {
-    // The host owns its event loop: under ISOLATED (the default) the
-    // library starts no host-side thread — it binds its channel handles
-    // onto the loop you inject below, and on_message fires on the thread
-    // that pumps it. (Host and libqzjs must link the same libuv.)
-    uv_loop_t loop;
-    uv_loop_init(&loop);
+    // qzjs owns all of its threads and loops — the host injects no event
+    // loop and runs no callbacks. Everything JS sends out (postMessage,
+    // crash reports) lands in a per-runtime FIFO mailbox that the host
+    // drains on its own thread, at its own time, via qz_recv_message.
 
     // Create the runtime — blocks until JS is ready (evals initial_script)
     qz_config_t cfg = {0};
     cfg.initial_script = "console.log('Hello from qzjs!'); postMessage(1 + 1);";
-    cfg.message_cb = on_message;
-    cfg.uv_loop = &loop;
     qz_t *rt = qz_create(&cfg);
     if (!rt) {
         fprintf(stderr, "Failed to create runtime\n");
@@ -66,19 +56,39 @@ int main(void) {
     // Drive the runtime by posting JSON messages
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
 
-    // Pump the host loop — replies arrive in on_message here
-    while (uv_run(&loop, UV_RUN_ONCE)) { /* until done */ }
+    // Consume replies from the mailbox: wait up to 1 s for the first
+    // message, then pure-poll until it drains.
+    char *json;
+    size_t len;
+    int timeout_ms = 1000;
+    while (qz_recv_message(rt, &json, &len, timeout_ms) == 0) {
+        printf("received: %.*s\n", (int)len, json);
+        qz_free_message(json);
+        timeout_ms = 0;
+    }
 
-    // Clean up — graceful shutdown (library handles on the loop are closed)
-    qz_destroy(rt);
-    uv_loop_close(&loop);
+    // Let the runtime auto-exit once no async work is pending, then a
+    // final pure-poll drain — messages that arrived during the wait
+    // (including a crash {"type":"error"} report) are still in the mailbox.
+    qz_wait_idle(rt);
+    while (qz_recv_message(rt, &json, &len, 0) == 0) {
+        printf("received: %.*s\n", (int)len, json);
+        qz_free_message(json);
+    }
+
+    // Clean up — frees the mailbox, closes the wake fd, releases the rt
+    qz_free(rt);
     return 0;
 }
 ```
 
-In a `THREAD` build (`-DQZ_PROCESS_MODEL=THREAD`) the same program needs no
-`uv_loop` at all: qzjs runs an internal thread and loop, and `message_cb`
-fires there while the host pumps nothing.
+The host can embed qzjs in any event system: `qz_message_fd(rt)` returns the
+runtime's wake fd (a Linux `eventfd`) — readable means at least one message is
+pending, so you can `poll()`/`epoll`/`select` it beside your own fds. Drain the
+mailbox before clearing that fd (see the consume protocol in
+[Host Integration](/guide/host-integration)). Under a `THREAD` build
+(`-DQZ_PROCESS_MODEL=THREAD`) the same program is unchanged: JS runs on
+qzjs's internal thread and the host still just consumes the mailbox.
 
 Compile and link with pkg-config (pulls the full static link line — all vendored archives):
 

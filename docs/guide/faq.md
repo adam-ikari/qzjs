@@ -44,8 +44,11 @@ Node.js or bun cannot. Numbers come from the project's own benchmarks — see
 ### Is it multi-threaded? Can JS run in parallel?
 
 The **main runtime is single-threaded**. All JS runs on qzjs's own internal
-thread, which also drives the embedded libuv loop; the host thread never calls
-into JS. Concurrency comes from async I/O, not parallel JS in the main context.
+thread — under ISOLATED that is a thread inside the main-RT process, under
+THREAD the library's internal qzjs thread — which also drives the embedded
+libuv loop; the host thread never calls into JS and receives nothing by
+callback: host-bound messages wait in the mailbox for `qz_recv_message`.
+Concurrency comes from async I/O, not parallel JS in the main context.
 
 Web Workers *do* run in parallel — as threads or child processes depending on
 the backend — but communicate via structured-clone messages.
@@ -55,9 +58,13 @@ the backend — but communicate via structured-clone messages.
 `QZ_PROCESS_MODEL` selects the default worker backend:
 
 - **`ISOLATED`** (default) — each `new Worker(...)` runs in a dedicated child
-  process (`qzjs-rt`) via fork+exec. Stronger isolation, IPC overhead.
+  process (`qzjs-rt`) via fork+exec. Stronger isolation, IPC overhead. The
+  host-side shape follows: JS lives in the main-RT process, the library owns
+  its own host-side pump thread and loop, and all host-bound messages land in
+  a FIFO mailbox drained with `qz_recv_message` — no loop to inject or pump.
 - **`THREAD`** — workers are threads in one process. Lower overhead, shared
-  address space.
+  address space. The library's internal qzjs thread runs everything; the host
+  still just consumes the mailbox.
 
 Neither is a security boundary against malicious script. See
 [Multi-Context & Web Workers](/guide/multi-context).
@@ -103,8 +110,11 @@ explicitly. Compile at deploy time for the target build. See
 ### Can the host call JS directly, e.g. `qz_eval`?
 
 No. There is **no `qz_eval`** on the public C API. The host and runtime
-communicate only over JSON messages — `qz_post_message` inbound, `message_cb`
-outbound. This keeps the JS execution boundary explicit and the host free of
+communicate only over JSON messages — `qz_post_message` inbound, and a
+per-runtime FIFO **mailbox** outbound: JS `postMessage` output, crash reports,
+and control receipts all land there, and the host drains them on its own
+thread with `qz_recv_message` / `qz_free_message`. qzjs never executes host
+code. This keeps the JS execution boundary explicit and the host free of
 an eval channel. See [Host Integration](/guide/host-integration).
 
 ### Why do timers behave oddly under tests?
@@ -145,7 +155,9 @@ the runtime buildable in toolchains that predate C11 atomics support.
 
 ### Why did `qz_create` return NULL?
 
-The initial script threw, or thread/loop init failed. See
+The initial script threw, or thread/loop init failed; under ISOLATED,
+failing to spawn the main-RT child (`qzjs-rt`) also returns `NULL` — the
+library never relies on anything injected by the host. See
 [Troubleshooting](/guide/troubleshooting#runtime-creation).
 
 ### How do I debug JS?
