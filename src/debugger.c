@@ -74,11 +74,19 @@ struct qz_debug {
     JSDebugFrame *frames;
     int frame_count;
     int frame_generation;       /* bumped each stop; invalidates stale ids */
+    /* expandable-value slots for the DAP variablesReference hierarchy: each
+     * non-leaf value (object/array local, hover/evaluate result) is DupValue'd
+     * here and exposed as a reference id. Freed whenever frame_generation is
+     * bumped (refs are only valid within their stop), like the snapshot. */
+    JSValue *var_slots;         /* [0..var_slot_count) or NULL; JS_UNDEFINED = free */
+    int var_slot_count;
 };
 
 /* Forward decl — defined below; used by qz_debug_attach. */
 static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
                                   const uint8_t *pc, void *opaque);
+/* Defined below (variable-slot helpers); called from the stop paths. */
+static void var_slots_free(struct qz_debug *dbg, JSContext *ctx);
 
 /* ================================================================
  * Helpers
@@ -289,6 +297,7 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
             dbg->frames = NULL;
             dbg->frame_count = 0;
         }
+        var_slots_free(dbg, ctx);   /* refs die with the snapshot */
         dbg->frame_generation++;
 
         if (dbg->cbs.on_stopped)
@@ -368,6 +377,7 @@ static void qz_debug_on_throw(JSContext *ctx, JSValueConst exception,
         dbg->frames = NULL;
         dbg->frame_count = 0;
     }
+    var_slots_free(dbg, ctx);   /* refs die with the snapshot */
     dbg->frame_generation++;
 
     if (dbg->cbs.on_stopped)
@@ -416,10 +426,12 @@ void qz_debug_detach(qz_t *rt, qz_debug_t *dbg)
         rt->dbg_session = NULL;
     /* Free any cached paused-frame snapshot. Requires a live ctx — detach must
      * therefore run before context teardown (qz_thread_teardown ordering). */
-    if (dbg->frames) {
+    if (dbg->frames || dbg->var_slots) {
         JSContext *ctx = qz_get_active_jsctx(rt);
-        if (ctx)
+        if (ctx) {
             JS_FreeCallFrames(ctx, dbg->frames, dbg->frame_count);
+            var_slots_free(dbg, ctx);
+        }
         dbg->frames = NULL;
         dbg->frame_count = 0;
     }
@@ -617,6 +629,211 @@ static int frame_id_to_index(qz_debug_t *dbg, int frame_id)
     return idx;
 }
 
+/* ================================================================
+ * Expandable-value slots (DAP variablesReference hierarchy)
+ * ================================================================
+ *
+ * Each non-leaf value (object/array local, hover/evaluate result) is
+ * DupValue'd into a slot and exposed as an expandable variablesReference.
+ * Slot ids share the frame-id 32-bit space:
+ *
+ *   id = (frame_generation << 16) | (QZ_VAR_SLOT_BASE + slot)
+ *
+ * QZ_VAR_SLOT_BASE keeps the low half >= 0x1000, where a frame index
+ * (call stacks never come close to 4096) can never land: frame_id_to_index
+ * therefore rejects slot ids, and var_slot_get rejects frame ids. The
+ * generation half kills ids from earlier stops exactly like stale frame
+ * ids — a reference is only valid during the stop that produced it, and
+ * the slots are freed whenever frame_generation is bumped. */
+
+#define QZ_VAR_SLOT_BASE 0x1000
+#define QZ_VAR_SLOT_MAX  0x1000   /* low half stays < 0x2000 */
+#define QZ_VAR_CHILD_MAX 100      /* children listed per level (paging not yet used) */
+
+static void var_slots_free(qz_debug_t *dbg, JSContext *ctx)
+{
+    int i;
+    if (!dbg->var_slots) return;
+    for (i = 0; i < dbg->var_slot_count; i++)
+        JS_FreeValue(ctx, dbg->var_slots[i]);
+    free(dbg->var_slots);
+    dbg->var_slots = NULL;
+    dbg->var_slot_count = 0;
+}
+
+/* Store v in a slot and return its reference id; 0 when v is not expandable
+ * (leaves never need children) or the table is full. */
+static int var_slot_add(qz_debug_t *dbg, JSContext *ctx, JSValueConst v)
+{
+    int i;
+    if (!JS_IsObject(v) || JS_IsFunction(ctx, v))
+        return 0;
+    for (i = 0; i < dbg->var_slot_count; i++) {
+        if (JS_IsUndefined(dbg->var_slots[i])) {
+            dbg->var_slots[i] = JS_DupValue(ctx, v);
+            return (dbg->frame_generation << 16) | (QZ_VAR_SLOT_BASE + i);
+        }
+    }
+    if (dbg->var_slot_count >= QZ_VAR_SLOT_MAX)
+        return 0;
+    {
+        JSValue *ns = realloc(dbg->var_slots,
+                              (size_t)(dbg->var_slot_count + 1) * sizeof(JSValue));
+        if (!ns) return 0;
+        dbg->var_slots = ns;
+        ns[dbg->var_slot_count] = JS_DupValue(ctx, v);
+        return (dbg->frame_generation << 16) |
+               (QZ_VAR_SLOT_BASE + dbg->var_slot_count++);
+    }
+}
+
+/* Decode a slot id back to its value; JS_UNDEFINED if stale/invalid. */
+static JSValue var_slot_get(qz_debug_t *dbg, int ref)
+{
+    int gen = (ref >> 16) & 0xffff;
+    int low = ref & 0xffff;
+    int slot;
+    if (gen != (dbg->frame_generation & 0xffff)) return JS_UNDEFINED;
+    if (low < QZ_VAR_SLOT_BASE || low >= QZ_VAR_SLOT_BASE + QZ_VAR_SLOT_MAX)
+        return JS_UNDEFINED;
+    slot = low - QZ_VAR_SLOT_BASE;
+    if (slot >= dbg->var_slot_count) return JS_UNDEFINED;
+    return dbg->var_slots[slot];
+}
+
+/* Coarse DAP type for a value (mirrors JS typeof, array/function distinct). */
+static const char *debug_var_type(JSContext *ctx, JSValueConst v)
+{
+    if (JS_IsArray(v)) return "array";
+    if (JS_IsFunction(ctx, v)) return "function";
+    if (JS_IsString(v)) return "string";
+    if (JS_IsNumber(v)) return "number";
+    if (JS_IsBool(v)) return "boolean";
+    if (JS_IsNull(v)) return "null";
+    if (JS_IsUndefined(v) || JS_IsUninitialized(v)) return "undefined";
+    if (JS_IsSymbol(v)) return "symbol";
+    if (JS_IsBigInt(v)) return "bigint";
+    return "object";
+}
+
+/* Bound to max bytes without splitting a UTF-8 sequence; append "…". */
+static char *bounded_dup(const char *s, size_t max)
+{
+    size_t len = strlen(s);
+    size_t cut;
+    char *out;
+    if (len <= max) return strdup(s);
+    cut = max;
+    while (cut > 0 && ((unsigned char)s[cut] & 0xc0) == 0x80) cut--;
+    out = malloc(cut + 4);  /* "…" is 3 bytes + NUL */
+    if (!out) return NULL;
+    memcpy(out, s, cut);
+    memcpy(out + cut, "\xe2\x80\xa6", 3);
+    out[cut + 3] = '\0';
+    return out;
+}
+
+/* Value shown in the DAP `value` field: bounded JSON-ish text. The old code
+ * emitted unbounded JSON.stringify and nothing (NULL → "undefined") on
+ * cycles; here every failure path falls back to a guarded ToString and, at
+ * worst, the caller's literal. Strings are JSON-encoded (quoted + escaped)
+ * to match the previous stringify behavior. */
+static char *debug_var_preview(JSContext *ctx, JSValueConst v)
+{
+    JSValue str;
+    const char *s;
+    char *out = NULL;
+
+    if (JS_IsObject(v)) {
+        str = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
+        if (JS_IsException(str) || JS_IsUndefined(str)) {
+            /* cycle / throwing toJSON / function → guarded ToString */
+            if (JS_IsException(str))
+                JS_FreeValue(ctx, JS_GetException(ctx));
+            else
+                JS_FreeValue(ctx, str);
+            str = JS_ToString(ctx, v);
+        }
+    } else if (JS_IsString(v)) {
+        str = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
+    } else {
+        str = JS_ToString(ctx, v);  /* Symbol throws → handled below */
+    }
+    if (JS_IsException(str)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return NULL;
+    }
+    s = JS_ToCString(ctx, str);
+    if (s) {
+        out = bounded_dup(s, 200);
+        JS_FreeCString(ctx, s);
+    }
+    JS_FreeValue(ctx, str);
+    return out;
+}
+
+/* Enumerate one level of an object's own enumerable string-keyed properties
+ * into a fresh array. Getters / Proxy traps may run JS (the world is frozen
+ * but JS still executes) and may throw — that surfaces as rc<0 and an empty
+ * DAP array rather than a half-built one. Prototype-chain properties are
+ * deliberately excluded (own only), and the listing is capped so one click
+ * can't ask the pump for a megabyte of JSON. */
+static int collect_children(qz_debug_t *dbg, JSContext *ctx, JSValueConst obj,
+                            qz_debug_var **out_vars, int *out_count)
+{
+    JSPropertyEnum *tab = NULL;
+    uint32_t len = 0, i, show;
+    qz_debug_var *vars;
+    int extra;
+
+    *out_vars = NULL;
+    *out_count = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &len, obj,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return -1;
+    }
+    show = len > QZ_VAR_CHILD_MAX ? QZ_VAR_CHILD_MAX : len;
+    extra = len > show;
+    vars = calloc((size_t)show + extra, sizeof(qz_debug_var));
+    if (!vars) {
+        JS_FreePropertyEnum(ctx, tab, len);
+        return -1;
+    }
+    for (i = 0; i < show; i++) {
+        const char *nm = JS_AtomToCString(ctx, tab[i].atom);
+        JSValue pv;
+        if (!nm) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            continue;   /* name stays NULL → DAP prints "" */
+        }
+        vars[i].name = strdup(nm);
+        JS_FreeCString(ctx, nm);
+        pv = JS_GetProperty(ctx, obj, tab[i].atom);
+        if (JS_IsException(pv)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            vars[i].value_json = strdup("<error>");
+            vars[i].type = strdup("error");
+            continue;
+        }
+        vars[i].value_json = debug_var_preview(ctx, pv);
+        vars[i].type = strdup(debug_var_type(ctx, pv));
+        vars[i].variables_reference = var_slot_add(dbg, ctx, pv);
+        JS_FreeValue(ctx, pv);
+    }
+    if (extra) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%u more", len - show);
+        vars[show].name = strdup("<...>");
+        vars[show].value_json = strdup(buf);
+        vars[show].type = strdup("object");
+    }
+    JS_FreePropertyEnum(ctx, tab, len);
+    *out_vars = vars;
+    *out_count = (int)(show + extra);
+    return 0;
+}
+
 int qz_debug_get_scopes(qz_debug_t *dbg, int frame_id,
                           qz_debug_scope **out_scopes, int *out_count)
 {
@@ -651,41 +868,53 @@ void qz_debug_free_scopes(qz_debug_scope *scopes, int count)
 int qz_debug_get_variables(qz_debug_t *dbg, int variables_reference,
                              qz_debug_var **out_vars, int *out_count)
 {
+    JSContext *ctx;
+    int idx;
+
     if (!dbg || !out_vars || !out_count) return -1;
     *out_vars = NULL;
     *out_count = 0;
     if (ensure_frames(dbg) < 0) return -1;
-    int idx = frame_id_to_index(dbg, variables_reference);
-    if (idx < 0) return -1;
 
-    JSContext *ctx = qz_get_active_jsctx(dbg->rt);
+    ctx = qz_get_active_jsctx(dbg->rt);
     if (!ctx) return -1;
-    JSDebugFrame *f = &dbg->frames[idx];
-    int n = f->arg_count + f->var_count;
-    if (n <= 0) return 0;
 
-    qz_debug_var *vars = calloc(n, sizeof(qz_debug_var));
-    if (!vars) return -1;
-    int i;
-    for (i = 0; i < n; i++) {
-        JSDebugVar *dv = &f->vars[i];
-        vars[i].name = dv->name ? strdup(dv->name) : strdup("<unnamed>");
-        JSValue v = JS_GetFrameVariable(ctx, idx, i);
-        if (!JS_IsException(v)) {
-            JSValue str = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
-            if (!JS_IsException(str) && !JS_IsUndefined(str)) {
-                const char *s = JS_ToCString(ctx, str);
-                if (s) vars[i].value_json = strdup(s);
-                JS_FreeCString(ctx, s);
+    /* Frame scope: the Locals of one frame (variables_reference == frame_id). */
+    idx = frame_id_to_index(dbg, variables_reference);
+    if (idx >= 0) {
+        JSDebugFrame *f = &dbg->frames[idx];
+        int n = f->arg_count + f->var_count;
+        qz_debug_var *vars;
+        int i;
+        if (n <= 0) return 0;
+        vars = calloc(n, sizeof(qz_debug_var));
+        if (!vars) return -1;
+        for (i = 0; i < n; i++) {
+            JSDebugVar *dv = &f->vars[i];
+            JSValue v;
+            vars[i].name = dv->name ? strdup(dv->name) : strdup("<unnamed>");
+            v = JS_GetFrameVariable(ctx, idx, i);
+            if (!JS_IsException(v)) {
+                vars[i].value_json = debug_var_preview(ctx, v);
+                vars[i].type = strdup(debug_var_type(ctx, v));
+                vars[i].variables_reference = var_slot_add(dbg, ctx, v);
             }
-            JS_FreeValue(ctx, str);
-            vars[i].type = strdup("object");  /* MVP: coarse type */
+            JS_FreeValue(ctx, v);
         }
-        JS_FreeValue(ctx, v);
+        *out_vars = vars;
+        *out_count = n;
+        return 0;
     }
-    *out_vars = vars;
-    *out_count = n;
-    return 0;
+
+    /* Not a frame scope — try an expandable-value slot. Its generation half
+     * only matches during the stop that created it; stale ids from earlier
+     * stops miss here exactly like stale frame ids. */
+    {
+        JSValue obj = var_slot_get(dbg, variables_reference);
+        if (!JS_IsUndefined(obj))
+            return collect_children(dbg, ctx, obj, out_vars, out_count);
+    }
+    return -1;
 }
 
 void qz_debug_free_vars(qz_debug_var *vars, int count)
@@ -702,11 +931,13 @@ void qz_debug_free_vars(qz_debug_var *vars, int count)
 
 int qz_debug_evaluate(qz_debug_t *dbg, int frame_id,
                         const char *expression,
-                        char **out_value_json, char **out_error)
+                        char **out_value_json, char **out_error,
+                        int *out_variables_reference)
 {
     if (!dbg || !expression) return -1;
     if (out_value_json) *out_value_json = NULL;
     if (out_error) *out_error = NULL;
+    if (out_variables_reference) *out_variables_reference = 0;
     /* Evaluate in global scope. Watch expressions referencing frame LOCALS
      * fail with ReferenceError — true eval-in-frame needs engine support
      * QuickJS doesn't expose (a future engine-patch enhancement). Locals are
@@ -772,13 +1003,12 @@ int qz_debug_evaluate(qz_debug_t *dbg, int frame_id,
         JS_FreeValue(ctx, v);
         return -1;
     }
-    JSValue str = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
-    if (!JS_IsException(str) && !JS_IsUndefined(str)) {
-        const char *s = JS_ToCString(ctx, str);
-        if (out_value_json && s) *out_value_json = strdup(s);
-        JS_FreeCString(ctx, s);
-    }
-    JS_FreeValue(ctx, str);
+    /* Object results become expandable (hover/watch can drill in); the slot
+     * dies with the next stop, like every other reference. */
+    if (out_variables_reference)
+        *out_variables_reference = var_slot_add(dbg, ctx, v);
+    if (out_value_json)
+        *out_value_json = debug_var_preview(ctx, v);
     JS_FreeValue(ctx, v);
     return 0;
 }

@@ -395,11 +395,12 @@ static int dap_handle_request(qz_dap_t *d, const char *command,
             if (!v) break;
             cJSON_AddStringToObject(v, "name",
                 vars[i].name ? vars[i].name : "");
-            /* value_json 是 JS 值的 JSON 表示（如 "1"），按原实现作为
-             * 字符串字段嵌入。 */
             cJSON_AddStringToObject(v, "value",
                 vars[i].value_json ? vars[i].value_json : "undefined");
-            cJSON_AddNumberToObject(v, "variablesReference", 0);
+            /* Real expandable reference: objects/arrays hand back a slot id
+             * that the `variables` command drills into (0 = leaf). */
+            cJSON_AddNumberToObject(v, "variablesReference",
+                                    vars[i].variables_reference);
             cJSON_AddStringToObject(v, "type",
                 vars[i].type ? vars[i].type : "object");
             cJSON_AddItemToArray(arr, v);
@@ -427,12 +428,15 @@ static int dap_handle_request(qz_dap_t *d, const char *command,
             }
         }
         char *val = NULL, *err = NULL;
-        int rc = qz_debug_evaluate(d->dbg, (int)fid, expr ? expr : "", &val, &err);
+        int vref = 0;
+        int rc = qz_debug_evaluate(d->dbg, (int)fid, expr ? expr : "", &val, &err,
+                                   &vref);
         cJSON *body = cJSON_CreateObject();
         if (body) {
             cJSON_AddStringToObject(body, "result",
                 (rc == 0 && val) ? val : (err ? err : "error"));
-            cJSON_AddNumberToObject(body, "variablesReference", 0);
+            /* Object results are expandable (hover drill-in). */
+            cJSON_AddNumberToObject(body, "variablesReference", rc == 0 ? vref : 0);
             char *buf = cJSON_PrintUnformatted(body);
             cJSON_Delete(body);
             dap_send_response(d, req_seq, "evaluate", rc == 0 ? 1 : 0, buf ? buf : "",

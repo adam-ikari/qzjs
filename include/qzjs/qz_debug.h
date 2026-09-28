@@ -120,9 +120,14 @@ int  qz_debug_get_variables(qz_debug_t *dbg, int variables_reference,
                               qz_debug_var **out_vars, int *out_count);
 void qz_debug_free_vars(qz_debug_var *vars, int count);
 
+/* Evaluate `expression` for the given frame. On success *out_value_json
+ * holds a bounded preview of the result; when the result is an expandable
+ * value (object/array), *out_variables_reference receives a reference valid
+ * until the next stop (0 = leaf). */
 int  qz_debug_evaluate(qz_debug_t *dbg, int frame_id,
                          const char *expression,
-                         char **out_value_json, char **out_error);
+                         char **out_value_json, char **out_error,
+                         int *out_variables_reference);
 
 #endif /* QZ_DEBUG_SUPPORT */
 

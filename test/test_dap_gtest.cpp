@@ -60,6 +60,21 @@ static const char *kJsExceptionProgram =
     "}\n"                              /* line 8 */
     "2;\n";                            /* line 9 */
 
+/* Program for the variable-expansion test: a nested object and an array as
+ * frame locals. Breakpoints sit on lines 4/5 — AFTER the declarations
+ * execute (a breakpoint stops at its statement's entry, where a `var` local
+ * is still the hoisted undefined) — giving the test two stops inside the
+ * same frame: the second stop must invalidate the first stop's
+ * variablesReference (generation bump), which the test asserts. */
+static const char *kJsExpandProgram =
+    "function f() {\n"                           /* line 1 */
+    "  var o = {a: 1, nested: {b: [7, 8]}};\n"   /* line 2 */
+    "  var arr = [4, 5];\n"                      /* line 3 */
+    "  var sum = o.a + arr[0];\n"                /* line 4 <- bp */
+    "  return sum;\n"                            /* line 5 <- bp */
+    "}\n"                                        /* line 6 */
+    "f();\n";                                    /* line 7 */
+
 /* ---- DAP framing helpers (parent side) ---- */
 
 static void dap_write(int fd, const char *json) {
@@ -1033,6 +1048,323 @@ TEST(DapDebugger, ExceptionBreakpointDisarmed) {
     close(to_child[0]);
     close(from_child[1]);
     int rc = parent_exc_main(from_child[0], to_child[1], pid, 0);
+    if (rc == 100) {
+        ADD_FAILURE() << "child exited non-zero";
+    } else if (rc != 0) {
+        ADD_FAILURE() << rc << " DAP assertion(s) failed";
+    }
+}
+
+/* ---- Variable expansion (DAP variablesReference hierarchy) ---- */
+
+static int child_expand_main(int in_fd, int out_fd) {
+    dup2(in_fd, STDIN_FILENO);
+    dup2(out_fd, STDOUT_FILENO);
+    close(in_fd);
+    close(out_fd);
+
+    qz_config_t cfg = {};
+    cfg.initial_script = kJsExpandProgram;
+    qz_t *rt = qz_create(&cfg);
+    if (!rt) return 1;
+    qz_destroy(rt);
+    return 0;
+}
+
+/* Drives one session: expand the nested object/array chain out of the
+ * Locals scope, drill in through evaluate's reference, then prove the next
+ * stop invalidates the previous stop's references (generation bump). */
+static int parent_expand_main(int child_out_fd, int child_in_fd, pid_t pid)
+{
+    FILE *from_child = fdopen(child_out_fd, "r");
+    if (!from_child) return 1;
+    int failures = 0;
+    char *msg;
+
+    /* 1. initialize handshake */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":1,\"command\":\"initialize\","
+        "\"arguments\":{\"adapterID\":\"qzjs\",\"clientID\":\"test\"}}");
+    int got_event = 0, got_response = 0;
+    for (int tries = 0; tries < 4 && !(got_event && got_response); tries++) {
+        msg = dap_read(from_child);
+        if (!msg) break;
+        if (strstr(msg, "\"event\"") && strstr(msg, "\"initialized\"")) got_event = 1;
+        if (strstr(msg, "\"response\"") && strstr(msg, "\"initialize\"")) got_response = 1;
+        free(msg);
+    }
+    if (!got_event || !got_response) {
+        fprintf(stderr, "FAIL: no initialize handshake\n");
+        return 1;
+    }
+
+    /* 2. breakpoints on lines 4 and 5 of <initial> (past the declarations) */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":2,\"command\":\"setBreakpoints\","
+        "\"arguments\":{\"source\":{\"path\":\"<initial>\"},"
+        "\"breakpoints\":[{\"line\":4},{\"line\":5}]}}");
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"verified\":true")) {
+        fprintf(stderr, "FAIL: breakpoints not verified: %s\n", msg ? msg : "(null)");
+        free(msg);
+        return 1;
+    }
+    free(msg);
+
+    /* 3. configurationDone → response, then the entry stop */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":3,\"command\":\"configurationDone\","
+        "\"arguments\":{}}");
+    msg = dap_read(from_child);
+    free(msg);
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"")) {
+        fprintf(stderr, "FAIL: no entry stop: %s\n", msg ? msg : "(null)");
+        free(msg);
+        return 1;
+    }
+    free(msg);
+
+    /* 4. continue → the first breakpoint stop (line 4) */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":4,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);  /* continue response */
+    free(msg);
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"")) {
+        fprintf(stderr, "FAIL: no breakpoint stop: %s\n", msg ? msg : "(null)");
+        free(msg);
+        return 1;
+    }
+    free(msg);
+    fprintf(stderr, "ok: stop at line 4\n");
+
+    /* 5. stackTrace → top frame id (for scopes/evaluate) */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":5,\"command\":\"stackTrace\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);
+    char *fid = msg ? json_get(msg, "id") : nullptr;
+    free(msg);
+    if (!fid) { fprintf(stderr, "FAIL: no frame id\n"); return 1; }
+
+    /* 6. scopes → the Locals reference */
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"request\",\"seq\":6,\"command\":\"scopes\","
+        "\"arguments\":{\"frameId\":%s}}", fid);
+    dap_write(child_in_fd, buf);
+    msg = dap_read(from_child);
+    char *locals_ref = msg ? json_get(msg, "variablesReference") : nullptr;
+    free(msg);
+    if (!locals_ref) {
+        fprintf(stderr, "FAIL: no Locals reference\n");
+        free(fid);
+        return 1;
+    }
+
+    /* 7. variables(Locals) → both locals expandable, object preview intact */
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"request\",\"seq\":7,\"command\":\"variables\","
+        "\"arguments\":{\"variablesReference\":%s}}", locals_ref);
+    dap_write(child_in_fd, buf);
+    msg = dap_read(from_child);
+    char *o_ref = nullptr, *arr_ref = nullptr;
+    if (!msg || !strstr(msg, "\"name\":\"o\"") || !strstr(msg, "\"name\":\"arr\"")) {
+        fprintf(stderr, "FAIL: locals missing: %s\n", msg ? msg : "(null)");
+        failures++;
+    } else {
+        const char *op = strstr(msg, "\"name\":\"o\"");
+        o_ref = json_get(op, "variablesReference");
+        const char *ap = strstr(msg, "\"name\":\"arr\"");
+        arr_ref = json_get(ap, "variablesReference");
+        if (!o_ref || atoi(o_ref) <= 0 || !arr_ref || atoi(arr_ref) <= 0) {
+            fprintf(stderr, "FAIL: locals not expandable (o=%s arr=%s)\n",
+                    o_ref ? o_ref : "(null)", arr_ref ? arr_ref : "(null)");
+            failures++;
+        } else {
+            fprintf(stderr, "ok: locals expandable (o=%s arr=%s)\n", o_ref, arr_ref);
+        }
+        if (!strstr(msg, "nested")) {
+            fprintf(stderr, "FAIL: object preview lacks nested: %s\n", msg);
+            failures++;
+        }
+    }
+    free(msg);
+
+    /* 8. expand o → a + nested → b (array) → elements 0/1 */
+    if (o_ref && atoi(o_ref) > 0) {
+        snprintf(buf, sizeof(buf),
+            "{\"type\":\"request\",\"seq\":8,\"command\":\"variables\","
+            "\"arguments\":{\"variablesReference\":%s}}", o_ref);
+        dap_write(child_in_fd, buf);
+        msg = dap_read(from_child);
+        char *nested_ref = nullptr;
+        if (!msg || !strstr(msg, "\"name\":\"a\"") || !strstr(msg, "\"name\":\"nested\"")) {
+            fprintf(stderr, "FAIL: o children missing: %s\n", msg ? msg : "(null)");
+            failures++;
+        } else {
+            const char *np = strstr(msg, "\"name\":\"nested\"");
+            nested_ref = json_get(np, "variablesReference");
+            if (!nested_ref || atoi(nested_ref) <= 0) {
+                fprintf(stderr, "FAIL: nested not expandable\n");
+                failures++;
+            }
+        }
+        free(msg);
+        if (nested_ref && atoi(nested_ref) > 0) {
+            snprintf(buf, sizeof(buf),
+                "{\"type\":\"request\",\"seq\":9,\"command\":\"variables\","
+                "\"arguments\":{\"variablesReference\":%s}}", nested_ref);
+            dap_write(child_in_fd, buf);
+            msg = dap_read(from_child);
+            char *b_ref = nullptr;
+            if (!msg || !strstr(msg, "\"name\":\"b\"")) {
+                fprintf(stderr, "FAIL: nested child b missing: %s\n",
+                        msg ? msg : "(null)");
+                failures++;
+            } else {
+                const char *bp2 = strstr(msg, "\"name\":\"b\"");
+                b_ref = json_get(bp2, "variablesReference");
+                if (!b_ref || atoi(b_ref) <= 0) {
+                    fprintf(stderr, "FAIL: b (array) not expandable\n");
+                    failures++;
+                }
+            }
+            free(msg);
+            if (b_ref && atoi(b_ref) > 0) {
+                snprintf(buf, sizeof(buf),
+                    "{\"type\":\"request\",\"seq\":10,\"command\":\"variables\","
+                    "\"arguments\":{\"variablesReference\":%s}}", b_ref);
+                dap_write(child_in_fd, buf);
+                msg = dap_read(from_child);
+                if (!msg || !strstr(msg, "\"name\":\"0\"") ||
+                    !strstr(msg, "\"name\":\"1\"") ||
+                    !strstr(msg, "\"value\":\"7\"")) {
+                    fprintf(stderr, "FAIL: array elements wrong: %s\n",
+                            msg ? msg : "(null)");
+                    failures++;
+                } else {
+                    fprintf(stderr, "ok: nested chain o->nested->b[0,1]\n");
+                }
+                free(msg);
+            }
+            free(b_ref);
+        }
+        free(nested_ref);
+    }
+
+    /* 9. evaluate locals.o → its own expandable reference */
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"request\",\"seq\":11,\"command\":\"evaluate\","
+        "\"arguments\":{\"expression\":\"locals.o\",\"frameId\":%s}}", fid);
+    dap_write(child_in_fd, buf);
+    msg = dap_read(from_child);
+    char *ev_ref = nullptr;
+    if (!msg || !strstr(msg, "\"success\":true")) {
+        fprintf(stderr, "FAIL: evaluate failed: %s\n", msg ? msg : "(null)");
+        failures++;
+    } else {
+        ev_ref = json_get(msg, "variablesReference");
+        if (!ev_ref || atoi(ev_ref) <= 0) {
+            fprintf(stderr, "FAIL: evaluate result not expandable (%s)\n",
+                    ev_ref ? ev_ref : "(null)");
+            failures++;
+        }
+    }
+    free(msg);
+    if (ev_ref && atoi(ev_ref) > 0) {
+        snprintf(buf, sizeof(buf),
+            "{\"type\":\"request\",\"seq\":12,\"command\":\"variables\","
+            "\"arguments\":{\"variablesReference\":%s}}", ev_ref);
+        dap_write(child_in_fd, buf);
+        msg = dap_read(from_child);
+        if (!msg || !strstr(msg, "\"name\":\"a\"")) {
+            fprintf(stderr, "FAIL: evaluate ref children wrong: %s\n",
+                    msg ? msg : "(null)");
+            failures++;
+        } else {
+            fprintf(stderr, "ok: evaluate result expandable\n");
+        }
+        free(msg);
+    }
+
+    /* 10. continue → the second stop (line 5) — generation bump */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":13,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);  /* continue response */
+    free(msg);
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"")) {
+        fprintf(stderr, "FAIL: no second stop: %s\n", msg ? msg : "(null)");
+        free(msg);
+        failures++;
+    }
+    free(msg);
+
+    /* 11. the first stop's reference must be dead now (empty children) */
+    if (o_ref && atoi(o_ref) > 0) {
+        snprintf(buf, sizeof(buf),
+            "{\"type\":\"request\",\"seq\":14,\"command\":\"variables\","
+            "\"arguments\":{\"variablesReference\":%s}}", o_ref);
+        dap_write(child_in_fd, buf);
+        msg = dap_read(from_child);
+        if (!msg || !strstr(msg, "\"variables\":[]")) {
+            fprintf(stderr, "FAIL: stale ref not invalidated: %s\n",
+                    msg ? msg : "(null)");
+            failures++;
+        } else {
+            fprintf(stderr, "ok: stale reference invalidated\n");
+        }
+        free(msg);
+    }
+
+    /* 12. finish the program → drain to EOF */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":15,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);  /* continue response */
+    free(msg);
+    while ((msg = dap_read(from_child)) != nullptr) free(msg);
+
+    signal(SIGPIPE, SIG_IGN);
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":99,\"command\":\"disconnect\","
+        "\"arguments\":{}}");
+    fclose(from_child);
+    close(child_in_fd);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    signal(SIGPIPE, SIG_DFL);
+    free(fid); free(locals_ref); free(o_ref); free(arr_ref); free(ev_ref);
+    if (failures != 0) return failures;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 100;
+    return 0;
+}
+
+TEST(DapDebugger, VariableExpansion) {
+    int to_child[2], from_child[2];
+    ASSERT_EQ(0, pipe(to_child));
+    ASSERT_EQ(0, pipe(from_child));
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        close(to_child[1]);
+        close(from_child[0]);
+        setenv("QZ_DEBUG", "1", 1);
+        const char *trace = getenv("QZ_DAP_TRACE");
+        if (trace) { freopen(trace, "w", stderr); }
+        int rc = child_expand_main(to_child[0], from_child[1]);
+        _exit(rc);
+    }
+
+    close(to_child[0]);
+    close(from_child[1]);
+    int rc = parent_expand_main(from_child[0], to_child[1], pid);
     if (rc == 100) {
         ADD_FAILURE() << "child exited non-zero";
     } else if (rc != 0) {
