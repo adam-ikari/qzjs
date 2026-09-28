@@ -4,11 +4,20 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-17T04:05:45"
+updated: "2026-09-28T11:28:40"
 ---
 
 <!-- compiled_truth -->
-<current best understanding — replace this with the real content>
+## 当前共识（compiled truth）
+
+ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MODEL=THREAD 回退）：宿主进程 ⇄ 独立主RT 进程（qzjs-rt）经单条 socketpair uv_pipe 通信，JS/loop/微任务全在主RT 进程内；worker 进程树经嵌套 spawn（N-P1）展开，端点身份为 §8.2 path 链（u16[]，根起逐级槽位 id；LCA 前缀比较路由，零路由表；PORT_TRANSFER 变长头；信封 source/target int32 冻结 schema 零改动）。控制面 CTL-1/CTL-2：qzjs-ctl CLI + AF_UNIX 端点 + SO_PEERCRED，树路由经 target_path。
+
+**宿主侧契约（M-P6，2026-09-28 翻转，取代原「库自带宿主 loop 线程」设计）**：库在宿主侧不拥有任何线程/loop——宿主必须经 cfg.uv_loop 注入 uv_loop_t（NULL → qz_create 显式失败，§5.3 不降级），message_cb 在泵宿主 loop 的线程触发。qz_create 的 ready 握手走同步 raw-fd 帧读：create 期间不泵不回调，pre-ready 脚本帧缓冲后 FIFO 重放。阻塞宿主 API（qz_ping/qz_ping_path/qz_wait_idle/qz_destroy）就地泵（UV_RUN_NOWAIT+yield）→ message_cb 可在调用内重入 → cb 内禁调阻塞宿主 API。库永不 UV_RUN_DEFAULT/uv_loop_close 宿主 loop；teardown 后库句柄全关（wait_idle 后用 qz_free）。message_cb payload 两模型同语义 NUL 终止（len 不含终止符）。THREAD 模型与主RT 进程内部不变。
+
+Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worker（qz_ping_path，tp 回显转发/pfail 快拒）、worker→sub（Worker.prototype.ping）；0=通畅/1=超时(loop 阻塞)/-1=死。storage 单所有者（owner=树根主RT，§10.2）非根节点中继上行（N-P4 corr 并发关联）；owner 死 ⇒ 孤儿连锁自杀即设计终点（降级不实施）。
+
+延后项终判：tier-2 超时异步化维持 DEFERRED（理由②因 M-P6 作废——宿主侧 terminate ≤2s 冻结现落在调用线程；①③仍立）；path u16→u32 YAGNI 维持；§10.2 降级不实施。深度上限 QZ_SELF_PATH_MAX=8、storage 中继单飞行仍为已知缺口。
+
 
 ## Timeline
 
@@ -88,4 +97,16 @@ updated: "2026-09-17T04:05:45"
   kind: decision
   summary: "延后项复查：§10.2 所有者死亡降级 → 不实施，孤儿自杀即设计终点（§9.4 优先）。owner 死亡时孤儿自杀而非存活降级：主RT 死 → parent-fd EOF → shutting_down → teardown → exit（rt_main.c:348-353）；storage 代理同步 RPC 收 EOF → storageSync 抛 InternalError → 连锁自杀（bridge.c:2053、local-storage.js:27-28）。判定不实施：① §9.4 连锁死亡是预期行为，§6.4 通道不重连，孤儿存活即成不可达死进程；② 降级态结构上不可达——owner 恒为树根主RT（§10.2+N-P4），owner 死 ⇒ 祖先全死 ⇒ 任何孤儿必经 §9.4 自杀；③ 计划 §10.2 降级兜底（快照只读+LWW）破坏单所有者不变量且与现有 e2e 级联断言冲突。详见 CHANGELOG。"
   source: "§10.2 所有者死亡降级调查会话"
+  affects: [multi-process-model]
+
+- time: 2026-09-28T11:27:31
+  kind: reversal
+  summary: "M-P6 契约翻转：ISOLATED 宿主侧库私有「宿主 loop 线程」（host_thread_main）废除——宿主必须经 cfg.uv_loop 注入自己的 uv_loop_t（NULL→qz_create 显式失败，§5.3 不降级），库把宿主侧通道句柄（管道读泵/wake async/tx 溢出定时器）全部挂上，message_cb 在泵宿主 loop 的线程触发。配套：①create ready 改同步 raw-fd 帧读（qz_proc_wait_ready_raw，先于 uv_read_start；pre-ready 脚本帧暂存 proc->pre_frames 上限 256，读泵注册后 FIFO 重放——主RT eval 先于 emit ready 的既有顺序 hazard 由此闭合）；②阻塞宿主 API（qz_ping/qz_ping_path/qz_wait_idle/qz_destroy）就地泵（UV_RUN_NOWAIT+yield），message_cb 可在调用内重入触发→规则：cb 内禁调阻塞宿主 API；③库永不 UV_RUN_DEFAULT/uv_loop_close 宿主 loop，teardown 后句柄全关可干净 close（wait_idle 后用 qz_free 释放 rt）。I5 复查记录②clause 作废：宿主侧 terminate 的 ≤2s 冻结原跑专用 loop 线程不碰宿主主线程，现落在调用线程上（单线程宿主 destroy 挂死主RT 时冻结 ≤2s+排干，mp5 实测 2006ms）——维持 DEFERRED 结论不变但理由②失效（①③仍立）。附带：ISOLATED message_cb payload 复制+NUL 终止（对齐 THREAD len+1 语义，两模型同）；host_teardown 排干 msgq 尾挂节点（pop 约定末节点由下次 pop 释放→无下次则漏，修 60B idle-req 泄漏）。CLI/examples/mp5 e2e/文档 EN+zh 全量翻转。"
+  source: "2026-09-28 M-P6 宿主契约翻转会话"
+  affects: [multi-process-model]
+
+- time: 2026-09-28T11:28:40
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "2026-09-28 M-P6 宿主契约翻转会话"
   affects: [multi-process-model]

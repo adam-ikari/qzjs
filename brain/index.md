@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-09-28T03:48:47.701Z._
+_Auto-generated. Last updated 2026-09-28T11:28:40.381Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
@@ -22,6 +22,7 @@ _Auto-generated. Last updated 2026-09-28T03:48:47.701Z._
 - [fetch-proxy-support](pages/fetch-proxy-support.md) — category: decision | tags: [fetch, proxy, connect, tls, uv_io] | - **背景**：B2「fetch 完善」剩余项「代理」—— 出站 fetch 需要能走公司/环境 HTTP 代理。
 - [fetch-request-body-bytes](pages/fetch-request-body-bytes.md) — category: decision | tags: [fetch, wintertc, http, polyfill] | - **背景**：`fetch(url, {body})` 请求体此前在 JS 层被 `String()` 强转，二进制（Uint8Array/ArrayBuffer）与流式 body（ReadableStream）语义丢失；C 桥接层 `http_request_stream`
 - [full-project-review-2026-09](pages/full-project-review-2026-09.md) — category: project | tags: [review, quality, security, ci, docs] | 六维全量评审（2026-09-23，静态核查 + 关键项亲自复现验证）。
+- [hit-conditional-breakpoints](pages/hit-conditional-breakpoints.md) — category: decision | tags: [dap, debugger, breakpoints] | ## 现状（已实现，合入 d0a94fed）
 - [host-bytecode-api](pages/host-bytecode-api.md) — category: decision | tags: [bytecode, host-api, compatibility] | **DAP CI 连败根因（2026-09-26 已修）**：8ac7ed7c 项目改名（am_→qz_）漏改
 - [httpserver-perf-baseline](pages/httpserver-perf-baseline.md) — category: decision | tags: [httpserver, perf, serve] | M2-D3 连接生命周期完成：
 - [httpserver-perf-benchmark](pages/httpserver-perf-benchmark.md) — category: decision | ### Phase 4 优化（2026-08-19，分支 phase4-httpserver-perf）
@@ -30,7 +31,7 @@ _Auto-generated. Last updated 2026-09-28T03:48:47.701Z._
 - [httpserver-ws-protocol](pages/httpserver-ws-protocol.md) — category: decision | tags: [http-server, websocket, protocol] | polyfill/src/http-server.js（纯 JS 层 WS 协议）：
 - [libuv-io-uring-workaround](pages/libuv-io-uring-workaround.md) — category: decision | tags: [libuv, io-uring, linux, workaround] | ## 现状（2026-09-20 更新）
 - [liveness-ping](pages/liveness-ping.md) — category: decision | tags: [liveness, ping, pong, host, worker] | <current best understanding — replace this with the real content>
-- [multi-process-model](pages/multi-process-model.md) — category: decision | <current best understanding — replace this with the real content>
+- [multi-process-model](pages/multi-process-model.md) — category: decision | ## 当前共识（compiled truth）
 - [oss-library-policy](pages/oss-library-policy.md) — category: decision | tags: [deps, policy, oss] | # 开源库引入与替换原则
 - [polyfill-bundling-policy](pages/polyfill-bundling-policy.md) — category: decision | tags: [polyfill, bundling, memory] | ## 启动加速决策链（2026-09-10 用户拍板）
 - [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## 现状
