@@ -4,7 +4,7 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-28T11:28:40"
+updated: "2026-09-28T13:59:40"
 ---
 
 <!-- compiled_truth -->
@@ -109,4 +109,9 @@ Liveness ping 家族：宿主→主RT（qz_ping）、宿主→树中任意 worke
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "2026-09-28 M-P6 宿主契约翻转会话"
+  affects: [multi-process-model]
+
+- time: 2026-09-28T13:59:40
+  kind: decision
+  summary: "wake 初始化先于读泵注册；pre-ready 帧在 qz_create 内同步重放可触发 message_cb"
   affects: [multi-process-model]
