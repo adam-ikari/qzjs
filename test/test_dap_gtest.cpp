@@ -75,6 +75,20 @@ static const char *kJsExpandProgram =
     "}\n"                                        /* line 6 */
     "f();\n";                                    /* line 7 */
 
+/* Program for the hitCondition test: the line-3 statement executes once per
+ * loop iteration (5 reaches). With hitCondition "2" the breakpoint must stop
+ * exactly once — on the second reach — and continuing from that stop must
+ * not let the same-statement re-hit guard inflate the count (the remaining
+ * reaches must all pass silently). Line 5 carries an invalid hitCondition:
+ * it must answer verified:false with a message and register nothing (the
+ * program runs to completion without ever stopping there). */
+static const char *kJsHitProgram =
+    "var s = 0;\n"                       /* line 1 */
+    "for (var i = 0; i < 5; i++) {\n"    /* line 2 */
+    "  s += i;\n"                        /* line 3 <- bp, hitCondition "2" */
+    "}\n"                                /* line 4 */
+    "s;\n";                              /* line 5 <- bp, hitCondition "bad" */
+
 /* ---- DAP framing helpers (parent side) ---- */
 
 static void dap_write(int fd, const char *json) {
@@ -1365,6 +1379,181 @@ TEST(DapDebugger, VariableExpansion) {
     close(to_child[0]);
     close(from_child[1]);
     int rc = parent_expand_main(from_child[0], to_child[1], pid);
+    if (rc == 100) {
+        ADD_FAILURE() << "child exited non-zero";
+    } else if (rc != 0) {
+        ADD_FAILURE() << rc << " DAP assertion(s) failed";
+    }
+}
+
+/* ---- Hit count breakpoints (DAP hitCondition) ---- */
+
+static int child_hit_main(int in_fd, int out_fd) {
+    dup2(in_fd, STDIN_FILENO);
+    dup2(out_fd, STDOUT_FILENO);
+    close(in_fd);
+    close(out_fd);
+
+    qz_config_t cfg = {};
+    cfg.initial_script = kJsHitProgram;
+    qz_t *rt = qz_create(&cfg);
+    if (!rt) return 1;
+    qz_destroy(rt);
+    return 0;
+}
+
+/* Drives one session: a "2" hitCondition must stop exactly once (second
+ * reach of the loop line), an invalid one must answer verified:false with a
+ * message, and the drain must show no further stops. */
+static int parent_hit_main(int child_out_fd, int child_in_fd, pid_t pid)
+{
+    FILE *from_child = fdopen(child_out_fd, "r");
+    if (!from_child) return 1;
+    int failures = 0;
+    char *msg;
+
+    /* 1. initialize handshake */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":1,\"command\":\"initialize\","
+        "\"arguments\":{\"adapterID\":\"qzjs\",\"clientID\":\"test\"}}");
+    int got_event = 0, got_response = 0;
+    for (int tries = 0; tries < 4 && !(got_event && got_response); tries++) {
+        msg = dap_read(from_child);
+        if (!msg) break;
+        if (strstr(msg, "\"event\"") && strstr(msg, "\"initialized\"")) got_event = 1;
+        if (strstr(msg, "\"response\"") && strstr(msg, "\"initialize\"")) got_response = 1;
+        free(msg);
+    }
+    if (!got_event || !got_response) {
+        fprintf(stderr, "FAIL: no initialize handshake\n");
+        return 1;
+    }
+
+    /* 2. one valid + one invalid hitCondition in a single request */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":2,\"command\":\"setBreakpoints\","
+        "\"arguments\":{\"source\":{\"path\":\"<initial>\"},"
+        "\"breakpoints\":[{\"line\":3,\"hitCondition\":\"2\"},"
+        "{\"line\":5,\"hitCondition\":\"bad\"}]}}");
+    msg = dap_read(from_child);
+    if (!msg ||
+        !strstr(msg, "\"verified\":true") ||   /* line 3 accepted */
+        !strstr(msg, "\"verified\":false") ||  /* line 5 rejected */
+        !strstr(msg, "invalid hitCondition")) {
+        fprintf(stderr, "FAIL: hitCondition response wrong: %s\n",
+                msg ? msg : "(null)");
+        failures++;
+    } else {
+        fprintf(stderr, "ok: verified:true + verified:false w/ message\n");
+    }
+    free(msg);
+
+    /* 3. configurationDone → response, then the entry stop */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":3,\"command\":\"configurationDone\","
+        "\"arguments\":{}}");
+    msg = dap_read(from_child);
+    free(msg);
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"")) {
+        fprintf(stderr, "FAIL: no entry stop: %s\n", msg ? msg : "(null)");
+        free(msg);
+        return 1;
+    }
+    free(msg);
+
+    /* 4. continue → the ONE hit-condition stop, at line 3 */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":4,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);  /* continue response */
+    free(msg);
+    msg = dap_read(from_child);
+    if (!msg || !strstr(msg, "\"stopped\"") ||
+        !strstr(msg, "\"reason\":\"breakpoint\"")) {
+        fprintf(stderr, "FAIL: expected hit stop: %s\n", msg ? msg : "(null)");
+        free(msg);
+        return 1;
+    }
+    free(msg);
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":5,\"command\":\"stackTrace\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);
+    char *ln = msg ? json_get(msg, "line") : nullptr;
+    if (!msg || !ln || atoi(ln) != 3) {
+        fprintf(stderr, "FAIL: stop not at line 3 (line=%s)\n",
+                ln ? ln : "(null)");
+        failures++;
+    } else {
+        fprintf(stderr, "ok: stopped once at line 3 (2nd hit)\n");
+    }
+    free(msg);
+    free(ln);
+
+    /* 5. continue → run to EOF; any FURTHER stop fails the test (the "2"
+     *    condition must not re-fire, and the invalid bp never registered).
+     *    Unblock a spurious stop with a continue so the drain can't hang. */
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":6,\"command\":\"continue\","
+        "\"arguments\":{\"threadId\":1}}");
+    msg = dap_read(from_child);  /* continue response */
+    free(msg);
+    int extra_stops = 0;
+    while ((msg = dap_read(from_child)) != nullptr) {
+        int is_stop = strstr(msg, "\"stopped\"") != nullptr;
+        free(msg);
+        if (is_stop) {
+            extra_stops++;
+            dap_write(child_in_fd,
+                "{\"type\":\"request\",\"seq\":50,\"command\":\"continue\","
+                "\"arguments\":{\"threadId\":1}}");
+            msg = dap_read(from_child);  /* continue response */
+            free(msg);
+        }
+    }
+    if (extra_stops != 0) {
+        fprintf(stderr, "FAIL: %d unexpected extra stop(s)\n", extra_stops);
+        failures++;
+    } else {
+        fprintf(stderr, "ok: no extra stops, child drained\n");
+    }
+
+    signal(SIGPIPE, SIG_IGN);
+    dap_write(child_in_fd,
+        "{\"type\":\"request\",\"seq\":99,\"command\":\"disconnect\","
+        "\"arguments\":{}}");
+    fclose(from_child);
+    close(child_in_fd);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    signal(SIGPIPE, SIG_DFL);
+    if (failures != 0) return failures;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 100;
+    return 0;
+}
+
+TEST(DapDebugger, HitCondition) {
+    int to_child[2], from_child[2];
+    ASSERT_EQ(0, pipe(to_child));
+    ASSERT_EQ(0, pipe(from_child));
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        close(to_child[1]);
+        close(from_child[0]);
+        setenv("QZ_DEBUG", "1", 1);
+        const char *trace = getenv("QZ_DAP_TRACE");
+        if (trace) { freopen(trace, "w", stderr); }
+        int rc = child_hit_main(to_child[0], from_child[1]);
+        _exit(rc);
+    }
+
+    close(to_child[0]);
+    close(from_child[1]);
+    int rc = parent_hit_main(from_child[0], to_child[1], pid);
     if (rc == 100) {
         ADD_FAILURE() << "child exited non-zero";
     } else if (rc != 0) {

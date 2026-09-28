@@ -50,10 +50,16 @@ qz_t *qz_debug_get_runtime(qz_debug_t *dbg);
 /* Detach and free the session. JS resumes normally afterwards. */
 void qz_debug_detach(qz_t *rt, qz_debug_t *dbg);
 
-/* Breakpoint table. filename is matched against the filename atom used in
- * JS_Eval (the host must eval with the real source path). */
+/* Register a breakpoint; filename is matched against the filename atom used
+ * in JS_Eval (the host must eval with the real source path).
+ * `condition` (DAP conditional breakpoint) and `hit_condition` (DAP hit
+ * count: "N", "%N", ">=N", ...) may be NULL.
+ * Returns 0 on success, -1 on invalid arguments/alloc failure, and -2 when
+ * `hit_condition` fails to parse — nothing is registered in that case, so
+ * the caller can answer verified:false with a message. */
 int  qz_debug_add_breakpoint(qz_debug_t *dbg, const char *filename,
-                               int line, const char *condition);
+                               int line, const char *condition,
+                               const char *hit_condition);
 int  qz_debug_remove_breakpoint(qz_debug_t *dbg, const char *filename, int line);
 void qz_debug_clear_breakpoints(qz_debug_t *dbg);
 /* Remove only the breakpoints registered for `filename`, keeping every other

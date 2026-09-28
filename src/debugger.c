@@ -33,13 +33,33 @@ enum qz_step_mode {
     STEP_OUT,
 };
 
+/* DAP hitCondition operators, parsed once at set time (hit_condition_parse).
+ * hit_op < 0 means no hitCondition — the breakpoint is always a candidate. */
+enum {
+    HIT_EQ,   /* "N" | "==N" — stop on exactly the Nth hit (VS Code: "only break
+               * on the fifth hit") */
+    HIT_MOD,  /* "%N" — stop every Nth hit */
+    HIT_GT, HIT_GE, HIT_LT, HIT_LE, HIT_NE,
+};
+
 typedef struct qz_bp {
     char *filename;   /* strdup'd; matched against JS_Eval filename atom string */
     int   line;
     char *condition;  /* strdup'd DAP condition expr; NULL = unconditional. Evaluated
                        * in the frame's locals sandbox (qz_debug_evaluate style);
                        * stops only if it evaluates truthy. */
-    int   hit;        /* incremented each time this bp fires (for future use) */
+    int   hit;        /* times execution reached this line as a stop candidate
+                       * (the same-statement re-hit guard already filtered) */
+    int   hit_op;     /* enum above; -1 = no hitCondition */
+    int   hit_n;      /* hitCondition operand */
+    /* Visit tracking for hit counting: one "visit" = one arrival at the
+     * line. A statement compiles to several opcodes that all map to its
+     * line, and without a stop in between the re-hit guard never arms — so
+     * hits are edge-triggered: count when the visit starts, stay silent
+     * while still inside it. Transitions mirror the stop guard below. */
+    char *reach_file; /* strdup'd while inside the current visit; NULL = idle */
+    int   reach_line;
+    int   reach_depth;
 } qz_bp_t;
 
 struct qz_debug {
@@ -105,6 +125,84 @@ static qz_bp_t *bp_find(qz_debug_t *dbg, const char *filename, int line)
             return bp;
     }
     return NULL;
+}
+
+/* Parse a DAP hitCondition into op/operand. DAP leaves the expression to the
+ * adapter; VS Code's de-facto forms (its "Hit count" menu) are:
+ *   "N" | "==N"     stop on exactly the Nth hit
+ *   "%N"            stop every Nth hit
+ *   ">N" ">=N" "<N" "<=N" "!=N"   relational against the hit count
+ * Surrounding whitespace is ignored; anything else (unknown operator, missing
+ * or non-decimal operand, trailing junk, negative N, "%0") is rejected so the
+ * caller can answer verified:false with a message instead of silently
+ * dropping the breakpoint. Returns 0 on success, -1 on parse error. */
+static int hit_condition_parse(const char *s, int *out_op, int *out_n)
+{
+    const char *p = s;
+    char *end;
+    int op = HIT_EQ, n;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '%') { op = HIT_MOD; p++; }
+    else if (p[0] == '>' && p[1] == '=') { op = HIT_GE; p += 2; }
+    else if (p[0] == '<' && p[1] == '=') { op = HIT_LE; p += 2; }
+    else if (p[0] == '=' && p[1] == '=') { op = HIT_EQ; p += 2; }
+    else if (p[0] == '!' && p[1] == '=') { op = HIT_NE; p += 2; }
+    else if (*p == '>') { op = HIT_GT; p++; }
+    else if (*p == '<') { op = HIT_LT; p++; }
+    /* bare number → HIT_EQ */
+    while (*p == ' ' || *p == '\t') p++;
+    n = (int)strtol(p, &end, 10);
+    if (end == p) return -1;                 /* no digits */
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0') return -1;             /* trailing junk */
+    if (n < 0) return -1;
+    if (op == HIT_MOD && n == 0) return -1;  /* %0 would divide by zero */
+    *out_op = op;
+    *out_n = n;
+    return 0;
+}
+
+/* Should this reach of the breakpoint be considered for stopping, per its
+ * hitCondition? Called after bp->hit has been incremented for the reach;
+ * no hitCondition → always. */
+static int bp_hit_true(const qz_bp_t *bp)
+{
+    int h = bp->hit;
+    if (bp->hit_op < 0) return 1;
+    switch (bp->hit_op) {
+    case HIT_EQ:  return h == bp->hit_n;
+    case HIT_MOD: return bp->hit_n > 0 && (h % bp->hit_n) == 0;
+    case HIT_GT:  return h > bp->hit_n;
+    case HIT_GE:  return h >= bp->hit_n;
+    case HIT_LT:  return h < bp->hit_n;
+    case HIT_LE:  return h <= bp->hit_n;
+    case HIT_NE:  return h != bp->hit_n;
+    }
+    return 1;
+}
+
+/* Advance every breakpoint's visit state for this dispatch, using the same
+ * transition rules as the stop guard: leaving the statement (same depth,
+ * other line/file) or returning out of its frame ends the visit; entering a
+ * callee does NOT — the call is part of the statement being visited, and
+ * returning to it must not re-count. Called unconditionally so a stop for a
+ * step/pause/other breakpoint elsewhere cannot strand stale visit state. */
+static void bps_visit_advance(qz_debug_t *dbg, int line, int depth,
+                              const char *filename)
+{
+    int i;
+    for (i = 0; i < dbg->bp_count; i++) {
+        qz_bp_t *bp = &dbg->bps[i];
+        if (!bp->reach_file) continue;  /* idle */
+        if (depth < bp->reach_depth ||
+            (depth == bp->reach_depth &&
+             (line != bp->reach_line ||
+              (filename && strcmp(filename, bp->reach_file) != 0)))) {
+            free(bp->reach_file);
+            bp->reach_file = NULL;
+        }
+    }
 }
 
 /* Evaluate a breakpoint condition in the current (top) frame's locals.
@@ -211,6 +309,10 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
         depth = n;
     }
 
+    /* Breakpoint visit tracking — edge-trigger the hit counts (see
+     * bps_visit_advance) before any stop decision reads them. */
+    bps_visit_advance(dbg, line, depth, filename);
+
     /* Re-hit guard: after a stop at (file, line, depth), suppress
      * breakpoint re-fires on the dispatches that merely RESUME the same
      * statement — but only for as long as that really is the same visit.
@@ -274,9 +376,19 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
         if (bp) {
             /* skip re-hitting the same breakpoint immediately after continue */
             if (dbg->last_stop_line != line) {
-                int c = bp_condition_true(dbg, bp);
-                if (c != 0)  /* true (1) or error (-1) → stop */
-                    reason = "breakpoint";
+                if (!bp->reach_file) {  /* fresh arrival — one count per visit
+                                         * (adjacent opcodes mapping to the
+                                         * same line are ONE visit) */
+                    bp->reach_line = line;
+                    bp->reach_depth = depth;
+                    bp->reach_file = strdup(filename ? filename : "");
+                    bp->hit++;
+                    if (bp_hit_true(bp)) { /* hitCondition gate (unset → always) */
+                        int c = bp_condition_true(dbg, bp);
+                        if (c != 0)  /* true (1) or error (-1) → stop */
+                            reason = "breakpoint";
+                    }
+                }
             }
         }
     }
@@ -440,6 +552,7 @@ void qz_debug_detach(qz_t *rt, qz_debug_t *dbg)
         for (i = 0; i < dbg->bp_count; i++) {
             free(dbg->bps[i].filename);
             free(dbg->bps[i].condition);
+            free(dbg->bps[i].reach_file);
         }
         free(dbg->bps);
     }
@@ -449,9 +562,17 @@ void qz_debug_detach(qz_t *rt, qz_debug_t *dbg)
 }
 
 int qz_debug_add_breakpoint(qz_debug_t *dbg, const char *filename,
-                              int line, const char *condition)
+                              int line, const char *condition,
+                              const char *hit_condition)
 {
+    int hit_op = -1, hit_n = 0;
+
     if (!dbg || !filename || line < 1) return -1;
+    if (hit_condition && hit_condition[0]) {
+        if (hit_condition_parse(hit_condition, &hit_op, &hit_n) < 0)
+            return -2;  /* invalid hitCondition — nothing registered; the
+                         * caller reports verified:false + message */
+    }
     if (dbg->bp_count >= dbg->bp_cap) {
         int nc = dbg->bp_cap ? dbg->bp_cap * 2 : 8;
         qz_bp_t *nb = realloc(dbg->bps, sizeof(qz_bp_t) * nc);
@@ -462,7 +583,12 @@ int qz_debug_add_breakpoint(qz_debug_t *dbg, const char *filename,
     dbg->bps[dbg->bp_count].filename = strdup(filename);
     dbg->bps[dbg->bp_count].line = line;
     dbg->bps[dbg->bp_count].condition = (condition && condition[0]) ? strdup(condition) : NULL;
-    dbg->bps[dbg->bp_count].hit = 0;
+    dbg->bps[dbg->bp_count].hit = 0;   /* fresh registration → count restarts */
+    dbg->bps[dbg->bp_count].hit_op = hit_op;
+    dbg->bps[dbg->bp_count].hit_n = hit_n;
+    dbg->bps[dbg->bp_count].reach_file = NULL;
+    dbg->bps[dbg->bp_count].reach_line = 0;
+    dbg->bps[dbg->bp_count].reach_depth = 0;
     dbg->bp_count++;
     return 0;
 }
@@ -476,6 +602,7 @@ int qz_debug_remove_breakpoint(qz_debug_t *dbg, const char *filename, int line)
             dbg->bps[i].filename && strcmp(dbg->bps[i].filename, filename) == 0) {
             free(dbg->bps[i].filename);
             free(dbg->bps[i].condition);
+            free(dbg->bps[i].reach_file);
             /* shift down */
             int j;
             for (j = i; j < dbg->bp_count - 1; j++)
@@ -494,6 +621,7 @@ void qz_debug_clear_breakpoints(qz_debug_t *dbg)
     for (i = 0; i < dbg->bp_count; i++) {
         free(dbg->bps[i].filename);
         free(dbg->bps[i].condition);
+        free(dbg->bps[i].reach_file);
     }
     dbg->bp_count = 0;
 }
@@ -507,6 +635,7 @@ void qz_debug_clear_breakpoints_in_file(qz_debug_t *dbg, const char *filename)
         if (bp->filename && strcmp(bp->filename, filename) == 0) {
             free(bp->filename);
             free(bp->condition);
+            free(bp->reach_file);
         } else {
             dbg->bps[j++] = *bp;   /* keep other files' breakpoints */
         }

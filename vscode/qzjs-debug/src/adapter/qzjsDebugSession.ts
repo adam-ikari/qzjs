@@ -302,6 +302,9 @@ export class QzjsDebugSession extends DebugSession {
     response.body.supportsEvaluateForHovers = true;
     response.body.supportsTerminateRequest = false;
     response.body.supportsLogPoints = true;
+    // DAP leaves hitCondition ("5", "%5", ">=100") to the adapter; the C
+    // layer parses it at set time and gates the stop on the hit count.
+    response.body.supportsHitConditionalBreakpoints = true;
     // Only the "all" filter is implemented (stop on every throw, caught or
     // not); uncaught-only needs catch-detection on the unwind path and is
     // deliberately not advertised so clients won't request it.
@@ -440,6 +443,10 @@ export class QzjsDebugSession extends DebugSession {
     resp.forEach((b, i) => {
       const reqLine = requested[i]?.line;
       const line = typeof reqLine === 'number' ? reqLine : b.line;
+      // C's `false` is authoritative — it means the runtime refused to
+      // register (e.g. an unparseable hitCondition), and a line-in-file
+      // check cannot re-enable that. The adapter only ever narrows.
+      if (b.verified === false) return;
       b.verified = lineCount !== null && typeof line === 'number' && line >= 1 && line <= lineCount;
     });
   }

@@ -668,17 +668,22 @@ static void dap_handle_set_exception_breakpoints(qz_dap_t *d, const char *args,
 }
 
 /* Handle a setBreakpoints request: replace the breakpoints of the source in
- * `args` (source.path + breakpoints[].line, optional condition) with the ones
- * in the request, then respond with the verified lines. Scoped per source —
- * DAP sends one request per file, so other files' breakpoints must survive;
- * a request without source.path (malformed: DAP requires source) registers
- * nothing and leaves the table untouched rather than wiping files we cannot
- * attribute. Shared by the configuration phase (qz_dap_configure) and the
- * run-time pump (qz_dap_service) so breakpoints added mid-run take effect
- * immediately. */
+ * `args` (source.path + breakpoints[].line, optional condition/hitCondition)
+ * with the ones in the request, then respond with the verified lines. Scoped
+ * per source — DAP sends one request per file, so other files' breakpoints
+ * must survive; a request without source.path (malformed: DAP requires
+ * source) registers nothing and leaves the table untouched rather than wiping
+ * files we cannot attribute. Shared by the configuration phase
+ * (qz_dap_configure) and the run-time pump (qz_dap_service) so breakpoints
+ * added mid-run take effect immediately.
+ *
+ * Registration and the response entry are built in one pass: a breakpoint the
+ * runtime refuses (qz_debug_add_breakpoint < 0, e.g. an unparseable
+ * hitCondition) answers verified:false with a message so VS Code renders the
+ * gray "not installed" glyph instead of a breakpoint that will never fire. */
 static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_seq)
 {
-    /* args.source.path + args.breakpoints[].line（+ 可选 condition） */
+    /* args.source.path + args.breakpoints[].line（+ 可选 condition/hitCondition） */
     cJSON *ja = cJSON_Parse(args ? args : "");
     cJSON *bps = ja ? cJSON_GetObjectItemCaseSensitive(ja, "breakpoints") : NULL;
     const cJSON *src = ja ? cJSON_GetObjectItemCaseSensitive(ja, "source") : NULL;
@@ -686,6 +691,8 @@ static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_se
                         cJSON_IsString(cJSON_GetObjectItemCaseSensitive(src, "path")))
         ? cJSON_GetObjectItemCaseSensitive(src, "path")->valuestring : NULL;
 
+    cJSON *body = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(body, "breakpoints");
     if (path) {
         qz_debug_clear_breakpoints_in_file(d->dbg, path);
         if (cJSON_IsArray(bps)) {
@@ -697,27 +704,30 @@ static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_se
                 const cJSON *cond = cJSON_GetObjectItemCaseSensitive(bp, "condition");
                 const char *condstr = (cJSON_IsString(cond) && cond->valuestring)
                     ? cond->valuestring : NULL;
-                qz_debug_add_breakpoint(d->dbg, path, ln->valueint, condstr);
+                const cJSON *hc = cJSON_GetObjectItemCaseSensitive(bp, "hitCondition");
+                const char *hcstr = (cJSON_IsString(hc) && hc->valuestring)
+                    ? hc->valuestring : NULL;
+                int rc = qz_debug_add_breakpoint(d->dbg, path, ln->valueint,
+                                                 condstr, hcstr);
+                cJSON *v = cJSON_CreateObject();
+                if (!v) break;
+                if (rc == 0) {
+                    cJSON_AddBoolToObject(v, "verified", 1);
+                } else {
+                    cJSON_AddBoolToObject(v, "verified", 0);
+                    if (rc == -2) {
+                        char msg[256];
+                        snprintf(msg, sizeof(msg), "invalid hitCondition: %.200s",
+                                 hcstr ? hcstr : "");
+                        cJSON_AddStringToObject(v, "message", msg);
+                    }
+                }
+                cJSON_AddNumberToObject(v, "line", ln->valueint);
+                cJSON_AddItemToArray(arr, v);
             }
         }
     }
 
-    /* respond with verified breakpoints (echo lines) */
-    cJSON *body = cJSON_CreateObject();
-    cJSON *arr = cJSON_AddArrayToObject(body, "breakpoints");
-    if (path && cJSON_IsArray(bps)) {
-        const cJSON *bp = NULL;
-        cJSON_ArrayForEach(bp, bps) {
-            const cJSON *ln = cJSON_GetObjectItemCaseSensitive(bp, "line");
-            if (!cJSON_IsNumber(ln) || ln->valueint <= 0)
-                continue;
-            cJSON *v = cJSON_CreateObject();
-            if (!v) break;
-            cJSON_AddBoolToObject(v, "verified", 1);
-            cJSON_AddNumberToObject(v, "line", ln->valueint);
-            cJSON_AddItemToArray(arr, v);
-        }
-    }
     char *buf = body ? cJSON_PrintUnformatted(body) : NULL;
     cJSON_Delete(body);
     cJSON_Delete(ja);
