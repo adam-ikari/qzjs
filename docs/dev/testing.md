@@ -67,6 +67,30 @@ ctest -N -L offline | tail -1     # how many tests this build registers
 ² CLI end-to-end 来自 `test/test_cli_gtest.cpp`（fork 真实 qzjs 可执行文件，断言 stdout/stderr/退出码）。
 ³ HTTPServer e2e 来自 `test/test_httpserver_e2e.py`（真实 libuv 构建 + 纯 JS serve() listener）。
 
+## Coverage Scope — Uncovered-by-Design
+
+The gtest + coverage gate builds with `-DQZ_BUILD_TESTS=ON`, which compiles
+the core against `mock_libuv` (an in-process libuv fake). Modules that bind
+to **real** libuv primitives (`uv_pipe`, `SO_PEERCRED`, real sockets, the
+`qzjs-rt`/`qzjs-ctl` executables) are therefore **excluded from the gtest
+and gcov denominator** — they link only in the `QZ_BUILD_TESTS=OFF`
+(real-libuv) build, and are covered exclusively by e2e:
+
+| Module | File | Why mocked out | Real coverage |
+|---|---|---|---|
+| IPC process channel | `src/ipc_process.c` | real `uv_pipe` | e2e (`test_mp*_e2e.sh`, `test_ctl_e2e.sh`) |
+| CTL-2 local endpoint | `src/control_endpoint.c` | `uv_pipe` + `SO_PEERCRED` | e2e (`test_ctl_e2e.sh`) |
+| Host↔main-RT process split | `src/rt_host.c` | fork+exec of `qzjs-rt` | e2e (`test_mp2_host_split_e2e.sh`) |
+| TCP I/O | `src/tcp_io.c` | real sockets | e2e (HTTPServer, WS, gRPC suites) |
+| Main RT entrypoint | `src/rt_main.c` (`qzjs-rt`) | standalone executable | e2e (every ISOLATED run) |
+| CTL CLI entrypoint | `src/ctl_cli.c` (`qzjs-ctl`) | standalone executable | e2e (`test_ctl_e2e.sh`) |
+
+This is intentional, not a gap: the mock PAL cannot exercise process
+isolation, real IPC, or live sockets — those semantics are asserted by e2e
+under ASan+LSan (the `asan`/`ubsan` jobs' real-ISOLATED builds and the `e2e`
+job). The gcov 50% gate thus measures the mock-testable surface; the
+multi-process layer is gated by e2e green, not by line coverage.
+
 ## Memory Safety
 
 All offline tests pass under AddressSanitizer with leak detection
