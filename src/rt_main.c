@@ -602,16 +602,16 @@ int main(int argc, char **argv)
         size_t rd = fread(script, 1, (size_t)sz, f);
         script[rd] = '\0';
         fclose(f);
-        /* C1: script fully read — unlink the temp file now. The parent keeps
-         * no reference to the file (mkstemp fd was closed before exec), so
-         * removing the directory entry is race-free, and this runs before the
-         * handshake so the parent's success path never leaks the file. */
-        unlink(script_path);
+        /* --script PATH 是用户/调用方自有的文件（手动运行
+         * `qzjs-rt --script foo.js`），**不删除**——旧版在此 unlink 是
+         * 因为父进程写的是 mkstemp 临时文件、子读毕负责清理；启动源码改
+         * 走管道（--script-stdin）后，PATH 形态只用于用户文件，删它会
+         * 误删用户的真实脚本。 */
     }
 
     /* 字节码（二进制）：--bytecode-stdin 从管道读（零落盘）；否则读
-     * --bytecode PATH 临时文件（手动形态）。源码帧先于字节码帧（父按
-     * 「源码→字节码」固定顺序写）。 */
+     * --bytecode PATH 用户文件（手动形态，不删除）。源码帧先于字节码帧
+     *（父按「源码→字节码」固定顺序写）。 */
     uint8_t *bytecode = NULL;
     size_t bytecode_len = 0;
     if (bytecode_stdin) {
@@ -645,7 +645,8 @@ int main(int argc, char **argv)
         }
         fclose(f);
         bytecode_len = (size_t)sz;
-        unlink(bytecode_path);   /* 同 script：读毕即删（C1） */
+        /* --bytecode PATH 同 --script PATH：用户自有 .bc 文件，不删除
+         *（理由见上面 script_path 注释）。 */
     }
 
     /* ── Handshake (child sends first, §3.3) ── */
