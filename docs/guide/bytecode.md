@@ -19,6 +19,9 @@ From C:
 ```c
 #include <qzjs/qzjs.h>
 
+const char *source = "1 + 1";   /* 你的 JS 源码 */
+size_t source_len = 5;          /* 不含结尾 NUL */
+
 char *err = NULL;
 uint8_t *bc = NULL;
 size_t bc_len = 0;

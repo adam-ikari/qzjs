@@ -131,6 +131,6 @@ timers, URL, TextEncoder, …).
 ## Next Steps
 
 - [Event Loop](/guide/event-loop) — how the library-owned loop (ISOLATED: the
-  `qzjs-rt` process plus the library's host-side pump thread; THREAD: the
-  internal qzjs thread) drives execution — the host pumps nothing
+  `qzjs-rt` process plus the library's host-side thread; THREAD: the
+  internal qzjs thread) drives execution — the host drives nothing
 - [Embedding](/guide/embedding) — the C API for host applications (mailbox consumption)

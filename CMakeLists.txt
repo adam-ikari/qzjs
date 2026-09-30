@@ -699,6 +699,7 @@ set(_qz_core_sources
     src/thread.c
     src/msgq.c
     src/ipc_envelope.c
+    src/ipc_ctl.c
     src/uv_io.c
     src/worker.c
     src/control.c
@@ -804,7 +805,14 @@ target_include_directories(qzjs SYSTEM PUBLIC
 # link (mock_libuv, not the system libuv). Production builds omit this define
 # and use real libuv's uv.h.
 if(QZ_BUILD_TESTS)
-    target_compile_definitions(qzjs PRIVATE QZ_USE_MOCK_LIBUV)
+    # QZ_USE_MOCK_LIBUV 必须 **PUBLIC**：include/qzjs/qzjs.h 的 ping 家族守卫是
+    # `#if defined(QZ_PROCESS_MODEL_ISOLATED) && !defined(QZ_USE_MOCK_LIBUV)`，
+    # 而 ISOLATED 是 PUBLIC、mock 若留在 PRIVATE，测试目标就只看得到 ISOLATED
+    # ——守卫的 mock 那半边对消费者形同虚设，头里照旧声明 qz_ping，而
+    # libqzjs.a 里根本没有它（rt_host.c 整文件不编）。结果是「编译过、链接炸」
+    # 在测试构建里原样复现。改成 PUBLIC 后守卫对库和消费者说的是同一件事。
+    # 副作用可控：qzjs.h 本身不因该宏分支，消费方无需 mock_libuv.h 头文件。
+    target_compile_definitions(qzjs PUBLIC QZ_USE_MOCK_LIBUV)
     target_include_directories(qzjs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
 endif()
 
@@ -1102,6 +1110,58 @@ if(QZ_PROCESS_MODEL STREQUAL "ISOLATED" AND NOT QZ_BUILD_TESTS)
     target_compile_definitions(qz_mp7_mailbox_e2e PRIVATE _POSIX_C_SOURCE=200809L)
     qz_enable_warnings(qz_mp7_mailbox_e2e)
 endif()
+# ============================================================================
+# qz_ctl_endpoint_leak_probe — CTL-2 本地端点 + target_path 前投的 LSan 探针。
+#
+# 为什么要有这个独立探针：test_nested_e2e.sh 里 `ctl --target-path` 走的正是
+# qz_control_endpoint_cmd 的 path 前投早返回，而那条路径曾经不 free(buf) /
+# free(correl)。ASAN 一直没报出来不是因为不漏，而是 e2e 脚本用 kill -TERM 收
+# 宿主——LSan 只在**正常退出**的 atexit 里跑检查，收信号直接死就一封报告都不出。
+# 「测试没报」不等于「没漏」。本探针自己建运行时、当客户端、正常 return，
+# 让泄漏检查真的跑。仅诊断用，不参与 ctest（需要 ASAN 才有意义）。
+# ============================================================================
+if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
+    add_executable(qz_ctl_endpoint_leak_probe test/probe_ctl_endpoint_leak.c)
+    target_link_libraries(qz_ctl_endpoint_leak_probe PRIVATE qz_full)
+    target_compile_definitions(qz_ctl_endpoint_leak_probe PRIVATE
+        _POSIX_C_SOURCE=200809L)
+    qz_enable_warnings(qz_ctl_endpoint_leak_probe)
+endif()
+
+# ============================================================================
+# qz_ctl_reject_frames_probe — 端点拒收路径的帧级探针，逐帧用 cJSON 真解析。
+#
+# 存在的理由：第一版那两条拒收回帧里，-3 帧是**非法 JSON**（C 记法 \"qzjs\"
+# 只让字符串里出现裸引号，拼进 JSON 在第 53 列截断 error 串），而 qzjs-ctl 用
+# strstr 判断成败、从不解析 JSON，所以谁都没抓��到——用 strstr 写的断言天生抓不到
+# 「JSON 非法」。同源的另外三条也一起锁：帧尾不能自带 \n（否则多一个空帧）、
+# 前投无此槽位要当场回 NOT_FOUND、interrupt 不带 correl 不得被拒。
+# ============================================================================
+if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
+    add_executable(qz_ctl_reject_frames_probe test/probe_ctl_reject_frames.c)
+    target_link_libraries(qz_ctl_reject_frames_probe PRIVATE qz_full cjson)
+    target_compile_definitions(qz_ctl_reject_frames_probe PRIVATE
+        _POSIX_C_SOURCE=200809L)
+    qz_enable_warnings(qz_ctl_reject_frames_probe)
+endif()
+
+# ============================================================================
+# host_contract_e2e — 宿主形态的消费契约端到端验证（真实 ISOLATED 构建）。
+#
+# 既有 8 支 e2e 的 harness 是**测试专用**宿主，各自验一条断言。宿主真正会做的事
+# ——照 docs/{,zh/}c-api/runtime.md「邮箱」节那段循环收发——没有任何一支在验；
+# 文档门只保证那段代码能编，不保证它行为正确。这一支跑三条路径：
+#   1. 文档循环原样（三态分开判、错误帧认出来且不 break）
+#   2. 宿主自己的 eventfd（qz_message_fd）+ poll 驱动的循环
+#   3. qz_wait_idle 之后仍可排干（最终排干的位置就在那里）
+# ============================================================================
+if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
+    add_executable(host_contract_e2e test/host_contract_e2e.c)
+    target_link_libraries(host_contract_e2e PRIVATE qz_full)
+    target_compile_definitions(host_contract_e2e PRIVATE _POSIX_C_SOURCE=200809L)
+    qz_enable_warnings(host_contract_e2e)
+endif()
+
 # ============================================================================
 # Install
 # ============================================================================

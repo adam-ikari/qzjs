@@ -133,7 +133,7 @@ TEST_F(HostMessagingTest, HostInboundJsonRoundTrip) {
         "'ok'", &v));
     const char *json = "{\"ping\":{\"n\":3}}";
     ASSERT_EQ(0, qz_post_message(h->rt, json, strlen(json)));
-    /* poll：每次 eval 泵一轮 loop，消息在 wake_cb 派发后 _inbound 非 null。
+    /* poll：每次 eval 驱动一轮 loop，消息在 wake_cb 派发后 _inbound 非 null。
      * 注意 eval 命令本身也会触发 listener，_inbound 首条可能抢到 eval 命令
      * 或宿主消息——但宿主消息先入队，先派发。 */
     ASSERT_TRUE(host_poll_until_value(h,

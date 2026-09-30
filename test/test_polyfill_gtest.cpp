@@ -2181,7 +2181,7 @@ TEST_F(PolyfillTest, TransformStreamApi) {
         "});\n"
         "var w = ts.writable.getWriter(); var r = ts.readable.getReader();\n"
         "var out = [];\n"
-        /* 规范默认 HWM=0：readable 不读则 writable 背压挂起——先起读泵，再写。 */
+        /* 规范默认 HWM=0：readable 不读则 writable 背压挂起——先起读取循环（pump），再写。 */
         "var pump = (function loop(){ return r.read().then(function(x){\n"
         "  if (x.done) { out.push(x.done); return; } out.push(x.value); return loop(); }); })();\n"
         "w.write('a').then(function(){ return w.write('b'); }).then(function(){ return w.close(); })\n"

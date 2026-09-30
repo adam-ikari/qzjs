@@ -67,7 +67,7 @@ it returns `NULL` when either fails. The causes:
    loops are owned by the library — the host injects nothing.
 3. **Under ISOLATED: the main-RT child process (`qzjs-rt`) failed to
    spawn.** `qz_create` spawns it first, then starts the library's own
-   host-side pump thread and loop; if the binary cannot be located or the
+   host-side thread and loop; if the binary cannot be located or the
    spawn fails, create returns `NULL`.
 
 The CLI prints `qzjs: runtime init failed` for the same condition.
@@ -110,9 +110,11 @@ check, in order:
    with `timeout_ms > 0` (or `-1` to block), or integrate
    `qz_message_fd(rt)` (the wake fd, a Linux `eventfd`) into your own
    poll/epoll/select loop — readable means ≥1 message pending.
-3. **Another consumer took it first.** Concurrent `qz_recv_message` calls on
-   one rt are safe, but each message is delivered to exactly **one** caller
-   (single-consumer rule); cross-thread handoff is the host's job.
+3. **Another consumer took it first.** Only **one consumer at a time** may
+   call `qz_recv_message` on one rt — concurrent calls are not safe: both
+   threads read the same head node, so one message is delivered twice and one
+   node is freed twice. To consume from several threads, serialize in the
+   host (your own queue, then fan out).
 
 Crash reports are ordinary mailbox messages too: the `{"type":"error"}`
 frame arrives via `qz_recv_message` — notably after `qz_wait_idle` returns,
@@ -228,7 +230,7 @@ the path and permissions.
 ### No `process`, `require`, or `Buffer` in scripts
 
 By design — the CLI exposes no Node-style globals. Scripts use the WinterTC Web
-API surface instead. See [Standalone CLI](/guide/cli#no-node-js-api).
+API surface instead. See [Standalone CLI](/guide/cli#no-nodejs-api).
 
 ### `qzjs-ctl` commands fail
 

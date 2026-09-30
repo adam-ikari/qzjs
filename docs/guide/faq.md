@@ -60,8 +60,8 @@ the backend — but communicate via structured-clone messages.
 - **`ISOLATED`** (default) — each `new Worker(...)` runs in a dedicated child
   process (`qzjs-rt`) via fork+exec. Stronger isolation, IPC overhead. The
   host-side shape follows: JS lives in the main-RT process, the library owns
-  its own host-side pump thread and loop, and all host-bound messages land in
-  a FIFO mailbox drained with `qz_recv_message` — no loop to inject or pump.
+  its own host-side thread and loop, and all host-bound messages land in
+  a FIFO mailbox drained with `qz_recv_message` — no loop to inject or drive.
 - **`THREAD`** — workers are threads in one process. Lower overhead, shared
   address space. The library's internal qzjs thread runs everything; the host
   still just consumes the mailbox.
@@ -74,7 +74,7 @@ Neither is a security boundary against malicious script. See
 Under `ISOLATED`, workers are separate processes, so they need an executable to
 launch: `qzjs-rt`. It is built alongside the CLI (`QZ_BUILD_CLI=ON`). If it
 cannot be found the spawn fails — see
-[Troubleshooting](/guide/troubleshooting#workers-the-process-model).
+[Troubleshooting](/guide/troubleshooting#workers--the-process-model).
 
 ### Can workers share memory?
 
@@ -85,11 +85,23 @@ No. Messages are structured-cloned, not shared. Use `postMessage` /
 
 ### Which Web APIs are available?
 
-21 modules are exposed as globals: `fetch`, `console`, `crypto.subtle`,
+30 modules are registered (see the [overview](/index) for the canonical
+count). Most are exposed as globals: `fetch`, `console`, `crypto.subtle`,
 `streams`, `timers`, `URL`, `TextEncoder`/`TextDecoder`, `AbortController`,
-`WebSocket`, `BroadcastChannel`, `EventSource`, `CacheStorage`, `Service
-Worker`, `Worker`, `fs`, `storage`, `navigator`, `serve()`, `grpc`,
-`compression`, `structuredClone`, and more. The full list with global names is
+`WebSocket`, `BroadcastChannel`, `EventSource`, `CacheStorage`, `Worker`,
+`CompressionStream`/`DecompressionStream`, `structuredClone`, and more.
+A few are **not** globals — reach them through their owner or namespace, or
+your script gets a `ReferenceError`:
+
+| Not a global | Correct path |
+|--------------|--------------|
+| `fs` | `globalThis.qzjs.fs` |
+| async storage | `globalThis.qzjs.storage` |
+| Web Storage (`localStorage` / `sessionStorage`) | `globalThis.localStorage` / `globalThis.sessionStorage` (parent runtime only) |
+| Service Worker | `navigator.serviceWorker` |
+| `serve()` / `grpc` | gated on the build; see [Build Options](/guide/build-options) |
+
+The full list with global names is
 the [JS API Reference](/js-api/).
 
 ### Why is `serve()` not on `node:http`?

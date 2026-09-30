@@ -141,8 +141,78 @@ static void conn_read_cb(uv_stream_t *s, ssize_t nread, const uv_buf_t *b)
     for (size_t i = 0; i < c->len; i++) {
         if (c->buf[i] != '\n') continue;
         size_t llen = i - start;
-        if (llen > 0)
-            qz_control_endpoint_cmd(c->rt, c->buf + start, llen, c);
+        if (llen > 0) {
+            /* 拒收（缺 correl / 保留命名空间）必须回一句话，不能默默吞掉。
+             * 同一个文件里的兄弟分支对「无此 target」是会写 NOT_FOUND 回执的，
+             * 两处自相矛盾；而「没有回执、没有错误帧、连接也不关」正是这批改动
+             * 要消灭的静默失败——客户端只会一直等到自己超时。
+             *
+             * 只为**专用拒收码**回帧（-2 缺 correl / -3 保留命名空间）。别的非零
+             * 码不是拒收：path 前投的 ctl_forward 对「无此槽位」也返回 -1，那条
+             * 路由 qz_control_endpoint_cmd 内部自己回 NOT_FOUND（见 control.c），
+             * 这里再发一条就成了误导。
+             *
+             * 两条纪律，都是被实测打出来的：
+             *  · **不带尾 \n**。qz_ctl_conn_write 无条件在末尾补一个 \n（换行分
+             *    帧）。字面量里再带一个就多出一个**空帧**，按行分帧的客户端会把它
+             *    读成一条零长帧，然后 json.loads("") 抛异常。同文件 control.c 的
+             *    NOT_FOUND 帧用 snprintf、不带尾换行，就是这个约定。
+             *  · **纯 ASCII，且 JSON 转义层数要对**。C 源码里写 \" 只让字符串里
+             *    出现一个裸 "，拼进 JSON 会在此处截断 error 串——整帧变成非法
+             *    JSON，客户端拿到的是解析异常而不是诊断（这正是第一版写错的地方：
+             *    json.loads 在第 53 列就失败）。嵌引号在 C 记法里要写 \\\"，
+             *    即 JSON 层面的 \"。非 ASCII（em-dash）也换成 ASCII：裸 UTF-8 在
+             *    JSON 串里虽合法，但对端按 Latin-1 解码就是乱码。
+             *  · -3 的 correl 是拿得到的（control.c 先校验它非空、再判命名空间），
+             *    所以经 correl_out 出参取出来、回显在帧里；-2 取不到，帧里写
+             *    "correl":null，让客户端分得清「这帧没有配对键」与「这帧格式坏了」。 */
+            char *rej_correl = NULL;
+            int r = qz_control_endpoint_cmd(c->rt, c->buf + start, llen, c,
+                                             &rej_correl);
+            if (r == -2) {
+                static const char kNoCorrel[] =
+                    "{\"ctl\":true,\"ok\":false,"
+                    "\"error\":\"missing correl: it is the only key a receipt can "
+                    "be paired on, so this command is rejected\","
+                    "\"correl\":null,\"code\":\"INVALID_ARG\"}";
+                qz_ctl_conn_write(c, kNoCorrel, sizeof kNoCorrel - 1);
+            } else if (r == -3) {
+                static const char kReserved[] =
+                    "{\"ctl\":true,\"ok\":false,"
+                    "\"error\":\"rejected: a numeric \\\"qzjs\\\" key is the "
+                    "channel layer's reserved namespace for system CONTROL\","
+                    "\"correl\":\"%s\",\"code\":\"INVALID_ARG\"}";
+                char buf[512];
+                int n = snprintf(buf, sizeof buf, kReserved,
+                                 rej_correl ? rej_correl : "");
+                if (n > 0 && (size_t)n < sizeof buf)
+                    qz_ctl_conn_write(c, buf, (size_t)n);
+                else
+                    fprintf(stderr, "qzjs: reserved-ns receipt does not fit "
+                                    "(correl len=%zu)\n",
+                            rej_correl ? strlen(rej_correl) : (size_t)0);
+            } else if (r == -4) {
+                /* 命令没能进队列 ⇒ 不会有回执。不说，客户端就干等到超时。
+                 * 这条与「转发失败会回 NOT_FOUND」是同一类问题：早先这里对 -1
+                 * 全部静默，于是同一个函数里转发失败有回执、入队失败没回执。 */
+                static const char kEnq[] =
+                    "{\"ctl\":true,\"ok\":false,"
+                    "\"error\":\"command could not be enqueued; no receipt will "
+                    "come for it\",\"code\":\"INTERNAL\"}";
+                qz_ctl_conn_write(c, kEnq, sizeof kEnq - 1);
+            } else if (r == -5) {
+                /* 前投失败：NOT_FOUND 帧已由 qz_control_endpoint_cmd 写出。 */
+            } else if (r != 0) {
+                /* 其余 -1（rt/magic 非法、control_plane 非 LOCAL、malloc 失败）。
+                 * 也要说话：同文件兄弟分支从不沉默，没有理由这里例外。 */
+                static const char kInternal[] =
+                    "{\"ctl\":true,\"ok\":false,"
+                    "\"error\":\"control command could not be accepted\","
+                    "\"code\":\"INTERNAL\"}";
+                qz_ctl_conn_write(c, kInternal, sizeof kInternal - 1);
+            }
+            free(rej_correl);
+        }
         start = i + 1;
     }
     if (start > 0) {

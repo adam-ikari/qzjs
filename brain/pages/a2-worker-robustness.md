@@ -45,19 +45,19 @@ updated: "2026-09-13T00:44:30"
 
 - time: 2026-09-08T12:14:19
   kind: note
-  summary: "已知限制：PROCESS 后端（QZ_WORKER_BACKEND=process）单 worker 连续 postMessage 往返 >~500-1000 条洪水下间歇卡死（JS 派发深层丢帧 + 帧错位双模式）。已修 3 处确证根因（背压 EAGAIN 静默丢帧→spill buffer、ENOBUFS 丢整包→按背压、JS 异常污染→JS_GetException）。残余已排除：写路径丢帧、读泵停/死锁、子进程崩溃、JS_NewArrayBufferCopy 异常。风险点：A) worker.js deliverToWorker 派发深层；B) 父 rbuf 解帧错位（oversized flen 异常）；C) spill buffer 多 proc/重连未验证。基准 R3/R4 以分批≤40 条 workaround。根治方向：JS 派发丢帧 + 帧错位。见 commit fix(proc) PROCESS worker 消息挂死。"
+  summary: "已知限制：PROCESS 后端（QZ_WORKER_BACKEND=process）单 worker 连续 postMessage 往返 >~500-1000 条洪水下间歇卡死（JS 派发深层丢帧 + 帧错位双模式）。已修 3 处确证根因（背压 EAGAIN 静默丢帧→spill buffer、ENOBUFS 丢整包→按背压、JS 异常污染→JS_GetException）。残余已排除：写路径丢帧、读侧停/死锁、子进程崩溃、JS_NewArrayBufferCopy 异常。风险点：A) worker.js deliverToWorker 派发深层；B) 父 rbuf 解帧错位（oversized flen 异常）；C) spill buffer 多 proc/重连未验证。基准 R3/R4 以分批≤40 条 workaround。根治方向：JS 派发丢帧 + 帧错位。见 commit fix(proc) PROCESS worker 消息挂死。"
   source: "2026-09-07 PROCESS 洪水基准修复会话"
   affects: [a2-worker-robustness]
 
 - time: 2026-09-08T12:14:27
   kind: note
-  summary: "已知限制：PROCESS 后端（QZ_WORKER_BACKEND=process）单 worker 连续 postMessage 往返 >~500-1000 条洪水下间歇卡死（JS 派发深层丢帧 + 帧错位双模式）。已修 3 处确证根因（背压 EAGAIN 静默丢帧→spill buffer、ENOBUFS 丢整包→按背压、JS 异常污染→JS_GetException）。残余已排除：写路径丢帧、读泵停/死锁、子进程崩溃、JS_NewArrayBufferCopy 异常。风险点：A) worker.js deliverToWorker 派发深层；B) 父 rbuf 解帧错位（oversized flen 异常）；C) spill buffer 多 proc/重连未验证。基准 R3/R4 以分批≤40 条 workaround。根治方向：JS 派发丢帧 + 帧错位。见 commit fix(proc) PROCESS worker 消息挂死。"
+  summary: "已知限制：PROCESS 后端（QZ_WORKER_BACKEND=process）单 worker 连续 postMessage 往返 >~500-1000 条洪水下间歇卡死（JS 派发深层丢帧 + 帧错位双模式）。已修 3 处确证根因（背压 EAGAIN 静默丢帧→spill buffer、ENOBUFS 丢整包→按背压、JS 异常污染→JS_GetException）。残余已排除：写路径丢帧、读侧停/死锁、子进程崩溃、JS_NewArrayBufferCopy 异常。风险点：A) worker.js deliverToWorker 派发深层；B) 父 rbuf 解帧错位（oversized flen 异常）；C) spill buffer 多 proc/重连未验证。基准 R3/R4 以分批≤40 条 workaround。根治方向：JS 派发丢帧 + 帧错位。见 commit fix(proc) PROCESS worker 消息挂死。"
   source: "2026-09-07 PROCESS 洪水基准修复会话"
   affects: [a2-worker-robustness]
 
 - time: 2026-09-08T14:14:04
   kind: decision
-  summary: "已根治：PROCESS 洪水卡死（前述已知限制解除）。确证根因 = src/ipc_process.c proc_read_cb 缺 memcpy(rbuf, buf->base)（commit 9b7c0781 误删）——父读泵读入字节从未真正进 rbuf，前 ~950 帧靠 malloc 地址复用凑巧工作（首次 realloc 复用刚 free 的 buf 内存块），rbuf 扩容 realloc 移块后数据全丢 + rbuf_len 虚增 → 解帧读垃圾 → oversized flen 0x40100000 → 假卡死（rcvd 停 ~1159）；且原始代码 UAF（free 在 memcpy 前）。修复：恢复 memcpy（rbuf_len+= 前）+ free 移到每分支 memcpy 后（与子侧 rt_main.c pipe_read_cb 一致）。验证：10000 条洪水 7/7 PASS + mp1 e2e PASS。PROCESS 后端可支撑 10000 条连续往返，基准 R3/R4 分批 workaround 可移除。"
+  summary: "已根治：PROCESS 洪水卡死（前述已知限制解除）。确证根因 = src/ipc_process.c proc_read_cb 缺 memcpy(rbuf, buf->base)（commit 9b7c0781 误删）——父读回调读入字节从未真正进 rbuf，前 ~950 帧靠 malloc 地址复用凑巧工作（首次 realloc 复用刚 free 的 buf 内存块），rbuf 扩容 realloc 移块后数据全丢 + rbuf_len 虚增 → 解帧读垃圾 → oversized flen 0x40100000 → 假卡死（rcvd 停 ~1159）；且原始代码 UAF（free 在 memcpy 前）。修复：恢复 memcpy（rbuf_len+= 前）+ free 移到每分支 memcpy 后（与子侧 rt_main.c pipe_read_cb 一致）。验证：10000 条洪水 7/7 PASS + mp1 e2e PASS。PROCESS 后端可支撑 10000 条连续往返，基准 R3/R4 分批 workaround 可移除。"
   source: "2026-09-08 PROCESS 洪水根治会话"
   affects: [a2-worker-robustness]
 

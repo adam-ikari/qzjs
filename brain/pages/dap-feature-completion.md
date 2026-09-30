@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [dap, vscode, debugger]
 created: "2026-09-28T01:38:49"
-updated: "2026-09-28T02:23:42"
+updated: "2026-09-29T02:27:42"
 ---
 
 <!-- compiled_truth -->
@@ -39,12 +39,12 @@ updated: "2026-09-28T02:23:42"
 - 非调试构建零开销：全部 hook 代码 #ifdef，`build/`（QZ_DEBUG_SUPPORT 未定义）编译通过。
 
 ### debugger.c：qz_debug_on_throw 处理器
-- `exc_break_mode` 门 + `dbg->stopped` 重入保护（先占位 stopped=1 再 JS_ToString，防用户 toString 抛错嵌套泵）→ step_mode=STEP_NONE + pause_requested=0 + 顶帧 eager step_line → 消息字符串化（失败用 `<exception>` 兜底，JS_FreeValue(JS_GetException) 清 stray 槽）→ free 旧帧快照 + generation++（pump 期惰性取抛点栈）→ on_stopped("exception", 1) → stopped=0。**不碰 last_stop_* 守卫**。
+- `exc_break_mode` 门 + `dbg->stopped` 重入保护（先占位 stopped=1 再 JS_ToString，防用户 toString 抛错嵌套重入）→ step_mode=STEP_NONE + pause_requested=0 + 顶帧 eager step_line → 消息字符串化（失败用 `<exception>` 兜底，JS_FreeValue(JS_GetException) 清 stray 槽）→ free 旧帧快照 + generation++（暂停处理期惰性取抛点栈）→ on_stopped("exception", 1) → stopped=0。**不碰 last_stop_* 守卫**。
 - 新 API：`qz_debug_set_exception_break(dbg, mode)` / `qz_debug_last_exception(dbg)`（qz_debug.h 声明）；attach 接线 `hooks.on_throw`；`exc_message` 在 detach 释放。
 
 ### DAP 层 + TS
-- `dap_on_stopped` exception body（cJSON，reason/description:"Exception" + text=错误消息 + threadId + allThreadsStopped）；`dap_handle_set_exception_breakpoints`（filter "all"→arm，未知→verified:false，回 breakpoints[]；filters:[] = 解除）进**全部三个泵**（paused / mid-run / configure）。
-- 同轮顺带修：paused 泵 `setBreakpoints` 此前只回 `{}` 通用 ack（断点编辑丢失 + VS Code 置灰该文件）→ 补同 handler。
+- `dap_on_stopped` exception body（cJSON，reason/description:"Exception" + text=错误消息 + threadId + allThreadsStopped）；`dap_handle_set_exception_breakpoints`（filter "all"→arm，未知→verified:false，回 breakpoints[]；filters:[] = 解除）进**全部三条处理分支**（paused / mid-run / configure）。
+- 同轮顺带修：paused 分支 `setBreakpoints` 此前只回 `{}` 通用 ack（断点编辑丢失 + VS Code 置灰该文件）→ 补同 handler。
 - TS：`exceptionBreakpointFilters` 能力（只申报 all）+ 中继。**方法名必须是 `setExceptionBreakPointsRequest`（大写 B）**——`@vscode/debugadapter` 基类硬编码 if/else 分发，小写 b 静默落到默认空成功响应（调试代价大）；测试必须断言响应体全文防此坑。
 
 ### 语义边界（docs Limitations 记载）
@@ -79,4 +79,10 @@ updated: "2026-09-28T02:23:42"
   kind: decision
   summary: "Phase 2 验证全绿：ctest 26/26（dap gtest 6/6 含 ExceptionBreakpointArmed/Disarmed）+ npm e2e 7/7 + tsc + 非调试 build/ 编译；补丁镜像 GOLD/hunkcheck/reverse 三校验通过；docs en+zh（What works/Limitations/Test）、CHANGELOG（1 Added + 3 Fixed）、ROADMAP A4（6/6 + 7/7）已同步；未提交待'提交'指令"
   source: brain append-timeline
+  affects: [dap-feature-completion]
+
+- time: 2026-09-29T02:27:42
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
   affects: [dap-feature-completion]

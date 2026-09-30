@@ -104,10 +104,13 @@ qzjs and all dependencies compile under `-std=c99 -Wall -Wextra -Werror` (enforc
 Engine callbacks have fixed signatures that may include unused parameters. Use `QZ_UNUSED(x)`:
 
 ```c
+#include <quickjs.h>
+#include "qz_internal.h"   /* QZ_UNUSED 定义在此（内部头） */
+
 static JSValue my_callback(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {
     QZ_UNUSED(this_val);  // suppresses -Wunused-parameter
-    // ...
+    return JS_UNDEFINED;
 }
 ```
 

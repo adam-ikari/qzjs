@@ -137,12 +137,12 @@ The runtime is layered. Read these together to understand it:
   (saved for re-injection). `QZ_MAGIC` validates the opaque `qz_t*`. The `uv.h`
   include switches to `mock_libuv.h` under `QZ_USE_MOCK_LIBUV`.
 - **`src/qzjs.c`** — core lifecycle (`qz_create` — ISOLATED spawns the main-RT
-  process + the library pump thread, THREAD starts the internal thread, both
+  process + the library host-side thread, THREAD starts the internal thread, both
   block until ready; `qz_destroy`/`qz_wait_idle` shutdown; `qz_recv_message`/
   `qz_message_fd` mailbox consumption; `qz_mailbox_teardown` drains `mq_out` +
   closes `out_efd`; `qz_free` dual-role via `QZ_MAGIC` + `thread_joined`;
   internals `qz_runtime_init`/`qz_eval_internal`/`qz_thread_teardown`).
-- **`src/rt_host.c`** — the ISOLATED host-side pump thread+loop (library-owned,
+- **`src/rt_host.c`** — the ISOLATED host-side thread+loop (library-owned,
   never the host's): runs `uv_run`, owns the mainRT channel handles, wake
   async, tx-spill timer; three-tier ≤2s terminate of a frozen mainRT happens on
   this thread, the calling thread only joins.
@@ -179,7 +179,7 @@ The runtime is layered. Read these together to understand it:
 
 - **JS runs on the library's own thread, never the host's.** Default build
   ISOLATED: `qz_create` spawns the main-RT child *process* (`qzjs-rt`, its own
-  `uv_loop_t` + JS) **and** a library-internal host-side pump thread+loop in
+  `uv_loop_t` + JS) **and** a library-internal host-side thread+loop in
   the host process. THREAD build (fallback): a single internal `uv_thread_t`
   runs the embedded `uv_loop_t`. Either way every JS evaluation, uv callback,
   and microtask runs on the library thread — the host thread never touches
@@ -198,7 +198,7 @@ The runtime is layered. Read these together to understand it:
   one `qz_post_message` round-trip implies the prior eval's promise chain
   completed.
 - **Graceful shutdown.** `qz_destroy` signals teardown (`shutting_down` +
-  `uv_async_send(wake)`), the library pump/loop thread exits and reaps the
+  `uv_async_send(wake)`), the library loop thread exits and reaps the
   main-RT process (ISOLATED) — the ≤2s three-tier terminate of a frozen mainRT
   runs on the library thread, the caller only joins — then drains/closes the
   mailbox. After `qz_wait_idle` the mailbox still yields messages until

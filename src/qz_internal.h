@@ -34,6 +34,7 @@ typedef struct qz_ctx_s qz_ctx_t;   /* 前置声明：qz_proc_handle_t 用指针
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>   /* qz_close_loop 的诊断输出 */
 
 /* libuv's intrusive queue primitives (uv__queue). Used by msgq.c as the
  * lock-free MPSC container; also needed for the qz_msg_t layout above. */
@@ -300,7 +301,7 @@ struct qz_t {
     JSRuntime *jsrt;
 
     /* thread + loop (execution model A: qzjs owns a thread running the libuv
-     * loop)。ISOLATED 宿主 rt 同样自带线程与 loop——该线程即库宿主侧泵线程
+     * loop)。ISOLATED 宿主 rt 同样自带线程与 loop——该线程即库宿主侧线程
      * （M-P7 主权裁决：库自管一切线程/loop，宿主零注入零回调）。 */
     uv_loop_t loop;
     uv_thread_t thread;
@@ -315,17 +316,27 @@ struct qz_t {
     qz_msg_t msg_stub;
 
     /* outbound mailbox（M-P7）：库 → 宿主方向消息的 per-rt FIFO。生产者 =
-     * 库泵线程/JS 线程（读泵解帧、CONTROL 回执、崩溃上报），单消费者 = 宿主
+     * 库宿主侧线程/JS 线程（读回调解帧、CONTROL 回执、崩溃上报），单消费者 = 宿主
      * recv 线程（qzjs.h 消费协议）。out_efd = eventfd 唤醒计数（push 先入链
      * 后 write）；free 时未消费节点连同 stub 排干释放。 */
     qz_mq_t mq_out;
     int out_efd;             /* eventfd；-1 = 未创建/已关闭 */
+    int out_claim;           /* atomic: qz_recv_message 的「消费者在场」标记。
+                              * 抢不到的一方直接报错返回 -1，而不是并发弹一个
+                              * lock-free MPSC 队列。per-call（进抢出放），所以
+                              * 「A 排干完交给 B」这种顺序移交仍然合法。
+                              * 生产恒 0（rt 由 calloc 分配）。*/
+    int out_fault;           /* atomic: 测试注入——让接下来这么多次 qz_out_push
+                              * 的主分配强制失败（走 OOM 标记路径）。生产恒 0
+                              * （rt 由 calloc 分配）。写者有两个：qz_test_mailbox_fault
+                              *（设值）与 msgq.c 的 qz_out_push（饱和递减），两边都是
+                              * 原子访问，不要加非原子读。*/
 
     int shutting_down;   /* atomic: set by destroy -> thread leaves main loop */
     int wait_idle;       /* atomic: qz_wait_idle requested: auto-exit when idle */
     int thread_ready;    /* atomic: ready handshake: thread init complete */
     int ready_err;       /* init failure code (0 ok; non-zero -> qz_create returns NULL) */
-    int thread_joined;   /* atomic: 拆除已完成（线程后端 = uv_thread_join 已做，双 join 是 UB；ISOLATED 宿主 = 库泵线程已收尸，幂等门） */
+    int thread_joined;   /* atomic: 拆除已完成（线程后端 = uv_thread_join 已做，双 join 是 UB；ISOLATED 宿主 = 库宿主侧线程已收尸，幂等门） */
 
     /* config copy (initial_script strdup'd by qz_create, freed by destroy) */
     qz_config_t config;
@@ -399,8 +410,8 @@ struct qz_t {
     uint32_t proc_handle_seq;   /* handle id 单调分配器（0 = 无效） */
 
     /* ── M-P2 宿主↔主RT 通道（QZ_PROCESS_MODEL=ISOLATED）──
-     * 宿主进程：proc = 主RT 子进程通道（句柄挂宿主注入 loop，由泵该 loop 的
-     * 宿主线程独占读写）；主RT 进程：ipc_channel_pipe = parent-fd 读管道。后者恒活动（duplex 读泵），必须被
+     * 宿主进程：proc = 主RT 子进程通道（句柄挂宿主注入 loop，由驱动该 loop 的
+     * 宿主线程独占读写）；主RT 进程：ipc_channel_pipe = parent-fd 读管道。后者恒活动（duplex 读回调），必须被
      * wait_idle 的 idle 判定豁免，否则主RT 永不判 idle（与 JS-managed worker
      * pipe 同因，见 qz_proc_handle_is_pipe）。进程自身只有一个对端通道，指针
      * 级判定即足够。THREAD 编译下恒为 NULL（宿主走线程后端）。 */
@@ -409,9 +420,9 @@ struct qz_t {
     int          idle_ack;          /* atomic: 主RT 已回 CONTROL{idle} ack */
     /* liveness ping/pong（宿主↔主RT C 层直回，检测对端 uv loop 阻塞）：
      * ping_seq = 发起方分配的单调序号（宿主线程写）；pong_seq = 最近收到
-     * 的 PONG 回显序号（宿主 loop 线程读泵写）。compare 判定 loop 通畅。 */
+     * 的 PONG 回显序号（宿主 loop 线程读回调写）。compare 判定 loop 通畅。 */
     int32_t      ping_seq;          /* atomic: 宿主线程写的探测序号 */
-    int32_t      pong_seq;          /* atomic: 宿主读泵回填的应答序号 */
+    int32_t      pong_seq;          /* atomic: 宿主读回调回填的应答序号 */
     int32_t      ping_fail;         /* atomic: 跨层 ping 转发失败回执的 seq
                                      * （pfail corr，qz_ping_path 快速 -1） */
 #endif
@@ -519,6 +530,12 @@ void qz_msg_free(qz_msg_t *m);
 
 void qz_out_mq_init(qz_t *rt);                  /* create 期初始化邮箱 */
 int  qz_out_push(qz_t *rt, const char *json, size_t len); /* 入箱 + eventfd 写 */
+/* 测试钩子：让 rt 接下来 N 次 qz_out_push 的主分配强制失败（N=0 关），用于直接
+ * 验「OOM 时宿主能在流上看见标记帧」。生产恒 0，因此分支恒不成立。
+ * per-rt 作用域——刻意不做成 env/全局：那等于在生产库里留一个静默丢消息的
+ * 总开关，且同进程多个 rt 会共享额度。详见 src/msgq.c 的形态说明。
+ * 用例见 test/test_mailbox_oom_gtest.cpp。 */
+void qz_test_mailbox_fault(qz_t *rt, int n);
 qz_msg_t *qz_out_pop(qz_t *rt);                 /* 宿主 recv 线程（单消费者） */
 int  qz_out_has_pending(qz_t *rt);
 void qz_post_to_host(qz_t *rt, const char *json, size_t len); /* 出站唯一漏斗 */
@@ -533,11 +550,11 @@ int qz_loop_idle(qz_t *rt);
 /* M-P2：宿主↔主RT 进程分离路径已编入（ISOLATED 非 mock 构建）。 */
 #if defined(QZ_PROCESS_MODEL_ISOLATED) && !defined(QZ_USE_MOCK_LIBUV)
 #define QZ_HOST_SPLIT 1
-/* rt_host.c — 宿主侧主RT 通道后端 + 库自管泵线程（M-P7 主权回归）：
+/* rt_host.c — 宿主侧主RT 通道后端 + 库自管宿主侧线程（M-P7 主权回归）：
  * loop_init → blob 落盘 → spawn 主RT → raw-fd 同步等 CONTROL{ready}
- * （pre-ready 帧暂存）→ wake init → 读泵注册（pre-ready 帧重放入邮箱）→
- * 起库泵线程（uv_run ONCE 循环 + EOF/DEAD 检测 + 退出路径上自收主RT：
- * ≤2s 三级终止预算冻结在泵线程内，调用线程只 join）。通道句柄挂 rt 内嵌
+ * （pre-ready 帧暂存）→ wake init → 读回调注册（pre-ready 帧重放入邮箱）→
+ * 起库宿主侧线程（uv_run ONCE 循环 + EOF/DEAD 检测 + 退出路径上自收主RT：
+ * ≤2s 三级终止预算冻结在宿主侧线程内，调用线程只 join）。通道句柄挂 rt 内嵌
  * loop；出站消息一律入邮箱，qzjs 不调用任何宿主函数。
  * qz_host_start 返回 0 = 已就绪；非 0 = 显式失败（不降级，§5.3）。
  * qz_host_destroy 释放 rt 本身。 */
@@ -555,7 +572,7 @@ int  qz_eval_bytecode_internal(qz_t *rt, const uint8_t *code, size_t len,
 void qz_thread_teardown(qz_t *rt);
 #ifdef QZ_DEBUG_SUPPORT
 /* debugger_dap.c — service the DAP stdin channel from the qzjs thread while
- * the debuggee is NOT paused (the paused pump runs inside on_stopped).
+ * the debuggee is NOT paused (the paused loop runs inside on_stopped).
  * Called by the DAP poll timer so an idle uv_run never blocks forever on a
  * DAP pause/setBreakpoints/disconnect that arrived on stdin. */
 void qz_dap_service(qz_t *rt);
@@ -717,7 +734,7 @@ void qz_ctl_register(qz_t *rt, const char *correl, uint64_t deadline_ns,
  * 方向），只有 target 逐跳改写。
  *
  * local_id：本节点在父树中的槽位 id（宿主 0 / 主RT QZ_IPC_MAIN_ID / worker
- *   --worker-id）。仅 qzjs 线程调用（信封读泵中）。 */
+ *   --worker-id）。仅 qzjs 线程调用（信封读回调中）。 */
 typedef enum {
     QZ_CTL_ROUTE_LOCAL = 0,   /* 命中本地：入 msgq 交 dispatch */
     QZ_CTL_ROUTE_UP    = 1,   /* 上行：发父通道（改写 target 后） */
@@ -728,7 +745,7 @@ typedef enum {
 /* 纯函数：路由决策（无副作用，便于单测）。 */
 qz_ctl_route_t qz_ctl_route_decide(int32_t local_id, int32_t target);
 
-/* 路由一条 CONTROL 命令信封（读泵调用；OFF 档丢弃，§4.1）。返回 0 = 已处理。 */
+/* 路由一条 CONTROL 命令信封（读回调调用；OFF 档丢弃，§4.1）。返回 0 = 已处理。 */
 int qz_control_route(qz_t *rt, int32_t local_id, int32_t source,
                        int32_t target, const uint8_t *payload, uint32_t len);
 
@@ -753,9 +770,41 @@ void qz_ctl_conn_write(void *conn, const char *json, size_t len);
  * 连接 / 继续沿树上行/邮箱，并消费条目。 */
 int qz_ctl_deliver_receipt(qz_t *rt, const uint8_t *payload, uint32_t len);
 /* 端点命令入口：命令 JSON 的 target 决定本地执行还是树转发；回执一律写回
- * sink 连接（CTL-2 §2.3：端点只是生产者，执行路径与 qz_control 同一套）。 */
+ * sink 连接（CTL-2 §2.3：端点只是生产者，执行路径与 qz_control 同一套）。
+ *
+ * **返回码是契约，端点按它决定回不回帧**（control_endpoint.c 的分帧循环）：
+ *    0   命令已被接受（本地执行或已前投）。path 前投成功时**没有**同步回执，
+ *        回执稍后沿树回来。
+ *   -2   **拒收**：缺 correl。端点回一帧 ok:false / code=INVALID_ARG，
+ *        correl 字段显式为 null（无从回显，所以写 null 而不是省略）。
+ *   -3   **拒收**：顶层带数字 "qzjs" 键（通道层保留命名空间）。code=INVALID_ARG，
+ *        且**回显 correl**（这条命令的 correl 是拿得到的：先校验它非空、再判命名
+ *        空间）——与 -2 相反，-2 才是 correl:null。
+ *   -4   命令没能进队列（qz_msg_push 失败）。**不会有回执**，所以端点必须当场
+ *        回一帧 ok:false / code=INTERNAL，否则客户端干等到超时。
+ *   -5   前投失败，但 NOT_FOUND 帧已由本函数当场写出（已 ctl_unregister）——端点
+ *        **不得**为它再发一帧。两条远端前投路径（§8.2 的 target_path 早返回、以及
+ *        非 path 的远端 target）都归到这个码。
+ *   -1   其余（rt/magic 非法、control_plane 非 LOCAL、malloc 失败）。端点回
+ *        ok:false / code=INTERNAL。
+ *
+ * 也就是说：除 0 与 -5 外，端点对**每一个**非零都回帧。判据是「客户端能不能只靠
+ * 连接上的帧判断这条命令的结局」——不能，就该说话。
+ *
+ * correl_out（可为 NULL）：提取到 correl 时写入 strdup 副本，调用方 free；没有则
+ * 写 NULL。端点用它给 -3 的帧回显 correl——协议按 correl 配对，而 -3 的 correl
+ * 是拿得到的，一帧不带 correl 的回执对客户端毫无用处。
+ *
+ * **已知残留**：-2（缺 correl）的帧按协议无法带 correl，而拒收帧是**同步**写的、
+ * 正常回执是**异步**写的，所以一次写多条命令时，客户端按**位置**配对会错位
+ * （第 2 条的拒收帧可能先于第 1 条的回执到达）。按 correl 配对可解决 -3 那种，
+ * -2 只能靠顺序。要彻底解决需把拒收也走异步回执路径（届时它也受回执表与超时
+ * 回收约束），那是另一次改动，暂未做。
+ *
+ * 帧级判据见 test/probe_ctl_reject_frames.c（逐帧用 cJSON 真解析；用 strstr
+ * 写断言抓不到「JSON 非法」这一类，而这里第一版就踩过）。 */
 int qz_control_endpoint_cmd(qz_t *rt, const char *bytes, size_t len,
-                              void *sink);
+                              void *sink, char **correl_out);
 /* 命令入队 + 指定回执 sink（NULL = 进程内邮箱 / 跨进程信封路径）。 */
 int qz_control_sink(qz_t *rt, const char *bytes, size_t len, void *sink);
 
@@ -769,6 +818,38 @@ static inline int64_t qz_now_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 /* ── Cross-file small helpers (shared, header-inline in C99) ── */
+
+/* 关 loop，并把返回值说出来。uv_loop_close 非 0 = EBUSY，还有 handle 没关
+ * （stop 过但没 close、或 close 回调没跑完）——此时 loop 内部结构仍被这些
+ * handle 引用，绝不能 free 回收，泄漏是唯一安全选择。静默忽略返回值等于把
+ * 「句柄泄漏」变成一个只在 ASAN 跑出来才显形的洞：正常构建全程无声。header
+ * inline 而非另起一个 .c：mock_libuv 没有 uv_err_name/uv_loop_alive_handles，
+ * 所以只能报数字码；也省得为一个诊断函数给构建加 TU。 */
+static inline int qz_close_loop(uv_loop_t *loop)
+{
+    int rc = uv_loop_close(loop);
+    if (rc != 0) {
+        /* 这里的取舍要写清楚，因为曾经被写成「loop 内存绝不能回收、泄漏是唯一安全
+         * 选择」而实现恰好相反（所有调用点下一行就 free rt）。实际权衡是：
+         * libuv 的 handle 是**独立分配**的，所以 free 掉含 loop 的 rt 并不会 free
+         * 掉那批 handle——它们各自变成泄漏（malloc 块 + 指向已释放 loop 的指针）。
+         * 于是两种选择的代价：
+         *   · 不 free rt → 在**可重试的 setup 失败路径**上每次泄漏一个 rt，无界；
+         *   · free rt   → 只泄漏那批 handle，rt 本身回收。
+         * 后者更可控，所以调用点一律仍 free rt（各调用点有 // close-failed 注释标注
+         * 这个取舍）。要真正做到「一个都不漏」得在 close 失败后 uv_walk + uv_close
+         * 逐个收尾再重试——那在 setup 半初始化的路径上会碰到未就绪的 handle，风险
+         * 高于它解决的问题，故不做。
+         * 诊断本身是必须的：静默忽略才会把句柄泄漏变成只在 ASAN 下才显形的洞。 */
+        fprintf(stderr,
+                "qzjs: uv_loop_close failed (rc=%d) — handles still open. "
+                "uv_loop_t is embedded by value in qz_t, and the caller still frees "
+                "rt: those handles are separately allocated, so they leak rather "
+                "than being freed (see the trade-off note above).\n",
+                rc);
+    }
+    return rc;
+}
 
 /* Little-endian accessors live in le_bytes.h (dependency-free; ipc_envelope.c
  * must stay buildable without libuv/quickjs), pulled in below. */

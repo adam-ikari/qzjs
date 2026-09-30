@@ -19,7 +19,7 @@ qzjs 是一个 **WinterTC 兼容运行时**，用于在 C 应用内嵌入 JS（�
 - **低开销脚本** — 一个 `initial_script` 或消息驱动处理器取代手写 C 状态机。
 
 宿主留在 C。qzjs 完全自主管理自己的线程与 loop，从不执行宿主代码：ISOLATED 下
-JS 跑在独立的主RT 进程里、库自持宿主侧泵线程；THREAD 下 JS 跑在库的内部线程上。
+JS 跑在独立的主RT 进程里、库自持宿主侧线程；THREAD 下 JS 跑在库的内部线程上。
 一切发往宿主的内容——JS 的 `postMessage` 输出——都进入 FIFO 邮箱，由宿主在
 自己的线程上经 `qz_recv_message` 消费、自选时机。
 

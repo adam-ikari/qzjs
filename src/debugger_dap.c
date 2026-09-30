@@ -3,7 +3,7 @@
  *
  * PAL-agnostic. Provides the DAP callback set + base-protocol I/O + a minimal
  * JSON parser/serializer that qz_create installs when debugging is enabled.
- * The DAP stdin pump runs inside on_stopped when JS pauses.
+ * The DAP stdin request loop runs inside on_stopped when JS pauses.
  *
  * Threading: single-threaded. on_stopped blocks reading DAP requests until a
  * flow command (continue/step) sets the step mode and returns, unblocking the
@@ -31,7 +31,7 @@
  * C 层 JSON 不手写。帧重组（dap_read_message）按 Content-Length 读完整
  * 一帧后才解析，无增量解析需求，cJSON_Parse 直接可用。
  *
- * 为何必须在 C 层（勿删/勿改走 JS_ParseJSON）：解析点 dap_on_stopped 暂停泵
+ * 为何必须在 C 层（勿删/勿改走 JS_ParseJSON）：解析点 dap_on_stopped 暂停态处理
  * 运行在 JS 断点内——世界冻结（async JS/PAL 回调不前进，debugger.c 有
  * 重入门），JS 引擎栈在断点现场，此时调 JS_ParseJSON 属引擎重入。
  * 裁决留痕：docs/architecture/c-js-layering.md §6.6。
@@ -174,12 +174,12 @@ static char *dap_read_message(qz_dap_t *d, int *out_seq, char **out_command,
 }
 
 /* ================================================================
- * on_stopped pump — the paused DAP request loop
+ * on_stopped loop — the paused DAP request loop
  * ================================================================ */
 
 /* Poll stdin for a DAP message with a timeout. Returns:
  *   1 = message available (call dap_read_message to get it)
- *   0 = timeout (no message yet — caller can pump PAL)
+ *   0 = timeout (no message yet — caller can drive PAL)
  *  -1 = EOF / error */
 static int dap_poll_message(qz_dap_t *d, int timeout_ms)
 {
@@ -195,16 +195,16 @@ static int dap_poll_message(qz_dap_t *d, int timeout_ms)
 }
 
 /* Forward: handle a single DAP request; returns 1 if it was a flow command
- * (continue/step/stop) that should end the paused pump, 0 otherwise. */
+ * (continue/step/stop) that should end the paused loop, 0 otherwise. */
 static int dap_handle_request(qz_dap_t *d, const char *command,
                               const char *args, int req_seq);
-/* Request handlers shared across the three pumps (paused / mid-run /
+/* Request handlers shared across the three loops (paused / mid-run /
  * configure) — defined with the other handlers below. */
 static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_seq);
 static void dap_handle_set_exception_breakpoints(qz_dap_t *d, const char *args,
                                                  int req_seq);
 
-/* The DAP callback for on_stopped. Pumps DAP requests until a flow command.
+/* The DAP callback for on_stopped. Serves DAP requests until a flow command.
  * Design note: while paused the world is frozen by design — async JS (timers,
  * PAL callbacks) does not advance, and the re-entrancy guard in debugger.c
  * suppresses PAL-driven re-entry. This matches standard debugger semantics
@@ -244,7 +244,7 @@ static void dap_on_stopped(qz_debug_t *dbg, const char *reason, int thread_id)
         dap_send_event(d, "stopped", body);
     }
 
-    /* pump until a flow command */
+    /* serve requests until a flow command */
     for (;;) {
         int pr = dap_poll_message(d, 50);  /* 50ms poll */
         if (pr < 0) break;                 /* EOF */
@@ -270,7 +270,7 @@ static void dap_on_stopped(qz_debug_t *dbg, const char *reason, int thread_id)
  * ================================================================ */
 
 /* Each returns 1 if it's a flow command (continue/step/stop) that ends the
- * paused pump, 0 otherwise. */
+ * paused loop, 0 otherwise. */
 
 static int dap_handle_request(qz_dap_t *d, const char *command,
                               const char *args, int req_seq)
@@ -459,7 +459,7 @@ static int dap_handle_request(qz_dap_t *d, const char *command,
     }
     if (strcmp(command, "setBreakpoints") == 0) {
         /* Editing breakpoints while paused: without this branch the paused
-         * pump fell through to the generic `{}` ack and the edit was lost
+         * loop fell through to the generic `{}` ack and the edit was lost
          * (VS Code would even un-verify the file's breakpoints). */
         dap_handle_set_breakpoints(d, args, req_seq);
         return 0;
@@ -474,12 +474,12 @@ static int dap_handle_request(qz_dap_t *d, const char *command,
  * Attach / main loop
  * ================================================================ */
 
-/* DAP stdin poll cadence. Also used by the paused pump (dap_on_stopped) as
- * its poll timeout; the periodic run-time timer reuses the same value so an
- * idle uv_run never sleeps longer than this between DAP services. */
+/* DAP stdin poll cadence. Also used by the paused loop (dap_on_stopped) as
+ * its poll timeout; the periodic run-time timer reuses the same value so
+ * an idle uv_run never sleeps longer than this between DAP services. */
 #define DAP_POLL_MS 50
 /* forward decl — defined with the other request handlers below; shared by the
- * configuration phase and the run-time service pump. */
+ * configuration phase and the run-time service loop. */
 static void dap_handle_set_breakpoints(qz_dap_t *d, const char *args, int req_seq);
 
 
@@ -498,7 +498,7 @@ static void qz_dap_timer_cb(uv_timer_t *t)
  * so new breakpoints take effect immediately) and disconnect (stop polling). All
  * other requests are acknowledged so the VS Code client stays happy; their
  * real work (stackTrace/scopes/variables/evaluate) happens in the paused
- * pump (dap_on_stopped), which runs on the same thread and therefore cannot
+ * loop (dap_on_stopped), which runs on the same thread and therefore cannot
  * race with this function. */
 void qz_dap_service(qz_t *rt)
 {
@@ -627,7 +627,7 @@ void qz_dap_detach(qz_t *rt)
  * throw, caught or not (uncaught-only would need catch-detection on the
  * unwind path and is not advertised, so clients won't send it; a client
  * that asks anyway gets verified:false for that filter). Responds with one
- * breakpoint entry per requested filter. Shared by all three pumps. */
+ * breakpoint entry per requested filter. Shared by all three loops. */
 static void dap_handle_set_exception_breakpoints(qz_dap_t *d, const char *args,
                                                  int req_seq)
 {
@@ -674,8 +674,8 @@ static void dap_handle_set_exception_breakpoints(qz_dap_t *d, const char *args,
  * must survive; a request without source.path (malformed: DAP requires
  * source) registers nothing and leaves the table untouched rather than wiping
  * files we cannot attribute. Shared by the configuration phase
- * (qz_dap_configure) and the run-time pump (qz_dap_service) so breakpoints
- * added mid-run take effect immediately.
+ * (qz_dap_configure) and the run-time service loop (qz_dap_service) so
+ * breakpoints added mid-run take effect immediately.
  *
  * Registration and the response entry are built in one pass: a breakpoint the
  * runtime refuses (qz_debug_add_breakpoint < 0, e.g. an unparseable

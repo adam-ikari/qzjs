@@ -163,62 +163,9 @@ int qz_ipc_parse_ack(const char *json, int *out_ok, int *out_v)
     return rc;
 }
 
-/* ── M-P2 主RT 通道 CONTROL 协议分类（§6.1，两侧共用） ── */
-
-qz_ipc_ctl_kind_t qz_ipc_ctl_classify(const uint8_t *payload,
-                                          uint32_t len, int *out_val)
-{
-    if (!payload || len == 0) return QZ_IPC_CTL_NONE;
-
-    /* cJSON 按 NUL 结尾扫描，payload 是零拷贝片（rbuf 内），补一份带 NUL 的
-     * 副本再解析。CONTROL 消息都很小（<64B），一次性栈缓冲足够。 */
-    char buf[256];
-    if (len >= sizeof(buf)) return QZ_IPC_CTL_NONE;
-    memcpy(buf, payload, len);
-    buf[len] = '\0';
-
-    cJSON *j = cJSON_Parse(buf);
-    if (!j) return QZ_IPC_CTL_NONE;
-    qz_ipc_ctl_kind_t kind = QZ_IPC_CTL_NONE;
-    if (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(j, "qzjs"))) {
-        const cJSON *ready = cJSON_GetObjectItemCaseSensitive(j, "ready");
-        const cJSON *idle  = cJSON_GetObjectItemCaseSensitive(j, "idle");
-        const cJSON *sd    = cJSON_GetObjectItemCaseSensitive(j, "shutdown");
-        if (cJSON_IsNumber(ready)) {
-            kind = QZ_IPC_CTL_READY;
-            *out_val = ready->valueint;
-        } else if (cJSON_IsNumber(idle)) {
-            kind = QZ_IPC_CTL_IDLE;
-            *out_val = idle->valueint;
-        } else if (cJSON_IsNumber(sd)) {
-            kind = QZ_IPC_CTL_SHUTDOWN;
-            *out_val = sd->valueint;
-        } else if (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(j, "ping"))) {
-            /* liveness 探测：宿主→对端。对端 C 层读泵识别后直回 PONG。 */
-            kind = QZ_IPC_CTL_PING;
-            *out_val = 1;
-        } else if (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(j, "pong"))) {
-            /* liveness 应答：对端读泵回显 corr（= ping seq）。 */
-            kind = QZ_IPC_CTL_PONG;
-            *out_val = 1;
-        } else if (cJSON_IsNumber(
-                       cJSON_GetObjectItemCaseSensitive(j, "pfail"))) {
-            /* 跨层 ping 转发失败：中间节点回 corr=seq（宿主快速 -1）。 */
-            kind = QZ_IPC_CTL_PFAIL;
-            *out_val = 1;
-        } else {
-            /* 带 "qzjs" 标记但非 ready/idle/shutdown（M-P4 closing 等）：
-             * 通道级系统消息，交通道层消费，不被当作控制面命令路由。 */
-            kind = QZ_IPC_CTL_SYSTEM;
-        }
-    }
-    cJSON_Delete(j);
-    return kind;
-}
-
 /* 跨层 ping 的 "tp" 数组提取（{"qzjs":1,"ping":N,"tp":[...]} / PONG 回显同
  * 字段）。返回元素数（0 = 无 tp = 单跳形态）。栈缓冲 + cJSON（与 classify
- * 同裁决：不手写解析）；读泵/主RT g_rx 两侧共用。 */
+ * 同裁决：不手写解析）；读回调/主RT g_rx 两侧共用。 */
 int qz_ipc_ping_tp(const uint8_t *payload, uint32_t len,
                      int32_t *out, int cap)
 {
@@ -883,7 +830,7 @@ qz_proc_t *qz_proc_new(void)
     return (qz_proc_t *)calloc(1, sizeof(qz_proc_t));
 }
 
-/* ── Async read pump: inbound envelopes → parent msgq ── */
+/* ── Async read loop: inbound envelopes → parent msgq ── */
 
 static void proc_alloc_cb(uv_handle_t *h, size_t suggested, uv_buf_t *buf)
 {
@@ -1062,8 +1009,8 @@ void qz_proc_start_read_cb(qz_proc_t *proc, qz_proc_msg_cb_t cb,
     proc->pipe.data = proc;
     uv_read_start((uv_stream_t *)&proc->pipe, proc_alloc_cb, proc_read_cb);
 
-    /* 重放 create 期暂存的 pre-ready 帧（FIFO 序先于后续读泵帧）。重放走
-     * cb 直调（读泵已注册但此刻无新帧：同一宿主线程内顺序执行）。 */
+    /* 重放 create 期暂存的 pre-ready 帧（FIFO 序先于后续读回调帧）。重放走
+     * cb 直调（读回调已注册但此刻无新帧：同一宿主线程内顺序执行）。 */
     for (int i = 0; i < proc->n_pre_frames; i++) {
         struct qz_proc_pre_frame *pf = &proc->pre_frames[i];
         cb(user_data, pf->kind, pf->source, pf->corr, pf->payload, pf->len);
@@ -1076,7 +1023,7 @@ void qz_proc_start_read_cb(qz_proc_t *proc, qz_proc_msg_cb_t cb,
 }
 
 /* 宿主 create 握手后半（ISOLATED）：见 ipc_process.h 声明处注释。与 spawn
- * 握手同一 raw-fd 路径（uv_read_start 尚未注册，帧不会与读泵抢字节）。 */
+ * 握手同一 raw-fd 路径（uv_read_start 尚未注册，帧不会与读回调抢字节）。 */
 int qz_proc_wait_ready_raw(qz_proc_t *proc, int64_t deadline_ms, int *out_ok)
 {
     if (!proc || proc->state != QZ_PROC_RUN || !out_ok) return -1;
@@ -1085,7 +1032,7 @@ int qz_proc_wait_ready_raw(qz_proc_t *proc, int64_t deadline_ms, int *out_ok)
 
     /* 循环吃帧直到 CONTROL{ready}：主RT 初始脚本的顶层 postMessage 会先于
      * ready 落通道（eval 在 emit ready 之前），这些 pre-ready 帧暂存到
-     * proc->pre_frames，由 qz_proc_start_read_cb 注册读泵后按 FIFO 重放。 */
+     * proc->pre_frames，由 qz_proc_start_read_cb 注册读回调后按 FIFO 重放。 */
     for (;;) {
         uint8_t *frame = NULL;
         size_t flen = 0;
@@ -1153,10 +1100,10 @@ int qz_proc_handle_is_pipe(qz_t *rt, uv_handle_t *h)
 
 /* ── Liveness ping（worker 进程→sub worker，镜像 rt_host.c 的 qz_ping）──
  * 发 CONTROL{"qzjs":1,"ping":seq}（corr = seq，schema 零破坏）→ 阻塞等待
- * sub worker C 层读泵直回的 PONG（不经 JS/msgq——pong 延迟反映对端 uv loop
- * 健康度）。等待期间 uv 读泵不跑（JS 同步调用栈内），本函数自 poll+recv
+ * sub worker C 层读回调直回的 PONG（不经 JS/msgq——pong 延迟反映对端 uv loop
+ * 健康度）。等待期间 uv 读回调不跑（JS 同步调用栈内），本函数自 poll+recv
  * 驱动：收到的字节进 rbuf 累加器逐帧解析，PONG 按 corr 配对（pong_seq 回
- * 填），非 PONG 帧留在 rbuf 原样待读泵下次活动正常消费（无 JS 重入、零丢
+ * 填），非 PONG 帧留在 rbuf 原样待读回调下次活动正常消费（无 JS 重入、零丢
  * 帧）。POLLHUP/read==0 = 对端死 → -1（EOF 路径）。单飞行：同一 proc 同
  * 时至多一个 ping（JS 同步调用无并发，无需加锁）。 */
 int qz_proc_ping(qz_proc_t *proc, int32_t timeout_ms)
@@ -1237,7 +1184,7 @@ int qz_proc_ping(qz_proc_t *proc, int32_t timeout_ms)
                             is_pong = 1;
                     }
                     if (!is_pong) {
-                        /* 非 PONG 帧保留在 rbuf（frame_len 不归零）：读泵
+                        /* 非 PONG 帧保留在 rbuf（frame_len 不归零）：读回调
                          * 下次活动按完整帧正常消费——ping 等待窗口不吞应用
                          * 帧（MESSAGE/STORAGE/CONTROL 命令），零丢失。 */
                         break;

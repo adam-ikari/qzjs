@@ -1,7 +1,9 @@
-# worker — 真线程 Web Worker
+# worker — 独立载体的 Web Worker
 
-父 runtime 通过 `new Worker('file://.../worker.js')` 创建独立线程的 worker，
-双向 `postMessage` 通信（结构化克隆）。
+父 runtime 通过 `new Worker('file://.../worker.js')` 创建一个**独立载体**的
+worker，双向 `postMessage` 通信（结构化克隆）。载体随编译模型而定：ISOLATED
+（缺省）是**独立进程**（`QZ_WORKER_BACKEND_PROCESS`，M-P1 机制），THREAD 编译
+才是**真线程**（`QZ_WORKER_BACKEND_THREAD`）。两者都不是父线程本身。
 
 ## 构建与运行
 
@@ -27,7 +29,7 @@ worker 已创建
 
 - `Worker` 只接受 `file://` URL；不支持 http(s) 脚本地址。
 - `postMessage` 走结构化克隆——对象按值传递，不共享引用。
-- worker 是**真线程**：并行计算不阻塞父线程的事件循环。
+- worker 跑在独立载体上（ISOLATED=进程 / THREAD=线程，由 `qz_config_t.worker_backend` 选）：并行计算不阻塞父 runtime 的事件循环。写「worker 是真线程」在缺省 ISOLATED 构建下是错的。
 - 父脚本跑在主RT 进程里；worker 回显经父 JS 转成宿主的 `postMessage` 落进
   邮箱，宿主 `qz_recv_message` 消费——库不调用宿主回调，两个进程模型同一
   契约。示例用定时 recv 窗口等往返完成。

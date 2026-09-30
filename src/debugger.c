@@ -7,7 +7,7 @@
  * the blocking pause logic (the on_dispatch hook).
  *
  * Threading: single-threaded. on_dispatch runs inline on the JS thread inside
- * JS_Eval. To pause it BLOCKS (calling cbs.on_stopped, which pumps the host's
+ * JS_Eval. To pause it BLOCKS (calling cbs.on_stopped, which drives the host's
  * protocol until a flow command arrives) then returns 0 to resume. It must
  * NEVER return non-zero (that would abort via JS_ThrowInterrupted).
  *
@@ -286,7 +286,7 @@ static int qz_debug_on_dispatch(JSContext *ctx, struct JSStackFrame *sf,
         return 0;  /* native or no debug info — can't debug this frame */
 
     /* Re-entrancy guard: if we're already paused (inside on_stopped, e.g.
-     * because the DAP layer is pumping the PAL event loop and PAL-driven JS
+     * because the DAP layer is driving the PAL event loop and PAL-driven JS
      * re-entered on_dispatch), don't nest another stop. The PAL-driven JS runs
      * "in the background" of a pause and must not trigger breakpoints/steps. */
     if (dbg->stopped)
@@ -450,7 +450,7 @@ static void qz_debug_on_throw(JSContext *ctx, JSValueConst exception,
     /* The stop consumes any armed step and pending pause (the next flow
      * command re-arms) and records this line, mirroring the on_dispatch stop
      * block. Frames are read eagerly for the line only — the paused snapshot
-     * itself is fetched lazily during the pump, when the stack is still the
+     * itself is fetched lazily during the loop, when the stack is still the
      * throw site. */
     dbg->step_mode = STEP_NONE;
     dbg->pause_requested = 0;
@@ -476,14 +476,14 @@ static void qz_debug_on_throw(JSContext *ctx, JSValueConst exception,
         }
         /* Anything raised while stringifying (throwing toString, Symbol, OOM)
          * sits in the pending slot; drop it — JS_Throw stores the original
-         * right after we return, and the pump must not see the stray. */
+         * right after we return, and the loop must not see the stray. */
         JS_FreeValue(ctx, JS_GetException(ctx));
     }
     if (!dbg->exc_message)
         dbg->exc_message = strdup("<exception>");
 
     /* Invalidate any previous paused-frame snapshot; ensure_frames refetches
-     * during the pump with the throw-site stack. */
+     * during the loop with the throw-site stack. */
     if (dbg->frames) {
         JS_FreeCallFrames(ctx, dbg->frames, dbg->frame_count);
         dbg->frames = NULL;
@@ -906,7 +906,7 @@ static char *debug_var_preview(JSContext *ctx, JSValueConst v)
  * but JS still executes) and may throw — that surfaces as rc<0 and an empty
  * DAP array rather than a half-built one. Prototype-chain properties are
  * deliberately excluded (own only), and the listing is capped so one click
- * can't ask the pump for a megabyte of JSON. */
+ * can't ask the loop for a megabyte of JSON. */
 static int collect_children(qz_debug_t *dbg, JSContext *ctx, JSValueConst obj,
                             qz_debug_var **out_vars, int *out_count)
 {

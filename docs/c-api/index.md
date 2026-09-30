@@ -1,15 +1,18 @@
 # C API Reference
 
-qzjs exposes a small, focused C API surface. Every function operates on an opaque `qz_t*` runtime handle. JS is **single-threaded inside the runtime** — the host never calls into JS, and qzjs never runs host code: all host-bound messages arrive in a per-runtime **mailbox** the host drains on its own thread. Blocking host API calls (`qz_create`, `qz_destroy`, `qz_ping`, `qz_ping_path`, `qz_wait_idle`) must come from the host thread that created the runtime; `qz_post_message`, `qz_control`, and `qz_recv_message` are thread-safe from any thread.
+qzjs exposes a small, focused C API surface. Every function operates on an opaque `qz_t*` runtime handle. JS is **single-threaded inside the runtime** — the host never calls into JS, and qzjs never runs host code: all host-bound messages arrive in a per-runtime **mailbox** the host drains on its own thread. Blocking host API calls (`qz_create`, `qz_destroy`, `qz_ping`, `qz_ping_path`, `qz_wait_idle`) must come from the host thread that created the runtime; `qz_post_message` and `qz_control` are thread-safe from any thread, and `qz_recv_message` may be called from any thread — but one consumer at a time per runtime.
 
 ## API Groups
 
 | Group | Description |
 |-------|-------------|
-| [Runtime Lifecycle](/c-api/runtime) | `qz_create`, `qz_destroy`, `qz_post_message` |
+| [Runtime Lifecycle](/c-api/runtime) | `qz_create`, `qz_destroy`, `qz_wait_idle`, `qz_free` |
+| [Messaging](/c-api/runtime#messaging) | `qz_post_message` in, `qz_recv_message` / `qz_free_message` / `qz_message_fd` out |
+| [Control Plane](/c-api/runtime#qz_control) | `qz_control` — eval / inspect / metrics / interrupt, receipt via the mailbox |
+| [Liveness](/c-api/runtime#liveness) | `qz_ping`, `qz_ping_path` (ISOLATED) and the all-builds `*_if_available` variants |
+| [Bytecode](/c-api/runtime#qz_compile) | `qz_compile` — JS source to bytecode blob |
 | [Multi-Context](/guide/multi-context) | Isolated JS contexts within one runtime |
 | [Extensions](/c-api/extensions) | `qz_ext_t`, lifecycle hooks |
-| [Mailbox](/c-api/runtime#mailbox) | `qz_recv_message`, `qz_free_message`, `qz_message_fd` |
 
 ## Quick Example
 
@@ -25,7 +28,7 @@ int main(void) {
 
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
 
-    /* Drain the mailbox on this thread — no loop to pump, no callback. */
+    /* Drain the mailbox on this thread — no loop to drive, no callback. */
     for (;;) {
         char *json = NULL; size_t len = 0;
         int r = qz_recv_message(rt, &json, &len, 1000 /* ms */);
@@ -67,18 +70,19 @@ and timing for consuming messages. The *side* of the library depends on the
 build:
 
 - **ISOLATED (default):** the library spawns the main-RT process (`qzjs-rt`)
-  plus its own internal host-side pump thread + loop. Outbound messages —
+  plus its own internal host-side thread + loop. Outbound messages —
   JS `postMessage`, the crash report `{"type":"error"}`, CONTROL receipts —
   enter the mailbox; the host drains it via `qz_recv_message` (optionally
   waking on `qz_message_fd`) on whatever thread it likes. The blocking host
-  APIs (`qz_ping`, `qz_ping_path`, `qz_wait_idle`, `qz_destroy`) do their
-  waiting inside the library's pump thread. There is no loop injection, no
-  pumping obligation, and no same-libuv requirement.
+  APIs (`qz_ping`, `qz_ping_path`, `qz_wait_idle`, `qz_destroy`) block **the
+  calling thread** — the library's own thread keeps the loop turning and
+  produces the reply (or performs the three-tier termination) while the caller
+  waits. There is no loop injection, no driving obligation, and no
+  same-libuv requirement.
 - **THREAD:** the library starts an internal `qzjs` thread running the
   embedded libuv loop; all JS runs there, and outbound messages enter the
   same mailbox API.
 
 In both models `qz_post_message` is thread-safe (inbound, JSON copied),
-`qz_recv_message` may be called concurrently from several threads (at most
-one should wait on the wake fd), and `qz_create`/`qz_destroy` are
-host-thread calls.
+`qz_recv_message` may be called from any thread, but only one consumer at a
+time per runtime, and `qz_create`/`qz_destroy` are host-thread calls.

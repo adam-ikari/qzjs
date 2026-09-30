@@ -459,7 +459,16 @@ static int run_code(const char *code, const char *file,
         qz_free(rt);
         return 1;
     }
-    qz_post_message(rt, cmd, strlen(cmd));
+    if (qz_post_message(rt, cmd, strlen(cmd)) != 0) {
+        /* 投递失败必须说出来：cli_wait_done 是无上限的 for(;;)，等一个永远不会
+         * 到的回执就是挂死。而且失败原因只有 OOM / 长度溢出——两者都意味着
+         * 内存已经紧张到宿主该知道了。 */
+        free(cmd);
+        fprintf(stderr, "qzjs: failed to post command to runtime\n");
+        qz_wait_idle(rt);
+        qz_free(rt);
+        return 1;
+    }
     free(cmd);
 
     /* 等 eval 回包：排干邮箱 → poll 唤醒 fd → 复核（消费协议）。 */
@@ -550,7 +559,13 @@ static int repl_loop(void) {
             exit_code = 1;
             continue;
         }
-        qz_post_message(rt, cmd, strlen(cmd));
+        /* 投递失败必须说出来：cli_wait_done 无上限，失败后继续等就是挂死。 */
+        if (qz_post_message(rt, cmd, strlen(cmd)) != 0) {
+            free(cmd);
+            fprintf(stderr, "qzjs: failed to post command to runtime\n");
+            exit_code = 1;
+            continue;
+        }
         free(cmd);
         cli_wait_done(rt, &host);
 
@@ -650,7 +665,7 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
         free(bc);
         return 1;
     }
-    qz_wait_idle(rt);   /* 库线程自泵；崩溃/回声帧入邮箱 */
+    qz_wait_idle(rt);   /* 库线程自驱动；崩溃/回声帧入邮箱 */
     cli_drain_mbox(rt, &host, NULL);   /* 末次排干：bootstrap console 输出在此消费 */
     int exit_code = host.exit_code;
     if (exit_code && !host.reported) fprintf(stderr, "%s\n", host.result);

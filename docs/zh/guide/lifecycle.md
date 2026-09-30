@@ -21,7 +21,7 @@ if (!rt) {
 ```
 
 `qz_create` 执行以下操作：
-1. ISOLATED（默认）：spawn 主RT 进程（`qzjs-rt`），随后**库启动自己的宿主侧泵线程与 loop**（绝不用宿主的），并阻塞等待主RT 的 `CONTROL{ready}`。THREAD：一切在库的内部 qzjs 线程上运行。失败返回 `NULL`
+1. ISOLATED（默认）：spawn 主RT 进程（`qzjs-rt`），随后**库启动自己的宿主侧线程与 loop**（绝不用宿主的），并阻塞等待主RT 的 `CONTROL{ready}`。THREAD：一切在库的内部 qzjs 线程上运行。失败返回 `NULL`
 2. 创建 JSRuntime 和初始上下文
 3. 注册构建时扩展集（`QZ_EXTENSIONS` 表 —
    内置扩展如 compress/crypto/textcodec/wamr，当其 `QZ_WITH_*` 选项开启时生效，
@@ -29,7 +29,7 @@ if (!rt) {
 4. 将 WinterTC 兼容的运行时注入到初始上下文中
 5. 求值 `initial_script` — ISOLATED 下在主RT 进程内，THREAD 下在库的内部线程上；抛出异常会使 `qz_create` 返回 `NULL`
 
-`qz_create` 会阻塞，直到运行时就绪且 `initial_script` 已求值。ready 握手之前到达的帧已被重放进每运行时的**邮箱**，宿主第一次 `qz_recv_message` 即可取到。宿主可以把 qzjs 嵌入任何事件系统（poll/epoll/select、自己的线程）：库自主管理线程与 loop，从不执行宿主代码 — 宿主没有任何 loop 要运行或泵动，也没有任何回调打进宿主代码。
+`qz_create` 会阻塞，直到运行时就绪且 `initial_script` 已求值。ready 握手之前到达的帧已被重放进每运行时的**邮箱**，宿主第一次 `qz_recv_message` 即可取到。宿主可以把 qzjs 嵌入任何事件系统（poll/epoll/select、自己的线程）：库自主管理线程与 loop，从不执行宿主代码 — 宿主没有任何 loop 要运行或驱动，也没有任何回调打进宿主代码。
 
 ## 收发消息：post 与 recv
 
@@ -50,7 +50,7 @@ if (r == 0) {
 
 ## 等待：qz_ping 与 qz_wait_idle
 
-- `qz_ping` / `qz_ping_path`：存活探测。其阻塞等待发生在**库的泵线程**上；邮箱不受影响
+- `qz_ping` / `qz_ping_path`：存活探测。阻塞等待发生在**调用线程**上（带退避的短睡轮询，回执由库宿主侧线程回填）；邮箱不受影响
 - `qz_wait_idle`：请求在无挂起异步工作时自动退出，然后阻塞直到主体退出。等待期间出站消息（包括崩溃上报 `{"type":"error"}`）照常进入邮箱；返回之后、`qz_free` 之前，仍可 `qz_recv_message` 取净。它与 `qz_destroy` 互斥（二选一，绝不同时调用）
 
 ## 销毁运行时
@@ -85,8 +85,8 @@ qz_free(rt);                            // 排干邮箱、关闭唤醒 fd、释�
 
 - **JS 从不在宿主线程上运行，宿主代码也从不进库里运行** — 库拥有其全部线程/loop；两侧之间唯一的桥梁是数据（消息），因此不存在回调重入之类的规则
 - **`qz_post_message` 是线程安全的** — 两模型下均可从任何线程调用；JSON 会被拷贝
-- **`qz_recv_message` 可从任何线程调用** — 允许多线程并发对同一 rt 调用（无锁 pop 互斥排空），但等待 fd 的线程最多一个；收到消息的跨线程移交由宿主自行负责
-- **阻塞等待不影响邮箱** — `qz_ping`、`qz_ping_path`、`qz_wait_idle` 的等待本体在库泵线程上执行；消息（含崩溃上报）照常入队，随你何时排干
+- **`qz_recv_message` 可从任何线程调用，但同一 rt 同一时刻只允许一个消费者** — 无锁 pop 并不互斥，并发调用会让两个线程各读到同一个 head 节点，同一条消息被交付两次、同一节点被释放两次；消费须由宿主串行化，收到消息的跨线程移交也由宿主自行负责
+- **阻塞等待不影响邮箱** — `qz_ping`、`qz_ping_path`、`qz_wait_idle` 阻塞的是调用线程（ping 是带退避的短睡轮询，wait_idle/destroy 是 join），库自有线程在这期间照常转 loop；消息（含崩溃上报）照常入箱，随你何时排干
 - **`qz_destroy` 仅限宿主线程** — 从调用 `qz_create` 的线程调用
 
 ## 内存模型

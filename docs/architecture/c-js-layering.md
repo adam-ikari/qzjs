@@ -182,7 +182,7 @@ polyfill bundle 是**单一替换单元**（`build.js` 打包 + `QZ_WITH_GRPC` �
 | ext_crypto.c | C | mbedTLS 绑定，算法原语（C2） |
 | ext_compress.c | C | miniz 绑定，压解原语（C2） |
 | ext_textcodec.c | C | UTF-8/Base64 字节变换（C2） |
-| ext_wamr.c / ext_wasm3.c / ext_web_wasm.c | C | wasm 引擎绑定（C4） |
+| ext_wamr.c / ext_wasm3.c | C | wasm 引擎绑定（C4） |
 | extension.c | C | 扩展注册表（C4） |
 | control.c | C | 控制平面（C4） |
 | debugger.c / debugger_dap.c | C | DAP 调试器（C4；调试是工具面非应用协议） |
@@ -260,12 +260,12 @@ polyfill bundle 是**单一替换单元**（`build.js` 打包 + `QZ_WITH_GRPC` �
   C 层本身归 C 的裁决不变，变的只是实现来源：手写 JSON 基建全部删除。
   1. `debugger_dap.c`（原 json_parser/json_parse_string/json_get/
      json_get_int/json_emit/json_emit_string，~280 行）：**cJSON 替换**。
-     C 层时机论证仍成立——解析点 `dap_on_stopped` 暂停泵运行在 JS 断点内，
+     C 层时机论证仍成立——解析点 `dap_on_stopped` 暂停态处理运行在 JS 断点内，
      世界冻结、引擎栈在断点现场，`JS_ParseJSON` 属引擎重入。但 DAP 是
      Content-Length 分帧、整帧到手才解析（`dap_read_message`），无增量
      解析需求，`cJSON_Parse` 直接可用；序列化改 `cJSON_CreateObject` +
      `Add*` 构建 + `cJSON_PrintUnformatted`。行为由 `test_dap_gtest`
-     锁定（3 用例 8 场景全过）。
+     锁定（9 用例 8 场景全过）。
   2. `control.c`（原共享份 qz_json_get_str/get_int 调用点）：**cJSON
      替换**。`qz_control` 在生产者线程，无 JSContext（JSRuntime 归
      qzjs 线程所有），且 interrupt 要求 runtime 暂停/未初始化也能入队

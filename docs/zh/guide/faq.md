@@ -55,8 +55,8 @@ Web Worker **确实**并行——按后端不同以线程或子进程形式—�
 
 - **`ISOLATED`**（默认）——每个 `new Worker(...)` 经 fork+exec 在专用子进程
   （`qzjs-rt`）中运行。隔离性更强，有 IPC 开销。宿主侧形态也随之改变：JS 跑在
-  主RT 进程里，库自持宿主侧泵线程与 loop，发往宿主的消息全部进入 FIFO 邮箱，
-  由宿主经 `qz_recv_message` 消费——无需注入、也无需泵动任何循环。见
+  主RT 进程里，库自持宿主侧线程与 loop，发往宿主的消息全部进入 FIFO 邮箱，
+  由宿主经 `qz_recv_message` 消费——无需注入、也无需驱动任何循环。见
   [事件循环](/zh/guide/event-loop)。
 - **`THREAD`**——worker 是同一进程内的线程。开销更低，共享地址空间。库自带内部
   qzjs 线程跑一切，宿主同样只需消费邮箱。
@@ -78,12 +78,22 @@ Web Worker **确实**并行——按后端不同以线程或子进程形式—�
 
 ### 有哪些 Web API 可用？
 
-21 个模块以全局形式暴露：`fetch`、`console`、`crypto.subtle`、`streams`、
-`timers`、`URL`、`TextEncoder`/`TextDecoder`、`AbortController`、
-`WebSocket`、`BroadcastChannel`、`EventSource`、`CacheStorage`、
-`Service Worker`、`Worker`、`fs`、`storage`、`navigator`、`serve()`、`grpc`、
-`compress`、`structuredClone` 等。含全局名的完整列表见
-[JS API 参考](/zh/js-api/)。
+共注册 30 个模块（权威口径见[概览](/zh/index)）。其中大多数以全局形式暴露：
+`fetch`、`console`、`crypto.subtle`、`streams`、`timers`、`URL`、
+`TextEncoder`/`TextDecoder`、`AbortController`、`WebSocket`、
+`BroadcastChannel`、`EventSource`、`CacheStorage`、`Worker`、
+`CompressionStream`/`DecompressionStream`、`structuredClone` 等。
+以下**不是**全局——写错会直接 `ReferenceError`：
+
+| 不是全局 | 正确取法 |
+|----------|----------|
+| `fs` | `globalThis.qzjs.fs` |
+| 异步 storage | `globalThis.qzjs.storage` |
+| Web Storage（`localStorage` / `sessionStorage`） | `globalThis.localStorage` / `globalThis.sessionStorage`（仅父 runtime 挂载） |
+| Service Worker | `navigator.serviceWorker` |
+| `serve()` / `grpc` | 取决于构建档；见[构建选项](/zh/guide/build-options) |
+
+含全局名的完整列表见 [JS API 参考](/zh/js-api/)。
 
 ### 为什么 `serve()` 不基于 `node:http`？
 

@@ -59,7 +59,7 @@ Browser-standard APIs beyond the WinterCG core.
 | [EventSource](/js-api/event-source) | `EventSource` |
 | [CacheStorage](/js-api/cache-storage) | `caches`, `CacheStorage`, `Cache` |
 | [Service Worker](/js-api/service-worker) | `navigator.serviceWorker` |
-| [localStorage](/js-api/storage#localstorage-sessionstorage) | `localStorage`, `sessionStorage` |
+| [localStorage](/js-api/storage#localstorage--sessionstorage) | `localStorage`, `sessionStorage` |
 
 ### qzjs Platform Extensions
 

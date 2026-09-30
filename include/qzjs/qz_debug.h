@@ -27,7 +27,7 @@ typedef struct qz_debug qz_debug_t;
  * interrupt handler (same thread as JS). */
 typedef struct qz_debug_cbs {
     /* The session has stopped (breakpoint / step / pause / entry). The host
-     * pumps its protocol until qz_debug_continue / step_* is called, at
+     * serves its protocol until qz_debug_continue / step_* is called, at
      * which point this returns and JS resumes. reason is one of:
      *   "breakpoint", "step", "pause", "entry". */
     void (*on_stopped)(qz_debug_t *dbg, const char *reason, int thread_id);

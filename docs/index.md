@@ -63,7 +63,9 @@ int main(void) {
     qz_post_message(rt, "{\"cmd\":\"echo\",\"data\":\"hi\"}", 26);
     for (;;) {
         char *json = NULL; size_t len = 0;
-        if (qz_recv_message(rt, &json, &len, 5000) != 0) break;  // drain the mailbox
+        int r = qz_recv_message(rt, &json, &len, 5000);
+        if (r < 0) break;   /* -1 = 参数/状态错误，不是「没消息」 */
+        if (r == 1) break;  /* 1 = 超时，窗口内无消息 */
         printf("received: %.*s\n", (int)len, json);
         qz_free_message(json);
     }

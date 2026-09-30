@@ -124,5 +124,5 @@ CLI 有意**不暴露**任何 Node 风格的全局——没有 `process`，没�
 
 ## 下一步
 
-- [事件循环](/zh/guide/event-loop) — 库自有 loop（ISOLATED：`qzjs-rt` 进程 + 库的宿主侧泵线程；THREAD：内部 qzjs 线程）如何驱动执行——宿主不泵动任何事件循环
+- [事件循环](/zh/guide/event-loop) — 库自有 loop（ISOLATED：`qzjs-rt` 进程 + 库的宿主侧线程；THREAD：内部 qzjs 线程）如何驱动执行——宿主不驱动任何事件循环
 - [嵌入](/zh/guide/embedding) — 面向宿主应用的 C API（邮箱消费）

@@ -90,10 +90,13 @@ qzjs 及其所有依赖项在 `-std=c99 -Wall -Wextra -Werror` 下编译（通�
 引擎回调具有固定签名，可能包含未使用的参数。使用 `QZ_UNUSED(x)`：
 
 ```c
+#include <quickjs.h>
+#include "qz_internal.h"   /* QZ_UNUSED 定义在此（内部头） */
+
 static JSValue my_callback(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {
     QZ_UNUSED(this_val);  // 消除 -Wunused-parameter
-    // ...
+    return JS_UNDEFINED;
 }
 ```
 

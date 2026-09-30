@@ -44,7 +44,7 @@ int main(void) {
 
 `qz_create` blocks until the runtime is ready and `initial_script` has been
 eval'd. Under ISOLATED the library spawns the main-RT process plus **its own**
-host-side pump thread and loop (never yours); frames that arrived before the
+host-side thread and loop (never yours); frames that arrived before the
 ready handshake are already replayed into the mailbox, so your very first
 `qz_recv_message` picks them up. Under THREAD, JS runs on the library's
 internal thread. The host sends messages via `qz_post_message` (thread-safe
@@ -65,8 +65,9 @@ eventfd is written):
 3. Re-probe `qz_recv_message(..., 0)` once more — a message means go back to step 1; only when it comes up empty may you block in `poll()`.
 
 The fd belongs to the runtime: never close it yourself, and it becomes invalid
-after `qz_free`. Multiple threads may call `qz_recv_message` on one runtime
-concurrently, but keep at most one thread as the fd waiter.
+after `qz_free`. `qz_recv_message` may be called from any thread, but only
+one consumer at a time per runtime — the lock-free pop is not mutually
+exclusive, so concurrent pollers would hand out the same message twice.
 
 ## Calling C Functions from JS
 
@@ -187,8 +188,8 @@ qz_t *rt1 = qz_create(&cfg1);
 qz_t *rt2 = qz_create(&cfg2);
 
 // Post to each independently; each runtime queues its own mailbox
-qz_post_message(rt1, "{\"cmd\":\"echo\",\"data\":\"a\"}", 26);
-qz_post_message(rt2, "{\"cmd\":\"echo\",\"data\":\"b\"}", 26);
+qz_post_message(rt1, "{\"cmd\":\"echo\",\"data\":\"a\"}", 25);
+qz_post_message(rt2, "{\"cmd\":\"echo\",\"data\":\"b\"}", 25);
 
 host_drain(rt1, "rt1", 5000);
 host_drain(rt2, "rt2", 5000);
@@ -197,7 +198,7 @@ qz_destroy(rt1);
 qz_destroy(rt2);
 ```
 
-Each runtime is fully self-driven — there is no host loop to pump under
+Each runtime is fully self-driven — there is no host loop to drive under
 either model. `qz_message_fd(rt)` returns a distinct wake fd per runtime, so
 one host thread can watch several mailboxes with a single poll/epoll set
 (apply the drain-then-clear-then-recheck protocol to each fd you wait on).

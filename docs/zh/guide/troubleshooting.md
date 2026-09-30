@@ -59,7 +59,7 @@ profile 会翻转 `QZ_WITH_*` 功能开关。`minimal` 保留 WebAssembly、
 ### `qz_create` 返回 `NULL`
 
 `qz_create` 会阻塞到运行时就绪且 `initial_script` 执行完毕（ISOLATED 下先
-spawn 独立主RT 进程、再启动库自持的宿主侧泵线程与 loop；THREAD 下等库内部
+spawn 独立主RT 进程、再启动库自持的宿主侧线程与 loop；THREAD 下等库内部
 qzjs 线程就绪——线程与 loop 全部归库所有，宿主不注入任何东西）；任一环节失败即
 返回 `NULL`。原因：
 
@@ -105,9 +105,10 @@ if (!rt) {
    `1`。要用 `timeout_ms > 0`（限时等）或 `-1`（无限等）消费，或把
    `qz_message_fd(rt)`（唤醒 fd，Linux `eventfd`）接入你自己的
    poll/epoll/select 循环——可读即表示至少有一条消息待取。
-3. **消息被另一个消费者先取走了。** 同一 rt 上并发调用 `qz_recv_message`
-   是安全的，但每条消息恰好交付给**一个**调用者（单消费者规则）；跨线程的
-   消息交接由宿主自己负责。
+3. **消息被另一个消费者先取走了。** 同一 rt 上**只允许一个消费者**在调
+   `qz_recv_message`——并发调用并不安全：两个线程会各自读到同一个 head 节点，
+   同一条消息被交付两次、同一节点被释放两次。需要多线程消费时，请宿主自己用
+   队列串行化后再分发给各线程。
 
 崩溃上报同样是普通的邮箱消息：`{"type":"error"}` 帧经 `qz_recv_message`
 取到——尤其是 `qz_wait_idle` 返回后做最后一次 `recv(0)` 终排时。见
@@ -217,7 +218,7 @@ WebSocket 客户端支持 `ws://`；`wss://` 抛 `wss:// not supported yet`。�
 ### 脚本里没有 `process`、`require`、`Buffer`
 
 这是设计行为——CLI 不暴露任何 Node 风格的全局。脚本改用 WinterTC Web API
-面。见 [独立 CLI](/zh/guide/cli#无-node-js-api)。
+面。见 [独立 CLI](/zh/guide/cli#无-nodejs-api)。
 
 ### `qzjs-ctl` 命令失败
 

@@ -22,7 +22,7 @@ description: 在 C 应用中嵌入 qzjs 的主机集成路径 —— create、JS
 ## 1. Create
 
 ISOLATED（默认）下 [`qz_create`](/zh/c-api/runtime) spawn 主RT 进程（`qzjs-rt`），随后
-**库自己启动宿主侧的泵线程 + loop**——宿主什么都不用注入、什么都不用泵。它阻塞等待
+**库自己启动宿主侧线程 + loop**——宿主什么都不用注入、什么都不用驱动。它阻塞等待
 mainRT 的 `CONTROL{ready}` 回执；ready 前到达的帧已被重放进邮箱，宿主的第一个
 `qz_recv_message` 就能拿到它们。THREAD 构建下则启动 qzjs 内部线程、拉起 libuv 循环。
 两种形态下它都阻塞到就绪才返回，这时运行时已活、`initial_script` 已跑完。失败返回 `NULL`。
@@ -51,7 +51,7 @@ qz_t *rt = qz_create(&cfg);   // 阻塞直到就绪
 qzjs **从不执行宿主代码**——公共 API 里不存在任何回调。所有发往宿主的消息——JS
 `postMessage`、崩溃上报 `{"type":"error"}`、CONTROL 回执——都进入每个 runtime 一条的
 FIFO **邮箱**，由宿主在自己的线程上自选时机排干。两种形态下库都自主管理线程与 loop
-（ISOLATED：mainRT 子进程 + 库内部宿主侧泵线程；THREAD：内部 qzjs 线程）；宿主只需读邮箱。
+（ISOLATED：mainRT 子进程 + 库内部宿主侧线程；THREAD：内部 qzjs 线程）；宿主只需读邮箱。
 
 | 方向 | 机制 | 线程 |
 |-----------|-----------|--------|
@@ -76,20 +76,27 @@ int  qz_message_fd(qz_t *rt);
 规则：
 
 - **两个方向都是 JSON 字符串。** 不传指针，不共享内存对象，只传可序列化的数据。
-- **`qz_post_message` 线程安全。** 可从任意主机线程调用；它入队到运行时的入站队列。同一 runtime 的 FIFO 顺序保持；投递不依赖宿主的调度——库自己的泵线程双向搬运帧。
-- **消费完全由宿主掌控。** 任意线程、任意时机。多个线程可并发对同一 runtime 调 `qz_recv_message`（出队互斥），但「等 fd 的人」最多一个；跨线程的消息所有权交接由宿主负责。
-- **阻塞型宿主 API（`qz_ping`、`qz_ping_path`、`qz_wait_idle`、`qz_destroy`）在库的泵线程上等待**，不依赖你运行任何东西。没有需要保持轻量的回调，也没有嵌套要避免——随时排干邮箱即可，哪怕另一个线程正阻塞在其中某个调用里。
+- **`qz_post_message` 线程安全。** 可从任意主机线程调用；它入队到运行时的入站队列。同一 runtime 的 FIFO 顺序保持；投递不依赖宿主的调度——库自有线程双向搬运帧。
+- **消费完全由宿主掌控。** 任意线程、任意时机，但同一 runtime **同一时刻只允许一个消费者**：无锁 pop 并非互斥，两个线程并发弹出会各自读到同一个 head 节点——同一条消息交付两次、同一节点释放两次。消费须由宿主串行化；跨线程的消息所有权交接由宿主负责。
+- **阻塞型宿主 API（`qz_ping`、`qz_ping_path`、`qz_wait_idle`、`qz_destroy`）阻塞的是调用线程**，不依赖你运行任何东西——等待是调用方在等，库自有线程在这期间照常转 loop、产出回执（或执行三级终止）。没有需要保持轻量的回调，也没有嵌套要避免——随时排干邮箱即可，哪怕另一个线程正阻塞在其中某个调用里。
 - **未消费的消息在 `qz_destroy`/`qz_free` 时被释放**——不泄漏，但需要就先排干。
 - **有界队列。** 运行时忙（或者 JS 一直不读）时，入站消息会在队列边界积压。
   你的主机代码要能接受 `qz_post_message` 不会马上排空。
 
 ```c
+/* 你自己的消息处理器（按事件类型分发）。 */
+static void handle_json(char *json, size_t len) {
+    (void)json; (void)len;   /* 真实实现里解析并分发 */
+}
+
 static void host_drain(qz_t *rt, int timeout_ms) {
     for (;;) {
         char *json = NULL; size_t len = 0;
         int r = qz_recv_message(rt, &json, &len, timeout_ms);
-        if (r != 0) break;
-        // json 是完整 JSON 字符串；在主机侧解析并分发
+        /* 三态分开看：0 = 取到；1 = 窗口内无消息（正常收工）；-1 = 参数/状态
+         * 错误。把 -1 和 1 一起 break 等于把错误当「没消息了」。 */
+        if (r < 0) { fprintf(stderr, "qz_recv_message failed\n"); break; }
+        if (r == 1) break;
         handle_json(json, len);
         qz_free_message(json);
         timeout_ms = 0;   // 首条到达后转纯轮询排干
@@ -122,7 +129,7 @@ globalThis.onmessage = function (e) {
 
 ```c
 // 宿主侧——发送要执行的代码
-qz_post_message(rt, "{\"cmd\":\"eval\",\"code\":\"2 + 2\"}", 26);
+qz_post_message(rt, "{\"cmd\":\"eval\",\"code\":\"2 + 2\"}", 29);
 // qz_recv_message 取到：{"result":4}
 ```
 

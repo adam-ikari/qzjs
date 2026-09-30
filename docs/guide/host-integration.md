@@ -28,7 +28,7 @@ thread at its own time.
 [`qz_create`](/c-api/runtime) boots the runtime and evals
 `cfg.initial_script`. Under the default **ISOLATED** build, `qz_create`
 spawns the main-RT process (`qzjs-rt`) and then the **library starts its own
-host-side pump thread + loop** — you inject nothing and pump nothing. It
+host-side thread + loop** — you inject nothing and drive nothing. It
 blocks until mainRT's `CONTROL{ready}` receipt arrives; frames that arrived
 before ready are already replayed into the mailbox, so the host's very first
 `qz_recv_message` gets them. Under **THREAD** it starts qzjs's internal
@@ -68,7 +68,7 @@ public API. All host-bound messages — JS `postMessage`, the crash report
 `{"type":"error"}`, and CONTROL receipts — land in a per-runtime FIFO
 **mailbox** that the host drains on its own thread at its own time. Under
 both builds the library owns its threads and loops (ISOLATED: mainRT child
-process plus a library-internal host-side pump thread; THREAD: an internal
+process plus a library-internal host-side thread; THREAD: an internal
 qzjs thread); the host simply reads the mailbox.
 
 | Direction | Mechanism | Thread |
@@ -101,16 +101,19 @@ Rules:
 - **`qz_post_message` is thread-safe** under both models. You may call it
   from any host thread; it enqueues into the runtime's inbound queue. FIFO
   order per runtime is preserved, and delivery does not depend on the host's
-  schedule — the library's own pump thread moves frames in both directions.
-- **The host fully owns consumption.** Any thread, any timing. Multiple
-  threads may concurrently call `qz_recv_message` on the same runtime (the
-  pop is mutually exclusive), but at most one thread should be the "fd
-  waiter"; cross-thread message ownership handoff is the host's job.
+  schedule — the library's own thread moves frames in both directions.
+- **The host fully owns consumption.** Any thread, any timing — but **one
+  consumer at a time per runtime**: the lock-free pop is *not* mutually
+  exclusive, so two concurrent callers read the same head node and deliver
+  and free it twice. Serialize in the host; cross-thread message ownership
+  handoff is the host's job.
 - **The blocking host APIs (`qz_ping`, `qz_ping_path`, `qz_wait_idle`,
-  `qz_destroy`) wait on the library's pump thread**, not on anything you run.
-  There is no callback to keep fast and no nesting to avoid — drain the
-  mailbox whenever convenient, including while one of them is blocked on
-  another thread.
+  `qz_destroy`) block the calling thread**, not anything you run. The wait is
+  the caller's; what runs meanwhile is the library's own thread turning the
+  loop and producing the reply (or doing the three-tier termination). There is
+  no callback to keep fast and no nesting to avoid — drain the mailbox
+  whenever convenient, including while one of them is blocked on another
+  thread.
 - **Unconsumed messages are freed at `qz_destroy`/`qz_free`** — no leak, but
   drain the mailbox first if you need the messages.
 - **There is a bounded queue.** If the runtime is busy (or JS never reads),
@@ -118,12 +121,19 @@ Rules:
   with `qz_post_message` not draining instantly.
 
 ```c
+/* 你自己的消息处理器（按事件类型分发）。 */
+static void handle_json(char *json, size_t len) {
+    (void)json; (void)len;   /* 真实实现里解析并分发 */
+}
+
 static void host_drain(qz_t *rt, int timeout_ms) {
     for (;;) {
         char *json = NULL; size_t len = 0;
         int r = qz_recv_message(rt, &json, &len, timeout_ms);
-        if (r != 0) break;
-        // json is a full JSON string; parse and dispatch on the host side
+        /* 三态分开看：0 = 取到；1 = 窗口内无消息（正常收工）；-1 = 参数/状态
+         * 错误。把 -1 和 1 一起 break 等于把错误当「没消息了」。 */
+        if (r < 0) { fprintf(stderr, "qz_recv_message failed\n"); break; }
+        if (r == 1) break;
         handle_json(json, len);
         qz_free_message(json);
         timeout_ms = 0;   // first arrived — switch to pure poll to drain
@@ -159,7 +169,7 @@ globalThis.onmessage = function (e) {
 
 ```c
 // host side — send code to run
-qz_post_message(rt, "{\"cmd\":\"eval\",\"code\":\"2 + 2\"}", 26);
+qz_post_message(rt, "{\"cmd\":\"eval\",\"code\":\"2 + 2\"}", 29);
 // qz_recv_message returns: {"result":4}
 ```
 
@@ -246,8 +256,9 @@ You can also register your own C functions as JS globals. See
 
 [`qz_destroy`](/c-api/runtime) performs a graceful force-terminate: under
 ISOLATED the worst case is a ≤2s three-tier terminate of a frozen mainRT,
-handled inside the library's own thread — the caller only waits for the
-reaping; under THREAD it signals the internal thread and joins it. Either way
+executed by the library's own thread — the calling thread only blocks waiting
+for the reaping (so a hung mainRT never blocks your host event loop for longer
+than that budget); under THREAD it signals the internal thread and joins it. Either way
 it drains pending work and frees the runtime. **Any mailbox messages you have
 not consumed are freed at this point**, so drain first if you need them. Call
 it from the host when the runtime is no longer needed. For the full

@@ -41,7 +41,14 @@ typedef struct qz_ext_t {
 #include <quickjs.h>
 #include "qz_internal.h"   // qz_get_active_jsctx (internal helper)
 
+static JSValue my_hello_fn(JSContext *ctx, JSValue this_val,
+                           int argc, JSValue *argv) {
+    QZ_UNUSED(this_val); QZ_UNUSED(argc); QZ_UNUSED(argv);
+    return JS_NewString(ctx, "hello from C");
+}
+
 static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
+    QZ_UNUSED(ext);
     JSContext *ctx = qz_get_active_jsctx(rt);
     if (!ctx) return -1;
 
@@ -131,10 +138,32 @@ mailbox). An extension that needs per-runtime state keeps its own table keyed by
 the `qz_t *` handle it receives in every hook:
 
 ```c
+#include <qzjs/qzjs.h>
+#include "qz_internal.h"   /* QZ_UNUSED */
+
+/* 你自己的 per-rt 表：qzjs 不提供 runtime-data 通道，键只能是钩子收到的 rt。 */
+typedef struct { int refcount; } my_state_t;
+#define MAX_INSTANCES 64
+static struct { qz_t *rt; my_state_t *st; } g_registry[MAX_INSTANCES];
+
+static my_state_t *my_registry_get_or_create(qz_t *rt) {
+    for (size_t i = 0; i < MAX_INSTANCES; i++)
+        if (g_registry[i].st && g_registry[i].rt == rt) return g_registry[i].st;
+    for (size_t i = 0; i < MAX_INSTANCES; i++) {
+        if (!g_registry[i].st) {
+            g_registry[i].rt = rt;
+            g_registry[i].st = calloc(1, sizeof *g_registry[i].st);
+            return g_registry[i].st;
+        }
+    }
+    return NULL;   /* 表满：显式失败，不静默复用别人的槽 */
+}
+
 /* extension init: init runs on the JS thread during qz_create, before the
  * host holds the rt — but rt is a valid key from inside the hook. */
 static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
-    my_state_t *st = my_registry_get_or_create(rt);  /* your own per-rt table */
-    ...
+    QZ_UNUSED(ext);
+    my_state_t *st = my_registry_get_or_create(rt);
+    return st ? 0 : -1;
 }
 ```

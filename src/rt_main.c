@@ -288,11 +288,11 @@ static void process_rx(qz_t *rt)
                 int ctl_val = 0;    /* CTL-1：CONTROL 命令类判定 */
                 if (is_ctl && g_server_mode)
                     server_handle_control(rt, &view);
-                /* Liveness ping（{"qzjs":1,"ping":1}）：读泵 C 层就地直回
+                /* Liveness ping（{"qzjs":1,"ping":1}）：读回调 C 层就地直回
                  * PONG（corr = ping seq 原样回显），不经 msgq/JS——pong 延迟
-                 * 反映 uv loop 健康度（loop 阻塞在读泵 poll 里就回不了）。
+                 * 反映 uv loop 健康度（loop 阻塞在读回调 poll 里就回不了）。
                  * 跨层形态（带 "tp"，宿主→任意 worker）：本节点非目的地时
-                 * 按链下投（读泵转发，不消费），仅目的地直回。 */
+                 * 按链下投（读回调转发，不消费），仅目的地直回。 */
                 if (is_ctl && view.payload_len > 0 &&
                     qz_ipc_ctl_classify(view.payload, view.payload_len,
                                           &ctl_val) == QZ_IPC_CTL_PING) {
@@ -308,7 +308,7 @@ static void process_rx(qz_t *rt)
                                           view.payload_len);
                     } else if (tpn > 0) {
                         /* 跨层目的地（本节点深度 == 链长）：直回 PONG 并
-                         * 回显 "tp" 作过境标记——中间节点读泵凭 tp 识别
+                         * 回显 "tp" 作过境标记——中间节点读回调凭 tp 识别
                          * 上行中继（corr 保持）。（不经 JS/msgq：pong 延迟
                          * 反映本节点 uv loop 健康度。） */
                         char msg[160];
@@ -347,7 +347,7 @@ static void process_rx(qz_t *rt)
                                               &pong_val);
                     /* 跨层 PONG/pfail 过境（宿主 ping_path 发起的帧沿上行回
                      * 来）：沿父通道转发给宿主（corr/payload 保持）。本节点
-                     * 自身的单跳 PONG 不会到达这里——那类帧已在子通道读泵
+                     * 自身的单跳 PONG 不会到达这里——那类帧已在子通道读回调
                      * （proc_process_rx）按 pong_seq 槽拦截。 */
                     if (ck == QZ_IPC_CTL_PONG || ck == QZ_IPC_CTL_PFAIL) {
                         qz_ipc_child_emit(g_local_id, QZ_IPC_HOST_ID,
@@ -369,7 +369,7 @@ static void process_rx(qz_t *rt)
                      * 的回复（corr == g_sync_corr）或子树中继请求的回复（corr
                      * 命中 storage_relays → 按登记下投发起子进程）。两者都匹配
                      * 不到 = 协议外（所有者从不主动发起），丢弃。所有者（主RT）
-                     * 侧的请求帧不经过本管道——worker 通道是 proc 句柄读泵，
+                     * 侧的请求帧不经过本管道——worker 通道是 proc 句柄读回调，
                      * JS 层 processOnMessage 按 kind=4 分流（worker.js）。 */
                     if (g_sync_waiting && view.corr == g_sync_corr) {
                         g_sync_reply = (uint8_t *)malloc(view.payload_len);
@@ -407,24 +407,30 @@ static void process_rx(qz_t *rt)
                         }
                     }
                 }
-                else if (is_ctl &&
-                           qz_ipc_ctl_classify(view.payload, view.payload_len,
-                                                 &ctl_val) ==
-                               QZ_IPC_CTL_NONE) {
-                    /* CTL-1（§2.2）：命令类 CONTROL 信封在本节点树路由——命中
-                     * 本地则入 msgq（flags=CONTROL）交 dispatch，否则逐跳向上/
-                     * 向下转发。系统级 CONTROL 已由上方分支消化，不受影响。 */
-                    qz_control_route(rt, g_local_id, view.source, view.target,
-                                       view.payload, view.payload_len);
-                } else if (is_ctl && view.payload_len > 0 &&
-                           qz_ipc_ctl_classify(view.payload, view.payload_len,
-                                                 &ctl_val) !=
-                               QZ_IPC_CTL_NONE) {
-                    /* 系统级 CONTROL（ready/idle/shutdown/ping 家族，"qzjs"
-                     * 标记）：通道 C 层就地消费，不入 msgq/JS——否则控制面
-                     * 会把心跳当命令回 UNKNOWN_CMD 回执，泄漏进宿主邮箱
-                     * （M-P7 箱净门捕获）。命令类 classify==NONE 已由上方
-                     * CTL-1 分支路由。 */
+                else if (is_ctl) {
+                    /* classify 一次定去向（同一 payload 调两次 = 两次 cJSON
+                     * 解析，且两个分支的条件一旦各自演进就会互相矛盾——
+                     * 上次就是「双调用 + 谓词过宽」让 M-P7 的门形同虚设）。 */
+                    qz_ipc_ctl_kind_t ck2 =
+                        qz_ipc_ctl_classify(view.payload, view.payload_len,
+                                            &ctl_val);
+                    if (ck2 == QZ_IPC_CTL_NONE) {
+                        /* CTL-1（§2.2）：命令类 CONTROL 信封在本节点树路由——命中
+                         * 本地则入 msgq（flags=CONTROL）交 dispatch，否则逐跳向上/
+                         * 向下转发。系统级 CONTROL 已由上方分支消化，不受影响。 */
+                        qz_control_route(rt, g_local_id, view.source,
+                                         view.target, view.payload,
+                                         view.payload_len);
+                    } else if (ck2 == QZ_IPC_CTL_SYSTEM) {
+                        /* 带 "qzjs" 数字标记但不在已知系统家族内（M-P4 closing
+                         * 等）：通道 C 层就地消费，不入 msgq/JS，否则控制面会
+                         * 当命令回 UNKNOWN_CMD 回执泄漏进宿主邮箱（M-P7 箱净门捕获）。
+                         * 刻意静默——「qzjs」是保留命名空间，宿主往这个键发东西
+                         * 本就不该被当用户命令受理；qz_control() 侧已有守卫
+                         * 拒收（见 control.c），这里只兜住直连通道的帧。 */
+                    }
+                    /* 其余（READY/IDLE/SHUTDOWN/PING/PONG/PFAIL）：上方各
+                     * 分支已就地消费并 continue，落到这里只是防御性兜底。 */
                 } else {
                     /* kind → msgq flags：CONTROL 交控制面；PORT_TRANSFER 走
                      * 应用派发但 JS 拿到 kind=1，据此走 port 端点路由（M-P3）。 */
@@ -795,7 +801,7 @@ int main(int argc, char **argv)
      * 半边；主RT/宿主进程不注册，调用即 -1 = 不可达）。 */
     qz_ipc_child_set_storage_sync(child_storage_sync);
 
-    /* 主RT 形态：登记宿主通道管道 —— 读管道恒活动（duplex 读泵），wait_idle 的
+    /* 主RT 形态：登记宿主通道管道 —— 读管道恒活动（duplex 读回调），wait_idle 的
      * idle 判定须豁免它，否则主RT 永不判 idle（qz_proc_handle_is_pipe）。 */
     if (is_server) rt->ipc_channel_pipe = &g_parent_pipe;
 
@@ -903,7 +909,8 @@ fail:
     if (g_rx.buf) { free(g_rx.buf); g_rx.buf = NULL; }
     free(w);
     if (loop_inited) {
-        uv_loop_close(&rt->loop);
+        qz_close_loop(&rt->loop);
+        /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
     }
     free(rt);
     return 1;

@@ -29,7 +29,14 @@ static void host_drain(qz_t *rt, int timeout_ms) {
         char *json = NULL;
         size_t len = 0;
         int r = qz_recv_message(rt, &json, &len, timeout_ms);
-        if (r != 0) break;          /* 1 = 窗口内无消息；-1 = 错误 */
+        /* 三态必须分开看：0 = 取到；1 = 窗口内无消息（正常收工）；
+         * -1 = 参数/状态错误。把 -1 和 1 一起 break 等于把错误当「没消息了」，
+         * 宿主会安静地少处理消息却以为一切正常。 */
+        if (r < 0) {
+            fprintf(stderr, "[host] qz_recv_message 失败（参数或状态错误）\n");
+            break;
+        }
+        if (r == 1) break;           /* 窗口内无消息 */
         printf("[host]  收到: %.*s\n", (int)len, json);
         qz_free_message(json);
         timeout_ms = 0;             /* 首条已到 → 余下的纯排干 */
@@ -76,7 +83,11 @@ int main(void) {
     };
     for (size_t i = 0; i < sizeof(reqs) / sizeof(reqs[0]); i++) {
         printf("[host]  发:  %s\n", reqs[i]);
-        qz_post_message(rt, reqs[i], strlen(reqs[i]));
+        if (qz_post_message(rt, reqs[i], strlen(reqs[i])) != 0) {
+            fprintf(stderr, "[host] qz_post_message 失败（OOM 或长度非法）\n");
+            qz_destroy(rt);
+            return 1;
+        }
         host_drain(rt, 1000);        /* 等 JS 处理 + 回复落箱 */
     }
 

@@ -56,9 +56,13 @@ QZ_DEBUG=1 ./myapp app.js
 existing verbose-log flag):
 
 ```c
+#include <qzjs/qzjs.h>
+
+const char *src = "debugger;\n";   /* pauses at entry, then at breakpoints */
+
 qz_config_t cfg = {};
 cfg.debug = 0x2;            /* bit 1 = debug-enable (or just run with QZ_DEBUG=1) */
-cfg.initial_script = src;   /* pauses at entry, then at breakpoints */
+cfg.initial_script = src;
 qz_t *rt = qz_create(&cfg);
 ```
 

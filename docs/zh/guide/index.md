@@ -11,7 +11,7 @@ THREAD 下跑在库自有的内部线程上；库自主管理线程与 loop，�
 通过 JSON 消息与宿主通信。
 
 C 应用想把一部分逻辑放进 JavaScript 的话，qzjs 提供运行时；宿主无需注入、也
-无需泵动任何循环——发往宿主的消息（JS `postMessage`、崩溃上报、CONTROL 回执）
+无需驱动任何循环——发往宿主的消息（JS `postMessage`、崩溃上报、CONTROL 回执）
 一律进入每运行时一条的 FIFO 邮箱，宿主在自己的线程上、自选时机经
 `qz_recv_message` 消费。
 

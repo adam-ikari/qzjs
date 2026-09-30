@@ -38,9 +38,13 @@ QZ_DEBUG=1 ./myapp app.js
 **方案 B — 配置位：** 设置 `qz_config_t.debug` 的位 1（位 0 是现有的详细日志标志）：
 
 ```c
+#include <qzjs/qzjs.h>
+
+const char *src = "debugger;\n";   /* 在入口处暂停，然后在断点处暂停 */
+
 qz_config_t cfg = {};
 cfg.debug = 0x2;            /* 位 1 = 启用调试（或直接以 QZ_DEBUG=1 运行） */
-cfg.initial_script = src;   /* 在入口处暂停，然后在断点处暂停 */
+cfg.initial_script = src;
 qz_t *rt = qz_create(&cfg);
 ```
 

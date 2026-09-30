@@ -22,7 +22,7 @@ if (!rt) {
 
 `qz_create` does the following:
 1. Under ISOLATED (the default): spawns the main-RT process (`qzjs-rt`), then
-   the **library starts its own host-side pump thread and loop** (never the
+   the **library starts its own host-side thread and loop** (never the
    host's) and blocks until mainRT's `CONTROL{ready}`. Under THREAD:
    everything runs on the library's internal qzjs thread. Failure returns
    `NULL`
@@ -40,7 +40,7 @@ eval'd. Frames that arrived before the ready handshake are already replayed
 into the per-runtime **mailbox**, so the host's very first `qz_recv_message`
 gets them. The host can embed qzjs in any event system (poll/epoll/select, its
 own threads): the library owns its threads and loop and never runs host code —
-there is no loop for the host to run or pump, and no callback into host code.
+there is no loop for the host to run or drive, and no callback into host code.
 
 ## Exchanging Messages: post and recv
 
@@ -68,8 +68,9 @@ it is invalid after `qz_free`.
 
 ## Waiting: qz_ping and qz_wait_idle
 
-- `qz_ping` / `qz_ping_path`: liveness probes. Their blocking wait happens on
-  the **library pump thread**; the mailbox is unaffected
+- `qz_ping` / `qz_ping_path`: liveness probes. The blocking wait happens on
+  the **calling thread** (a bounded backoff poll for the reply the library's
+  own thread fills in); the mailbox is unaffected
 - `qz_wait_idle`: requests auto-exit once no async work is pending, then
   blocks until the main body exits. Outbound messages — including a crash
   `{"type":"error"}` — keep entering the mailbox during the wait, and after it
@@ -120,13 +121,14 @@ An internal magic tag distinguishes the two. `qz_free(NULL)` is safe.
   the two sides is data (messages), so there are no callback reentrancy rules
 - **`qz_post_message` is thread-safe** under both models — call it from any
   thread; the JSON is copied
-- **`qz_recv_message` is safe to call from any thread** — concurrent calls on
-  one rt are fine (the lock-free pop is mutually exclusive), but keep at most
-  one thread as the fd waiter; cross-thread handoff of received messages is
-  the host's job
+- **`qz_recv_message` may be called from any thread, but only one consumer at
+  a time per rt** — the lock-free pop is *not* mutually exclusive, so
+  concurrent calls deliver and free the same node twice; serialize in the
+  host, and cross-thread handoff of received messages is the host's job
 - **Blocking waits leave the mailbox flowing** — `qz_ping`, `qz_ping_path`,
-  and `qz_wait_idle` perform their waits on the library pump thread; messages
-  (including crash reports) keep queueing and are drained whenever you choose
+  and `qz_wait_idle` block the calling thread (the library's own thread keeps
+  the loop turning meanwhile); messages (including crash reports) keep
+  queueing and are drained whenever you choose
 - **`qz_destroy` is host-thread-only** — call it from the thread that called `qz_create`
 
 ## Memory Model

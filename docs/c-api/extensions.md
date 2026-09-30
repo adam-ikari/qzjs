@@ -64,9 +64,17 @@ expands to an empty array element and fails to compile.
 ```c
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
+#include "qz_internal.h"   /* qz_get_active_jsctx — internal helper */
+
+static JSValue my_hello_fn(JSContext *ctx, JSValue this_val,
+                           int argc, JSValue *argv) {
+    QZ_UNUSED(this_val);
+    return JS_NewString(ctx, "hello from C");
+}
 
 static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
-    JSContext *ctx = qz_get_jsctx(rt);
+    QZ_UNUSED(ext);
+    JSContext *ctx = qz_get_active_jsctx(rt);
     if (!ctx) return -1;
 
     JSValue global = JS_GetGlobalObject(ctx);
@@ -101,14 +109,39 @@ the `rt` (and `JSContext *`) passed to every lifecycle hook is a stable
 identity:
 
 ```c
+#include <qzjs/qzjs.h>
+#include "qz_internal.h"   /* QZ_UNUSED */
+
+/* 扩展自己的东西：qzjs 不提供任何 per-runtime 宿主数据通道。 */
+typedef struct { int refcount; } my_state_t;
+
+#define MAX_INSTANCES 64
 typedef struct { qz_t *rt; my_state_t *state; } ext_instance_t;
 
-static ext_instance_t instances[MAX];   // or a hash map keyed by rt
+static ext_instance_t instances[MAX_INSTANCES];   /* 或按 rt 索引的哈希表 */
+
+static ext_instance_t *find_or_create_instance(ext_instance_t *tab, size_t cap,
+                                              qz_t *rt) {
+    for (size_t i = 0; i < cap; i++)
+        if (tab[i].state && tab[i].rt == rt) return &tab[i];
+    for (size_t i = 0; i < cap; i++) {
+        if (!tab[i].state) {
+            tab[i].rt = rt;
+            tab[i].state = calloc(1, sizeof *tab[i].state);
+            return &tab[i];
+        }
+    }
+    return NULL;   /* 表满：显式失败，不静默复用别人的槽 */
+}
+
+static my_state_t *my_per_rt_state_new(void) { return calloc(1, sizeof(my_state_t)); }
 
 static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
-    ext_instance_t *inst = find_or_create_instance(instances, rt);
+    QZ_UNUSED(ext);
+    ext_instance_t *inst = find_or_create_instance(instances, MAX_INSTANCES, rt);
+    if (!inst) return -1;
     inst->state = my_per_rt_state_new();
-    return 0;
+    return inst->state ? 0 : -1;
 }
 ```
 

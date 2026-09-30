@@ -38,7 +38,7 @@ int main(void) {
 }
 ```
 
-`qz_create` 会阻塞，直到运行时就绪且 `initial_script` 已求值。ISOLATED 下库 spawn 主RT 进程，并启动**库自己的**宿主侧泵线程与 loop（从不用宿主的）；ready 握手前到达的帧已被重放进邮箱，宿主第一次 `qz_recv_message` 即可取到。THREAD 构建下所有 JS 跑在库的内部线程上。宿主通过 `qz_post_message`（两模型下均线程安全）发送消息，一切输出都从邮箱收取：`qz_recv_message` 返回 `0` 时 `*json` 是 malloc 的、NUL 结尾的 UTF-8 JSON 缓冲（`len` 不含结尾符），必须用 `qz_free_message` 释放；`timeout_ms` 为 `0` 纯轮询、`>0` 最多等待该毫秒数、`-1` 无限阻塞。`qz_destroy` 执行优雅关闭。
+`qz_create` 会阻塞，直到运行时就绪且 `initial_script` 已求值。ISOLATED 下库 spawn 主RT 进程，并启动**库自己的**宿主侧线程与 loop（从不用宿主的）；ready 握手前到达的帧已被重放进邮箱，宿主第一次 `qz_recv_message` 即可取到。THREAD 构建下所有 JS 跑在库的内部线程上。宿主通过 `qz_post_message`（两模型下均线程安全）发送消息，一切输出都从邮箱收取：`qz_recv_message` 返回 `0` 时 `*json` 是 malloc 的、NUL 结尾的 UTF-8 JSON 缓冲（`len` 不含结尾符），必须用 `qz_free_message` 释放；`timeout_ms` 为 `0` 纯轮询、`>0` 最多等待该毫秒数、`-1` 无限阻塞。`qz_destroy` 执行优雅关闭。
 
 若想在邮箱上有消息时被唤醒而不是空轮询，把 `qz_message_fd(rt)`（运行时持有的唤醒 fd，一个 `eventfd`）接入你自己的 poll/epoll/select；可读即表示至少有一条消息待取。按以下消费协议操作可确保不丢唤醒（消息先链入邮箱，之后才写 eventfd）：
 
@@ -46,7 +46,7 @@ int main(void) {
 2. `read(qz_message_fd(rt), ...)` — 清空 eventfd 计数直到 `EAGAIN`；
 3. 再探一次 `qz_recv_message(..., 0)` — 若取到消息则回到步骤 1；只有探空后才可 `poll()` 阻塞。
 
-fd 归运行时所有：宿主不得 close，`qz_free` 之后即失效。允许多个线程并发对同一 rt 调 `qz_recv_message`，但等待 fd 的线程最多只能有一个。
+fd 归运行时所有：宿主不得 close，`qz_free` 之后即失效。`qz_recv_message` 可从任何线程调用，但同一 rt 同一时刻只允许一个消费者（无锁 pop 不互斥，并发弹出会把同一条消息交付两次并重复释放节点）。
 
 ## 从 JS 调用 C 函数
 
@@ -144,8 +144,8 @@ qz_t *rt1 = qz_create(&cfg1);
 qz_t *rt2 = qz_create(&cfg2);
 
 // 分别向每个实例发送消息；每个运行时各自排队自己的邮箱
-qz_post_message(rt1, "{\"cmd\":\"echo\",\"data\":\"a\"}", 26);
-qz_post_message(rt2, "{\"cmd\":\"echo\",\"data\":\"b\"}", 26);
+qz_post_message(rt1, "{\"cmd\":\"echo\",\"data\":\"a\"}", 25);
+qz_post_message(rt2, "{\"cmd\":\"echo\",\"data\":\"b\"}", 25);
 
 host_drain(rt1, "rt1", 5000);
 host_drain(rt2, "rt2", 5000);
@@ -154,7 +154,7 @@ qz_destroy(rt1);
 qz_destroy(rt2);
 ```
 
-每个运行时完全自驱运行，两种模型下宿主都没有需要泵动的 loop。`qz_message_fd(rt)` 为每个运行时返回各自独立的唤醒 fd，因此一个宿主线程可以用同一组 poll/epoll 同时照看多个邮箱（对每个等待的 fd 都要套用「排干 → 清计数 → 复查」协议）。
+每个运行时完全自驱运行，两种模型下宿主都没有需要驱动的 loop。`qz_message_fd(rt)` 为每个运行时返回各自独立的唤醒 fd，因此一个宿主线程可以用同一组 poll/epoll 同时照看多个邮箱（对每个等待的 fd 都要套用「排干 → 清计数 → 复查」协议）。
 
 ## 错误处理模式
 

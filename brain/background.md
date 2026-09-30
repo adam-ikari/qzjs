@@ -2,7 +2,7 @@
 slug: background
 title: Project background
 role: project background
-updated: "2026-09-28T17:19:48"
+updated: "2026-09-29T04:55:05"
 ---
 
 # Project background
@@ -15,8 +15,8 @@ updated: "2026-09-28T17:19:48"
 和线程，宿主形态不受干涉，通讯只用 postMessage 机制：JS→宿主的消息进库内部邮箱，
 宿主在自选线程上 qz_recv_message 取件（或挂 qz_message_fd 唤醒 fd 进自己的事件
 系统），qzjs 从不跨线程调用宿主代码。缺省 ISOLATED 进程模型下 JS 跑在独立主RT 进程
-（qzjs-rt），THREAD 模型下跑在库内部线程——两模型宿主体验一致、零泵义务。M-P6 曾要求
-宿主注入 cfg.uv_loop 并在泵线程触发 message_cb，该注入契约已被 M-P7 裁决取代并整体废除。
+（qzjs-rt），THREAD 模型下跑在库内部线程——两模型宿主体验一致、零驱动义务。M-P6 曾要求
+宿主注入 cfg.uv_loop 并在宿主驱动该 loop 的线程上触发 message_cb，该注入契约已被 M-P7 裁决取代并整体废除。
 
 ## Goals
 

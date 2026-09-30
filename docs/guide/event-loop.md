@@ -2,12 +2,12 @@
 
 qzjs works in one of two shapes, selected at build time by
 `QZ_PROCESS_MODEL` (default `ISOLATED`). In **both** shapes the story is the
-same: **the library pumps its own loop/thread and never runs host code**.
+same: **the library drives its own loop/thread and never runs host code**.
 The host does not run or inject a loop — it consumes the mailbox on its own
 thread at its own time:
 
 - **ISOLATED** — JS runs in a separate main-RT *process* (`qzjs-rt`), and the
-  library additionally starts its **own host-side pump thread + loop** inside
+  library additionally starts its **own host-side thread + loop** inside
   your process. All host-bound messages (JS `postMessage`, the crash
   `{"type":"error"}` report, CONTROL receipts) are written to a per-runtime
   FIFO **mailbox**, drained with `qz_recv_message`.
@@ -20,10 +20,10 @@ thread at its own time:
 ```mermaid
 flowchart TB
     subgraph HOSTP["宿主进程"]
-        PUMP["库自有泵线程 + loop（库创建、库泵）"]
+        HSIDE["库自有线程 + loop（库创建、库驱动）"]
         MB["邮箱 FIFO"]
         HT["宿主线程 — 自选时机 qz_recv_message"]
-        PUMP -->|"帧到达 → 写入邮箱"| MB
+        HSIDE -->|"帧到达 → 写入邮箱"| MB
         MB -->|"qz_recv_message / 唤醒 fd"| HT
     end
     HOSTP -->|"qz_post_message: JSON 入（MPSC + uv_async）"| RT
@@ -36,9 +36,9 @@ flowchart TB
 The library owns every thread and loop on both sides of the boundary; nothing
 is borrowed from the host. `qz_create` spawns the main-RT process, completes
 the ready handshake on a synchronous raw-fd read, and starts the library's
-host-side pump thread. Frames that arrive before ready are already replayed
+host-side thread. Frames that arrive before ready are already replayed
 into the mailbox, so the host's first `qz_recv_message` gets them. The host
-injects no loop and pumps nothing, and there is **no same-libuv linking
+injects no loop and drives nothing, and there is **no same-libuv linking
 obligation** between host and libqzjs — libuv is the library's internal
 dependency (the host may embed qzjs in any event system: poll/epoll/select,
 its own threads, or none).
@@ -78,7 +78,7 @@ int main(void) {
 
     qz_post_message(rt, "{\"cmd\":\"ping\"}", 14);
 
-    /* 在本线程、按自己的节奏消费邮箱 —— 库自己泵，宿主无需驱动任何东西。 */
+    /* 在本线程、按自己的节奏消费邮箱 —— 库自己驱动，宿主无需驱动任何东西。 */
     host_drain(rt, 2000);
 
     qz_destroy(rt);
@@ -106,18 +106,72 @@ a message is linked into the mailbox *before* the eventfd is written:
 The fd is owned by the runtime: do NOT close it; it becomes invalid after
 `qz_free`. Linux-only.
 
+### Integrating the wake fd with a host libuv loop
+
+Since qzjs is itself libuv-native, the common host shape is: your application
+already runs a `uv_loop_t`. Plug the wake fd in with a `uv_poll_t` handle on
+**your own** loop — the library runs its loop on a private thread, and two
+`uv_loop_t` instances are independent:
+
+```c
+int mfd = qz_message_fd(rt);                 // plain eventfd
+uv_poll_t req;
+
+static void on_mailbox(uv_poll_t *h, int status, int events) {
+    char *json; size_t len;
+    for (;;) {
+        // Step 1 — drain and process (timeout_ms MUST be 0 here)
+        while (qz_recv_message(rt, &json, &len, 0) == 0) {
+            handle(json, len);
+            qz_free_message(json);
+        }
+        // Step 2 — clear the eventfd counter until EAGAIN
+        uint64_t c;
+        while (read(mfd, &c, sizeof c) == (ssize_t)sizeof c) {}
+        // Step 3 — re-probe. A message showing up here arrived during 1-2,
+        // so its eventfd write may have been consumed by step 2 — go back
+        // to step 1 (which re-clears the counter) instead of returning to
+        // poll. Handling only one message and then returning would strand
+        // the rest of the batch: mailbox non-empty, fd clear, no wakeup left.
+        if (qz_recv_message(rt, &json, &len, 0) != 0) break;
+        handle(json, len);
+        qz_free_message(json);
+    }
+}
+
+uv_poll_init(uv_loop, &req, mfd);            // host's own loop
+uv_poll_start(&req, UV_READABLE, on_mailbox);
+```
+
+Two uv-specific constraints:
+
+- **Never pass `timeout_ms > 0` (or `-1`) inside the poll callback** —
+  `qz_recv_message` would call `poll()` on the host loop's own thread and
+  stall it. Use `0` (pure poll) to drain; blocking `recv(ms)` only makes sense
+  on a dedicated thread outside the loop.
+- **Detach the handle before freeing the runtime.** `qz_free`/`qz_destroy`
+  closes `out_efd`. If a `uv_poll_t` is still armed on that fd when the rt is
+  freed, the fd number can be recycled by another file and the callback fires
+  against an unrelated descriptor. Correct order:
+  `qz_wait_idle` → final drain with `recv(0)` → `uv_poll_stop(&req)` (and
+  `uv_close` if you free the handle's memory) → `qz_free(rt)`.
+  `uv_poll_stop` only disarms the handle; it does not close the fd, which is
+  exactly right since the fd belongs to the rt.
+
 ## Thread & Reentrancy Rules
 
 - `qz_post_message` is thread-safe (the JSON is copied) under both models —
   call it from any thread. FIFO order per runtime is preserved; delivery is
-  driven by the library's own pump thread, not by the host's schedule.
-- `qz_recv_message` may be called concurrently from multiple threads (the
-  mailbox pop is mutually exclusive). But at most **one** thread should be the
-  "fd waiter"; cross-thread ownership handoff of taken messages is the host's
-  job.
+  driven by the library's own thread, not by the host's schedule.
+- `qz_recv_message` may be called from any thread, but only **one consumer at
+  a time** per runtime: the lock-free pop is *not* mutually exclusive, so two
+  concurrent callers read the same head node and hand it out (and free it)
+  twice. Serialize in the host; ownership handoff of taken messages is the
+  host's job.
 - The blocking APIs (`qz_ping`, `qz_ping_path`, `qz_wait_idle`, `qz_destroy`)
-  do their waiting **on the library's pump thread**; the caller simply blocks.
-  The mailbox is unaffected — outbound messages (including the crash
+  block **the calling thread** — the wait is the caller's (a bounded backoff
+  poll for pings, a join for wait_idle/destroy), while the library's own
+  thread turns the loop and produces the reply. The mailbox is unaffected — outbound messages (including the crash
   `{"type":"error"}` report) keep entering it during the wait, and
   `qz_recv_message` still works after `qz_wait_idle` returns and before
   `qz_free`.

@@ -98,13 +98,13 @@ size_t qz_ipc_build_ack(char *out, size_t cap, int ok);
                                          * worker 自 close 前通知父（EOF 不再
                                          * 当作崩溃触发 onerror） */
 #define QZ_IPC_CTL_PING_MSG   "{\"qzjs\":1,\"ping\":1}"   /* liveness 探测：
-                                         * 宿主→对端；对端 C 层读泵就地直回。
+                                         * 宿主→对端；对端 C 层读回调就地直回。
                                          * 跨层形态加 "tp":[u16 链]（§8.2
                                          * root-relative 槽位链，宿主→任意
-                                         * worker）：中间节点按链下投（读泵
-                                         * 转发，不消费），目标读泵直回。 */
+                                         * worker）：中间节点按链下投（读回调
+                                         * 转发，不消费），目标读回调直回。 */
 #define QZ_IPC_CTL_PONG_MSG   "{\"qzjs\":1,\"pong\":1}"   /* liveness 应答：
-                                         * 对端读泵回显 corr（= ping seq）。
+                                         * 对端读回调回显 corr（= ping seq）。
                                          * 跨层 PONG 回显 "tp"（过境标记：
                                          * 中间节点见 tp 沿父通道上行转发，
                                          * 不吃进自身 ping_seq 配对槽）。 */
@@ -146,6 +146,19 @@ int qz_proc_post_ctl(qz_proc_t *proc, const char *json);
 /* Channel handle — see typedef above (qz_proc_t), defined at the top of
  * this header so declarations can reference it. */
 
+/* 读回调（qz_proc_start_read_cb）：cb(user, kind, source, corr, payload, len)。
+ * payload == NULL 表示 peer-death/EOF（回调后不再调用，kind/source/corr 无意义）；
+ * kind = IPC_ENV_KIND_*、source = 信封源标签、corr = STORAGE 中继关联 id（非
+ * STORAGE 帧恒 0），接收方据此分流（如 M-P2 宿主侧区分 CONTROL 协议消息与
+ * MESSAGE 数据；STORAGE owner 按 corr 原样回显回复）。
+ *
+ * 放在 QZ_USE_MOCK_LIBUV 分支之外：纯函数指针 typedef，不依赖 libuv，而
+ * qz_proc_start_read_cb 的声明在分支之外且要用它——留在里面会让本头在
+ * mock 测试构建下不 self-contained（谁从 mock TU 包含它谁编译失败）。 */
+typedef void (*qz_proc_msg_cb_t)(void *user, int8_t kind, int32_t source,
+                                   int32_t corr,
+                                   const uint8_t *payload, uint32_t len);
+
 #ifndef QZ_USE_MOCK_LIBUV
 /* Full struct body is private to ipc_process.c (real-libuv pipe APIs).
  * Mock test builds (QZ_USE_MOCK_LIBUV) only see the opaque typedef. */
@@ -160,15 +173,6 @@ typedef struct qz_tx_s {
     int         timer_active;
 } qz_tx_t;
 
-/* 读泵回调（qz_proc_start_read_cb）：cb(user, kind, source, corr, payload, len)。
- * payload == NULL 表示 peer-death/EOF（回调后不再调用，kind/source/corr 无意义）；
- * kind = IPC_ENV_KIND_*、source = 信封源标签、corr = STORAGE 中继关联 id（非
- * STORAGE 帧恒 0），接收方据此分流（如 M-P2 宿主侧区分 CONTROL 协议消息与
- * MESSAGE 数据；STORAGE owner 按 corr 原样回显回复）。 */
-typedef void (*qz_proc_msg_cb_t)(void *user, int8_t kind, int32_t source,
-                                   int32_t corr,
-                                   const uint8_t *payload, uint32_t len);
-
 /* pre-ready 帧暂存硬上限：超过 = 协议异常，create 显式失败（§5.3）。 */
 #define QZ_PROC_PRE_FRAMES_MAX 256
 
@@ -180,7 +184,7 @@ struct qz_proc_s {
     int       state;          /* qz_proc_state_t */
     void     *parent_rt;      /* parent qz_t* (for callbacks) */
     /* CTL-1：>0 时本通道上到达的命令类 CONTROL 信封交 qz_control_route
-     * 树路由（值为本节点槽位 id）；0 = 不路由（宿主侧读泵交 msg_cb）。 */
+     * 树路由（值为本节点槽位 id）；0 = 不路由（宿主侧读回调交 msg_cb）。 */
     int32_t   ctl_route_id;
     /* Read accumulator: frames = [4-byte LE len][envelope]; async reads via
      * qz_proc_start_read / qz_proc_start_read_cb. */
@@ -198,7 +202,7 @@ struct qz_proc_s {
     qz_proc_msg_cb_t msg_cb;
     /* create 期 pre-ready 帧缓冲（M-P6）：主RT 形态初始脚本的顶层
      * postMessage 可先于 CONTROL{ready} 落通道。qz_proc_wait_ready_raw 把
-     * ready 之前的非-ready 帧暂存到这里，qz_proc_start_read_cb 注册读泵后
+     * ready 之前的非-ready 帧暂存到这里，qz_proc_start_read_cb 注册读回调后
      * 按 FIFO 序重放给 msg_cb。payload 逐帧 malloc，重放后/proc 回收时释放。 */
     struct qz_proc_pre_frame {
         int8_t   kind;
@@ -217,7 +221,7 @@ struct qz_proc_s {
     int       freed;
     /* ── Liveness ping/pong（父 → sub worker，镜像 rt->ping_seq/pong_seq）──
      * ping_seq = 发起方分配的单调序号（JS 线程写）；pong_seq = 最近收到的
-     * PONG 回显序号（读泵线程或 qz_proc_ping 同步扫帧回填）。compare 判定
+     * PONG 回显序号（读宿主侧线程或 qz_proc_ping 同步扫帧回填）。compare 判定
      * 对端 loop 通畅。单飞行：JS 同步调用，同一 proc 同时至多一个 ping。 */
     int32_t   ping_seq;       /* atomic */
     int32_t   pong_seq;       /* atomic */
@@ -269,7 +273,7 @@ void qz_proc_start_read(qz_proc_t *proc);
 
 /* JS-managed delivery mode (spawn 分层化): 同 qz_proc_start_read，但信封
  * 解码后不 push 父 msgq，而是调用 cb(user, payload, len)；payload=NULL 表示
- * peer-death/EOF（回调后不再调用）。proc 须已 RUN。cb 运行在读泵所在线程
+ * peer-death/EOF（回调后不再调用）。proc 须已 RUN。cb 运行在读回调所在线程
  * （父 loop 线程 = JS 线程，可直接 JS_Call）。cb 传 NULL 恢复 msgq 模式。 */
 void qz_proc_start_read_cb(qz_proc_t *proc, qz_proc_msg_cb_t cb,
                              void *user);
@@ -277,8 +281,8 @@ void qz_proc_start_read_cb(qz_proc_t *proc, qz_proc_msg_cb_t cb,
 /* 宿主 create 握手后半（ISOLATED）：spawn 的 M-P1 握手 ack 之后，主RT 先
  * eval 初始脚本再 emit CONTROL{ready}——顶层 postMessage 帧可先于 ready 落
  * 通道。在 uv_read_start 注册之前用阻塞 raw-fd 帧读逐帧吃到 ready（字节
- * 精确，不与读泵抢字节）；ready 前的非-ready 帧暂存 pre_frames，由
- * qz_proc_start_read_cb 注册读泵后同步 FIFO 重放给 msg_cb。
+ * 精确，不与读回调抢字节）；ready 前的非-ready 帧暂存 pre_frames，由
+ * qz_proc_start_read_cb 注册读回调后同步 FIFO 重放给 msg_cb。
  * 返回 0 = ready 已到（*out_ok：1 成功 / 0 主RT 初始化失败）；
  * -1 = EOF/超时/解码失败/pre-ready 帧超 QZ_PROC_PRE_FRAMES_MAX/分配失败
  *      （显式失败语义，§5.3）。 */
@@ -291,9 +295,9 @@ qz_proc_t *qz_proc_new(void);
 void qz_proc_free(qz_proc_t *proc);   /* destroy + free struct */
 /* ── Liveness ping（worker 进程→sub worker，镜像 rt_host.c 的 qz_ping）──
  * 发 CONTROL{"qzjs":1,"ping":seq}（corr = seq）并阻塞等待 sub worker C 层
- * 读泵直回的 PONG（不经 JS/msgq）。等待期间 uv 读泵不跑（JS 同步调用），
+ * 读回调直回的 PONG（不经 JS/msgq）。等待期间 uv 读回调不跑（JS 同步调用），
  * 由本函数自 poll+recv 驱动帧解析：PONG 按 corr 配对唤醒；其它帧缓存进
- * rbuf 待读泵下次活动正常消费（无 JS 重入）。返回 0 = 通畅；1 = 超时
+ * rbuf 待读回调下次活动正常消费（无 JS 重入）。返回 0 = 通畅；1 = 超时
  * （对端 loop 阻塞）；-1 = 参数/状态错误或通道死（EOF/POLLHUP）。 */
 int qz_proc_ping(qz_proc_t *proc, int32_t timeout_ms);
 

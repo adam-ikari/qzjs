@@ -1,7 +1,7 @@
 # timers — 定时器与异步驱动
 
 演示 qzjs 的事件循环驱动 JS 异步：`setTimeout` / `setInterval` / `Promise`
-在 qzjs 内部线程的 libuv 循环上推进，**宿主不需要手动泵动**。
+在 qzjs 内部线程的 libuv 循环上推进，**宿主不需要手动驱动**。
 
 ## 运行
 

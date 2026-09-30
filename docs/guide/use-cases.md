@@ -23,7 +23,7 @@ The defining case: run JS on resource-constrained targets.
 
 The host stays in C. qzjs fully owns its threads and loops and never runs
 host code: under ISOLATED, JS lives in a separate main-RT process and the
-library keeps its own host-side pump thread; under THREAD, JS runs on
+library keeps its own host-side thread; under THREAD, JS runs on
 qzjs's internal thread. Everything bound for the host — JS `postMessage`
 output — lands in a FIFO mailbox the host drains on its own thread with
 `qz_recv_message`, picking its own timing.

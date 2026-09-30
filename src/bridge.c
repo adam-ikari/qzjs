@@ -1767,7 +1767,7 @@ static qz_proc_handle_t *bridge_proc_handle_get(qz_t *rt, int id)
     return NULL;
 }
 
-/* 读泵回调（父 loop 线程 = JS 线程，可直接 JS_Call）：信封 payload → JS
+/* 读回调（父 loop 线程 = JS 线程，可直接 JS_Call）：信封 payload → JS
  * 回调(Uint8Array, kind, corr)；payload=NULL → peer-death/EOF，JS 回调(null,
  * kind, 0)。kind（M-P3）原样透传：PORT_TRANSFER 帧让 JS port 层走端点路由，
  * 普通帧交各消费者的应用派发；corr = STORAGE 中继关联 id（非 STORAGE 帧恒
@@ -1796,7 +1796,7 @@ static void bridge_proc_msg_cb(void *user, int8_t kind, int32_t source,
         JS_IsException(jcorr)) {
         /* OOM 建 ArrayBuffer：跳过本帧。必须 JS_GetException 清掉挂起异常，
          * 否则该异常会污染 context——后续每一帧的 JS_NewArrayBufferCopy /
-         * JS_Call 都立即返回同一个异常，读泵在 C 层照常解码但 JS 侧从此
+         * JS_Call 都立即返回同一个异常，读回调在 C 层照常解码但 JS 侧从此
          * 收不到任何消息（洪水下 rcvd 卡死）。 */
         JS_GetException(ctx);
         JS_FreeValue(ctx, arg);
@@ -1826,7 +1826,7 @@ static JSValue js_pal_process_spawn(JSContext *ctx, JSValueConst this_val,
     qz_t *rt = qz_get_rt_from_ctx(ctx);
     if (!rt) return JS_ThrowInternalError(ctx, "processSpawn: no runtime");
     /* §1.1 树形拓扑：worker 进程亦可 spawn 子 worker（嵌套 spawn）。进程后端
-     * 原语（socketpair/fork+exec/握手/读泵）不依赖「本 runtime 是主RT」，
+     * 原语（socketpair/fork+exec/握手/读回调）不依赖「本 runtime 是主RT」，
      * worker runtime 同样持有 proc_handles[] 与 uv loop，故不再按 worker_self
      * 拒绝（THREAD 编译由下方 ISOLATED 守卫拒绝）。 */
 
@@ -1982,7 +1982,7 @@ static JSValue js_pal_process_terminate(JSContext *ctx, JSValueConst this_val,
 
 /* pal.processPing(handle, timeoutMs) → int（liveness：检测 sub worker 事件
  * 循环阻塞。仅显式调用触发，无后台心跳。镜像 rt_host.c qz_ping：发
- * CONTROL{"qzjs":1,"ping":seq}（corr=seq）→ 阻塞等 sub worker 读泵 C 层直
+ * CONTROL{"qzjs":1,"ping":seq}（corr=seq）→ 阻塞等 sub worker 读回调 C 层直
  * 回的 PONG → 0=通畅 / 1=超时（对端 loop 阻塞）/ -1=通道死（EOF/状态错）。
  * 单飞行：JS 同步调用同一 handle 同时至多一个在途 ping。 */
 static JSValue js_pal_process_ping(JSContext *ctx, JSValueConst this_val,
@@ -2405,7 +2405,7 @@ JSValue qz_create_pal_object_ctx(qz_t *rt, qz_ctx_t *ctx)
         JS_SetPropertyStr(jsctx, pal, "storageRelay", JS_NewCFunction(jsctx, js_pal_storage_relay, "storageRelay", 2));
         /* §1.1 嵌套 spawn：worker 进程同样注册通用进程原语，JS 层 Worker
          * 封装（worker.js）据此在 worker 内 new Worker 起子 worker 进程。
-         * 与父 runtime 同签名；读泵/槽位登记复用 bridge 既有实现。 */
+         * 与父 runtime 同签名；读回调/槽位登记复用 bridge 既有实现。 */
         JS_SetPropertyStr(jsctx, pal, "processSpawn", JS_NewCFunction(jsctx, js_pal_process_spawn, "processSpawn", 3));
         JS_SetPropertyStr(jsctx, pal, "processPost", JS_NewCFunction(jsctx, js_pal_process_post, "processPost", 2));
         JS_SetPropertyStr(jsctx, pal, "processOnMessage", JS_NewCFunction(jsctx, js_pal_process_on_message, "processOnMessage", 2));

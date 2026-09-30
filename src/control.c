@@ -16,6 +16,11 @@
  */
 
 #include "qz_internal.h"
+/* 无条件 include（早先这里是 #ifndef QZ_USE_MOCK_LIBUV 包着的）：qz_ipc_ctl_classify
+ * 已从 ipc_process.c 迁到 ipc_ctl.c，而 ipc_ctl.c 始终编入，所以 classify 与
+ * QZ_IPC_MAIN_ID 在 mock 构建下同样可得。那个条件 include 变成死代码，还顺带
+ * 推翻了一处注释（见 qz_control_route 里 QZ_IPC_MAIN_ID 那行）。 */
+#include "ipc_process.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -40,12 +45,6 @@ struct qz_ctl_recept_s {
  * cJSON（用户指令：不手写）。correl 约定为简单 id：无转义/嵌套。 */
 
 #include <cJSON.h>
-
-/* CTL-1 跨进程回执走信封（ipc_process.c 的发送原语）。mock 测试构建无 ipc
- * 后端（QZ_USE_MOCK_LIBUV），回程恒为本地，转发路径不编入。 */
-#ifndef QZ_USE_MOCK_LIBUV
-#include "ipc_process.h"
-#endif
 
 /* ── Receipt helpers (qzjs thread) ── */
 
@@ -344,9 +343,61 @@ int32_t qz_ctl_cmd_target(const char *json, size_t len)
     return target;
 }
 
+/* 两个生产者入口（qz_control_sink / qz_control_endpoint_cmd）共用的拒收判据。
+ *
+ * 为什么要抽出来：早先两个入口各写各的，而且**顺序相反**——sink 是
+ * 「保留命名空间 → correl」，端点是「correl → 保留命名空间」。同一份字节
+ * （既没 correl、又用了保留键）在 sink 被报成「保留命名空间」、在端点被报成
+ * 「缺 correl」，而同两处注释都写着「两处必须同步」。顺序也必须共用：判据
+ * 相同但先后不同，诊断照样分叉。
+ *
+ * 顺序定为「保留命名空间 → correl」：保留命名空间是**契约层**问题（这条命令
+ * 根本不该以用户命令的身份进入通道层），correl 是**记账层**问题。先问契约，
+ * 再问记账。 */
+/* qz_control_sink / qz_control_endpoint_cmd 共用的返回码。公共 API（qz_control）
+ * 把非 0 一律归一化成 -1，所以这些是纯内部约定；端点按码决定回不回帧。
+ *   CTL_RC_ENQUEUE_FAILED  命令没能进队列 ⇒ 不会有回执，必须当场告诉客户端
+ *   CTL_RC_FORWARD_DONE    前投失败，但 NOT_FOUND 回执已由本函数写出，端点别再写
+ * 其余 -2/-3 见 qz_internal.h 的契约注释。 */
+#define CTL_RC_ENQUEUE_FAILED  -4
+#define CTL_RC_FORWARD_DONE    -5
+
+typedef enum {
+    CTL_ACCEPT = 0,
+    CTL_REJECT_NO_CORREL,
+    CTL_REJECT_RESERVED
+} ctl_verdict_t;
+
+static ctl_verdict_t ctl_check_accept(const uint8_t *bytes, size_t len,
+                                      const char *correl, int is_interrupt)
+{
+    int sys_val = 0;
+    if (qz_ipc_ctl_classify(bytes, (uint32_t)len, &sys_val) != QZ_IPC_CTL_NONE)
+        return CTL_REJECT_RESERVED;
+    /* interrupt 豁免 correl：它是唯一不依赖回执配对的命令（入队只为回执），
+     * 详见 qz_control_sink 里那段说明。 */
+    if ((!correl || !correl[0]) && !is_interrupt)
+        return CTL_REJECT_NO_CORREL;
+    return CTL_ACCEPT;
+}
+
+/* 判据 → 内部返回码。端点按码决定回哪一帧（见 qz_internal.h 的契约注释）。 */
+static int ctl_verdict_to_code(ctl_verdict_t v)
+{
+    switch (v) {
+    case CTL_REJECT_NO_CORREL: return -2;
+    case CTL_REJECT_RESERVED:  return -3;
+    default:                   return 0;
+    }
+}
+
 int qz_control(qz_t *rt, const char *bytes, size_t len)
 {
-    return qz_control_sink(rt, bytes, len, NULL);
+    /* 公共契约：非 0 即失败，一律返回 -1。内部 sink 用 -2/-3 区分两种拒收
+     * （端点要据此回不同的帧），那是**内部**约定，不许从公共 API 漏出去——
+     * 按 `== -1` 判断成败的宿主会突然看到 -2/-3。 */
+    int rc = qz_control_sink(rt, bytes, len, NULL);
+    return rc == 0 ? 0 : -1;
 }
 
 int qz_control_sink(qz_t *rt, const char *bytes, size_t len, void *sink)
@@ -367,10 +418,52 @@ int qz_control_sink(qz_t *rt, const char *bytes, size_t len, void *sink)
     char *op = NULL, *correl = NULL;
     ctl_extract(buf, &op, &correl, &timeout_ms, NULL);
 
+    int is_interrupt = op && strcmp(op, "interrupt") == 0;
+
+    /* 「qzjs」数字键是通道层系统 CONTROL 的保留命名空间——qz_ipc_ctl_classify
+     * 据此把 ready/idle/shutdown/ping/pong/pfail 与未知系统消息从用户命令里
+     * 分出来，rt_main 收到时会就地消费、不路由、不进 JS。用户命令带这个键
+     * 就等于静默消失：没有回执、没有错误、看不出发生了什么。与其留个黑洞，
+     * 不如在入口显式拒收（§5.3 不静默降级：失败必须可诊断）。判据与 classify
+     * 同源，不另立一套，也不由本入口与端点各写一遍——见 ctl_check_accept。 */
+    ctl_verdict_t verdict =
+        ctl_check_accept((const uint8_t *)bytes, len, correl, is_interrupt);
+    if (verdict != CTL_ACCEPT) {
+        int code = ctl_verdict_to_code(verdict);
+        free(op);
+        free(correl);
+        free(buf);
+        return code;
+    }
     /* interrupt：投递即生效——原子标志在生产者线程置位（§1.1 唯一例外）。
-     * 命令消息照常入队只为 correl 回执。 */
-    if (op && strcmp(op, "interrupt") == 0)
+     * 命令消息入队**只为** correl 回执，所以 interrupt 是唯一不依赖 correl 的
+     * 命令：没有 correl 就已经生效（verdict 判据对它豁免 correl 要求），照样
+     * 走下面的入队与登记，回执配不上也无妨——没人会等它。
+     *
+     * 置位排在判据之后是安全的，因为判据已把 interrupt 的 correl 缺口放行；
+     * 早先这里是「守卫在置位之前」，于是「不传 correl 的 interrupt」连原子标志
+     * 都置不上——那是对公共 API 的静默破坏，而 interrupt 恰恰是最不该被 correl
+     * 缺失拖住的那条命令。置位之后紧接着就是「无 correl 就收手」。 */
+    if (is_interrupt)
         __atomic_store_n(&rt->ctl_interrupt, 1, __ATOMIC_RELEASE);
+
+    /* interrupt 且没有 correl：效果已达成（标志置位），且没有 correl 就没有可配对
+     * 的回执——**到此收手**，不登记、不入队。
+     *
+     * 这一步不是可有可无的。放行之后若继续往下走：
+     *   qz_ctl_register(rt, NULL, …) → r->correl = strdup("")，登记一个空键条目；
+     *   入队后 dispatch 走 interrupt 分支 → ctl_claim(rt, NULL) 第一行就是
+     *   `if (!correl) return 1`（压根不查表）→ 照样产一条 correl="" 的回执投进
+     *   宿主邮箱，而那个空键条目谁也 claim 不掉，只能等超时回收。
+     * 那正是「correl 必填」这道守卫当初要消灭的孤儿回执——我第一版豁免 interrupt
+     * 时只是把守卫挪到置位之后、没在这里收手，等于把它放回来了。收口的
+     * ctl_local_command 一直是对的（那边同样 free 后直接 return 0），只有这个入口漏了。 */
+    if (is_interrupt && (!correl || !correl[0])) {
+        free(op);
+        free(correl);
+        free(buf);
+        return 0;
+    }
 
     /* 登记先于入队（§1.2）：dispatch 必能命中条目。本条命令在本进程产生
      * 回执（进程内 dispatch 或本进程邮箱回执）→ reply_dir = -1。 */
@@ -421,8 +514,24 @@ static int ctl_local_command(qz_t *rt, const uint8_t *payload, uint32_t len,
     int timeout_ms = 5000;
     char *op = NULL, *correl = NULL;
     ctl_extract(buf, &op, &correl, &timeout_ms, NULL);
-    if (op && strcmp(op, "interrupt") == 0)
+
+    int is_interrupt = op && strcmp(op, "interrupt") == 0;
+    if (is_interrupt)
         __atomic_store_n(&rt->ctl_interrupt, 1, __ATOMIC_RELEASE);
+
+    /* correl 必填的判据落在这里（收口），而不是每个生产者入口各写一遍。
+     * ctl_local_command 是 qz_control_route 在「target 命中本地」时的落地，
+     * 两个生产者入口（qz_control_sink / qz_control_endpoint_cmd）最终都汇到
+     * 它，而 wire 路径（rt_main → qz_control_route → 本函数）同样从这里过。
+     * 只在上游两个入口拦，wire 上来的帧照样能造出 correl="" 的孤儿回执——
+     * 那正是这道守卫要消灭的东西。
+     * interrupt 例外，理由见 qz_control_sink 里同一段注释。 */
+    if (!correl || !correl[0]) {
+        free(buf);
+        free(op);
+        free(correl);
+        return is_interrupt ? 0 : -1;
+    }
     uint64_t deadline = uv_hrtime() + (uint64_t)timeout_ms * 1000000ULL;
     qz_ctl_register(rt, correl, deadline, reply_dir, sink);
     int rc = qz_msg_push(rt, buf, (size_t)len, QZ_MSG_SRC_HOST,
@@ -432,7 +541,12 @@ static int ctl_local_command(qz_t *rt, const uint8_t *payload, uint32_t len,
     else uv_async_send(&rt->wake);   /* 唤醒与容器解耦（M-P7） */
     free(op);
     free(correl);
-    return rc == 0 ? 0 : -1;
+    /* 入队失败要给**专用**码：这一支与「参数非法 / 缺 correl」是完全不同的故障
+     * ——命令没进队列、回执永远不会来，调用方必须能据此告诉客户端「失败了」，
+     * 而不是让它干等到超时。原来两种原因都压成 -1，端点那边再一映射就彻底
+     * 分辨不出来，只能静默（这正是同函数里转发失败会回 NOT_FOUND、而入队失败
+     * 却一声不吭的自相矛盾）。 */
+    return rc == 0 ? 0 : CTL_RC_ENQUEUE_FAILED;
 }
 
 /* 逐跳转发一条 CONTROL 信封：target>1 下行到本地子槽位，否则上行；source
@@ -528,8 +642,7 @@ int qz_control_route(qz_t *rt, int32_t local_id, int32_t source,
             }
             if (on_path)
                 return ctl_forward(rt, source, p[d], payload, len);
-            /* 1 = QZ_IPC_MAIN_ID（mock 构建不编入 ipc_process.h，用字面量） */
-            return ctl_forward(rt, source, 1, payload, len);
+            return ctl_forward(rt, source, QZ_IPC_MAIN_ID, payload, len);
         }
     }
 
@@ -549,8 +662,13 @@ int qz_control_route(qz_t *rt, int32_t local_id, int32_t source,
 }
 
 int qz_control_endpoint_cmd(qz_t *rt, const char *bytes, size_t len,
-                              void *sink)
+                              void *sink, char **correl_out)
 {
+    /* correl_out（可传 NULL）：成功提取到 correl 时写入一份 strdup 副本，调用方负责
+     * free；没有 correl 时写 NULL。端点要靠它给 -3 的拒收帧回显 correl——协议本身
+     * 是按 correl 配对写回同一连接的，而 -3 这条命令的 correl 是**拿得到的**
+     * （先校验它非空、再判保留命名空间），一帧不带 correl 的回执对客户端毫无用处。 */
+    if (correl_out) *correl_out = NULL;
     if (!rt || rt->magic != QZ_MAGIC || !bytes) return -1;
     if (rt->config.control_plane != QZ_CONTROL_LOCAL) return -1;
 
@@ -560,8 +678,47 @@ int qz_control_endpoint_cmd(qz_t *rt, const char *bytes, size_t len,
     buf[len] = '\0';
     int32_t target = 1;
     int timeout_ms = 5000;
-    char *correl = NULL;
-    ctl_extract(buf, NULL, &correl, &timeout_ms, &target);
+    char *op = NULL, *correl = NULL;
+    /* op 也要取：interrupt 是唯一不依赖 correl 的命令（命令入队只为回执），
+     * 所以判 correl 时必须知道 op 是什么。这条路径原先传的是 NULL，代价是端点
+     * 上的 correl 守卫把不带 correl 的 interrupt 也拒了——收口那层的 interrupt
+     * 豁免根本没机会生效（探针 test/probe_ctl_reject_frames.c 第 4 项抓到）。
+     * 取了 op 就必须在每条 return 上 free 它。 */
+    ctl_extract(buf, &op, &correl, &timeout_ms, &target);
+    int is_interrupt = op && strcmp(op, "interrupt") == 0;
+    if (correl_out && correl && correl[0]) {
+        *correl_out = strdup(correl);
+        /* 复制失败就当没有：回执帧少一个字段仍远好过整帧丢失。 */
+    }
+
+    /* 判据与 qz_control_sink **共用** ctl_check_accept——包括顺序。
+     *
+     * 为什么要共用：端点是本地控制面（ctl 客户端）的生产入口，走「回执写回这条
+     * 连接」的路子，但命令本体同样以 CONTROL 信封进主RT，同样会被 rt_main 的
+     * classify 判成系统消息就地吞掉。只堵一个入口就留下「从 qz_control 拒、从端点
+     * 静默吞」这种凭调用方式决定行为的安全洞。
+     * 早先两个入口各写各的，而且**顺序相反**：sink 是「保留命名空间 → correl」，
+     * 端点是「correl → 保留命名空间」。同一份字节（既没 correl 又用了保留键）在
+     * sink 报「保留命名空间」、在端点报「缺 correl」——判据相同但先后不同，诊断
+     * 照样分叉，而两处注释都写着「两处必须同步」。gtest 的
+     * both_entries_agree_on_verdict_order 就是这条的回归锁。
+     *
+     * interrupt 豁免 correl 的理由见 sink 里那段。
+     *
+     * 两种拒收用**专用**返回码（-2 缺 correl / -3 保留命名空间），端点据此回不同
+     * 的错误帧。必须专用：下面 path 前投那步的 ctl_forward 对「无此槽位」也返回
+     * -1，而那不是拒收（本函数内部已自行回 NOT_FOUND），端点若按「非零即拒收」
+     * 处理就会额外发一条误导性的错误帧。 */
+    {
+        ctl_verdict_t verdict =
+            ctl_check_accept((const uint8_t *)bytes, len, correl, is_interrupt);
+        if (verdict != CTL_ACCEPT) {
+            free(buf);
+            free(op);
+            free(correl);
+            return ctl_verdict_to_code(verdict);
+        }
+    }
 
     /* §8.2 path 链寻址：target_path 指向孙及更深（本节点 depth 0 = 根）→
      * 登记回执（sink 连接）后按路径首元素下投；回执沿树回来时按 correl 找到
@@ -572,10 +729,39 @@ int qz_control_endpoint_cmd(qz_t *rt, const char *bytes, size_t len,
                                   QZ_SELF_PATH_MAX);
         if (pn > (int)rt->self_path_len) {
             uint64_t dl = uv_hrtime() + (uint64_t)timeout_ms * 1000000ULL;
+            int rc;
             qz_ctl_register(rt, correl, dl, -1, sink);
-            return ctl_forward(rt, qz_ctl_local_id(rt),
-                               p[rt->self_path_len], (const uint8_t *)bytes,
-                               (uint32_t)len);
+            rc = ctl_forward(rt, qz_ctl_local_id(rt),
+                             p[rt->self_path_len], (const uint8_t *)bytes,
+                             (uint32_t)len);
+            /* 这条早返回以前既不 free(buf) 也不 free(correl)——nested e2e 的
+             * `ctl --target-path` 每次调用漏两份。它一直没被报出来，不是因为
+             * 不漏，而是因为宿主进程是被 SIGTERM 杀掉的：LSan 只在正常退出的
+             * atexit 里跑检查，收信号直接死就一封报告都不出。「测试没报」
+             * 不等于「没漏」。 */
+            if (rc != 0) {
+                /* 转发失败**必须**当场注销回执条目并回 NOT_FOUND。原来这条早
+                 * 返回直接 return rc：条目留在表里（既没有 ctl_unregister，也
+                 * 没有 qz_ctl_conn_drop 被触发）要挂到超时 reap 才回收，而客户端
+                 * 一个回执都收不到，只能干等到自己超时——正是这批改动声称要消灭
+                 * 的静默失败，只是换了个入口。探针实测过：target_path 指向不存
+                 * 在的槽位时收到的是 5s 后的 TIMEOUT，不是 NOT_FOUND。
+                 * 与下面非 path 远端分支（NOT_FOUND 那段）保持一致。 */
+                ctl_unregister(rt, correl);
+                char err[192];
+                int n = snprintf(err, sizeof err,
+                                 "{\"ctl\":true,\"correl\":\"%s\",\"ok\":false,"
+                                 "\"error\":\"no such target on path\","
+                                 "\"code\":\"NOT_FOUND\"}",
+                                 correl ? correl : "");
+                if (n > 0 && (size_t)n < sizeof err)
+                    qz_ctl_conn_write(sink, err, (size_t)n);
+            }
+            free(buf);
+            free(op);
+            free(correl);
+            /* NOT_FOUND 帧已在本函数里写出，端点见到这个码不要再写一条。 */
+            return rc == 0 ? 0 : CTL_RC_FORWARD_DONE;
         }
     }
     free(buf);
@@ -606,7 +792,20 @@ int qz_control_endpoint_cmd(qz_t *rt, const char *bytes, size_t len,
                 qz_ctl_conn_write(sink, err, (size_t)n);
         }
     }
+    free(op);
     free(correl);
+    if (rc == 0) return 0;
+    /* 两个远端前投分支（§8.2 的 path 早返回、以及这里的非 path 远端目标）都在本地
+     * 自行写了 NOT_FOUND 帧并 ctl_unregister，所以对外**一律**报
+     * CTL_RC_FORWARD_DONE（-5），端点见到它就不再发第二帧。
+     *
+     * 这里原先是 `return rc`，而 ctl_forward 对「无此槽位」返回 -1 —— 于是端点的
+     * 兜底分支（`else if (r != 0)`）会**再发一帧 INTERNAL**，客户端对同一条命令收到
+     * 两帧。契约表里 -5 写的是「前投失败，NOT_FOUND 已写出」，但只有 path 那条分支
+     * 真兑现了。探针只测了 target_path，所以没抓到。 */
+    if (target != local) return CTL_RC_FORWARD_DONE;
+    /* 本地落地：原样透出 ctl_local_command 的 CTL_RC_ENQUEUE_FAILED，端点据此回
+     * INTERNAL 帧（入队失败不会有回执，不说就等于让客户端干等到超时）。 */
     return rc;
 }
 void qz_ctl_reap_timeouts(qz_t *rt)

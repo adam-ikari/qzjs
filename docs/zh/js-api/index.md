@@ -59,7 +59,7 @@ WinterCG 核心之外的浏览器标准 API。
 | [EventSource](/zh/js-api/event-source) | `EventSource` |
 | [CacheStorage](/zh/js-api/cache-storage) | `caches`、`CacheStorage`、`Cache` |
 | [Service Worker](/zh/js-api/service-worker) | `navigator.serviceWorker` |
-| [localStorage](/zh/js-api/storage#localstorage-sessionstorage) | `localStorage`、`sessionStorage` |
+| [localStorage](/zh/js-api/storage#localstorage--sessionstorage) | `localStorage`、`sessionStorage` |
 
 ### qzjs 平台扩展（类 Node 风格）
 

@@ -1,7 +1,7 @@
 /*
  * qzjs Core Runtime (执行模型 A)
  *
- * 宿主侧生命周期：qz_create（阻塞到内部线程/泵线程 ready）/ qz_destroy
+ * 宿主侧生命周期：qz_create（阻塞到内部线程/宿主侧线程 ready）/ qz_destroy
  * （请求主执行体退出 → join）/ qz_post_message（线程安全入站）/
  * qz_recv_message + qz_message_fd（出站邮箱消费）/ qz_free。
  * 主权原则（M-P7）：库不调用任何宿主代码——出站消息入 per-rt FIFO 邮箱，
@@ -21,15 +21,16 @@
 #include <poll.h>
 #include <unistd.h>
 #include <errno.h>
-#include <fcntl.h>
 #ifdef __linux__
 #include <sys/eventfd.h>
 #endif
 
 /* mailbox 唤醒 fd = eventfd(0, EFD_NONBLOCK|EFD_CLOEXEC)（Linux-only，CI
- * 平台即 Linux）。非 Linux 或创建失败 → 回退 pipe 对（读写端都置非阻塞，
- * 读端即 qz_message_fd；out_efd 存读端，msgq.c 对同一 fd 写——pipe 语义下
- * 写端与读端不同号，故回退路径把写降级为 no-op，宿主仅得轮询语义）。 */
+ * 平台即 Linux）。创建失败/非 Linux → 返回 -1，宿主退化为纯轮询语义（recv
+ * 的 `out_efd < 0` 分支已存在，CLI/示例均处理 fd<0）。这里绝不回退 pipe：
+ * pipe 读写端不同号，msgq.c 对 out_efd 的 write 是对读端写、根本不生效，
+ * 宿主拿到的是一个永远不会可读的「唤醒 fd」——按三步协议 poll 就死等且无
+ * 任何诊断。返回 -1 是降级但正确，假 fd 是挂死（§5.3 不静默降级）。 */
 #ifdef __linux__
 #define QZ_HAS_EVENTFD 1
 #endif
@@ -37,18 +38,10 @@
 static int qz_efd_create(void)
 {
 #ifdef QZ_HAS_EVENTFD
-    int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (fd >= 0) return fd;
+    return eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#else
+    return -1;
 #endif
-    int p[2];
-    if (pipe(p) != 0) return -1;
-    fcntl(p[0], F_SETFL, O_NONBLOCK);
-    fcntl(p[1], F_SETFL, O_NONBLOCK);
-    fcntl(p[0], F_SETFD, FD_CLOEXEC);
-    fcntl(p[1], F_SETFD, FD_CLOEXEC);
-    return p[0];   /* rt 同时记住写端？——不需要：写端与读端同号复用会断，
-                    * 故 pipe 回退下 out_efd 存读端，写端单独存 fd[1] 无位置，
-                    * 回退仅供非 Linux 编译，Linux 永不走到这里。 */
 }
 
 #ifdef QZ_DEBUG_SUPPORT
@@ -87,7 +80,11 @@ void qz_mailbox_teardown(qz_t *rt)
     qz_msg_t *m;
     while ((m = qz_out_pop(rt)) != NULL) {}
     if (rt->mq_out.head != &rt->mq_out.stub) qz_msg_free(rt->mq_out.head);
-    rt->mq_out.head = rt->mq_out.tail = &rt->mq_out.stub;
+    /* 回到 init 后的初始态（head=tail=stub 且 stub.q.next=NULL）——排干循环
+     * 只把 head 推到了尾节点，stub.q.next 仍指向链上第一个节点，而它早在
+     * 第二次 pop 时就被 free 了。不重置就是悬垂指针，二次 teardown 或任何
+     * 复检都会踩已释放内存。幂等靠状态复位，不靠调用次数门控。 */
+    qz_out_mq_init(rt);
     if (rt->out_efd >= 0) { close(rt->out_efd); rt->out_efd = -1; }
 }
 
@@ -141,9 +138,9 @@ qz_t *qz_create(const qz_config_t *config)
     uv_mutex_init(&rt->ctl_lock);
 
 #ifdef QZ_HOST_SPLIT
-    /* ── ISOLATED（M-P2/M-P7）：宿主↔主RT 进程分离 + 库自管泵线程 ──
+    /* ── ISOLATED（M-P2/M-P7）：宿主↔主RT 进程分离 + 库自管宿主侧线程 ──
      * spawn 主RT 进程 + 握手 + 阻塞 raw-fd 等 CONTROL{ready} + pre-ready 帧
-     * 入箱 + 起泵线程；失败显式返回 NULL，不降级到线程后端（§5.3）。
+     * 入箱 + 起宿主侧线程；失败显式返回 NULL，不降级到线程后端（§5.3）。
      * C API 签名不变：宿主见到的仍是一个 qz_t。 */
     if (qz_host_start(rt) != 0) {
         qz_mailbox_teardown(rt);
@@ -178,7 +175,7 @@ qz_t *qz_create(const qz_config_t *config)
 int qz_post_message(qz_t *rt, const char *json, size_t len)
 {
 #ifdef QZ_HOST_SPLIT
-    /* 入队即返回（与线程后端同语义）；泵线程装信封写通道。 */
+    /* 入队即返回（与线程后端同语义）；宿主侧线程装信封写通道。 */
     return qz_host_post(rt, json, len);
 #else
     if (!rt || rt->magic != QZ_MAGIC || !json) return -1;
@@ -211,7 +208,7 @@ void qz_wait_idle(qz_t *rt)
 void qz_destroy(qz_t *rt)
 {
 #ifdef QZ_HOST_SPLIT
-    qz_host_destroy(rt);   /* 唤醒泵线程自收主RT → join → 释放（含邮箱回收） */
+    qz_host_destroy(rt);   /* 唤醒宿主侧线程自收主RT → join → 释放（含邮箱回收） */
     return;
 #else
     if (!rt) return;
@@ -234,9 +231,9 @@ void qz_destroy(qz_t *rt)
  * Mailbox 消费 API（M-P7）——见 qzjs.h 消费协议注释
  * ================================================================ */
 
-int qz_recv_message(qz_t *rt, char **json, size_t *len, int timeout_ms)
+static int qz_recv_message_inner(qz_t *rt, char **json, size_t *len,
+                                 int timeout_ms)
 {
-    if (!rt || rt->magic != QZ_MAGIC || !json) return -1;
     int64_t deadline = timeout_ms > 0 ? qz_now_ms() + timeout_ms : 0;
     for (;;) {
         qz_msg_t *m = qz_out_pop(rt);
@@ -276,6 +273,40 @@ int qz_recv_message(qz_t *rt, char **json, size_t *len, int timeout_ms)
     }
 }
 
+/* 单消费者守卫。出站队列是 lock-free MPSC，而 qz_out_pop 的 head 是**非原子**
+ * 读写的——它成立的前提就是「只有一个消费者拥有 head」。两个线程并发弹出时，
+ * 两者会读到同一个 head、各自 free(head) 同一个节点（double free），并各自
+ * 返回同一个 next（同一条消息投递两次、另一条静默丢失）。
+ *
+ * 原来这份契约只写在头注释里，违反它没有任何东西会变红——静默的内存破坏。
+ * §5.3 要求失败可诊断，所以这里加一个 per-rt 的原子标记把它变成可诊断的 -1。
+ *
+ * per-call（进抢出放）而不是永久归属，理由是契约的措辞是「**同一时刻**只允许
+ * 一个线程」：永久归属会把「A 排干完、顺序交给 B」这种合法交接也判成违规。
+ * 一次 CAS 不是锁，不违反无锁这条。
+ *
+ * 阻塞等待期间标记是持有的——这正是「单一消费者」该有的样子：另一个线程这时
+ * 调用的结果是 -1 而不是并发弹队列。 */
+int qz_recv_message(qz_t *rt, char **json, size_t *len, int timeout_ms)
+{
+    if (!rt || rt->magic != QZ_MAGIC || !json) return -1;
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&rt->out_claim, &expected, 1, 0,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        fprintf(stderr,
+                "qz_recv_message: another thread is already consuming this "
+                "runtime's mailbox — returning -1 instead of corrupting it "
+                "(the outbound queue is lock-free MPSC with a single consumer; "
+                "two concurrent pops double-free the same node). Serialize "
+                "consumption in the host, or hand the mailbox over between "
+                "threads rather than sharing it.\n");
+        return -1;
+    }
+    int rc = qz_recv_message_inner(rt, json, len, timeout_ms);
+    __atomic_store_n(&rt->out_claim, 0, __ATOMIC_RELEASE);
+    return rc;
+}
+
 void qz_free_message(void *json)
 {
     free(json);
@@ -287,15 +318,62 @@ int qz_message_fd(qz_t *rt)
     return rt->out_efd;
 }
 
+/* 跨模型 liveness 入口（声明在 qzjs.h，两种模型都在）。THREAD 分支恒报
+ * 「不可测」而不是谎报 0——见 qzjs.h 里 QZ_PING_UNAVAILABLE 的说明。 */
+#ifndef QZ_HOST_SPLIT
+int qz_ping_if_available(qz_t *rt, int32_t timeout_ms)
+{
+    QZ_UNUSED(rt);
+    QZ_UNUSED(timeout_ms);
+    return QZ_PING_UNAVAILABLE;
+}
+
+int qz_ping_path_if_available(qz_t *rt, const int32_t *path, int path_len,
+                             int32_t timeout_ms)
+{
+    QZ_UNUSED(rt);
+    QZ_UNUSED(path);
+    QZ_UNUSED(path_len);
+    QZ_UNUSED(timeout_ms);
+    return QZ_PING_UNAVAILABLE;
+}
+#endif
+
 void  qz_free(void *ptr) {
     if (!ptr) return;
     qz_t *rt = (qz_t *)ptr;
-    /* 双角色：qz_wait_idle 后的 rt（magic 匹配且已收束）走完整回收——
-     * 邮箱排干 + 唤醒 fd 关闭 + config 缓冲；其余（qz_destroy 后的裸
-     * 兼容路径 / 非 rt 块）只释放 config 缓冲或裸 free。blob 无 magic，
-     * 绝不 deref config。 */
-    if (rt->magic == QZ_MAGIC &&
-        __atomic_load_n(&rt->thread_joined, __ATOMIC_ACQUIRE)) {
+    /* 双角色：qz_wait_idle 收束后的 rt 走完整回收——邮箱排干 + 唤醒 fd 关闭
+     * + config 缓冲；其余（qz_compile 等产出的裸 malloc 块）直接 free。
+     * blob 无 magic，绝不 deref config。 */
+    if (rt->magic == QZ_MAGIC) {
+        if (!__atomic_load_n(&rt->thread_joined, __ATOMIC_ACQUIRE)) {
+            /* 是 rt 但线程没被 join 过。直接 free 等于把仍在跑的线程脚下的结构体
+             * 抽走（UAF），比泄漏严重得多，故**什么都不碰**，只把话说清楚。
+             *
+             * 这里曾经「先做能做的部分」——排干邮箱 + 关掉 eventfd——理由是怕白扔
+             * 一个宿主 fd 槽位和整箱消息。**那是错的，两部分都不安全**：
+             *   · qz_mailbox_teardown 的契约是「join 后调用」（qz_destroy 的调用点
+             *     注释也写着「join 后无并发生产者，排干安全」），而本分支存在的全部
+             *     前提就是线程从未 join。它做的 qz_out_pop 会与生产者的
+             *     __atomic_exchange_n(&tail) + store_n(&prev->q.next) 并发：pop 到
+             *     NULL 之后还会 free(prev)，生产者手里那个 prev 就成了已释放内存，
+             *     而那条消息同时**静默丢失**——恰好是「不静默降级」最该避免的结果。
+             *   · 关 out_efd 更糟：生产者的 qz_out_link 里 write(rt->out_efd, …)。
+             *     关掉之后要么吃 EBADF，要么在 fd 号被宿主复用的情况下，**把 8 字节
+             *     写进宿主的不相关文件描述符**。那是库伸手损坏宿主拥有的东西，比泄漏
+             *     坏得多，也直接违反「宿主形态不是 qzjs 能干涉的」。
+             * 无法从 magic 之外的字段证明线程真的退出了（shutting_down 置位早于线程
+             * return），所以「线程可能还在跑」必须当成默认假设。要真正回收，宿主得
+             * 走 qz_destroy（它会 join）或先 qz_wait_idle。 */
+            fprintf(stderr,
+                    "qz_free: runtime's thread was never joined — the runtime, its "
+                    "mailbox and its wake fd are all left untouched (freeing them "
+                    "would race with a still-running thread; that is a use-after-free "
+                    "at best and could write into an unrelated host fd at worst). "
+                    "Call qz_wait_idle(rt) then qz_free(rt), or qz_destroy(rt), to "
+                    "release it.\n");
+            return;
+        }
         qz_mailbox_teardown(rt);
         free((void *)rt->config.initial_script);
         free((void *)rt->config.initial_bytecode);
@@ -429,7 +507,7 @@ int qz_runtime_init(qz_t *rt)
      * 作用域语义（A4 多上下文断点）：DAP 走 stdio 单通道，一个进程只有一份
      * stdin/stdout，无法同时服务两个 runtime 的协议会话。因此 worker 运行时
      * （rt->worker_self != NULL，独立线程 + 独立 JSRuntime）不 auto-attach——
-     * 否则它会与父 runtime 竞争读同一 stdin（父的 configure/on_stopped pump
+     * 否则它会与父 runtime 竞争读同一 stdin（父的 configure/on_stopped 循环
      * 会吞掉 worker 的协议消息 → 死锁/错乱）。结果：断点只作用于 attach 的
      * 那个 runtime 的 source 文件执行；父 runtime 设的断点不影响 worker。 */
     {
@@ -664,5 +742,6 @@ void qz_thread_teardown(qz_t *rt)
      * 所以必须 walk-close 而非只关 wake）。 */
     uv_walk(&rt->loop, qz_close_walk_cb, NULL);
     uv_run(&rt->loop, UV_RUN_NOWAIT);
-    uv_loop_close(&rt->loop);
+    qz_close_loop(&rt->loop);
+    /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
 }

@@ -26,7 +26,14 @@ static void host_drain(qz_t *rt, int timeout_ms) {
         char *json = NULL;
         size_t len = 0;
         int r = qz_recv_message(rt, &json, &len, timeout_ms);
-        if (r != 0) break;          /* 1 = 窗口内无消息；-1 = 错误 */
+        /* 三态必须分开看：0 = 取到；1 = 窗口内无消息（正常收工）；
+         * -1 = 参数/状态错误。把 -1 和 1 一起 break 等于把错误当「没消息了」，
+         * 宿主会安静地少处理消息却以为一切正常。 */
+        if (r < 0) {
+            fprintf(stderr, "[host] qz_recv_message 失败（参数或状态错误）\n");
+            break;
+        }
+        if (r == 1) break;           /* 窗口内无消息 */
         printf("[host] 收到 JS 消息: %.*s\n", (int)len, json);
         qz_free_message(json);
         timeout_ms = 0;             /* 首条已到 → 余下的纯排干 */
@@ -59,7 +66,13 @@ int main(void) {
     /* 宿主 → JS */
     const char *ping = "{\"cmd\":\"ping\"}";
     printf("[host] 发消息给 JS: %s\n", ping);
-    qz_post_message(rt, ping, strlen(ping));
+    /* 投递失败要报错而不是继续等：host_drain 有窗口上限，失败后你会看到
+     * 「什么都没收到」，看不出是消息没发出去。 */
+    if (qz_post_message(rt, ping, strlen(ping)) != 0) {
+        fprintf(stderr, "[host] qz_post_message 失败（OOM 或长度非法）\n");
+        qz_destroy(rt);
+        return 1;
+    }
 
     /* 等 JS 回包 */
     host_drain(rt, 1000);

@@ -2,7 +2,7 @@
 slug: flow
 title: Key flows
 role: key flows
-updated: "2026-09-28T17:20:25"
+updated: "2026-09-29T04:54:53"
 ---
 
 # Key flows
@@ -12,7 +12,7 @@ updated: "2026-09-28T17:20:25"
 ```mermaid
 sequenceDiagram
   participant H as Host C
-  participant Q as qzjs 自管线程(泵/运行时)
+  participant Q as qzjs 自管线程(驱动/运行时)
   participant L as libuv(库自有 loop)
   participant J as QuickJS runtime
   participant M as 邮箱(host 方向队列)
@@ -30,10 +30,10 @@ sequenceDiagram
   Q->>L: uv_stop + join（终止预算冻结在库线程）
 ```
 
-**M-P7 已落地（现状）**：本图即实现语义。ISOLATED 下库自建宿主侧泵线程+loop，host 方向全部消息
+**M-P7 已落地（现状）**：本图即实现语义。ISOLATED 下库自建宿主侧线程+loop，host 方向全部消息
 （JS postMessage、崩溃 {"type":"error"}、CONTROL 回执）入 per-rt FIFO 邮箱，宿主 qz_recv_message
-（0 取到/1 超时/-1 错）消费或挂 qz_message_fd 唤醒 fd 进自身事件系统；三级终止 ≤2s 冻结落在库泵
-线程、调用线程只 join。M-P6 的 cfg.uv_loop 注入 + message_cb 在泵线程触发 + 阻塞 API 就地 NOWAIT 泵
+（0 取到/1 超时/-1 错）消费或挂 qz_message_fd 唤醒 fd 进自身事件系统；三级终止 ≤2s 冻结落在库自有
+线程、调用线程只 join。M-P6 的 cfg.uv_loop 注入 + message_cb 在宿主驱动该 loop 的线程上触发 + 阻塞 API 就地 NOWAIT 驱动
 契约已整体废除（见 [[multi-process-model]]）。
 
 ## Other important flows
