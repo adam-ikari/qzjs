@@ -589,23 +589,15 @@ if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/
         "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c")
 else()
     set(_polyfill_rebuild_enabled FALSE)
-    # 非 rodata 模式没有 tracked 基线：工具链缺失且产物还没生成时直接配置失败，
-    # 否则只会在编译期冒出一句看不出原因的 "Cannot find source file"。
-    if(NOT _polyfill_mode STREQUAL "rodata"
-       AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}")
-        message(FATAL_ERROR
-            "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain: "
-            "${_polyfill_gen_c} is generated, untracked, and absent. "
-            "Run `npm --prefix polyfill ci` (creates node_modules/esbuild), then re-configure.")
-    endif()
-    if(QZ_WITH_GRPC)
-        message(WARNING "QZ_WITH_GRPC=ON but polyfill toolchain missing; gRPC stack will NOT be embedded")
-    endif()
-    add_custom_target(polyfill_rebuild
-        COMMAND ${CMAKE_COMMAND} -E echo "polyfill_rebuild: skipped (esbuild/node_modules missing — using pre-generated ${_polyfill_gen_c})"
-        VERBATIM
-    )
-    message(STATUS "Polyfill rebuild DISABLED — esbuild/node_modules not found; using pre-generated ${_polyfill_gen_c}. Run `npm --prefix polyfill ci` then re-configure to enable.")
+    # 内嵌字节码（src/polyfill_default.c / src/worker_boot_default.c）是纯构建
+    # 产物，不 committed（见 .gitignore）。因此**所有**模式——含 rodata——都
+    # 需要 polyfill 工具链在构建期生成它；工具链缺失时直接配置失败，否则只会在
+    # 编译期冒出一句看不出原因的 "Cannot find source file"。
+    message(FATAL_ERROR
+        "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain: the "
+        "embedded bytecode is a build product and is not committed. "
+        "Run `npm --prefix polyfill ci` (installs node_modules/esbuild) and make "
+        "sure npm is on PATH, then re-configure.")
 endif()
 
 # fuzz 语料种子：随字节码一起变成构建产物。内嵌的 polyfill / worker-boot

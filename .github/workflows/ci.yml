@@ -32,6 +32,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -93,6 +99,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -128,6 +140,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -158,6 +176,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -313,6 +337,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -352,6 +382,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure (ASan)
         run: |
           cmake -B build -G Ninja \
@@ -448,6 +484,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build clang
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure (UBSan)
         run: |
           cmake -B build -G Ninja \
@@ -506,6 +548,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure (Release)
         run: |
           cmake -B build -G Ninja \
@@ -781,6 +829,8 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure (Release, real-libuv CLI)
         run: |
           cmake -B build -G Ninja \
@@ -1205,6 +1255,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build lcov
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure (Coverage)
         run: |
           cmake -B build -G Ninja \
@@ -1251,6 +1307,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -1310,6 +1368,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -1342,6 +1406,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build clang-tidy
 
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
       - name: Configure (clang-tidy)
         run: |
           cmake -B build -G Ninja \
@@ -1388,12 +1458,11 @@ jobs:
       - name: Build quickjs-ng (instrumented)
         run: cmake --build build --target qjs --parallel
 
-      # 「字节码前缀」那四个种子是构建产物（见 test/gen_fuzz_seeds.py）：本 job
-      # 只构建 qjs（不构建 qzjs），挂在 qzjs 上的种子依赖不会触发，这里显式生成。
-      # 语料取自 committed 的 dist/*.bytecode（本 job 不跑 polyfill 工具链，字节码
-      # 是仓库基线），让 replay / fuzz 拿到真实字节码结构当变异起点。
-      - name: Generate fuzz corpus seeds from baseline bytecode
-        run: cmake --build build --target fuzz_seeds_gen
+      # 注：本 job 只构建插桩的 qjs（不构建 qzjs），不跑 polyfill 工具链，因此
+      # 没有内嵌字节码可用来生成「字节码前缀」种子（那些种子已随字节码改为构建
+      # 产物，见 test/gen_fuzz_seeds.py）。此处语料为 committed 的 crash/oom 回归
+      # 种子——它们是真实发现过的崩溃/OOM 输入，与字节码无关，仍是有效语料。
+      # 真实字节码结构的变异起点由构建 qzjs 的 job 侧（fuzz_seeds_gen）覆盖。
 
       - name: Build harness (inline, links the instrumented libqjs.a)
         run: |
