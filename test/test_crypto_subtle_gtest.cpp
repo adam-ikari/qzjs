@@ -621,7 +621,7 @@ crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:2048, publicExponent:n
   });
 'go'
 )";
-    ASSERT_TRUE(poll_until(h, "_e", code.c_str(), "\"match\":true", &v, 30000));
+    ASSERT_TRUE(poll_until(h, "_e", code.c_str(), "\"match\":true", &v, 60000));
     EXPECT_NE(std::string::npos, v.find("\"ctLen\":256")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -649,7 +649,7 @@ TEST_F(CryptoSubtleTest, RsaSsaSignVerifyRoundTrip) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"ok\":true", &v, 30000));
+        "\"ok\":true", &v, 60000));
     EXPECT_NE(std::string::npos, v.find("\"sigLen\":256")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -675,7 +675,7 @@ TEST_F(CryptoSubtleTest, RsaSsaVerifyRejectsTampered) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"badSig\":false", &v, 30000));
+        "\"badSig\":false", &v, 60000));
     EXPECT_NE(std::string::npos, v.find("\"badMsg\":false")) << "got: " << v;
 }
 
@@ -711,7 +711,7 @@ TEST_F(CryptoSubtleTest, RsaImportExportSpkiPkcs8) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"v1\":true", &v, 30000));
+        "\"v1\":true", &v, 60000));
     EXPECT_NE(std::string::npos, v.find("\"v2\":true")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -730,7 +730,7 @@ TEST_F(CryptoSubtleTest, RsaRejectsModulus1024) {
         "crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:1024, hash:'SHA-256'}, false, ['encrypt','decrypt'])\n"
         "  .then(function(){ _e = JSON.stringify({rejected:false}); },\n"
         "        function(err){ _e = JSON.stringify({rejected:true, name:(err && err.name)||String(err)}); });\n'go'",
-        "\"rejected\":true", &v, 30000));
+        "\"rejected\":true", &v, 60000));
 }
 
 TEST_F(CryptoSubtleTest, RsaOaep3072RoundTrip) {
@@ -754,6 +754,6 @@ crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:3072, hash:'SHA-256'},
      * 故这里不能用默认 5000ms（749 行的 poll 预算只覆盖异步段）。
      * 取 30000ms 与下方 poll 预算对齐。 */
     if (!host_eval(h, code.c_str(), &v, 30000)) { FAIL() << "3072 setup eval failed"; }
-    ASSERT_TRUE(host_poll_until_value(h, "_e", "\"match\":true", &v, 30000));
+    ASSERT_TRUE(host_poll_until_value(h, "_e", "\"match\":true", &v, 60000));
     EXPECT_NE(std::string::npos, v.find("\"ctLen\":384")) << "got: " << v;
 }

@@ -1448,6 +1448,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config ninja-build clang
 
+      # rodata 字节码现已 untracked，configure 阶段对**所有**模式要求 polyfill
+      # 工具链（FATAL 若缺）。本 job 只构建插桩 qjs、不构建 qzjs，字节码用不到，
+      # 但仍需工具链让 configure 过。npm ci 装好即可——构建只 --target qjs 不触发
+      # 字节码生成（polyfill 自定义命令是 qzjs 的依赖，qjs 不沾）。
+      - name: Install Node (polyfill toolchain — configure gate)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
+
       - name: Configure (clang, fuzzer + ASan instrumentation)
         run: |
           cmake -B build -G Ninja \
