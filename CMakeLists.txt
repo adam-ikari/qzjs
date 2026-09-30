@@ -589,15 +589,24 @@ if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/
         "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c")
 else()
     set(_polyfill_rebuild_enabled FALSE)
-    # 内嵌字节码（src/polyfill_default.c / src/worker_boot_default.c）是纯构建
-    # 产物，不 committed（见 .gitignore）。因此**所有**模式——含 rodata——都
-    # 需要 polyfill 工具链在构建期生成它；工具链缺失时直接配置失败，否则只会在
-    # 编译期冒出一句看不出原因的 "Cannot find source file"。
-    message(FATAL_ERROR
-        "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain: the "
-        "embedded bytecode is a build product and is not committed. "
-        "Run `npm --prefix polyfill ci` (installs node_modules/esbuild) and make "
-        "sure npm is on PATH, then re-configure.")
+    # 内嵌字节码是纯构建产物（不 committed，见 .gitignore），构建 qzjs 需要 polyfill
+    # 工具链现场生成。工具链缺失时**不在 configure 期报错**——字节码是 qzjs target
+    # 的依赖，而不是 configure 的前提：只构建 qjs 的 job（如 fuzz-smoke）根本用不到
+    # 字节码，让它在 configure 就 FATAL 会误伤这类 job。改为声明一条「生成即失败」
+    # 的 OUTPUT 规则：configure 照常通过；真去构建 qzjs 时这条命令才跑，并给出可操作
+    # 提示（而不是编译期那句看不懂的 "Cannot find source file"）。
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
+               "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c"
+        COMMAND ${CMAKE_COMMAND} -E echo
+                "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain to build qzjs: the embedded bytecode is a build product and is not committed. Run `npm --prefix polyfill ci` (installs node_modules/esbuild) and make sure npm is on PATH, then re-configure."
+        COMMAND ${CMAKE_COMMAND} -E false
+        VERBATIM
+    )
+    add_custom_target(polyfill_rebuild DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c")
+    message(STATUS "Polyfill toolchain NOT found (npm / node_modules/esbuild / qjsc.c missing) — configure OK; building qzjs will fail with an actionable message. Only 'qjs'-only builds (e.g. fuzz-smoke) are unaffected.")
 endif()
 
 # fuzz 语料种子：随字节码一起变成构建产物。内嵌的 polyfill / worker-boot
