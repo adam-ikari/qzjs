@@ -20,11 +20,14 @@ protected:
 };
 
 // 异步执行 code（结果写全局 var），轮询直到 var 的 JSON 值包含 expected。
+// timeout_ms 默认 5s；RSA 类用例在 ASan/UBSan 仪器化下 keygen+往返远超此值
+// （mbedtls 3.6.7 起 RSA 解密走常量时间路径，更慢），故允许逐例放宽。
 static bool poll_until(HostCtx *h, const char *var, const char *code,
-                       const char *expected, std::string *out) {
+                       const char *expected, std::string *out,
+                       int timeout_ms = 5000) {
     std::string v;
-    if (!host_eval(h, code, &v)) return false;
-    return host_poll_until_value(h, var, expected, out);
+    if (!host_eval(h, code, &v, timeout_ms)) return false;
+    return host_poll_until_value(h, var, expected, out, timeout_ms);
 }
 
 // ================================================================
@@ -618,7 +621,7 @@ crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:2048, publicExponent:n
   });
 'go'
 )";
-    ASSERT_TRUE(poll_until(h, "_e", code.c_str(), "\"match\":true", &v));
+    ASSERT_TRUE(poll_until(h, "_e", code.c_str(), "\"match\":true", &v, 30000));
     EXPECT_NE(std::string::npos, v.find("\"ctLen\":256")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -646,7 +649,7 @@ TEST_F(CryptoSubtleTest, RsaSsaSignVerifyRoundTrip) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"ok\":true", &v));
+        "\"ok\":true", &v, 30000));
     EXPECT_NE(std::string::npos, v.find("\"sigLen\":256")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -672,7 +675,7 @@ TEST_F(CryptoSubtleTest, RsaSsaVerifyRejectsTampered) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"badSig\":false", &v));
+        "\"badSig\":false", &v, 30000));
     EXPECT_NE(std::string::npos, v.find("\"badMsg\":false")) << "got: " << v;
 }
 
@@ -708,7 +711,7 @@ TEST_F(CryptoSubtleTest, RsaImportExportSpkiPkcs8) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"v1\":true", &v));
+        "\"v1\":true", &v, 30000));
     EXPECT_NE(std::string::npos, v.find("\"v2\":true")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -727,7 +730,7 @@ TEST_F(CryptoSubtleTest, RsaRejectsModulus1024) {
         "crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:1024, hash:'SHA-256'}, false, ['encrypt','decrypt'])\n"
         "  .then(function(){ _e = JSON.stringify({rejected:false}); },\n"
         "        function(err){ _e = JSON.stringify({rejected:true, name:(err && err.name)||String(err)}); });\n'go'",
-        "\"rejected\":true", &v));
+        "\"rejected\":true", &v, 30000));
 }
 
 TEST_F(CryptoSubtleTest, RsaOaep3072RoundTrip) {
