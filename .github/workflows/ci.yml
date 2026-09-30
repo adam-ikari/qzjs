@@ -1053,13 +1053,15 @@ jobs:
       - name: Docs internal links and anchors
         run: python3 test/docs_link_check.py
 
-      # fuzz 语料里的 seed-polyfill-head*.bc / seed-workerboot.bc 定义是「仓库自己那份
-      # 字节码的头 N 字节」。字节码会随 quickjs patch 与 polyfill 改动而变，语料不会
-      # 自动跟着变；漂移后它们仍能喂给 JS_ReadObject、重放门也不报错，但 fuzz 的 60 秒
-      # 预算是在一个已不存在的字节码形态附近做变异。核对时发现 HEAD 上那四个已经与
-      # src/*_default.c 对不上（头 4 字节 1b99c2fa / 1bbc192a vs 真实 1cb7bf5b /
-      # 1c7ae3a5），工作区里重新生成的版本才对得上——所以既有漂移也有修复。
-      - name: Fuzz corpus seeds still match the tracked bytecode
+      # fuzz 语料里的 seed-polyfill-head*.bc / seed-workerboot.bc 是「构建产出的
+      # 字节码（dist/*.bytecode）的头 N 字节」，现已改为**随构建重新生成**
+      # （test/gen_fuzz_seeds.py，挂 qzjs 的 fuzz_seeds_gen 目标；本 job 走 qzjs
+      # 默认 target 故自动触发）。它们曾 committed，但内嵌字节码由 qjsc 构建期
+      # 生成且逐位不可复现（同源码两次构建可有数字节差异），committed 种子永远
+      # 匹配不上某次构建的字节码——这道门因此恒红。现种子与字节码同批生成，门恒
+      # 成立，同时仍守住真正要防的事：种子必须是内嵌字节码的真实前缀，fuzz 的 60
+      # 秒预算才是在真实字节码结构附近变异，而非一个已不存在的形态。
+      - name: Fuzz corpus seeds match the built bytecode
         run: python3 test/fuzz_corpus_align_check.py
 
       # 公共头声明面 vs 实际链接面。「声明了但某个编译模型下没有实现」是最难查
@@ -1385,6 +1387,13 @@ jobs:
 
       - name: Build quickjs-ng (instrumented)
         run: cmake --build build --target qjs --parallel
+
+      # 「字节码前缀」那四个种子是构建产物（见 test/gen_fuzz_seeds.py）：本 job
+      # 只构建 qjs（不构建 qzjs），挂在 qzjs 上的种子依赖不会触发，这里显式生成。
+      # 语料取自 committed 的 dist/*.bytecode（本 job 不跑 polyfill 工具链，字节码
+      # 是仓库基线），让 replay / fuzz 拿到真实字节码结构当变异起点。
+      - name: Generate fuzz corpus seeds from baseline bytecode
+        run: cmake --build build --target fuzz_seeds_gen
 
       - name: Build harness (inline, links the instrumented libqjs.a)
         run: |

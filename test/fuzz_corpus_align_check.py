@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
-"""fuzz 语料与仓库真实字节码的对齐门。
+"""fuzz 语料与内嵌字节码的对齐门。
 
 ## 为什么需要这道门
 
 `test/fuzz-corpus/` 里那几个 `seed-polyfill-head{4k,8k,64k}.bc` /
-`seed-workerboot.bc` 的定义是「**仓库自己那份**字节码的头 N 字节」——真实
-polyfill 字节码在 `src/polyfill_default.c` 的 .rodata 里，worker boot 字节码在
-`src/worker_boot_default.c` 里，两者都是 tracked 的构建产物。
+`seed-workerboot.bc` 的语义是「**仓库内嵌的那份**字节码的头 N 字节」——polyfill
+字节码在 `src/polyfill_default.c` 的 .rodata 里，worker boot 字节码在
+`src/worker_boot_default.c` 里。
 
-问题在于：字节码会随 quickjs 的 patch、polyfill 的改动而变，而**语料不会自动跟着
-变**。一旦漂移，这几个 seed 就不再代表任何真实字节码了：它们仍然能喂给
-`JS_ReadObject`、仍然不会让重放门报错，但 fuzz 的 60 秒预算是在一个**已经不存在的
-字节码形态**附近做变异——正是 libFuzzer seeded run 最不该发生的事（CI 注释自己写着
-「so the 60 s budget spends its time mutating around known-interesting shapes
+这几个种子现在是**构建产物**（`test/gen_fuzz_seeds.py`，CMake 的
+`fuzz_seeds_gen` 目标，随字节码重新生成），不再是 committed 文件。原因：内嵌
+字节码由 qjsc 在构建期生成，且**逐位不可复现**——同一份 polyfill 源码、同样的
+patch 与配置，两次构建的字节码可以差几个字节。曾经这四个 seed 是 committed 的，
+而字节码是构建产物且不可复现，于是 committed 的前缀种子永远匹配不上某次 CI 构建
+的字节码，这道门恒红（seed 比真实字节码还长，或第 1 字节就不同）。
+
+## 这道门现在守什么
+
+生成环节（`gen_fuzz_seeds.py`）已保证种子来自当次构建的 `dist/*.bytecode`；本门
+再校验它们确实是**内嵌进库的那份**字节码的真实前缀——即 rodata 模式下
+`src/*_default.c` 的前缀。两者一旦脱节（生成读错了源、字节码被换掉而种子没重
+生成），门就红。
+
+真正要防的事没变：种子必须代表内嵌字节码的真实结构，否则 fuzz 的 60 秒预算是
+在一个**已不存在的字节码形态**附近做变异——正是 libFuzzer seeded run 最不该
+发生的（CI 注释自己写着「spends its time mutating around known-interesting shapes
 rather than rediscovering the container format from scratch」）。
 
-这不是假想：核对时发现 HEAD 上那四个 seed 与 `src/*_default.c` **对不上**（头 4 字节
-分别是 1b99c2fa / 1bbc192a，而仓库真实的是 1cb7bf5b / 1c7ae3a5），工作区里重新生成
-的版本才对得上。也就是说这道门要抓的漂移**已经发生过一次**，只是没人有判据去发现。
+对每个 seed：它的**全部字节**必须等于对应 `src/*_default.c` 里那段字节码的同长
+前缀。比 4 字节强得多，也不依赖任何魔数。
 
-## 判据
+不是前缀的 seed（`seed-crash-*.bin` / `seed-oom-*.bin` / 那些哈希名文件）不在本门
+范围——它们是 fuzz 发现的输入，与真实字节码无对应关系，由 CI 的重放门负责。
 
-对每个 seed：它的**全部字节**必须等于对应 `src/*_default.c` 里那段字节码的同长前缀。
-比 4 字节强得多，也不依赖任何魔数。
-
-不是前缀的 seed（`seed-crash-*.bin` / `seed-oom-*.bin` / 那些哈希名文件）不在本门范围
-——它们是 fuzz 发现的输入，与真实字节码无对应关系，由 CI 的重放门负责。
 
 用法：python3 test/fuzz_corpus_align_check.py     # 退出码 1 = 有 seed 已漂移
 """

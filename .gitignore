@@ -30,6 +30,14 @@ src/polyfill_compressed.c
 src/polyfill_external.c
 src/polyfill_host.c
 
+# fuzz 语料里「字节码前缀」那四个种子是内嵌字节码的派生产物，随构建重新生成
+# （test/gen_fuzz_seeds.py，CMake 的 fuzz_seeds_gen 目标）：内嵌字节码由 qjsc 在
+# 构建期生成且逐位不可复现，committed 的前缀种子无法稳定匹配任一次构建的字节码，
+# 对齐门（fuzz_corpus_align_check.py）因此恒红。crash/oom/哈希名那些是 fuzz 发现
+# 的历史输入，与字节码无对应关系，仍 committed。
+test/fuzz-corpus/seed-polyfill-head*.bc
+test/fuzz-corpus/seed-workerboot.bc
+
 # Node.js
 node_modules/
 package-lock.json

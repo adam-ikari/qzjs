@@ -608,6 +608,34 @@ else()
     message(STATUS "Polyfill rebuild DISABLED — esbuild/node_modules not found; using pre-generated ${_polyfill_gen_c}. Run `npm --prefix polyfill ci` then re-configure to enable.")
 endif()
 
+# fuzz 语料种子：随字节码一起变成构建产物。内嵌的 polyfill / worker-boot
+# 字节码是 qjsc 构建期生成的，且逐位不可复现（同源码两次构建可有数字节差异），
+# 所以 committed 的「字节码前缀」种子永远无法稳定匹配某次构建的字节码——对齐门
+# （test/fuzz_corpus_align_check.py）因此恒红。改为从构建产出的原始字节码
+# （dist/*.bytecode，raw；compressed 模式下 C 数组是压缩的，故不用 C 数组）生成。
+# 依赖 src/${_polyfill_gen_c}（polyfill 命令的 OUTPUT）保证顺序：build.js 先写
+# dist 字节码再写 C 数组，该文件变新即触发本命令。工具链缺失时（else 分支）产物
+# 是 committed 基线，命令仍能跑（只依赖已存在的 dist/*.bytecode）。
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus/seed-polyfill-head4k.bc"
+               "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus/seed-polyfill-head8k.bc"
+               "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus/seed-polyfill-head64k.bc"
+               "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus/seed-workerboot.bc"
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/gen_fuzz_seeds.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/dist" "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/test/gen_fuzz_seeds.py"
+        COMMENT "Generating fuzz corpus seeds from built bytecode"
+        VERBATIM
+    )
+    add_custom_target(fuzz_seeds_gen DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus/seed-workerboot.bc")
+else()
+    message(WARNING "python3 not found — fuzz corpus seeds will not be regenerated at build time")
+endif()
+
 # ============================================================================
 # WAMR dependency (default WASM engine) — built from source via add_subdirectory
 # ============================================================================
@@ -750,6 +778,13 @@ endif()
 
 
 add_library(qzjs STATIC ${_qz_core_sources})
+
+# fuzz 语料种子是字节码的派生产物：qzjs 一旦链接就带上了那份字节码，种子必须与
+# 它同批生成，否则对齐门拿旧种子比新字节码。挂在 qzjs 上让每个构建 qzjs 的 job
+# 都自动刷新种子（内嵌字节码变了，种子跟着变）。
+if(Python3_Interpreter_FOUND)
+    add_dependencies(qzjs fuzz_seeds_gen)
+endif()
 
 # ISOLATED 编译的定义（源码 #if 选择的唯一依据）。PUBLIC：消费者（含 qzjs-rt 与
 # 宿主二进制）必须与库看到同一宏——include/qzjs/qzjs.h 的 worker_backend 枚举值
