@@ -26,11 +26,13 @@ QPID=""
 # 所有 setsid 起的 qzjs 宿主进程登记到此（各即进程组号）：cleanup 组杀只碰
 # 本测试的组，不再用 pkill -f 全机匹配（避免误杀并行 e2e / 无关 qzjs-rt）。
 # qzjs 子进程（mainRT/worker/孙）不自行 setsid，留在宿主组内，组杀全覆盖。
-GROUPS=()
-mark_group() { [ -n "$1" ] && GROUPS+=("$1"); }
+# 注意：数组名不可用 GROUPS —— 那是 bash 特殊变量（当前用户组列表），赋值/追加
+# 会失败，在 set -u 下让 mark_group 中止函数、连带 start_tree 提前退出。
+HOST_PIDS=()
+mark_group() { [ -n "$1" ] && HOST_PIDS+=("$1"); }
 cleanup() {
   local g
-  for g in "${GROUPS[@]:-}"; do
+  for g in "${HOST_PIDS[@]:-}"; do
     [ -n "$g" ] && kill -KILL -- -"$g" 2>/dev/null
   done
   rm -rf "$FIX"
