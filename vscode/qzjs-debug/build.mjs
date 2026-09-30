@@ -1,7 +1,7 @@
 // qzjs-debug build script — zero-config esbuild-free bundling via Bun.
 // The adapter + extension are plain CommonJS; we just copy/transpile to out/.
 import { build } from "esbuild";
-import { mkdirSync, cpSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 
 mkdirSync("out", { recursive: true });
 
@@ -15,5 +15,4 @@ await build({
   sourcemap: true,
 });
 
-cpSync("testdata", "out/testdata", { recursive: true });
 console.log("built out/");
