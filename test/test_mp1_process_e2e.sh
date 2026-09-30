@@ -30,9 +30,9 @@ if [ ! -x "$AM" ]; then
 fi
 
 # Clean any stale temp files so the C1 leak check is meaningful.
-# 用真实落盘前缀（src/rt_host.c mkstemp template：qzjs-rt-script-*）。
-# 旧写法 /tmp/qzjs-worker-* 配不上任何文件，C1 泄漏检查成了空操作。
-rm -f /tmp/qzjs-rt-script-*
+# C1 泄漏检查的正是 worker 脚本临时文件：polyfill/worker.js ProcessWorker()
+# 写 /tmp/qzjs-worker-<id>.js，子进程读后自 unlink；被杀则残留。
+rm -f /tmp/qzjs-worker-*
 
 # ── Phase 1: graceful round-trip + terminate ──
 OUT1="$(timeout 20 "$AM" "$FIX/main-mp1.js" 2>&1)"
@@ -91,9 +91,9 @@ if pgrep -g "$PARENT" qzjs-rt >/dev/null; then
 fi
 
 # Temp-file leak check (C1): the child unlinks its script after reading.
-if ls /tmp/qzjs-rt-script-* >/dev/null 2>&1; then
+if ls /tmp/qzjs-worker-* >/dev/null 2>&1; then
   echo "FAIL: temp script files leaked:"
-  ls /tmp/qzjs-rt-script-*
+  ls /tmp/qzjs-worker-*
   exit 1
 fi
 
