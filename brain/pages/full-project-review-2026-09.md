@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-09-23T05:50:15"
+updated: "2026-09-30T03:24:16"
 ---
 
 <!-- compiled_truth -->
@@ -75,4 +75,9 @@ updated: "2026-09-23T05:50:15"
 - time: 2026-09-23T05:50:15
   kind: decision
   summary: "P0 全部 8 项落地并验证：README 长度 23→26、pkg-config -lam→真实 target、test_cli_gtest 注册（首次真实运行 9/9）、sidebar /c-api/eval 双死链删除、SECURITY.md 新建、serve() 默认 127.0.0.1（实测只绑回环）、cli.c 五处 malloc 判空、WS MAX_WS_BUFFER 16MiB + 1009 关闭（新增 2 个回归用例，禁用 guard 时确实失败）。另修复改名漏改类 bug：6 个 python 脚本 args.qz_bin→args.qzjs_bin。"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-09-30T03:24:16
+  kind: evidence
+  summary: "P1 全部 6 子项落地并验证（5 commits，213302c1..c5445ada）：①CI 治理——ci.yml 顶层加 permissions(contents:read)+concurrency(cancel-in-progress)，24 job 逐个 timeout-minutes，新增 profile-minimal job(QZ_PROFILE=minimal 此前 CI 零覆盖)；②release 治理——v0.2.0 annotated tag 指向发布点 afdccc72、THIRD_PARTY_NOTICES.md 列 8 个 vendored 依赖 pinned SHA+SPDX+patch 声明；③覆盖率——docs/dev/testing.md 加 'Coverage Scope — Uncovered-by-Design' 清单，6 个多进程模块(经 QZ_BUILD_TESTS=ON mock 构建排除)标注为何 mock 出+哪条 e2e 把关(设计非缺口)；④e2e 收敛——test_ctl/nested/mp1/mp2/mr2 五脚本全局 pkill/pgrep/rm 全收敛到进程组(setsid 起宿主+GROUPS 数组+pgrep -g+zombies() 限组)，顺带修 mp1 一处 stale 泄漏检查(/tmp/qzjs-worker-* 配不上实际落盘的 qzjs-rt-script-*，检查曾是空操作)；⑤mbedtls 3.6.6→3.6.7(CVE-2026-50587 RSA 时序)+ polyfill 新增 timingSafeEqual 接入 HMAC verify；⑥sitemap srcExclude 09-23 前已落地。验证：5 脚本 bash -n 全过、无残留全局 kill/pgrep、mbedtls 3.6.7 重编 165/165+TLS smoke、HMAC verify 四态全对。注：本机多进程 e2e 因既有 spawnWorker failed(err -9)(ISOLATED worker spawn 本身问题，基线对照改动前后同样失败)无法端到端跑，非本次引入。"
   affects: [full-project-review-2026-09]
