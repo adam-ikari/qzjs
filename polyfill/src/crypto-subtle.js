@@ -57,6 +57,18 @@ function installCryptoSubtle(pal) {
   function toArrayBuffer(u8) {
     return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
   }
+  /* Constant-time byte-array equality for secret-derived data (HMAC tags,
+   * future verify sites). Accumulates XOR over every byte so the comparison
+   * cost does not reveal the position of the first difference. Length is not
+   * secret, so a length mismatch returns false immediately. */
+  function timingSafeEqual(a, b) {
+    if (a.length !== b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff === 0;
+  }
 
   /* 各算法允许的 key usages（WebCrypto 规范） */
   var USAGE_MAP = {
@@ -347,12 +359,7 @@ function installCryptoSubtle(pal) {
           this.sign(algorithm, key, data).then(function(computed) {
             var sig = toUint8Array(signature);
             var comp = new Uint8Array(computed);
-            if (sig.length !== comp.length) { resolve(false); return; }
-            var diff = 0;
-            for (var i = 0; i < sig.length; i++) {
-              diff |= sig[i] ^ comp[i];
-            }
-            resolve(diff === 0);
+            resolve(timingSafeEqual(sig, comp));
           }, reject);
           return;
         }
