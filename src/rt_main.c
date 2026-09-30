@@ -498,6 +498,7 @@ int main(int argc, char **argv)
     int parent_fd = -1;
     int worker_id = 0;
     const char *script_path = NULL;
+    int script_stdin = 0;   /* --script-stdin：源码来自管道（--parent-fd），零落盘 */
     const char *bytecode_path = NULL;   /* --bytecode：预编译初始字节码 */
     int is_server = 0;          /* M-P2：主RT serve 形态 */
     int is_worker = 0;
@@ -527,6 +528,8 @@ int main(int argc, char **argv)
                 fprintf(stderr, "qzjs-rt: bad --worker-backend: %s\n", wb);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--script-stdin") == 0) {
+            script_stdin = 1;
         } else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
             script_path = argv[++i];
         } else if (strcmp(argv[i], "--bytecode") == 0 && i + 1 < argc) {
@@ -557,15 +560,31 @@ int main(int argc, char **argv)
     if ((!is_worker && !is_server) || (is_worker && is_server) || parent_fd < 0) {
         fprintf(stderr,
                 "qzjs-rt: usage:\n"
-                "  qzjs-rt --qzjs-worker    --parent-fd N --worker-id K [--script PATH]\n"
-                "  qzjs-rt --qzjs-rt-server --parent-fd N [--script PATH]"
+                "  qzjs-rt --qzjs-worker    --parent-fd N --worker-id K [--script-stdin | --script PATH]\n"
+                "  qzjs-rt --qzjs-rt-server --parent-fd N [--script-stdin | --script PATH]"
                 " [--bytecode PATH] [--worker-backend process|thread]\n");
         return 1;
     }
 
-    /* ── Read script file ── */
+    /* ── Read script ──
+     * 两种形态互斥：--script PATH 读文件（保留手动用法）；
+     * --script-stdin 从 --parent-fd 读首帧（parent 在 spawn 后、握手前已把
+     * 源码以长度前缀帧写入同一 socketpair，零落盘）。 */
     char *script = NULL;
-    if (script_path) {
+    if (script_stdin) {
+        int64_t deadline = qz_now_ms() + QZ_IPC_HANDSHAKE_TIMEOUT_MS;
+        uint8_t *frame = NULL;
+        size_t flen = 0;
+        if (qz_ipc_read_frame(parent_fd, &frame, &flen, deadline) < 0) {
+            fprintf(stderr, "qzjs-rt: --script-stdin read failed\n");
+            return 1;
+        }
+        script = (char *)malloc(flen + 1);
+        if (!script) { free(frame); return 1; }
+        memcpy(script, frame, flen);
+        script[flen] = '\0';
+        free(frame);
+    } else if (script_path) {
         FILE *f = fopen(script_path, "r");
         if (!f) {
             fprintf(stderr, "qzjs-rt: cannot open script: %s\n", script_path);

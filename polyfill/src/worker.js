@@ -59,30 +59,24 @@ export function setupWorker(pal) {
   }
 
   /* ── PROCESS 后端封装（spawn 分层化, Phase C）──
-   * 临时脚本 → processSpawn(qzjs-rt) → processOnMessage/processPost/
-   * processTerminate。worker id 从 1000 起，避开 C 线程后端槽位 1-16。
-   * 临时文件：成功路径由子进程（rt_main.c）读后自 unlink（C1）；失败路径
-   * 在此显式 fsRemove。 */
+   * 源码经管道传给子进程（--script-stdin + opts.source）→ processSpawn →
+   * processOnMessage/processPost/processTerminate。worker id 从 1000 起，
+   * 避开 C 线程后端槽位 1-16。不再写 /tmp 临时脚本文件：源码全程只在内存
+   * 与 socketpair 里流动，无明文落盘、无 unlink/泄漏、无命名冲突、不受
+   * argv 长度限制。 */
   var procWorkerSeq = 1000;
   function ProcessWorker(code) {
     var id = ++procWorkerSeq;
-    var tmp = '/tmp/qzjs-worker-' + id + '.js';
-    pal.fsWriteSync(tmp, code);
     /* §8.2：本节点的完整 path = 父 path ++ [本地槽位 id]，经 --path 传给子
      * （进程号按直接父本地分配，跨层会撞号——只有 path 链能消歧路由）。 */
     var pathArg = selfPath.concat([id]).join(',');
     var argv = ['qzjs-rt', '--qzjs-worker', '--parent-fd', '3',
-                '--worker-id', String(id), '--path', pathArg, '--script', tmp];
-    var handle;
-    try {
-      handle = pal.processSpawn(null, argv, { role: 0, id: id, handshake: true });
-    } catch (e) {
-      try { pal.fsRemove(tmp); } catch (e2) { /* 异步清理，失败不致命 */ }
-      throw e;
-    }
+                '--worker-id', String(id), '--path', pathArg,
+                '--script-stdin'];
+    var handle = pal.processSpawn(null, argv,
+                   { role: 0, id: id, handshake: true, source: code });
     this._id = id;
     this._handle = handle;
-    this._tmp = tmp;
     this._dead = false;
     this._closing = false;   /* M-P4 §9.3：worker 自 close 的 closing 通知 */
   }

@@ -1854,6 +1854,9 @@ static JSValue js_pal_process_spawn(JSContext *ctx, JSValueConst this_val,
     int role = QZ_IPC_ROLE_WORKER;
     int id = 1;
     int require_handshake = 1;
+    /* opts.source → 启动源码，经管道传给子进程（零落盘）。见 spawn 注释。 */
+    const char *script_src = NULL;
+    size_t script_len = 0;
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue jr = JS_GetPropertyStr(ctx, argv[2], "role");
         if (!JS_IsUndefined(jr)) { JS_ToInt32(ctx, &role, jr); }
@@ -1863,7 +1866,15 @@ static JSValue js_pal_process_spawn(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, ji);
         JSValue jh = JS_GetPropertyStr(ctx, argv[2], "handshake");
         if (!JS_IsUndefined(jh)) require_handshake = JS_ToBool(ctx, jh);
-        JS_FreeValue(ctx, jh);
+        /* opts.source: 启动源码字符串。worker.js 用它替代「写临时文件 +
+         * 传 --script PATH」——源码经管道传给子进程，零落盘。非字符串/
+         * 缺失 → NULL（子进程走 --script PATH）。 */
+        JSValue jsrc = JS_GetPropertyStr(ctx, argv[2], "source");
+        if (!JS_IsUndefined(jsrc) && !JS_IsNull(jsrc)
+            && JS_IsString(jsrc)) {
+            script_src = JS_ToCStringLen(ctx, &script_len, jsrc);
+        }
+        JS_FreeValue(ctx, jsrc);
     }
 
     qz_proc_t *proc = qz_proc_new();
@@ -1873,7 +1884,8 @@ static JSValue js_pal_process_spawn(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowOutOfMemory(ctx);
     }
     int rc = qz_proc_spawn(rt, proc, exe, cargv, role, id,
-                             require_handshake);
+                            require_handshake, script_src, script_len);
+    if (script_src) JS_FreeCString(ctx, script_src);
     /* fork+exec 在 spawn 内同步完成，cargv 仅在调用期间需要 */
     bridge_free_argv(cargv, nargv);
     if (exe) JS_FreeCString(ctx, exe);

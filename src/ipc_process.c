@@ -255,10 +255,11 @@ static void proc_reap_blocking(pid_t pid)
 /* ── Parent side: spawn ── */
 
 int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
-                    const char *exe,
-                    char *const argv[],
-                    int role, int id,
-                    int require_handshake)
+                   const char *exe,
+                   char *const argv[],
+                   int role, int id,
+                   int require_handshake,
+                   const char *script_src, size_t script_len)
 {
     if (!proc || !argv) return QZ_ERR_INVALID_ARG;
     memset(proc, 0, sizeof(*proc));
@@ -328,6 +329,19 @@ int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
     if (uv_pipe_open(&proc->pipe, sv[0]) != 0) {
         close(sv[0]);
         goto kill_fail;
+    }
+
+    /* ── Startup source over the channel (no temp file). Written here, before
+     * the handshake, because the child needs its script *before* it can send
+     * its handshake (rt_main.c reads --script-stdin, then handshakes). The
+     * socketpair is full-duplex, so parent-writes-then-reads is deadlock-free.
+     * Uses the raw sv[0] fd: uv_pipe_open above already took ownership of it
+     * for the loop, but the numeric descriptor stays valid until close. */
+    if (script_src && script_len > 0) {
+        if (qz_ipc_write_frame(sv[0], (const uint8_t *)script_src, script_len) < 0) {
+            kill_err = QZ_ERR_IO;
+            goto kill_fail;
+        }
     }
 
     /* ── Handshake (§3.3): child sends first, parent validates, replies ack.

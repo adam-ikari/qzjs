@@ -254,12 +254,20 @@ typedef enum {
  *           跳过握手。
  * require_handshake: 0 → spawn 后直接 QZ_PROC_RUN，不做握手（用于任意
  *           可执行文件，child 不 speak qzjs 信封协议）。
+ * script_src/script_len: 可选的启动源码。非 NULL 时在握手**之前**用
+ *   qz_ipc_write_frame 写入管道（4 字节长度前缀 + 裸字节），child 端以
+ *   --script-stdin 形态从同一管道读取。这是脚本传输的正规路径：源码全程
+ *   只在内存与 socketpair 里流动，**不落盘**。为 NULL 时 child 只能走
+ *   --script PATH（argv 自身的长度限制与明文临时文件由此而来）。
+ *   时序（全双工 socketpair，无死锁）：父 write(源码) → 子 read(源码)
+ *   → 子 write(握手) → 父 read(握手) → 父 write(ack)。
  * Returns 0 on success, qz_err_t (<0) on failure. */
 int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
-                    const char *exe,
-                    char *const argv[],
-                    int role, int id,
-                    int require_handshake);
+                   const char *exe,
+                   char *const argv[],
+                   int role, int id,
+                   int require_handshake,
+                   const char *script_src, size_t script_len);
 /* 3-tier termination (§9.2):
  *  1. Send CONTROL{shutdown} envelope
  *  2. Poll for child exit up to timeout_ms (default 2000ms)

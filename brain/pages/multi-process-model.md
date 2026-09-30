@@ -4,7 +4,7 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-30T00:43:15"
+updated: "2026-09-30T08:58:47"
 ---
 
 <!-- compiled_truth -->
@@ -260,4 +260,10 @@ quickjs 断言上终止、NDEBUG 下静默泄漏——根因在 vendored quickjs
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "brain update-truth: M-P7 评审修复全量落地（commit 83047e1c）"
+  affects: [multi-process-model]
+
+- time: 2026-09-30T08:58:47
+  kind: decision
+  summary: "启动脚本传输改管道、零落盘（2026-09-30，break change 非-public API）：worker/主RT 的启动源码不再经 /tmp 临时脚本文件（qzjs-worker-<id>.js / qzjs-rt-script-*）传递。父端在 qz_proc_spawn 里、握手之前用 qz_ipc_write_frame 把源码以长度前缀帧写入已 fork 的 socketpair（--parent-fd 通道）；子端 rt_main 以新形态 --script-stdin 从同一管道读首帧。时序（全双工 socketpair 无死锁）：父 write(源码)→子 read(源码)→子 write(握手)→父 read(握手)→父 write(ack)。理由：临时文件是明文落盘（worker 脚本可含密钥/字面量）、靠 unlink 清理（崩溃路径必泄漏）、命名靠自增 id（跨进程必撞）、且与 argv 长度限制赛跑。保留 --script PATH 形态供手动运行  与兼容。新增 pal.processSpawn opts.source 字段。--bytecode 仍走独立 --bytecode 临时文件（二进制，本次未动）。契约锁：mp1 e2e 用 compgen -G 逐个 glob 断言两个前缀零残留（注入即红）"
+  source: "2026-09-30 第一性原理：磁盘不是必需的传输介质，子进程已继承管道 fd"
   affects: [multi-process-model]

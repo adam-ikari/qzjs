@@ -136,11 +136,6 @@ static char *host_write_blob(const void *data, size_t len)
     return strdup(tmpl);
 }
 
-static char *host_write_script(const char *code)
-{
-    if (!code) return NULL;
-    return host_write_blob(code, strlen(code));
-}
 
 /* ── 入站分发（宿主侧线程，读回调内）──
  * 信封解码结果 → 宿主语义（全部入邮箱，库不调用任何宿主函数）：
@@ -302,20 +297,17 @@ int qz_host_start(qz_t *rt)
     /* loop 必须先 init：qz_proc_spawn 用 parent->loop 做 uv_pipe_init。 */
     if (uv_loop_init(&rt->loop) != 0) return -1;
 
-    char *tmp = host_write_script(rt->config.initial_script);
-    if (rt->config.initial_script && !tmp) {
-        qz_close_loop(&rt->loop);
-        /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
-        return -1;
-    }
-    /* 字节码与脚本独立叠加（先脚本后字节码，同 qzjs.h 语义）：各自写
-     * 临时文件，经 --script / --bytecode 传给主RT。 */
+    /* 启动源码经管道传给主RT（--script-stdin），零落盘。字节码走独立
+     * --bytecode 临时文件机制（与脚本不共路径，本次不动）。 */
+    const char *script_src = rt->config.initial_script;
+    size_t script_len = script_src ? strlen(script_src) : 0;
+    /* 字节码与脚本独立叠加（先脚本后字节码，同 qzjs.h 语义）：写临时文件，
+     * 经 --bytecode 传给主RT。 */
     char *bc_tmp = NULL;
     if (rt->config.initial_bytecode && rt->config.initial_bytecode_len) {
         bc_tmp = host_write_blob(rt->config.initial_bytecode,
                                  rt->config.initial_bytecode_len);
         if (!bc_tmp) {
-            if (tmp) { unlink(tmp); free(tmp); }
             qz_close_loop(&rt->loop);
             /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
             return -1;
@@ -333,9 +325,8 @@ int qz_host_start(qz_t *rt)
     argv[n++] = (char *)"--worker-backend";
     argv[n++] = (char *)(rt->config.worker_backend == QZ_WORKER_BACKEND_PROCESS
                              ? "process" : "thread");
-    if (tmp) {
-        argv[n++] = (char *)"--script";
-        argv[n++] = tmp;
+    if (script_src && script_len > 0) {
+        argv[n++] = (char *)"--script-stdin";
     }
     if (bc_tmp) {
         argv[n++] = (char *)"--bytecode";
@@ -357,7 +348,6 @@ int qz_host_start(qz_t *rt)
 
     rt->proc = qz_proc_new();
     if (!rt->proc) {
-        if (tmp) { unlink(tmp); free(tmp); }
         if (bc_tmp) { unlink(bc_tmp); free(bc_tmp); }
         qz_close_loop(&rt->loop);
         /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
@@ -367,8 +357,8 @@ int qz_host_start(qz_t *rt)
     /* 伴随二进制 qzjs-rt 由 M-P1 的解析链定位（显式路径 → QZ_RT_SERVER →
      * /proc/self/exe 同目录 → 编译期 QZ_RT_PATH）；找不到 = 显式失败。 */
     int rc = qz_proc_spawn(rt, rt->proc, NULL, argv,
-                             QZ_IPC_ROLE_MAIN, QZ_IPC_MAIN_ID, 1);
-    if (tmp) { unlink(tmp); free(tmp); }     /* 子已读毕并 unlink；幂等兜底 */
+                            QZ_IPC_ROLE_MAIN, QZ_IPC_MAIN_ID, 1,
+                            script_src, script_len);
     if (bc_tmp) { unlink(bc_tmp); free(bc_tmp); }
     if (rc != 0) {
         qz_proc_free(rt->proc);

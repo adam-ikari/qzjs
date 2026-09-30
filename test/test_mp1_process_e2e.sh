@@ -29,10 +29,9 @@ if [ ! -x "$AM" ]; then
   exit 1
 fi
 
-# Clean any stale temp files so the C1 leak check is meaningful.
-# C1 泄漏检查的正是 worker 脚本临时文件：polyfill/worker.js ProcessWorker()
-# 写 /tmp/qzjs-worker-<id>.js，子进程读后自 unlink；被杀则残留。
-rm -f /tmp/qzjs-worker-*
+# 契约锁：worker/主RT 启动源码经管道传递（--script-stdin），全程不落盘。
+# 这两个前缀若出现即为回归（有人改回了写临时文件）。
+rm -f /tmp/qzjs-worker-* /tmp/qzjs-rt-script-*
 
 # ── Phase 1: graceful round-trip + terminate ──
 OUT1="$(timeout 20 "$AM" "$FIX/main-mp1.js" 2>&1)"
@@ -90,10 +89,14 @@ if pgrep -g "$PARENT" qzjs-rt >/dev/null; then
   exit 1
 fi
 
-# Temp-file leak check (C1): the child unlinks its script after reading.
-if ls /tmp/qzjs-worker-* >/dev/null 2>&1; then
-  echo "FAIL: temp script files leaked:"
-  ls /tmp/qzjs-worker-*
+# 零落盘契约检查：启动源码走管道（--script-stdin + opts.source），不写临时
+# 脚本文件。任一前缀有残留即说明传输方式回退（哪怕进程都已退出）。
+# 用 compgen -G 逐个 glob 判定——`ls g1 g2` 在任一 glob 不匹配时退出码非零，
+# 会让「另一个 glob 命中」的真实回归被吞掉。
+if compgen -G "/tmp/qzjs-worker-*" >/dev/null \
+   || compgen -G "/tmp/qzjs-rt-script-*" >/dev/null; then
+  echo "FAIL: temp script file left on disk (source must go over the pipe):"
+  ls -1 /tmp/qzjs-worker-* /tmp/qzjs-rt-script-* 2>/dev/null
   exit 1
 fi
 
