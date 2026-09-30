@@ -30,7 +30,9 @@ if [ ! -x "$AM" ]; then
 fi
 
 # Clean any stale temp files so the C1 leak check is meaningful.
-rm -f /tmp/qzjs-worker-*
+# 用真实落盘前缀（src/rt_host.c mkstemp template：qzjs-rt-script-*）。
+# 旧写法 /tmp/qzjs-worker-* 配不上任何文件，C1 泄漏检查成了空操作。
+rm -f /tmp/qzjs-rt-script-*
 
 # ── Phase 1: graceful round-trip + terminate ──
 OUT1="$(timeout 20 "$AM" "$FIX/main-mp1.js" 2>&1)"
@@ -52,17 +54,17 @@ fi
 
 # ── Phase 2: hard kill + respawn + no zombie / no temp leak ──
 TMP="$(mktemp)"
-"$AM" "$FIX/main-mp1-kill.js" > "$TMP" 2>&1 &
+setsid "$AM" "$FIX/main-mp1-kill.js" > "$TMP" 2>&1 &
 PARENT=$!
 # Wait for the worker to come up (READY) so the child exists to kill.
 for i in $(seq 1 50); do
   grep -q '^READY$' "$TMP" 2>/dev/null && break
   sleep 0.1
 done
-# 按 argv 定位 worker 进程（`--qzjs-worker`）而非「父进程下第一个 qzjs-rt」：
-# ISOLATED 编译（M-P2 缺省）下宿主与主RT 是两个进程，worker 是主RT 的子进程
-# （宿主的孙进程）——按父进程号找会误取主RT（进程模型的主体，非被测对象）。
-CHILD="$(pgrep -f -- '--qzjs-worker' | head -1)"
+# 按 argv 定位 worker 进程（`--qzjs-worker`）且限在本测试进程组内（setsid
+# 后 PGID=PARENT；主RT 与 worker 同组，组内只有本测试的 qzjs-rt）——不再
+# 用全机 pgrep -f 匹配，避免命中并行 e2e / 无关 qzjs-rt。
+CHILD="$(pgrep -g "$PARENT" -f -- '--qzjs-worker' | head -1)"
 if [ -z "$CHILD" ]; then
   echo "FAIL: phase 2 — no qzjs-rt child found under parent $PARENT"
   kill "$PARENT" 2>/dev/null
@@ -82,16 +84,16 @@ if [ "$OUT2" != "$EXP2" ]; then
 fi
 
 # Zombie check (I1): the killed child must have been reaped — no qzjs-rt lingers.
-if pgrep -f qzjs-rt >/dev/null; then
+if pgrep -g "$PARENT" qzjs-rt >/dev/null; then
   echo "FAIL: phase 2 — leftover qzjs-rt process (zombie not reaped)"
-  pgrep -af qzjs-rt
+  pgrep -g "$PARENT" -af qzjs-rt
   exit 1
 fi
 
 # Temp-file leak check (C1): the child unlinks its script after reading.
-if ls /tmp/qzjs-worker-* >/dev/null 2>&1; then
+if ls /tmp/qzjs-rt-script-* >/dev/null 2>&1; then
   echo "FAIL: temp script files leaked:"
-  ls /tmp/qzjs-worker-*
+  ls /tmp/qzjs-rt-script-*
   exit 1
 fi
 

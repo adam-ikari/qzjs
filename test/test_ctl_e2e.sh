@@ -28,10 +28,12 @@ FIX="$(mktemp -d)"
 SOCK="$FIX/ctl.sock"
 QPID=""
 cleanup() {
-  [ -n "$QPID" ] && kill -TERM "$QPID" 2>/dev/null
+  # setsid 起的所有 qzjs（宿主 → 主RT → worker 树）同处一个进程组，QPID 即
+  # 组号。组杀收敛：只碰本测试的进程，不再用 pkill -f 全局匹配（避免误杀
+  # 并行跑的其它 e2e / 无关 qzjs-rt）。
+  [ -n "$QPID" ] && kill -TERM -- -"$QPID" 2>/dev/null
   sleep 0.3
-  pkill -f "qzjs-rt --qzjs-worker" 2>/dev/null
-  pkill -f "qzjs-rt --qzjs-rt-server" 2>/dev/null
+  [ -n "$QPID" ] && kill -KILL -- -"$QPID" 2>/dev/null
   rm -rf "$FIX"
 }
 trap cleanup EXIT
@@ -97,7 +99,7 @@ OUT="$(ctl --target 9999 metrics)"   # rc=1（ok:false）：回执本身必须�
 echo "$OUT" | grep -q '"code":"NOT_FOUND"' || fail "3 unknown target receipt" "$OUT"
 
 # ── 4: OFF 档恒拒（无端点） ──
-kill -TERM "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; QPID=""
+kill -TERM -- -"$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; QPID=""
 rm -f "$FIX/off.sock"
 setsid "$AM" --control-plane=off --control-pipe="$FIX/off.sock" \
   -e 'setInterval(function(){}, 100)' > "$FIX/off.out" 2>&1 &
@@ -115,7 +117,7 @@ fi
 # 否则调试会话期间控制面完全不可用。旧顺序（端点在 runtime_init 之后）在这里
 # 会失败——该断言即回归护栏。DAP 暂停期间控制命令按 timeout_ms 作废（§2.3
 # 明示），故此处只验证两通道并存、互不抢占。
-kill -TERM "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; QPID=""
+kill -TERM -- -"$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; QPID=""
 rm -f "$FIX/dap.in" "$FIX/dap.sock"
 mkfifo "$FIX/dap.in"
 QZ_DEBUG=1 setsid "$AM" --control-plane=local --control-pipe="$FIX/dap.sock" \
@@ -132,6 +134,6 @@ else
   echo "       (5) no DAP output (build without QZ_DEBUG_SUPPORT?); endpoint present"
 fi
 exec 9>&-
-kill -TERM "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; QPID=""
+kill -TERM -- -"$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null; QPID=""
 
 echo "PASS: CTL-1/CTL-2 control-plane e2e — endpoint 4 commands + correl pairing / tree routing to worker (target=$WORKER_ID, isolation + no id skew) / NOT_FOUND / OFF tier refused / DAP coexist"

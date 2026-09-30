@@ -29,8 +29,11 @@ if [ ! -x "$AM" ]; then
 fi
 
 rm -f "$STATE"
-OUT="$(timeout 30 "$AM" "$FIX/main-mr2-composition.js" 2>&1)"
-RC=$?
+# setsid 后台起（拿到进程组号），后续 worker 残留校验限本组，不用全机 pgrep -f。
+setsid timeout 30 "$AM" "$FIX/main-mr2-composition.js" > "$FIX/mr2.out" 2>&1 &
+P1=$!
+wait "$P1"; RC=$?
+OUT="$(cat "$FIX/mr2.out")"
 EXP=$'echoes:6\nDONE'
 if [ "$OUT" != "$EXP" ]; then
   echo "FAIL: composition e2e output mismatch (rc=$RC)"
@@ -46,12 +49,12 @@ fi
 
 # 无残留进程 worker：两个 worker 都已 terminate 并被回收（给优雅退出留 2s）
 for _ in $(seq 1 20); do
-  pgrep -f -- '--qzjs-worker' >/dev/null || break
+  pgrep -g "$P1" -f -- '--qzjs-worker' >/dev/null || break
   sleep 0.1
 done
-if pgrep -f -- '--qzjs-worker' >/dev/null; then
+if pgrep -g "$P1" -f -- '--qzjs-worker' >/dev/null; then
   echo "FAIL: leftover process worker (not reaped)"
-  pgrep -af -- '--qzjs-worker'
+  pgrep -g "$P1" -af -- '--qzjs-worker'
   exit 1
 fi
 

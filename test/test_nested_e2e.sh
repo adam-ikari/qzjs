@@ -23,11 +23,16 @@ done
 
 FIX="$(mktemp -d)"
 QPID=""
+# 所有 setsid 起的 qzjs 宿主进程登记到此（各即进程组号）：cleanup 组杀只碰
+# 本测试的组，不再用 pkill -f 全机匹配（避免误杀并行 e2e / 无关 qzjs-rt）。
+# qzjs 子进程（mainRT/worker/孙）不自行 setsid，留在宿主组内，组杀全覆盖。
+GROUPS=()
+mark_group() { [ -n "$1" ] && GROUPS+=("$1"); }
 cleanup() {
-  [ -n "$QPID" ] && kill -TERM "$QPID" 2>/dev/null
-  sleep 0.3
-  pkill -f "qzjs-rt --qzjs-worker" 2>/dev/null
-  pkill -f "qzjs-rt --qzjs-rt-server" 2>/dev/null
+  local g
+  for g in "${GROUPS[@]:-}"; do
+    [ -n "$g" ] && kill -KILL -- -"$g" 2>/dev/null
+  done
   rm -rf "$FIX"
 }
 trap cleanup EXIT
@@ -50,7 +55,7 @@ if grep -l "file:///home/gem/project/qzjs" "$FIX"/*.js > /dev/null 2>&1; then
 fi
 
 export QZ_WORKER_BACKEND=process
-rm -f /tmp/qzjs-worker-*
+rm -f /tmp/qzjs-rt-script-*
 
 # ── 1: 孙 worker 进程能力 + 三级 PID + 往返 ──
 OUT="$(timeout 30 "$AM" "$FIX/main-nested.js" 2>&1)" || fail "1 nested run rc" "$OUT"
@@ -58,8 +63,9 @@ EXP=$'nested:child-grand:ping\nDONE'
 [ "$OUT" = "$EXP" ] || fail "1 nested spawn round-trip" "$OUT"
 
 # PID 证据：跑一个 spawn 孙但不退出的脚本，检查三级父子链。
-"$AM" "$FIX/main-nested-cascade.js" > "$FIX/hold.out" 2>&1 &
+setsid "$AM" "$FIX/main-nested-cascade.js" > "$FIX/hold.out" 2>&1 &
 HPID=$!
+mark_group "$HPID"
 for _ in $(seq 1 50); do grep -q READY "$FIX/hold.out" 2>/dev/null && break; sleep 0.1; done
 sleep 0.6
 MAINRT="$(pgrep -P "$HPID" -f 'qzjs-rt' 2>/dev/null | head -1)"
@@ -80,11 +86,12 @@ EXP2=$'G2M:echo:hello\nDONE'
 kill -TERM "$HPID" 2>/dev/null
 for _ in $(seq 1 60); do kill -0 "$HPID" 2>/dev/null || break; sleep 0.1; done
 SOCK="$FIX/ctl.sock"
-"$AM" --control-plane=local --control-pipe="$SOCK" -e "
+setsid "$AM" --control-plane=local --control-pipe="$SOCK" -e "
 var w = new Worker('file://$FIX/worker_spawn_child_hold.js');
 setInterval(function(){}, 100);
 " > "$FIX/q.out" 2>&1 &
 QPID=$!
+mark_group "$QPID"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 
 [ -S "$SOCK" ] || fail "3 endpoint socket not created" "$(cat "$FIX/q.out")"
@@ -106,15 +113,18 @@ echo "$OUT" | grep -q '"result":"worker:undefined"' || fail "3 marker absent on 
 OUT="$(ctl --target-path 1001,1001 metrics)" || fail "3 grandchild metrics rc" "$OUT"
 echo "$OUT" | grep -q '"worker_count":0' || fail "3 grandchild metrics (leaf)" "$OUT"
 
-kill -TERM "$QPID" 2>/dev/null; QPID=""
-# 进程树级联退出需要一个调度窗口（kill→EOF→自杀逐级传播）。
+# 组杀整棵树（QPID 即组号），再用组内 pgrep 等级联退出完成——不再全机
+# pgrep -f 匹配（会误命中并行 e2e / 无关 qzjs-rt 造成假失败或误判）。
+QGID="$QPID"
+kill -TERM -- -"$QGID" 2>/dev/null
 for _ in $(seq 1 60); do
-  pgrep -f "qzjs-rt" > /dev/null 2>&1 || break
+  pgrep -g "$QGID" -f "qzjs-rt" > /dev/null 2>&1 || break
   sleep 0.1
 done
-if pgrep -f "qzjs-rt" > /dev/null 2>&1; then
-  fail "cleanup: leftover qzjs-rt process" "$(pgrep -af qzjs-rt)"
+if pgrep -g "$QGID" -f "qzjs-rt" > /dev/null 2>&1; then
+  fail "cleanup: leftover qzjs-rt in test process group" "$(pgrep -g "$QGID" -af qzjs-rt)"
 fi
+QPID=""
 
 # ── 4: §10.2 STORAGE 嵌套（孙的 localStorage 经子中继到主RT 所有者）──
 OUT="$(timeout 30 "$AM" "$FIX/main-nested-storage.js" 2>&1)" || fail "4 nested storage rc" "$OUT"
@@ -126,8 +136,9 @@ printf '%s\n' "$OUT" | grep -q "NESTED-STORAGE-DONE" || fail "4 nested storage c
 start_tree() {
   TREE_OUT="$FIX/tree.out"
   : > "$TREE_OUT"
-  "$AM" "$FIX/main-nested-cascade.js" > "$TREE_OUT" 2>&1 &
+  setsid "$AM" "$FIX/main-nested-cascade.js" > "$TREE_OUT" 2>&1 &
   TREE_HOST=$!
+  mark_group "$TREE_HOST"
   for _ in $(seq 1 60); do grep -q READY "$TREE_OUT" 2>/dev/null && break; sleep 0.1; done
   sleep 0.6
   PID_MAINRT="$(pgrep -P "$TREE_HOST" -f 'qzjs-rt' 2>/dev/null | head -1)"
@@ -136,7 +147,7 @@ start_tree() {
   [ -n "$PID_MAINRT" ] && [ -n "$PID_WORKER" ] && [ -n "$PID_GRAND" ] \
     || fail "5 tree not up (host=$TREE_HOST mainRT=$PID_MAINRT worker=$PID_WORKER grand=$PID_GRAND)" "$(cat "$TREE_OUT")"
 }
-zombies() { ps -eo stat=,comm= 2>/dev/null | awk '$2=="qzjs-rt" && $1 ~ /Z/' | wc -l; }
+zombies() { ps -eo pgid=,stat=,comm= 2>/dev/null | awk -v g="$TREE_HOST" '$1==g && $3=="qzjs-rt" && $2 ~ /Z/' | wc -l; }
 
 # 5a：kill 孙 → 子（worker）收尸，主RT/worker 存活，零 zombie。
 start_tree
@@ -148,8 +159,8 @@ kill -0 "$PID_MAINRT" 2>/dev/null || fail "5a mainRT died when grandchild was ki
 [ "$(zombies)" = "0" ] || fail "5a zombies after grandchild reap: $(zombies)"
 
 # 5b（新树）：kill worker → 孙按 §9.4 孤儿自杀 + 主RT 感知 error 且自身存活。
-kill -TERM "$TREE_HOST" 2>/dev/null
-for _ in $(seq 1 60); do pgrep -f qzjs-rt >/dev/null 2>&1 || break; sleep 0.1; done
+KGID="$TREE_HOST"; kill -TERM "$KGID" 2>/dev/null
+for _ in $(seq 1 60); do pgrep -g "$KGID" -f qzjs-rt >/dev/null 2>&1 || break; sleep 0.1; done
 start_tree
 kill -9 "$PID_WORKER" 2>/dev/null
 for _ in $(seq 1 80); do kill -0 "$PID_GRAND" 2>/dev/null || break; sleep 0.1; done
@@ -159,13 +170,13 @@ for _ in $(seq 1 60); do grep -q "MAINRT-ONERROR:" "$TREE_OUT" 2>/dev/null && br
 grep -q "MAINRT-ONERROR:" "$TREE_OUT" || fail "5b mainRT onerror on worker death (§9.3)" "$(cat "$TREE_OUT")"
 
 # 5c（新树）：kill 宿主 → 主RT + worker + 孙 全链退出（§9.4）。
-kill -TERM "$TREE_HOST" 2>/dev/null
-for _ in $(seq 1 60); do pgrep -f qzjs-rt >/dev/null 2>&1 || break; sleep 0.1; done
+KGID="$TREE_HOST"; kill -TERM "$KGID" 2>/dev/null
+for _ in $(seq 1 60); do pgrep -g "$KGID" -f qzjs-rt >/dev/null 2>&1 || break; sleep 0.1; done
 start_tree
-kill -9 "$TREE_HOST" 2>/dev/null
-for _ in $(seq 1 80); do pgrep -f qzjs-rt >/dev/null 2>&1 || break; sleep 0.1; done
-if pgrep -f qzjs-rt > /dev/null 2>&1; then
-  fail "5c two-level chain death incomplete" "$(pgrep -af qzjs-rt)"
+KGID="$TREE_HOST"; kill -9 "$KGID" 2>/dev/null
+for _ in $(seq 1 80); do pgrep -g "$KGID" -f qzjs-rt >/dev/null 2>&1 || break; sleep 0.1; done
+if pgrep -g "$KGID" -f qzjs-rt > /dev/null 2>&1; then
+  fail "5c two-level chain death incomplete" "$(pgrep -g "$KGID" -af qzjs-rt)"
 fi
 [ "$(zombies)" = "0" ] || fail "5c zombies after host kill: $(zombies)"
 

@@ -33,12 +33,17 @@ fi
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && { echo "--- got:"; printf '%s\n' "$2"; }; exit 1; }
 
 # ── 1: eval round-trip (host → mainRT → host) ──
-OUT="$(timeout 20 "$AM" -e 'console.log("mp2:" + (1 + 1))' 2>&1)"
+# setsid 后台起，拿到进程组号做「无残留」组内校验；不用全机 pgrep -f
+# （并行 e2e / 无关 qzjs-rt 会造成假失败）。
+setsid timeout 20 "$AM" -e 'console.log("mp2:" + (1 + 1))' > "$FIX/mp2.out" 2>&1 &
+P1=$!
+wait "$P1"
+OUT="$(cat "$FIX/mp2.out")"
 [ "$OUT" = "mp2:2" ] || fail "1 eval round-trip mismatch" "$OUT"
 
-# ── 3: no leftover child after a normal run ──
-if pgrep -f "qzjs-rt" > /dev/null 2>&1; then
-  fail "3 leftover qzjs-rt process after normal exit" "$(pgrep -af qzjs-rt)"
+# ── 3: no leftover child after a normal run（限本组）──
+if pgrep -g "$P1" -f "qzjs-rt" > /dev/null 2>&1; then
+  fail "3 leftover qzjs-rt process after normal exit" "$(pgrep -g "$P1" -af qzjs-rt)"
 fi
 
 # ── 2 + 4: real two-process split + orphan reclamation ──
