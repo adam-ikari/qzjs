@@ -4,6 +4,12 @@ on:
   push:
     branches: [master]
   pull_request:
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ============================================================================
@@ -14,6 +20,7 @@ jobs:
   # ============================================================================
   all-features-off:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: all-features-off
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +57,7 @@ jobs:
   # ============================================================================
   feature-matrix:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -108,6 +116,7 @@ jobs:
   # ============================================================================
   wamr:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: wamr (default WASM engine, Fast JIT)
     steps:
       - uses: actions/checkout@v4
@@ -137,6 +146,7 @@ jobs:
   # ============================================================================
   wasm3:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: wasm3 (alternative WASM engine)
     steps:
       - uses: actions/checkout@v4
@@ -170,6 +180,7 @@ jobs:
   # ============================================================================
   polyfill-external:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     name: polyfill-external (QZ_POLYFILL_MODE=external)
     steps:
       - uses: actions/checkout@v4
@@ -209,6 +220,7 @@ jobs:
   # ============================================================================
   polyfill-compressed:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     name: polyfill-compressed (QZ_POLYFILL_MODE=compressed)
     steps:
       - uses: actions/checkout@v4
@@ -248,6 +260,7 @@ jobs:
   # ============================================================================
   nonutf-encodings:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     name: nonutf (QZ_WITH_NONUTF_ENCODINGS=ON)
     steps:
       - uses: actions/checkout@v4
@@ -282,10 +295,44 @@ jobs:
         working-directory: build
 
   # ============================================================================
+  # QZ_PROFILE=minimal: ECMA-429-compliant build with only TLS cut. README's
+  # advertised variant — must actually compile + pass offline tests. Gated
+  # here so a broken minimal build surfaces in CI, not on user's machine.
+  # ============================================================================
+  profile-minimal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    name: profile=minimal (ECMA-429, TLS off)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config ninja-build
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DQZ_PROFILE=minimal \
+            -DQZ_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test (offline)
+        run: ctest -L offline --output-on-failure
+        working-directory: build
+
+  # ============================================================================
   # Sanitizers: ASan + UBSan with WAMR default engine.
   # ============================================================================
   asan:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -384,6 +431,7 @@ jobs:
   # ============================================================================
   ubsan:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -446,6 +494,7 @@ jobs:
   # ============================================================================
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: release build
     steps:
       - uses: actions/checkout@v4
@@ -479,6 +528,7 @@ jobs:
   # ============================================================================
   httpserver-perf:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: httpserver perf (wrk)
     steps:
       - uses: actions/checkout@v4
@@ -550,6 +600,7 @@ jobs:
   # ============================================================================
   h2-client-perf:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: h2-client perf (JS stack)
     steps:
       - uses: actions/checkout@v4
@@ -607,6 +658,7 @@ jobs:
   # ============================================================================
   runtime-perf:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: runtime perf (workers)
     continue-on-error: true
     steps:
@@ -711,6 +763,7 @@ jobs:
   # from the runtime-perf qjsc-order failures). continue-on-error: observe-only.
   cross-runtime:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: cross-runtime perf (qzjs/node/bun)
     continue-on-error: true
     steps:
@@ -780,6 +833,7 @@ jobs:
   # ============================================================================
   js-api-perf:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: js-api perf (streams/crypto/compress/fs/wasm × qzjs/node/bun)
     continue-on-error: true
     steps:
@@ -858,6 +912,7 @@ jobs:
   # ============================================================================
   tls-ws-grpc-perf:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: tls/ws/grpc perf (record-only)
     continue-on-error: true
     steps:
@@ -941,6 +996,7 @@ jobs:
   # ============================================================================
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: e2e (real-libuv CLI + JS harnesses)
     steps:
       - uses: actions/checkout@v4
@@ -1093,6 +1149,7 @@ jobs:
   # ============================================================================
   grpc-e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: grpc-e2e (QZ_WITH_GRPC=ON + TLS streaming)
     steps:
       - uses: actions/checkout@v4
@@ -1134,6 +1191,7 @@ jobs:
   # ============================================================================
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: coverage (gcov)
     steps:
       - uses: actions/checkout@v4
@@ -1179,6 +1237,7 @@ jobs:
   # ============================================================================
   debugger:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: debugger (DAP)
     steps:
       - uses: actions/checkout@v4
@@ -1226,6 +1285,7 @@ jobs:
   # ============================================================================
   test262:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     name: test262 (ES conformance)
     steps:
       - uses: actions/checkout@v4
@@ -1268,6 +1328,7 @@ jobs:
   # ============================================================================
   clang-tidy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: clang-tidy
     steps:
       - uses: actions/checkout@v4
@@ -1303,6 +1364,7 @@ jobs:
   # ============================================================================
   fuzz-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     name: fuzz-smoke (libFuzzer bytecode reader)
     steps:
       - uses: actions/checkout@v4
