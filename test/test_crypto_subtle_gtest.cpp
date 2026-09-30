@@ -621,7 +621,7 @@ crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:2048, publicExponent:n
   });
 'go'
 )";
-    ASSERT_TRUE(poll_until(h, "_e", code.c_str(), "\"match\":true", &v, 60000));
+    ASSERT_TRUE(poll_until(h, "_e", code.c_str(), "\"match\":true", &v, 90000));
     EXPECT_NE(std::string::npos, v.find("\"ctLen\":256")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -649,7 +649,7 @@ TEST_F(CryptoSubtleTest, RsaSsaSignVerifyRoundTrip) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"ok\":true", &v, 60000));
+        "\"ok\":true", &v, 90000));
     EXPECT_NE(std::string::npos, v.find("\"sigLen\":256")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -675,7 +675,7 @@ TEST_F(CryptoSubtleTest, RsaSsaVerifyRejectsTampered) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"badSig\":false", &v, 60000));
+        "\"badSig\":false", &v, 90000));
     EXPECT_NE(std::string::npos, v.find("\"badMsg\":false")) << "got: " << v;
 }
 
@@ -711,7 +711,7 @@ TEST_F(CryptoSubtleTest, RsaImportExportSpkiPkcs8) {
         "      });\n"
         "    });\n"
         "  });\n'go'",
-        "\"v1\":true", &v, 60000));
+        "\"v1\":true", &v, 90000));
     EXPECT_NE(std::string::npos, v.find("\"v2\":true")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"pubType\":\"public\"")) << "got: " << v;
     EXPECT_NE(std::string::npos, v.find("\"privType\":\"private\"")) << "got: " << v;
@@ -730,7 +730,7 @@ TEST_F(CryptoSubtleTest, RsaRejectsModulus1024) {
         "crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:1024, hash:'SHA-256'}, false, ['encrypt','decrypt'])\n"
         "  .then(function(){ _e = JSON.stringify({rejected:false}); },\n"
         "        function(err){ _e = JSON.stringify({rejected:true, name:(err && err.name)||String(err)}); });\n'go'",
-        "\"rejected\":true", &v, 60000));
+        "\"rejected\":true", &v, 90000));
 }
 
 TEST_F(CryptoSubtleTest, RsaOaep3072RoundTrip) {
@@ -748,12 +748,12 @@ crypto.subtle.generateKey({name:'RSA-OAEP', modulusLength:3072, hash:'SHA-256'},
   });
 'go'
 )";
-    /* gcov 插桩（-O0 --coverage）下 mbedTLS 3072 位 keygen 实测 5-6s
-     * （GH runner 上曾达 5.7s），且 polyfill 在 eval 的同步段内直接调用
-     * nativeRsaGenerateKey —— 全部耗时计入本次 host_eval 的超时预算，
-     * 故这里不能用默认 5000ms（749 行的 poll 预算只覆盖异步段）。
-     * 取 30000ms 与下方 poll 预算对齐。 */
-    if (!host_eval(h, code.c_str(), &v, 30000)) { FAIL() << "3072 setup eval failed"; }
-    ASSERT_TRUE(host_poll_until_value(h, "_e", "\"match\":true", &v, 60000));
+    /* gcov 插桩（-O0 --coverage）下 mbedTLS 3072 位 keygen + 往返是最慢的用例：
+     * 全部耗时计入 host_eval 的同步预算 + 下方 poll 预算。实测 2048 位在 coverage
+     * 下已需 ~10-40s，3072 位再慢约 3x——60s poll 在 CI 上偶发不足（本条曾在
+     * e4b2b866 绿、1b5dd3e5 红，边界抖动）。给足 120s 双向预算：这是最慢的单个
+     * 用例，多等一会儿不影响整体（coverage job 时限 60min）。 */
+    if (!host_eval(h, code.c_str(), &v, 120000)) { FAIL() << "3072 setup eval failed"; }
+    ASSERT_TRUE(host_poll_until_value(h, "_e", "\"match\":true", &v, 120000));
     EXPECT_NE(std::string::npos, v.find("\"ctLen\":384")) << "got: " << v;
 }
