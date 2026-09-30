@@ -1,10 +1,11 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-09-30T08:58:47.606Z._
+_Auto-generated. Last updated 2026-09-30T15:09:54.616Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
 - [brand-display-name](pages/brand-display-name.md) — category: decision | tags: [brand, docs] | Qz.js 品牌显示名 = **Qz.js**（内部标识 qzjs）。
+- [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | <current best understanding — replace this with the real content>
 - [c-js-layering](pages/c-js-layering.md) — category: decision | tags: [arch, layering, policy] | # C/JS 分层原则与标准（判据摘要）
 - [ci-nightly-repair](pages/ci-nightly-repair.md) — category: decision | status: completed | tags: [ci, nightly, scheduling] | ## 完结状态（2026-09-09/10）
 - [code-quality-requirements](pages/code-quality-requirements.md) — category: decision | tags: [code-quality, readability, dry, review] | ## 代码质量硬性要求（项目级，用户 2026-09-13 追加，对全部产出生效）
