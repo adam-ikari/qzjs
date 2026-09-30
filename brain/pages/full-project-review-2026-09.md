@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-09-30T03:24:16"
+updated: "2026-09-30T06:20:43"
 ---
 
 <!-- compiled_truth -->
@@ -80,4 +80,9 @@ updated: "2026-09-30T03:24:16"
 - time: 2026-09-30T03:24:16
   kind: evidence
   summary: "P1 全部 6 子项落地并验证（5 commits，213302c1..c5445ada）：①CI 治理——ci.yml 顶层加 permissions(contents:read)+concurrency(cancel-in-progress)，24 job 逐个 timeout-minutes，新增 profile-minimal job(QZ_PROFILE=minimal 此前 CI 零覆盖)；②release 治理——v0.2.0 annotated tag 指向发布点 afdccc72、THIRD_PARTY_NOTICES.md 列 8 个 vendored 依赖 pinned SHA+SPDX+patch 声明；③覆盖率——docs/dev/testing.md 加 'Coverage Scope — Uncovered-by-Design' 清单，6 个多进程模块(经 QZ_BUILD_TESTS=ON mock 构建排除)标注为何 mock 出+哪条 e2e 把关(设计非缺口)；④e2e 收敛——test_ctl/nested/mp1/mp2/mr2 五脚本全局 pkill/pgrep/rm 全收敛到进程组(setsid 起宿主+GROUPS 数组+pgrep -g+zombies() 限组)，顺带修 mp1 一处 stale 泄漏检查(/tmp/qzjs-worker-* 配不上实际落盘的 qzjs-rt-script-*，检查曾是空操作)；⑤mbedtls 3.6.6→3.6.7(CVE-2026-50587 RSA 时序)+ polyfill 新增 timingSafeEqual 接入 HMAC verify；⑥sitemap srcExclude 09-23 前已落地。验证：5 脚本 bash -n 全过、无残留全局 kill/pgrep、mbedtls 3.6.7 重编 165/165+TLS smoke、HMAC verify 四态全对。注：本机多进程 e2e 因既有 spawnWorker failed(err -9)(ISOLATED worker spawn 本身问题，基线对照改动前后同样失败)无法端到端跑，非本次引入。"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-09-30T06:20:43
+  kind: evidence
+  summary: "多进程 e2e 三失败定性（2026-09-30，5 commits 5341664a/c7a9fc43 等）：①err -9(worker 被杀)=P1 收敛前的全局 pkill -f 交叉误杀 + 残留进程污染，组作用域收敛已修；②nested PID_GRAND:unbound=P1 e2e 收敛引入的回归(数组名 GROUPS 撞 bash 特殊变量当前用户组列表，GROUPS+= 在 set -u 下令 mark_group 中止 start_tree)，基线对照在『基线全红』时零证明力故当时未察觉，已改名 HOST_PIDS 修复；③手动跑 worker 脚本在仓库路径报 fsReadSync ENOENT=本 PVE 宿主 FS/内核异常(strace 实证：同 ext4、同文件、同代码路径，openat 结果随调用上下文不同；worker 脚本放 /tmp 则正常)，非 qzjs 代码、规范 e2e 不受影响。终态 nested/mp1/mp2/mr2 四套多进程 e2e 全 PASS。方法论教训入账 decision-principles『验证前提』节。"
   affects: [full-project-review-2026-09]
