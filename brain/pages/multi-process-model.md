@@ -4,7 +4,7 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-29T09:17:11"
+updated: "2026-09-30T00:43:15"
 ---
 
 <!-- compiled_truth -->
@@ -19,6 +19,43 @@ ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MOD
 storage 单所有者（owner=树根主RT，§10.2）非根节点中继上行（N-P4 corr 并发关联）；owner 死 ⇒ 孤儿连锁自杀即设计终点（降级不实施）。系统级 CONTROL（ready/idle/shutdown/ping 家族，"qzjs" 标记）在 rt_main.c C 读回调就地消费、不入 msgq/JS——否则心跳被控制面当命令回 UNKNOWN_CMD 泄漏进宿主邮箱（M-P7 箱净门捕获）。
 
 延后项终判：tier-2 超时异步化维持 DEFERRED（①正常路径 ~1ms 仍立；③跨 loop 属主迁移风险仍立；②随 M-P7 冻结回到库自有线程而恢复原理由）；path u16→u32 YAGNI 维持；§10.2 降级不实施。深度上限 QZ_SELF_PATH_MAX=8、storage 中继单飞行仍为已知缺口。
+
+M-P7 邮箱化的代码评审修复**已全量落地并提交**（commit `83047e1c`，`fix(M-P7)!`，98 文件
++5244/-896，一次提交不拆分）。下面四条是这次评审**改变了既有判断**的部分，其余细节见
+CHANGELOG 本批 8 条与 brain `code-quality-requirements` 的同期 note。
+
+**契约层**：①邮箱收口为**严格单消费者**，撤销 16 处文档里「多线程可并发 recv」的承诺。
+`qz_out_pop` 的 head 是非原子读写的（注释：「consumer owns head, so no lock is needed」），
+该前提**原先只写在文档里**、违反它没有任何东西会变红；现补一个 per-rt 原子标记，并发调用
+得到 -1 + stderr 诊断。判据取 per-call 而非永久归属，因为契约措辞是「**同一时刻**只允许
+一个线程」——永久归属会把「A 排干完、顺序交给 B」也判成违规。**这是公开 API 的破坏性变更。**
+②ping 家族改条件编译并新增 `*_if_available` + `QZ_PING_UNAVAILABLE`（刻意不返回 0：谎报
+健康比明说测不了危险）。守卫原先**只修了一半**——`QZ_USE_MOCK_LIBUV` 是 PRIVATE，消费者
+看不到，mock 测试构建里「头里声明、库里没有」原样复现；已改 PUBLIC 并给门加第三档 mock 配置。
+③`qz_free` 在线程没 join 过时**什么都不碰**。中途改成过「先排干邮箱 + 关唤醒 fd」，是错的：
+teardown 的契约是「join 后调用」，而这条分支的前提恰是线程可能还在跑；排干会与生产者入链
+并发并 free 掉它手里的节点，关 fd 会让生产者 write 进一个可能已被宿主复用的 fd。
+④interrupt 豁免 correl，且置位后**立刻收手**（不登记、不入队、不产回执）。第一版只把守卫
+挪到置位之后，等于把「correl 必填」要消灭的 `correl=""` 孤儿回执原样放了回来。
+
+**判据层**：两个控制面入口的拒收判据抽成共用的 `ctl_check_accept`（**含顺序**）——早先两者
+顺序相反，同一份字节得到两种诊断，而两处注释都写着「两处必须同步」。端点返回码细分
+-2 缺 correl / -3 保留命名空间 / -4 入队失败（不会有回执，必须当场回帧）/ -5 前投失败
+（NOT_FOUND 已写出、端点别再发）；除 0 与 -5 外每个非零都回帧。内部码不外泄，公共
+`qz_control` 归一化回 -1。
+
+**验证矩阵进了 Makefile**（`asan` / `asan-rt` / `ubsan` / `gates` / `verify`）。这些配置
+此前**只存在于 CI yaml**，本地验证全靠手敲 cmake、配置对不对全凭记忆——我按「我本地跑过
+ASAN」的说法放过一次堆 use-after-free，因为手上的 build-asan 是 `tests=OFF`（压根不编译
+gtest），而唯一带 `tests=ON` 的那个是 UBSAN。**CI 早就会红，红的是我没复现 CI 的条件。**
+`asan-rt` 那一套是刻意分开的：`rt_host.c` 只在 ISOLATED && !mock 下编入，`tests=ON` 那一套
+里整文件是不编的。
+
+**遗留（均已写明，非静默搁置）**：打断正在执行的脚本会留下有根 JS 对象，`qz_destroy` 在
+quickjs 断言上终止、NDEBUG 下静默泄漏——根因在 vendored quickjs-ng，见
+[[interrupt-teardown-leak]]；对应测试保留为 `DISABLED_...` 而非删掉。另两条：拒收帧同步写
+而回执异步写（流水客户端按位置配对会错位）、每条控制命令 cJSON 解析两次（合并的风险大于
+收益）。
 
 
 ## Timeline
@@ -217,4 +254,10 @@ storage 单所有者（owner=树根主RT，§10.2）非根节点中继上行（N
   kind: note
   summary: "订正本页 2026-09-28 timeline ⑧ 的两处过期陈述：①「16 个示例从不被编译」——examples/CMakeLists.txt 实际产出 14 个目标（3 个 C 程序 hello/worker/messages + 11 个 qjsc JS 编译检查），而 examples/extension/extension.c 与 examples/worker-orchestrate/task-worker.js 都不在列表内，所以那一轮说的「全量编译」名不副实，现已按 14 个目标如实表述。②同一条里的 OOM 注入形态（env 钩子 QZ_MAILBOX_FAULT_INJECT）已被推翻：改为 per-rt 的 qz_t::out_fault 字段 + qz_test_mailbox_fault(rt, n)，env 入口整体删除；理由是进程级全局/env 等于在生产库里留一个静默丢消息的总开关，且同进程多个 rt 共享额度。详见 code-quality-requirements 页同日 note。"
   source: "2026-09-29 第五轮（跨文件一致性审查）订正"
+  affects: [multi-process-model]
+
+- time: 2026-09-30T00:43:15
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "brain update-truth: M-P7 评审修复全量落地（commit 83047e1c）"
   affects: [multi-process-model]
