@@ -500,6 +500,7 @@ int main(int argc, char **argv)
     const char *script_path = NULL;
     int script_stdin = 0;   /* --script-stdin：源码来自管道（--parent-fd），零落盘 */
     const char *bytecode_path = NULL;   /* --bytecode：预编译初始字节码 */
+    int bytecode_stdin = 0;  /* --bytecode-stdin：字节码来自管道，零落盘 */
     int is_server = 0;          /* M-P2：主RT serve 形态 */
     int is_worker = 0;
     int worker_backend = -1;    /* --worker-backend；-1 = 编译缺省 */
@@ -532,6 +533,8 @@ int main(int argc, char **argv)
             script_stdin = 1;
         } else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
             script_path = argv[++i];
+        } else if (strcmp(argv[i], "--bytecode-stdin") == 0) {
+            bytecode_stdin = 1;
         } else if (strcmp(argv[i], "--bytecode") == 0 && i + 1 < argc) {
             bytecode_path = argv[++i];
         } else if (strcmp(argv[i], "--path") == 0 && i + 1 < argc) {
@@ -562,7 +565,7 @@ int main(int argc, char **argv)
                 "qzjs-rt: usage:\n"
                 "  qzjs-rt --qzjs-worker    --parent-fd N --worker-id K [--script-stdin | --script PATH]\n"
                 "  qzjs-rt --qzjs-rt-server --parent-fd N [--script-stdin | --script PATH]"
-                " [--bytecode PATH] [--worker-backend process|thread]\n");
+                " [--bytecode-stdin | --bytecode PATH] [--worker-backend process|thread]\n");
         return 1;
     }
 
@@ -606,10 +609,23 @@ int main(int argc, char **argv)
         unlink(script_path);
     }
 
-    /* 字节码（二进制）：与脚本同临时文件机制，读为裸字节。 */
+    /* 字节码（二进制）：--bytecode-stdin 从管道读（零落盘）；否则读
+     * --bytecode PATH 临时文件（手动形态）。源码帧先于字节码帧（父按
+     * 「源码→字节码」固定顺序写）。 */
     uint8_t *bytecode = NULL;
     size_t bytecode_len = 0;
-    if (bytecode_path) {
+    if (bytecode_stdin) {
+        int64_t deadline = qz_now_ms() + QZ_IPC_HANDSHAKE_TIMEOUT_MS;
+        uint8_t *frame = NULL;
+        size_t flen = 0;
+        if (qz_ipc_read_frame(parent_fd, &frame, &flen, deadline) < 0) {
+            fprintf(stderr, "qzjs-rt: --bytecode-stdin read failed\n");
+            free(script);
+            return 1;
+        }
+        bytecode = frame;   /* 已是 malloc 的裸字节 */
+        bytecode_len = flen;
+    } else if (bytecode_path) {
         FILE *f = fopen(bytecode_path, "rb");
         if (!f) {
             fprintf(stderr, "qzjs-rt: cannot open bytecode: %s\n", bytecode_path);

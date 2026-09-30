@@ -259,7 +259,8 @@ int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
                    char *const argv[],
                    int role, int id,
                    int require_handshake,
-                   const char *script_src, size_t script_len)
+                   const char *script_src, size_t script_len,
+                   const void *bytecode_src, size_t bytecode_len)
 {
     if (!proc || !argv) return QZ_ERR_INVALID_ARG;
     memset(proc, 0, sizeof(*proc));
@@ -339,6 +340,15 @@ int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
      * for the loop, but the numeric descriptor stays valid until close. */
     if (script_src && script_len > 0) {
         if (qz_ipc_write_frame(sv[0], (const uint8_t *)script_src, script_len) < 0) {
+            kill_err = QZ_ERR_IO;
+            goto kill_fail;
+        }
+    }
+    /* 启动字节码（二进制）：紧跟源码帧之后写。child 端按 --script-stdin /
+     * --bytecode-stdin 两个 flag 各读一帧，顺序固定为「源码 → 字节码」。 */
+    if (bytecode_src && bytecode_len > 0) {
+        if (qz_ipc_write_frame(sv[0], (const uint8_t *)bytecode_src,
+                               bytecode_len) < 0) {
             kill_err = QZ_ERR_IO;
             goto kill_fail;
         }

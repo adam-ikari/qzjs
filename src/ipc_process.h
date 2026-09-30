@@ -259,15 +259,19 @@ typedef enum {
  *   --script-stdin 形态从同一管道读取。这是脚本传输的正规路径：源码全程
  *   只在内存与 socketpair 里流动，**不落盘**。为 NULL 时 child 只能走
  *   --script PATH（argv 自身的长度限制与明文临时文件由此而来）。
- *   时序（全双工 socketpair，无死锁）：父 write(源码) → 子 read(源码)
- *   → 子 write(握手) → 父 read(握手) → 父 write(ack)。
+ * bytecode_src/bytecode_len: 可选的启动字节码（二进制）。同机制，写在
+ *   源码帧**之后**（独立叠加，child 按 --script-stdin/--bytecode-stdin
+ *   两个 flag 各读一帧，顺序固定）。宿主 initial_bytecode 由此零落盘。
+ *   时序（全双工 socketpair，无死锁）：父 write(源码[,字节码]) → 子
+ *   read → 子 write(握手) → 父 read(握手) → 父 write(ack)。
  * Returns 0 on success, qz_err_t (<0) on failure. */
 int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
                    const char *exe,
                    char *const argv[],
                    int role, int id,
                    int require_handshake,
-                   const char *script_src, size_t script_len);
+                   const char *script_src, size_t script_len,
+                   const void *bytecode_src, size_t bytecode_len);
 /* 3-tier termination (§9.2):
  *  1. Send CONTROL{shutdown} envelope
  *  2. Poll for child exit up to timeout_ms (default 2000ms)

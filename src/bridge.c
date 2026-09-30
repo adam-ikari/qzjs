@@ -1884,7 +1884,8 @@ static JSValue js_pal_process_spawn(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowOutOfMemory(ctx);
     }
     int rc = qz_proc_spawn(rt, proc, exe, cargv, role, id,
-                            require_handshake, script_src, script_len);
+                            require_handshake, script_src, script_len,
+                            NULL, 0);   /* worker 路径只送源码，不送字节码 */
     if (script_src) JS_FreeCString(ctx, script_src);
     /* fork+exec 在 spawn 内同步完成，cargv 仅在调用期间需要 */
     bridge_free_argv(cargv, nargv);

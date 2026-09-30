@@ -106,36 +106,6 @@ int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
 }
 
 
-/* ── 初始脚本临时文件 ──
- * 与 M-P1 worker 脚本同机制：mkstemp 原子创建（无 TOCTOU），子进程读毕 unlink；
- * 本函数只负责写盘并交回路径，最后路径由调用方兜底 unlink（幂等）。 */
-static char *host_write_blob(const void *data, size_t len)
-{
-    if (!data || !len) return NULL;
-
-    char tmpl[] = "/tmp/qzjs-rt-script-XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return NULL;
-
-    const char *p = (const char *)data;
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = write(fd, p + off, len - off);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            unlink(tmpl);
-            return NULL;
-        }
-        off += (size_t)n;
-    }
-    if (close(fd) != 0) {
-        unlink(tmpl);
-        return NULL;
-    }
-    return strdup(tmpl);
-}
-
 
 /* ── 入站分发（宿主侧线程，读回调内）──
  * 信封解码结果 → 宿主语义（全部入邮箱，库不调用任何宿主函数）：
@@ -297,21 +267,16 @@ int qz_host_start(qz_t *rt)
     /* loop 必须先 init：qz_proc_spawn 用 parent->loop 做 uv_pipe_init。 */
     if (uv_loop_init(&rt->loop) != 0) return -1;
 
-    /* 启动源码经管道传给主RT（--script-stdin），零落盘。字节码走独立
-     * --bytecode 临时文件机制（与脚本不共路径，本次不动）。 */
+    /* 启动源码与字节码都经管道传给主RT（--script-stdin / --bytecode-stdin），
+     * 零落盘。二者独立叠加（先源码后字节码，同 qzjs.h 语义），父按
+     * 「源码→字节码」固定顺序各写一帧。 */
     const char *script_src = rt->config.initial_script;
     size_t script_len = script_src ? strlen(script_src) : 0;
-    /* 字节码与脚本独立叠加（先脚本后字节码，同 qzjs.h 语义）：写临时文件，
-     * 经 --bytecode 传给主RT。 */
-    char *bc_tmp = NULL;
+    const void *bytecode_src = NULL;
+    size_t bytecode_len = 0;
     if (rt->config.initial_bytecode && rt->config.initial_bytecode_len) {
-        bc_tmp = host_write_blob(rt->config.initial_bytecode,
-                                 rt->config.initial_bytecode_len);
-        if (!bc_tmp) {
-            qz_close_loop(&rt->loop);
-            /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
-            return -1;
-        }
+        bytecode_src = rt->config.initial_bytecode;
+        bytecode_len = rt->config.initial_bytecode_len;
     }
 
     char fd_arg[16];
@@ -328,9 +293,8 @@ int qz_host_start(qz_t *rt)
     if (script_src && script_len > 0) {
         argv[n++] = (char *)"--script-stdin";
     }
-    if (bc_tmp) {
-        argv[n++] = (char *)"--bytecode";
-        argv[n++] = bc_tmp;
+    if (bytecode_src && bytecode_len > 0) {
+        argv[n++] = (char *)"--bytecode-stdin";
     }
     /* CTL-2：控制面档位 + 端点路径传给主RT（runtime 在主RT 进程；宿主进程
      * 只有通道桩，不监听端点）。argv 仅在 spawn 期间需要（同步 fork+exec）。 */
@@ -348,7 +312,6 @@ int qz_host_start(qz_t *rt)
 
     rt->proc = qz_proc_new();
     if (!rt->proc) {
-        if (bc_tmp) { unlink(bc_tmp); free(bc_tmp); }
         qz_close_loop(&rt->loop);
         /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
         return -1;
@@ -358,8 +321,8 @@ int qz_host_start(qz_t *rt)
      * /proc/self/exe 同目录 → 编译期 QZ_RT_PATH）；找不到 = 显式失败。 */
     int rc = qz_proc_spawn(rt, rt->proc, NULL, argv,
                             QZ_IPC_ROLE_MAIN, QZ_IPC_MAIN_ID, 1,
-                            script_src, script_len);
-    if (bc_tmp) { unlink(bc_tmp); free(bc_tmp); }
+                            script_src, script_len,
+                            bytecode_src, bytecode_len);
     if (rc != 0) {
         qz_proc_free(rt->proc);
         rt->proc = NULL;
