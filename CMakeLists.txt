@@ -780,6 +780,11 @@ endif()
 
 add_library(qzjs STATIC ${_qz_core_sources})
 
+# 版本号单一来源：project(... VERSION ...) 是唯一真源，注入编译期宏供 cli.c /
+# qzjs-rt 拼版本串（此前 cli.c 里另有一份硬编码 "0.2.0"，两处会漂移）。
+# PRIVATE：版本串只影响本库内部实现，不进公共 ABI。
+target_compile_definitions(qzjs PRIVATE QZ_VERSION="${PROJECT_VERSION}")
+
 # fuzz 语料种子是字节码的派生产物：qzjs 一旦链接就带上了那份字节码，种子必须与
 # 它同批生成，否则对齐门拿旧种子比新字节码。挂在 qzjs 上让每个构建 qzjs 的 job
 # 都自动刷新种子（内嵌字节码变了，种子跟着变）。
@@ -1205,6 +1210,16 @@ set(_qz_install_targets qzjs qz_full)
 install(TARGETS ${_qz_install_targets}
     ARCHIVE DESTINATION lib
 )
+
+# 可执行产物（qz_cli/qz_rt/qz_ctl 的 OUTPUT_NAME 分别是 qzjs / qzjs-rt /
+# qzjs-ctl）。此前 install 只覆盖库与头文件，发布 tarball 里没有任何可执行文件
+# ——第三方拿到包却跑不起来。用 TARGET 判断而非 QZ_BUILD_CLI（后者与 tests 的
+# 组合会漏掉本该出的 qzjs-rt）。
+foreach(_qz_exe qz_cli qz_rt qz_ctl)
+    if(TARGET ${_qz_exe})
+        install(TARGETS ${_qz_exe} RUNTIME DESTINATION bin)
+    endif()
+endforeach()
 install(DIRECTORY include/qzjs
     DESTINATION include
 )

@@ -1,0 +1,105 @@
+# Release — tag 触发产出可安装的发布产物。
+#
+# 此前项目有 v0.2.0 tag 但零发布工程：workflows 只有 ci.yml（push master /
+# PR，无 tag 触发）与 pages.yml（文档站），29 个 job 全是 build+test，产物从不
+# 上传。结果「0.2.0」只存在于源码文本里，第三方无法从 GitHub 拿到任何可安装的
+# 版本。本 workflow 补上：tag → 构建 → cmake --install → tarball → Release。
+#
+# 版本真源是 CMakeLists 的 project(... VERSION ...)（编译期注入 QZ_VERSION）；
+# 这里从 tag 校验 tag 与 project 版本一致，防止「tag v0.3.0 但源码还是 0.2.0」
+# 这类漂移产物。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:            # 允许手动跑一次（不改 tag，纯验证打包链路）
+    inputs:
+      tag:
+        description: '仅用于产物命名（不改 tag）'
+        required: false
+        default: 'manual'
+
+permissions:
+  contents: write               # 创建 GitHub Release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false      # 发布不抢占：宁可排队也不中断正在跑的发布
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    name: build & package release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config ninja-build
+
+      - name: Install Node (polyfill toolchain)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install polyfill deps (esbuild)
+        run: npm --prefix polyfill ci
+
+      # tag 与源码版本必须一致——不一致就意味着这个 tag 打到了一个
+      # project() 版本还没跟上的提交上，产物元数据会说谎。
+      - name: Verify tag matches project version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PROJECT_VERSION="$(grep -m1 -oP 'VERSION\s+\K[0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt | head -1)"
+          echo "tag=$TAG project=$PROJECT_VERSION"
+          if [ "${TAG#v}" != "$PROJECT_VERSION" ]; then
+            echo "::error::tag $TAG does not match project(VERSION $PROJECT_VERSION) — bump CMakeLists before tagging"
+            exit 1
+          fi
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQZ_BUILD_TESTS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/dist"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install (populate dist/)
+        run: cmake --install build
+
+      # 校验 NOTICES 覆盖完整性，随包分发前再确认一次（合规最后一道门）。
+      - name: Third-party notices cover all vendored deps
+        run: python3 test/third_party_notices_check.py
+
+      - name: Package tarball
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NAME="qzjs-${TAG}"
+          cp THIRD_PARTY_NOTICES.md LICENSE README.md dist/ 2>/dev/null || true
+          ( cd dist && tar czf "../${NAME}.tar.gz" . )
+          echo "Packed ../${NAME}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qzjs-dist
+          path: qzjs-*.tar.gz
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" \
+            "qzjs-${TAG}.tar.gz" \
+            --title "qzjs ${TAG#v}" \
+            --generate-notes

@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-10-01T11:24:57"
+updated: "2026-10-01T11:32:12"
 ---
 
 <!-- compiled_truth -->
@@ -115,4 +115,9 @@ updated: "2026-10-01T11:24:57"
 - time: 2026-10-01T11:24:57
   kind: decision
   summary: "生产级合规：THIRD_PARTY_NOTICES 补漏 + 固化防漂移门。实际漂移比 scout 估计更多——NOTICES 只列 8 个 .gitmodules 子模块，漏 cJSON（v1.7.19，CMakeLists:270 编进库）+ 三个 polyfill npm 依赖（urlpattern-polyfill 10.1.0 / web-streams-polyfill 4.3.0 / @ungap/structured-clone 1.4.0，均被 polyfill/src import 并编进嵌入字节码随二进制分发）。MIT 要求保留版权声明 → 分发即违规风险。新增 Bundled JavaScript polyfill 段说明 esbuild 是构建期 bundler 不进二进制（显式豁免声明，否则分界会丢）。新增 test/third_party_notices_check.py 固化成门并挂 CI：校验 .gitmodules 子模块 + deps/ 全部 vendored 目录 + polyfill npm 依赖均在 NOTICES 表格第一列精确登记。踩坑两处：①子串匹配太松（删掉组件名 lz4 仍通过，因 URL/license 文件名里还有 'lz4'）→ 改精确解析表格第一列；②NOTICES 展示名与目录名不一致（表 'Mbed TLS' vs deps/mbedtls）→ 归一化匹配忽略大小写空格。有效性用变异测试证明：删 cJSON 行、删 web-streams 行均被精确 ::error:: 抓到"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T11:32:12
+  kind: decision
+  summary: "生产级发布工程：①版本号单一来源——CMakeLists project(VERSION) 注入编译期宏 QZ_VERSION，cli.c 用 'qzjs ' QZ_VERSION（此前 cli.c:18 与 CMakeLists.txt:3 两处硬编码 0.2.0 会漂移），保留字面量 fallback 供非 cmake 手敲构建。②新增 .github/workflows/release.yml：tag v*.*.* 触发（另留 workflow_dispatch 手动），构建 → cmake --install 打包 → NOTICES 校验 → tarball → upload-artifact + gh release --generate-notes。tag 与 project 版本不一致即拒（防打 tag 到版本还没跟上的提交上）。③修 install 真实缺口：此前 _qz_install_targets 只装库和头文件，发布 tarball 里零可执行文件——第三方拿到包却跑不起来。补 foreach 装 qz_cli/qz_rt/qz_ctl 到 bin/（用 TARGET 判断而非 QZ_BUILD_CLI，后者与 tests 的组合会漏 qzjs-rt）。本地全链路验证：install 产出 bin/{qzjs,qzjs-rt,qzjs-ctl} + lib/*.a + include/qzjs + pkgconfig/qzjs.pc + cmake config；产物实跑 'dist runs: 2'；tarball 4.9MB/34 项含 LICENSE+NOTICES+README。此前仅有 v0.2.0 tag 但零发布工程——版本号只存在于源码文本，第三方无法从 GitHub 拿到可安装版本"
   affects: [full-project-review-2026-09]

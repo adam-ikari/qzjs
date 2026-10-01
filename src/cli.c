@@ -15,7 +15,12 @@
 #include <poll.h>
 #include <stdint.h>
 
-#define QZ_CLI_VERSION "qzjs 0.2.0"
+/* 版本号单一来源 = CMakeLists 的 project(... VERSION ...)，经编译期宏注入。
+ * 保留字面量 fallback：非 cmake 构建（手敲 cc）也能编出可跑的 CLI。 */
+#ifndef QZ_VERSION
+#define QZ_VERSION "0.2.0"
+#endif
+#define QZ_CLI_VERSION "qzjs " QZ_VERSION
 
 /* M-P7：CLI 是零 libuv 的纯 poll 宿主——不调任何 uv API，出站消息经
  * qz_recv_message 邮箱消费（两个进程模型同一姿势）。qzjs 库自管线程与
