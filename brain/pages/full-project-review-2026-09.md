@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-10-01T05:37:33"
+updated: "2026-10-01T06:01:19"
 ---
 
 <!-- compiled_truth -->
@@ -100,4 +100,9 @@ updated: "2026-10-01T05:37:33"
 - time: 2026-10-01T05:37:33
   kind: decision
   summary: "P2 uv_io.c 拆分评估后选跳过：代码实证 http+TLS 占 84% (3285/3905)，TLS 内嵌 uv_io_http_op_t 状态机（tls_init_op/send_cb/recv_cb 操作 op->tcp/ssl 字段），不可独立拆出；http 是单一状态机贯穿所有回调，无法横向切小。唯一可拆是 fs+storage 数据层 ~620 行 (16%)，共享仅 json_escape 一个函数。收益被现实约束大幅压缩——http 主体 3285 行仍是巨物，主痛点未解，620 行搬移的手术成本不匹配。结论：评审项基于'该拆'直觉，但现实约束使其成为为拆而拆；记录约束供后续决策。转 CI ccache（纯收益零行为风险）"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T06:01:19
+  kind: decision
+  summary: "P2 CI ccache 完成：新增 composite action .github/actions/ccache-setup（装 ccache via hendrikmuhs/ccache-action + restore cache + 导出 CMAKE_C/CXX_COMPILER_LAUNCHER=ccache 到 GITHUB_ENV，使所有 cmake -B 自动透明走 ccache，无需逐 job 改 configure 命令）；ci.yml 24 个含 checkout 的编译 job 各插一行 uses。cache key 按 github.job 隔离。本地验证 CCACHE+launcher 编 qzjs 通过、YAML 语法 OK、24/24 覆盖。策略：composite 封装让每 job 只一行，降低 24 处重复配置的错误面"
   affects: [full-project-review-2026-09]
