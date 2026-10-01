@@ -892,34 +892,44 @@ static JSValue js_pal_http_request_abort(JSContext *ctx, JSValueConst this_val, 
     return JS_UNDEFINED;
  }
 
-static JSValue js_pal_fs_read(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+/* 6 个单参数 path/key 异步操作（fs_read/exists/remove/list + storage_get/del）
+ * 骨架逐字节相同：rt/cctx 查找 → argc 检查 → ToCString →（可选）path 校验 →
+ * PromiseCapability → alloc_cb_data → launch → 释放 → return promise。唯一差异
+ * 是错误串 (opname/argname)、是否做 path 校验、末尾那个 uv_io_* launch 与其
+ * done 回调。launch/done 分开传，避免为每个 op 写一个闭包。storage_get 用
+ * storage_get_done（返回字符串带引号处理），其余用 bridge_io_done。 */
+typedef void (*pal_io_launch_t)(qz_t *rt, const char *arg,
+                                qz_io_done_t done, void *cbd);
+static JSValue pal_path_promise_op(JSContext *ctx, int argc, JSValueConst *argv,
+                                   const char *opname, const char *argname,
+                                   int validate_path, pal_io_launch_t launch,
+                                   qz_io_done_t done)
 {
-    QZ_UNUSED(this_val);
     qz_t *rt = qz_get_rt_from_ctx(ctx);
     if (!rt) {
-        return JS_ThrowTypeError(ctx, "pal.fs_read not available");
+        return JS_ThrowTypeError(ctx, "pal.%s not available", opname);
     }
     qz_ctx_t *cctx = get_ctx_from_jsctx(rt, ctx);
     if (!cctx) {
-        return JS_ThrowTypeError(ctx, "pal.fs_read not available");
+        return JS_ThrowTypeError(ctx, "pal.%s not available", opname);
     }
     if (argc < 1) {
-        return JS_ThrowTypeError(ctx, "fs_read requires path argument");
+        return JS_ThrowTypeError(ctx, "%s requires %s argument", opname, argname);
     }
 
-    const char *path = JS_ToCString(ctx, argv[0]);
-    if (!path) {
+    const char *arg = JS_ToCString(ctx, argv[0]);
+    if (!arg) {
         return JS_EXCEPTION;
     }
-    if (!bridge_validate_path(path)) {
-        JS_FreeCString(ctx, path);
+    if (validate_path && !bridge_validate_path(arg)) {
+        JS_FreeCString(ctx, arg);
         return JS_ThrowTypeError(ctx, "Path traversal detected");
     }
 
     JSValue resolving_funcs[2];
     JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
     if (JS_IsException(promise)) {
-        JS_FreeCString(ctx, path);
+        JS_FreeCString(ctx, arg);
         return JS_EXCEPTION;
     }
 
@@ -927,14 +937,21 @@ static JSValue js_pal_fs_read(JSContext *ctx, JSValueConst this_val, int argc, J
     if (!cbd) {
         JS_FreeValue(ctx, resolving_funcs[0]);
         JS_FreeValue(ctx, resolving_funcs[1]);
-        JS_FreeCString(ctx, path);
+        JS_FreeCString(ctx, arg);
         return JS_ThrowOutOfMemory(ctx);
     }
 
-    uv_io_fs_read(rt, path, bridge_io_done, cbd);
+    launch(rt, arg, done, cbd);
 
-    JS_FreeCString(ctx, path);
+    JS_FreeCString(ctx, arg);
     return promise;
+}
+
+static JSValue js_pal_fs_read(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    QZ_UNUSED(this_val);
+    return pal_path_promise_op(ctx, argc, argv, "fs_read", "path", 1,
+                               uv_io_fs_read, bridge_io_done);
 }
 
 /* fsReadBinary(path) -> Promise<ArrayBuffer>
@@ -1061,177 +1078,29 @@ static JSValue js_pal_fs_write(JSContext *ctx, JSValueConst this_val, int argc, 
 static JSValue js_pal_fs_exists(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     QZ_UNUSED(this_val);
-    qz_t *rt = qz_get_rt_from_ctx(ctx);
-    if (!rt) {
-        return JS_ThrowTypeError(ctx, "pal.fs_exists not available");
-    }
-    qz_ctx_t *cctx = get_ctx_from_jsctx(rt, ctx);
-    if (!cctx) {
-        return JS_ThrowTypeError(ctx, "pal.fs_exists not available");
-    }
-    if (argc < 1) {
-        return JS_ThrowTypeError(ctx, "fs_exists requires path argument");
-    }
-
-    const char *path = JS_ToCString(ctx, argv[0]);
-    if (!path) {
-        return JS_EXCEPTION;
-    }
-    if (!bridge_validate_path(path)) {
-        JS_FreeCString(ctx, path);
-        return JS_ThrowTypeError(ctx, "Path traversal detected");
-    }
-
-    JSValue resolving_funcs[2];
-    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    if (JS_IsException(promise)) {
-        JS_FreeCString(ctx, path);
-        return JS_EXCEPTION;
-    }
-
-    qz_cb_data_t *cbd = alloc_cb_data(cctx, resolving_funcs[0], resolving_funcs[1], rt);
-    if (!cbd) {
-        JS_FreeValue(ctx, resolving_funcs[0]);
-        JS_FreeValue(ctx, resolving_funcs[1]);
-        JS_FreeCString(ctx, path);
-        return JS_ThrowOutOfMemory(ctx);
-    }
-
-    uv_io_fs_exists(rt, path, bridge_io_done, cbd);
-
-    JS_FreeCString(ctx, path);
-    return promise;
+    return pal_path_promise_op(ctx, argc, argv, "fs_exists", "path", 1,
+                               uv_io_fs_exists, bridge_io_done);
 }
 
 static JSValue js_pal_fs_remove(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     QZ_UNUSED(this_val);
-    qz_t *rt = qz_get_rt_from_ctx(ctx);
-    if (!rt) {
-        return JS_ThrowTypeError(ctx, "pal.fs_remove not available");
-    }
-    qz_ctx_t *cctx = get_ctx_from_jsctx(rt, ctx);
-    if (!cctx) {
-        return JS_ThrowTypeError(ctx, "pal.fs_remove not available");
-    }
-    if (argc < 1) {
-        return JS_ThrowTypeError(ctx, "fs_remove requires path argument");
-    }
-
-    const char *path = JS_ToCString(ctx, argv[0]);
-    if (!path) {
-        return JS_EXCEPTION;
-    }
-    if (!bridge_validate_path(path)) {
-        JS_FreeCString(ctx, path);
-        return JS_ThrowTypeError(ctx, "Path traversal detected");
-    }
-
-    JSValue resolving_funcs[2];
-    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    if (JS_IsException(promise)) {
-        JS_FreeCString(ctx, path);
-        return JS_EXCEPTION;
-    }
-
-    qz_cb_data_t *cbd = alloc_cb_data(cctx, resolving_funcs[0], resolving_funcs[1], rt);
-    if (!cbd) {
-        JS_FreeValue(ctx, resolving_funcs[0]);
-        JS_FreeValue(ctx, resolving_funcs[1]);
-        JS_FreeCString(ctx, path);
-        return JS_ThrowOutOfMemory(ctx);
-    }
-
-    uv_io_fs_remove(rt, path, bridge_io_done, cbd);
-
-    JS_FreeCString(ctx, path);
-    return promise;
+    return pal_path_promise_op(ctx, argc, argv, "fs_remove", "path", 1,
+                               uv_io_fs_remove, bridge_io_done);
 }
 
 static JSValue js_pal_fs_list(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     QZ_UNUSED(this_val);
-    qz_t *rt = qz_get_rt_from_ctx(ctx);
-    if (!rt) {
-        return JS_ThrowTypeError(ctx, "pal.fs_list not available");
-    }
-    qz_ctx_t *cctx = get_ctx_from_jsctx(rt, ctx);
-    if (!cctx) {
-        return JS_ThrowTypeError(ctx, "pal.fs_list not available");
-    }
-    if (argc < 1) {
-        return JS_ThrowTypeError(ctx, "fs_list requires path argument");
-    }
-
-    const char *path = JS_ToCString(ctx, argv[0]);
-    if (!path) {
-        return JS_EXCEPTION;
-    }
-    if (!bridge_validate_path(path)) {
-        JS_FreeCString(ctx, path);
-        return JS_ThrowTypeError(ctx, "Path traversal detected");
-    }
-
-    JSValue resolving_funcs[2];
-    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    if (JS_IsException(promise)) {
-        JS_FreeCString(ctx, path);
-        return JS_EXCEPTION;
-    }
-
-    qz_cb_data_t *cbd = alloc_cb_data(cctx, resolving_funcs[0], resolving_funcs[1], rt);
-    if (!cbd) {
-        JS_FreeValue(ctx, resolving_funcs[0]);
-        JS_FreeValue(ctx, resolving_funcs[1]);
-        JS_FreeCString(ctx, path);
-        return JS_ThrowOutOfMemory(ctx);
-    }
-
-    uv_io_fs_list(rt, path, bridge_io_done, cbd);
-
-    JS_FreeCString(ctx, path);
-    return promise;
+    return pal_path_promise_op(ctx, argc, argv, "fs_list", "path", 1,
+                               uv_io_fs_list, bridge_io_done);
 }
 
 static JSValue js_pal_storage_get(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     QZ_UNUSED(this_val);
-    qz_t *rt = qz_get_rt_from_ctx(ctx);
-    if (!rt) {
-        return JS_ThrowTypeError(ctx, "pal.storage_get not available");
-    }
-    qz_ctx_t *cctx = get_ctx_from_jsctx(rt, ctx);
-    if (!cctx) {
-        return JS_ThrowTypeError(ctx, "pal.storage_get not available");
-    }
-    if (argc < 1) {
-        return JS_ThrowTypeError(ctx, "storage_get requires key argument");
-    }
-
-    const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) {
-        return JS_EXCEPTION;
-    }
-
-    JSValue resolving_funcs[2];
-    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    if (JS_IsException(promise)) {
-        JS_FreeCString(ctx, key);
-        return JS_EXCEPTION;
-    }
-
-    qz_cb_data_t *cbd = alloc_cb_data(cctx, resolving_funcs[0], resolving_funcs[1], rt);
-    if (!cbd) {
-        JS_FreeValue(ctx, resolving_funcs[0]);
-        JS_FreeValue(ctx, resolving_funcs[1]);
-        JS_FreeCString(ctx, key);
-        return JS_ThrowOutOfMemory(ctx);
-    }
-
-    uv_io_storage_get(rt, key, storage_get_done, cbd);
-
-    JS_FreeCString(ctx, key);
-    return promise;
+    return pal_path_promise_op(ctx, argc, argv, "storage_get", "key", 0,
+                               uv_io_storage_get, storage_get_done);
 }
 
 static JSValue js_pal_storage_set(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
@@ -1293,42 +1162,8 @@ static JSValue js_pal_storage_set(JSContext *ctx, JSValueConst this_val, int arg
 static JSValue js_pal_storage_del(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     QZ_UNUSED(this_val);
-    qz_t *rt = qz_get_rt_from_ctx(ctx);
-    if (!rt) {
-        return JS_ThrowTypeError(ctx, "pal.storage_del not available");
-    }
-    qz_ctx_t *cctx = get_ctx_from_jsctx(rt, ctx);
-    if (!cctx) {
-        return JS_ThrowTypeError(ctx, "pal.storage_del not available");
-    }
-    if (argc < 1) {
-        return JS_ThrowTypeError(ctx, "storage_del requires key argument");
-    }
-
-    const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) {
-        return JS_EXCEPTION;
-    }
-
-    JSValue resolving_funcs[2];
-    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    if (JS_IsException(promise)) {
-        JS_FreeCString(ctx, key);
-        return JS_EXCEPTION;
-    }
-
-    qz_cb_data_t *cbd = alloc_cb_data(cctx, resolving_funcs[0], resolving_funcs[1], rt);
-    if (!cbd) {
-        JS_FreeValue(ctx, resolving_funcs[0]);
-        JS_FreeValue(ctx, resolving_funcs[1]);
-        JS_FreeCString(ctx, key);
-        return JS_ThrowOutOfMemory(ctx);
-    }
-
-    uv_io_storage_del(rt, key, bridge_io_done, cbd);
-
-    JS_FreeCString(ctx, key);
-    return promise;
+    return pal_path_promise_op(ctx, argc, argv, "storage_del", "key", 0,
+                               uv_io_storage_del, bridge_io_done);
 }
 
 /* ================================================================
