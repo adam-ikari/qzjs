@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [security, sandbox, P2]
 created: "2026-10-01T06:59:16"
-updated: "2026-10-01T07:33:40"
+updated: "2026-10-01T07:54:46"
 ---
 
 <!-- compiled_truth -->
@@ -67,4 +67,9 @@ typedef struct qz_config_s {
 - time: 2026-10-01T07:33:40
   kind: decision
   summary: "严格模式实施完成。两个实施决策（偏离原 spec）：1) strict 下拒绝相对路径，只接受 sandbox_root 内绝对路径——下游 uv_io_* 按进程 CWD 解析相对路径，若校验层脑补 root-relative 放行会导致「校验过、读不到」的语义不一致；绝对路径契约显式无歧义。2) ISOLATED 模型下 strict 配置经环境变量 QZ_STRICT_SANDBOX/QZ_STRICT_ENV 从父进程传给 qzjs-rt 子进程（子进程 exec 自己重建 rt，不继承父 cfg；exec 保留 environ，无需改 argv 协议）。验证：strict 下 root 内绝对路径读写 OK / 越界绝对 DENY / 相对 DENY / env 白名单 3 变量（对照非 strict 全量 92）；ctest 28/28 全绿。processSpawn strict（exe=NULL→默认 qzjs-rt 解析）已编译+审查，JS 层不暴露 Worker 无法触发冒烟"
+  affects: [strict-mode-sandbox]
+
+- time: 2026-10-01T07:54:46
+  kind: decision
+  summary: "CI 实证踩坑并修复：strict 限根用的 realpath()/dirname() 属 XSI 非纯 POSIX，CMakeLists 给 target 加 _POSIX_C_SOURCE=200809L 时 stdlib.h/libgen.h 不声明它们，-Werror=implicit-function-declaration 下首次 CI 20 个 job 红。本地 build 目录无该宏故隐式通过（本地测不出）。修：bridge.c 头部 #define _XOPEN_SOURCE 700（XSI+POSIX.1-2008 超集），须在任何头文件之前。教训：特性测试宏相关的编译问题只在带该宏的构建（test 目标/CI）暴露，本地默认构建测不出来——改用 C99+POSIX 特性时必须验 CI 配置。修复后 CI 29/29 全绿（含 asan/ubsan/feature-matrix/wamr/wasm3/polyfill-* 等全部配置）"
   affects: [strict-mode-sandbox]
