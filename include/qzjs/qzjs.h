@@ -38,6 +38,22 @@ typedef struct qz_config_s {
      * 粒度 per-rt：同一 qz_t 的全部 worker 同后端。M-P1 缺省 THREAD；
      * M-P2 起 ISOLATED 编译缺省 PROCESS（编译模型驱动缺省，§1.4）。 */
     int worker_backend;              /* qz_worker_backend_t 值 */
+    /* ── 严格模式（strict mode）：安全运行第三方/不可信 JS ──
+     * 引擎层 mechanism（非 policy 档位体系——见 brain/pages/strict-mode-sandbox.md）。
+     * strict_mode=1 启用后堵三个宿主沦陷缺口：fs 限根、processSpawn 仅
+     * qzjs-rt、env 白名单。不开 = 现状全开（trusted 场景兼容）。一次性配置
+     * 于 qz_create，运行期不可降级（防 JS 自关闭）。
+     *
+     * sandbox_root：strict 下 fs 限根绝对路径。所有 fs 路径 realpath 解析后
+     * 必须在该前缀内；相对路径相对 root 解析；拒符号链接逃逸。
+     * NULL + strict → 拒绝所有 fs 操作。
+     *
+     * env_allowlist：strict 下注入 globalThis.env 的白名单（NULL 结尾的 env
+     * 变量名数组，如 {"PATH","HOME",NULL}）。NULL + strict → 不注入任何 env。
+     * 非 strict 下该字段被忽略（现状全量 environ 注入）。 */
+    int strict_mode;                 /* 0 = off（默认）| 1 = on */
+    const char *sandbox_root;
+    const char *const *env_allowlist;
 } qz_config_t;
 
 /* 把 JS 源码编译为字节码 blob。独立函数（无需 qz_t/运行时）。

@@ -340,6 +340,11 @@ struct qz_t {
 
     /* config copy (initial_script strdup'd by qz_create, freed by destroy) */
     qz_config_t config;
+    /* strict mode 深拷贝（config.sandbox_root/env_allowlist 是宿主缓冲指针，
+     * qz_create strdup/深拷贝到这里由 rt 拥有，destroy 释放）。
+     * strict_mode==0 时均为 NULL，检查代码直接判 rt->config.strict_mode。 */
+    char *strict_root;          /* sandbox_root 深拷贝 */
+    char **strict_env_allow;    /* env 白名单深拷贝（NULL 结尾 char* 数组）*/
     /* 内部出站钩子（非公共 API）：仅主RT 子进程由 rt_main.c 挂
      * server_emit_cb → qz_post_to_host 走进程上行；宿主 rt 恒 NULL → 入邮箱。 */
     void (*host_emit)(qz_t *rt, const char *json, size_t len);

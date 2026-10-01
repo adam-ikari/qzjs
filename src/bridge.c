@@ -27,6 +27,8 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <libgen.h>   /* dirname() — strict 模式解析不存在路径的父目录 */
+#include <limits.h>   /* PATH_MAX — strict 模式 realpath 缓冲 */
 /* ipc_envelope.h 是纯 C99（无 uv 依赖），mock 构建也要它——THREAD 路径的
  * msgq flags 与 kind 常量同源（bridge_kind_arg / QZ_MSG_FLAG_PORT_TRANSFER）。 */
 #include "ipc_envelope.h"
@@ -495,7 +497,7 @@ static JSValue js_pal_timer_start(JSContext *ctx, JSValueConst this_val, int arg
  *   - Null bytes (path truncation attacks)
  *   - Leading "/" is allowed (absolute paths)
  */
-static bool bridge_validate_path(const char *path)
+static bool bridge_validate_path(qz_t *rt, const char *path)
 {
     if (!path || !*path) return false;
 
@@ -520,6 +522,51 @@ static bool bridge_validate_path(const char *path)
         }
         p++;
     }
+
+    /* ── strict 模式：限根（brain/pages/strict-mode-sandbox.md）──
+     * 非 strict 直接放行（现状全开，trusted 场景兼容）。strict 但宿主没配
+     * sandbox_root → 拒所有 fs（宁拒不猜：没有根就没有边界）。 */
+    if (!rt || !rt->config.strict_mode) return true;
+    if (!rt->strict_root) return false;
+    /* 相对路径在 strict 下拒绝：下游 uv_io_* 按进程 CWD 解析相对路径，而 CWD
+     * 在沙箱根之外（本项目的 qzjs-rt 从宿主 cwd 继承），把 root-relative 语义
+     * 在校验层"脑补"成放行会导致校验与实际解析不一致（校验过、读不到）。
+     * strict 的契约是「调用方给 sandbox_root 内的绝对路径」——显式、无歧义、
+     * 与实际解析一致。 */
+    if (path[0] != '/') return false;
+
+    char root_real[PATH_MAX];
+    if (!realpath(rt->strict_root, root_real)) return false;
+    size_t root_len = strlen(root_real);
+
+    /* 候选绝对路径（strict 只接受绝对路径，见上）。 */
+    char cand[PATH_MAX];
+    if (snprintf(cand, sizeof cand, "%s", path) >= (int)sizeof cand) return false;
+
+    char resolved[PATH_MAX];
+    if (realpath(cand, resolved)) {
+        /* 存在：canonical 形式必须落在 root 内。边界判定要跟 '/'/'\0' 比——
+         * 只比前缀会让 /sandboxevil 通过 /sandbox 的检查。 */
+        if (strncmp(resolved, root_real, root_len) != 0) return false;
+        char tail = resolved[root_len];
+        return tail == '/' || tail == '\0';
+    }
+
+    /* 不存在（fs_write 待创建 / fs_read 会 ENOENT）：解析父目录。只校验父目录
+     * 就够——目标文件尚不存在时 realpath 必然失败，但父目录真实存在，逃逸与否
+     * 由此判定。basename 已在上面拒过 ".." 分量。 */
+    char *dup = strdup(cand);
+    if (!dup) return false;
+    char *dir = dirname(dup);
+    bool ok = false;
+    if (realpath(dir, resolved)) {
+        size_t dlen = strlen(resolved);
+        ok = (strncmp(resolved, root_real, root_len) == 0) &&
+             (resolved[root_len] == '/' || resolved[root_len] == '\0' ||
+              root_len == dlen);
+    }
+    free(dup);
+    return ok;
 
     return true;
 }
@@ -921,7 +968,7 @@ static JSValue pal_path_promise_op(JSContext *ctx, int argc, JSValueConst *argv,
     if (!arg) {
         return JS_EXCEPTION;
     }
-    if (validate_path && !bridge_validate_path(arg)) {
+    if (validate_path && !bridge_validate_path(rt, arg)) {
         JS_FreeCString(ctx, arg);
         return JS_ThrowTypeError(ctx, "Path traversal detected");
     }
@@ -976,7 +1023,7 @@ static JSValue js_pal_fs_read_binary(JSContext *ctx, JSValueConst this_val, int 
     if (!path) {
         return JS_EXCEPTION;
     }
-    if (!bridge_validate_path(path)) {
+    if (!bridge_validate_path(rt, path)) {
         JS_FreeCString(ctx, path);
         return JS_ThrowTypeError(ctx, "Path traversal detected");
     }
@@ -1034,7 +1081,7 @@ static JSValue js_pal_fs_write(JSContext *ctx, JSValueConst this_val, int argc, 
     if (!path) {
         return JS_EXCEPTION;
     }
-    if (!bridge_validate_path(path)) {
+    if (!bridge_validate_path(rt, path)) {
         JS_FreeCString(ctx, path);
         return JS_ThrowTypeError(ctx, "Path traversal detected");
     }
@@ -1278,12 +1325,13 @@ static JSValue js_pal_fs_read_sync(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
     QZ_UNUSED(this_val);
+    qz_t *rt = qz_get_rt_from_ctx(ctx);
     if (argc < 1) return JS_EXCEPTION;
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
     /* Same ".." traversal guard as the async fs ops — sync reads (worker
      * script loader) must not bypass it. */
-    if (!bridge_validate_path(path)) {
+    if (!bridge_validate_path(rt, path)) {
         JS_FreeCString(ctx, path);
         return JS_ThrowTypeError(ctx, "Path traversal detected");
     }
@@ -1356,10 +1404,11 @@ static JSValue js_pal_fs_write_sync(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
     QZ_UNUSED(this_val);
+    qz_t *rt = qz_get_rt_from_ctx(ctx);
     if (argc < 1) return JS_EXCEPTION;
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
-    if (!bridge_validate_path(path)) {
+    if (!bridge_validate_path(rt, path)) {
         JS_FreeCString(ctx, path);
         return JS_ThrowTypeError(ctx, "Path traversal detected");
     }

@@ -272,6 +272,11 @@ int qz_proc_spawn(qz_t *parent, qz_proc_t *proc,
     int kill_err = QZ_ERR_GENERIC;   /* refined per failure cause below */
 
     int oom = 0;
+    /* strict 模式：忽略 JS 传的任意 binary_path（那等于任意 execv）。强制走
+     * resolve_binary(NULL) 的默认链——QZ_RT_SERVER / /proc/self/exe 旁挂的
+     * qzjs-rt / 编译期 QZ_RT_PATH，三者都是宿主控制的路径，不是 JS 能选的。
+     * 嵌套 worker（再 spawn）因此照常可用。 */
+    if (parent && parent->config.strict_mode) exe = NULL;
     char *path = resolve_binary(exe, &oom);
     if (!path) return oom ? QZ_ERR_NO_MEMORY : QZ_ERR_NOT_FOUND;
 

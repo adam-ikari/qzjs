@@ -726,6 +726,34 @@ int main(int argc, char **argv)
     rt->config.initial_script = NULL;
     rt->config.debug = 0;
     rt->config.control_plane = 0;
+    /* strict 模式：父进程（qzjs --strict-sandbox）经环境变量传递——子进程 exec
+     * 后继承 environ，无需改 argv 协议。深拷贝语义同 qz_create（rt 拥有）。 */
+    {
+        const char *sroot = getenv("QZ_STRICT_SANDBOX");
+        if (sroot && sroot[0]) {
+            rt->config.strict_mode = 1;
+            rt->strict_root = strdup(sroot);
+            const char *spec = getenv("QZ_STRICT_ENV");
+            if (!spec || !*spec) spec = "PATH,HOME,LANG";
+            size_t n = 1;
+            for (const char *c = spec; *c; c++) if (*c == ',') n++;
+            rt->strict_env_allow = (char **)calloc(n + 1, sizeof(char *));
+            if (rt->strict_env_allow) {
+                size_t i = 0; const char *start = spec;
+                for (;;) {
+                    const char *comma = strchr(start, ',');
+                    size_t len = comma ? (size_t)(comma - start) : strlen(start);
+                    if (len) {
+                        char *tok = (char *)malloc(len + 1);
+                        if (tok) { memcpy(tok, start, len); tok[len] = '\0';
+                                   rt->strict_env_allow[i++] = tok; }
+                    }
+                    if (!comma) break;
+                    start = comma + 1;
+                }
+            }
+        }
+    }
     rt->msg_head = &rt->msg_stub;
     rt->msg_tail = &rt->msg_stub;
     /* 子进程不消费邮箱（出站经 host_emit 上行 / worker 丢弃）：out_efd
@@ -934,6 +962,11 @@ int main(int argc, char **argv)
     free(g_rx.buf);
     g_rx.buf = NULL;
     free(w);
+    free(rt->strict_root);
+    if (rt->strict_env_allow) {
+        for (char **p = rt->strict_env_allow; *p; p++) free(*p);
+        free(rt->strict_env_allow);
+    }
     free(rt);
     free(bytecode);
     free(script);
@@ -947,6 +980,11 @@ fail:
     if (loop_inited) {
         qz_close_loop(&rt->loop);
         /* close-failed: 仍 free rt（uv_loop_t 按值内嵌其中）——见 qz_close_loop 的取舍说明。 */
+    }
+    free(rt->strict_root);
+    if (rt->strict_env_allow) {
+        for (char **p = rt->strict_env_allow; *p; p++) free(*p);
+        free(rt->strict_env_allow);
     }
     free(rt);
     return 1;

@@ -25,6 +25,11 @@
  * run_code 应用到 qz_config_t）。-1 = 缺省（OFF）。 */
 static int g_control_plane = -1;
 static const char *g_control_pipe = NULL;
+/* strict 模式（--strict-sandbox=PATH）：安全跑第三方/不可信代码。gz_fs 限根、
+ * processSpawn 仅 qzjs-rt、env 白名单。env 白名单默认 {PATH,HOME,LANG}，
+ * QZ_STRICT_ENV 环境变量可逗号分隔覆盖。 */
+static const char *g_strict_root = NULL;
+static char **g_strict_env_allow = NULL;
 
 static void usage(FILE *out) {
     fprintf(out,
@@ -45,6 +50,10 @@ static void usage(FILE *out) {
         "                      an AF_UNIX endpoint (see qzjs-ctl)\n"
         "  --control-pipe=<path>\n"
         "                      endpoint path (default /tmp/qzjs-<pid>-<n>.ctl)\n"
+        "  --strict-sandbox=<dir>\n"
+        "                      strict mode: confine fs to <dir>, spawn only\n"
+        "                      qzjs-rt, expose only allowlisted env (env: QZ_STRICT_ENV,\n"
+        "                      default PATH,HOME,LANG). Use for untrusted scripts.\n"
         "  -h, --help          show this help\n"
         "  -v, --version       show version\n"
         "\n"
@@ -280,7 +289,8 @@ static char *json_escape(const char *s) {
  * proposal-cli-api direction, globalThis.arguments holds the script args —
  * excluding the executable and script path — and globalThis.env the process
  * environment as a plain object). */
-static char *build_bootstrap(const char *const *args, int nargs) {
+static char *build_bootstrap(const char *const *args, int nargs,
+                             const char *const *env_allow) {
     /* arguments → JSON array literal [ "a", "b" ] */
     size_t args_cap = 8;
     for (int i = 0; i < nargs; i++) {
@@ -327,6 +337,15 @@ static char *build_bootstrap(const char *const *args, int nargs) {
         const char *eq = strchr(*e, '=');
         if (!eq) continue;
         size_t klen = (size_t)(eq - *e);
+        if (env_allow) {
+            /* strict 白名单：KEY 不在允许列表就跳过。strict 但白名单为空
+             * （{NULL}）→ globalThis.env 拿到 {}，一个变量都不泄。 */
+            int hit = 0;
+            for (const char *const *a = env_allow; *a; a++) {
+                if (strlen(*a) == klen && memcmp(*a, *e, klen) == 0) { hit = 1; break; }
+            }
+            if (!hit) continue;
+        }
         char *k = malloc(klen + 1);
         if (!k) {
             fprintf(stderr, "qzjs: out of memory allocating %zu bytes for env key\n", klen + 1);
@@ -395,6 +414,50 @@ static void apply_control_plane(qz_config_t *cfg) {
     cfg->control_pipe_path = g_control_pipe;
 }
 
+/* strict 模式应用（--strict-sandbox 解析于 main，run_code 应用到 config）。
+ * env 白名单：QZ_STRICT_ENV 逗号分隔覆盖缺省 {PATH,HOME,LANG}。 */
+static const char *const *strict_env_allow(void) {
+    if (!g_strict_root) return NULL;              /* 非 strict = NULL（全量注入）*/
+    if (g_strict_env_allow)                        /* 幂等：run_code/repl/bytecode 共用 */
+        return (const char *const *)g_strict_env_allow;
+    const char *spec = getenv("QZ_STRICT_ENV");
+    if (!spec || !*spec) spec = "PATH,HOME,LANG";
+    size_t n = 1;
+    for (const char *c = spec; *c; c++) if (*c == ',') n++;
+    g_strict_env_allow = (char **)calloc(n + 1, sizeof(char *));
+    if (!g_strict_env_allow) return NULL;
+    size_t i = 0;
+    const char *start = spec;
+    for (;;) {
+        const char *comma = strchr(start, ',');
+        size_t len = comma ? (size_t)(comma - start) : strlen(start);
+        if (len) {
+            char *tok = (char *)malloc(len + 1);
+            if (tok) {
+                memcpy(tok, start, len);
+                tok[len] = '\0';
+                g_strict_env_allow[i++] = tok;
+            }
+        }
+        if (!comma) break;
+        start = comma + 1;
+    }
+    return (const char *const *)g_strict_env_allow;
+}
+
+/* strict 模式应用（--strict-sandbox 解析于 main，各入口应用到 config）。 */
+static void apply_strict_mode(qz_config_t *cfg) {
+    if (!g_strict_root) return;
+    cfg->strict_mode = 1;
+    cfg->sandbox_root = g_strict_root;
+    cfg->env_allowlist = strict_env_allow();
+    /* ISOLATED 下 JS 跑在 qzjs-rt 子进程（exec 自己重建 rt，不继承父 cfg）——
+     * 经环境变量传递，子进程 rt_main.c 启动时读回。exec 保留 environ。 */
+    setenv("QZ_STRICT_SANDBOX", g_strict_root, 1);
+    const char *spec = getenv("QZ_STRICT_ENV");
+    setenv("QZ_STRICT_ENV", spec && *spec ? spec : "PATH,HOME,LANG", 1);
+}
+
 /* file: 这段 code 的来源路径（script 模式 = argv 里的脚本路径；-e / REPL 传
  * NULL）。它作为 eval 通道的 "file" 字段送进运行时，引擎用它命名这次求值，
  * 栈帧 / Error().stack / 调试器断点才认得真实文件（否则全是 "<input>"）。 */
@@ -402,17 +465,24 @@ static int run_code(const char *code, const char *file,
                     const char *const *args, int nargs) {
     cli_host_t host = {0};
 
-    char *bootstrap = build_bootstrap(args, nargs);
+    qz_config_t cfg;
+    memset(&cfg, 0, sizeof cfg);
+    apply_worker_backend(&cfg);
+    apply_control_plane(&cfg);
+    apply_strict_mode(&cfg);
+    /* strict 下 env 白名单非 NULL（可能为空表 {NULL} → 注入 {}）；非 strict 传
+     * NULL → build_bootstrap 保留现状的全量 environ 注入。 */
+    const char *const *env_allow =
+        cfg.strict_mode ? (cfg.env_allowlist ? cfg.env_allowlist
+                                             : (const char *const[]){NULL})
+                        : NULL;
+    char *bootstrap = build_bootstrap(args, nargs, env_allow);
     if (!bootstrap) {
         /* build_bootstrap 已打印带上下文的 OOM 诊断；这里只需失败退出，
          * 不能静默降级成"没有 arguments/env/onmessage 的 bootstrap"。 */
         return 1;
     }
-    qz_config_t cfg;
-    memset(&cfg, 0, sizeof cfg);
     cfg.initial_script = bootstrap;
-    apply_worker_backend(&cfg);
-    apply_control_plane(&cfg);
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
@@ -504,7 +574,7 @@ static int run_code(const char *code, const char *file,
 static int repl_loop(void) {
     cli_host_t host = {0};
 
-    char *bootstrap = build_bootstrap(NULL, 0);
+    char *bootstrap = build_bootstrap(NULL, 0, strict_env_allow());
     if (!bootstrap) {
         /* 同 run_code：OOM 诊断已由 build_bootstrap 打出，不静默降级 */
         return 1;
@@ -514,6 +584,7 @@ static int repl_loop(void) {
     cfg.initial_script = bootstrap;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+    apply_strict_mode(&cfg);
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
@@ -648,7 +719,7 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     fclose(f);
 
     cli_host_t host = {0};
-    char *bootstrap = build_bootstrap(args, nargs);
+    char *bootstrap = build_bootstrap(args, nargs, strict_env_allow());
     if (!bootstrap) { free(bc); return 1; }
     qz_config_t cfg;
     memset(&cfg, 0, sizeof cfg);
@@ -657,6 +728,7 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     cfg.initial_bytecode_len = (size_t)sz;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+    apply_strict_mode(&cfg);
 
     qz_t *rt = qz_create(&cfg);
     free(bootstrap);
@@ -696,6 +768,11 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
         }
         if (!strncmp(argv[i], "--control-pipe=", 15)) {
             g_control_pipe = argv[i] + 15;
+            continue;
+        }
+        if (!strncmp(argv[i], "--strict-sandbox=", 17)) {
+            g_strict_root = argv[i] + 17;
+            if (!*g_strict_root) { usage(stderr); return 2; }
             continue;
         }
         if (!strcmp(argv[i], "--bytecode")) {

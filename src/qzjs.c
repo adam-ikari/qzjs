@@ -126,6 +126,43 @@ qz_t *qz_create(const qz_config_t *config)
         rt->config.initial_bytecode = bc;
         rt->config.initial_bytecode_len = n;
     }
+    /* strict mode 深拷贝：sandbox_root strdup，env_allowlist 数组+各元素 strdup。
+     * 失败走 OOM 清理（与 initial_* 同模式：free 已分配，返 NULL）。 */
+    if (config->strict_mode) {
+        if (config->sandbox_root && config->sandbox_root[0]) {
+            rt->strict_root = strdup(config->sandbox_root);
+            if (!rt->strict_root) {
+                free((void *)rt->config.initial_script);
+                free((void *)rt->config.initial_bytecode);
+                free(rt);
+                return NULL;
+            }
+        }
+        if (config->env_allowlist) {
+            int n = 0;
+            while (config->env_allowlist[n]) n++;
+            rt->strict_env_allow = (char **)calloc((size_t)n + 1, sizeof(char *));
+            if (!rt->strict_env_allow) {
+                free(rt->strict_root);
+                free((void *)rt->config.initial_script);
+                free((void *)rt->config.initial_bytecode);
+                free(rt);
+                return NULL;
+            }
+            for (int i = 0; i < n; i++) {
+                rt->strict_env_allow[i] = strdup(config->env_allowlist[i]);
+                if (!rt->strict_env_allow[i]) {
+                    for (int j = 0; j < i; j++) free(rt->strict_env_allow[j]);
+                    free(rt->strict_env_allow);
+                    free(rt->strict_root);
+                    free((void *)rt->config.initial_script);
+                    free((void *)rt->config.initial_bytecode);
+                    free(rt);
+                    return NULL;
+                }
+            }
+        }
+    }
     /* lock-free MPSC queue: head == tail == sentinel (calloc zeroed stub's q.next) */
     rt->msg_head = &rt->msg_stub;
     rt->msg_tail = &rt->msg_stub;
@@ -223,6 +260,11 @@ void qz_destroy(qz_t *rt)
     qz_mailbox_teardown(rt);           /* join 后无并发生产者，排干安全 */
     free((void *)rt->config.initial_script);
     free((void *)rt->config.initial_bytecode);
+    free(rt->strict_root);
+    if (rt->strict_env_allow) {
+        for (char **p = rt->strict_env_allow; *p; p++) free(*p);
+        free(rt->strict_env_allow);
+    }
     free(rt);
 #endif
 }

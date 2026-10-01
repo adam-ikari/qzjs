@@ -468,5 +468,10 @@ void qz_host_destroy(qz_t *rt)
     qz_mailbox_teardown(rt);
     free((void *)rt->config.initial_script);
     free((void *)rt->config.initial_bytecode);
+    free(rt->strict_root);
+    if (rt->strict_env_allow) {
+        for (char **p = rt->strict_env_allow; *p; p++) free(*p);
+        free(rt->strict_env_allow);
+    }
     free(rt);
 }
