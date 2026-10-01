@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-09-30T06:20:43"
+updated: "2026-10-01T05:17:22"
 ---
 
 <!-- compiled_truth -->
@@ -85,4 +85,14 @@ updated: "2026-09-30T06:20:43"
 - time: 2026-09-30T06:20:43
   kind: evidence
   summary: "多进程 e2e 三失败定性（2026-09-30，5 commits 5341664a/c7a9fc43 等）：①err -9(worker 被杀)=P1 收敛前的全局 pkill -f 交叉误杀 + 残留进程污染，组作用域收敛已修；②nested PID_GRAND:unbound=P1 e2e 收敛引入的回归(数组名 GROUPS 撞 bash 特殊变量当前用户组列表，GROUPS+= 在 set -u 下令 mark_group 中止 start_tree)，基线对照在『基线全红』时零证明力故当时未察觉，已改名 HOST_PIDS 修复；③手动跑 worker 脚本在仓库路径报 fsReadSync ENOENT=本 PVE 宿主 FS/内核异常(strace 实证：同 ext4、同文件、同代码路径，openat 结果随调用上下文不同；worker 脚本放 /tmp 则正常)，非 qzjs 代码、规范 e2e 不受影响。终态 nested/mp1/mp2/mr2 四套多进程 e2e 全 PASS。方法论教训入账 decision-principles『验证前提』节。"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T04:09:30
+  kind: decision
+  summary: "P2 去重完成：bridge.c PAL 包装器群收敛。真实重复是 9 个 js_pal_* 异步包装器（~340 行，超 150 目标）；抽出 pal_path_promise_op() helper，6 个单参数 path/key op（fs_read/exists/remove/list + storage_get/del）骨架逐字节相同，收敛一处，差异经 opname/argname/validate_path/launch/done 五参数化。fs_read_binary（mid 插 bridge_zc_t + read_ex 签名不同）、fs_write、storage_set（2 参数+value 提取）结构不同，保留原样。验证：ninja 零警告 + ctest 28/28 + 真实运行时 smoke 6 op 全通。评审建议名 qz_apply_patch 为泛指"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T05:17:22
+  kind: decision
+  summary: "P2 CMakePresets.json 完成：cmake 3.31.10；12 个 configure preset 覆盖 CI 真实组合（default/debug-tests/minimal/all-features-off/thread/asan/asan-iso/ubsan/ubsan-iso/polyfill-compressed/polyfill-external/coverage），hidden base preset 抽 Ninja+compile_commands 公共部分；配套 build presets(jobs=0) 与 test presets(并行4)。binaryDir=build/<preset>，build/ 已在 .gitignore。验证：12/12 configure 成功；default+debug-tests+asan-iso build 成功；default ctest 28/28。目的：替代手敲 30 个 build 目录为  一键；CI 暂未改（保持绿），可选后续迁移"
   affects: [full-project-review-2026-09]
