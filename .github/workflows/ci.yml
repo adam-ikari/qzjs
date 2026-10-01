@@ -1150,6 +1150,13 @@ jobs:
       - name: Fuzz corpus seeds match the built bytecode
         run: python3 test/fuzz_corpus_align_check.py
 
+      # 第三方依赖登记完整性。MIT/Apache 的分发义务要求版权声明随二进制走；
+      # 新增 vendored 依赖或 polyfill npm 依赖时若漏登记 THIRD_PARTY_NOTICES.md
+      # = 合规风险。这条约束已被实际漂移验证过（cJSON 与三个 polyfill npm 依赖
+      # 曾漏登记），故把校验固化成门。
+      - name: Third-party notices cover all vendored deps
+        run: python3 test/third_party_notices_check.py
+
       # 公共头声明面 vs 实际链接面。「声明了但某个编译模型下没有实现」是最难查
       # 的一类缺陷：宿主编译通过（头无条件声明），直到链接才炸出一句
       # undefined reference，看起来像构建坏了而不是「这个模型没这个功能」。

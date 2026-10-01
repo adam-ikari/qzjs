@@ -18,6 +18,20 @@ same notices.
 | WAMR | https://github.com/bytecodealliance/wasm-micro-runtime | `25bd7eb63e82` | Apache-2.0 |
 | GoogleTest | https://github.com/google/googletest | `f8d7d77c0693` | BSD-3-Clause |
 | lz4 | https://github.com/lz4/lz4 | `0774d05537f9` | BSD-2-Clause (lib/) / GPL-2.0-or-later (rest) |
+| cJSON | https://github.com/DaveGamble/cJSON | v1.7.19 (vendored in-tree, not a submodule) | MIT |
+| urlpattern-polyfill | https://github.com/PolyfillJS/urlpattern-polyfill | 10.1.0 (bundled into polyfill) | MIT |
+| web-streams-polyfill | https://github.com/MattiasBuelens/web-streams-polyfill | 4.3.0 (bundled into polyfill) | MIT |
+| @ungap/structured-clone | https://github.com/Ungapped/structured-clone | 1.4.0 (bundled into polyfill) | MIT |
+
+## Bundled JavaScript polyfill
+
+The WinterTC polyfill (`polyfill/src/`, built by `polyfill/build.js`) is
+compiled to QuickJS bytecode and **embedded in the runtime binary**. The npm
+dependencies it imports at build time are therefore bundled into the shipped
+binary and are listed above: `urlpattern-polyfill`, `web-streams-polyfill`,
+and `@ungap/structured-clone` (all MIT). `esbuild` is used only to bundle the
+polyfill at build time — it is a build-time tool, is not embedded, and is not
+shipped in runtime binaries.
 
 ## Patches
 

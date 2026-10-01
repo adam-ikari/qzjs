@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-10-01T09:45:00"
+updated: "2026-10-01T11:24:57"
 ---
 
 <!-- compiled_truth -->
@@ -110,4 +110,9 @@ updated: "2026-10-01T09:45:00"
 - time: 2026-10-01T09:45:00
   kind: decision
   summary: "P2 CI macos runner 评估后跳过：非「加 runner」而是「先做 macOS 平台移植」——ipc_process.c 无平台守卫（AF_UNIX socketpair/fork+exec/SIGKILL+waitpid Linux-only 声明但无 #ifdef）、resolve_binary 硬依赖 /proc/self/exe（macOS 无 /proc，需 _NSGetExecutablePath）、CMake ISOLATED 无 macOS 变体、deps/wamr 需额外适配。约 200-400 行改动跨 ipc_process.c/rt_host.c/CMakeLists + WAMR/mbedtls 平台分支，且「能编译」≠「能跑对」——定位是 Linux 嵌入式运行时，macOS 支持无明确需求。与 uv_io.c 拆分同性质：评审项基于直觉，现实约束使收益/风险不匹配。记录为已知约束，不立项。至此评审 P2 全清单闭环（除 macos runner 跳过、uv_io.c 跳过外，qz_apply_patch 去重/CMakePresets/CI ccache/严格模式 四项全部实施完成且 CI 29/29 实证）"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T11:24:57
+  kind: decision
+  summary: "生产级合规：THIRD_PARTY_NOTICES 补漏 + 固化防漂移门。实际漂移比 scout 估计更多——NOTICES 只列 8 个 .gitmodules 子模块，漏 cJSON（v1.7.19，CMakeLists:270 编进库）+ 三个 polyfill npm 依赖（urlpattern-polyfill 10.1.0 / web-streams-polyfill 4.3.0 / @ungap/structured-clone 1.4.0，均被 polyfill/src import 并编进嵌入字节码随二进制分发）。MIT 要求保留版权声明 → 分发即违规风险。新增 Bundled JavaScript polyfill 段说明 esbuild 是构建期 bundler 不进二进制（显式豁免声明，否则分界会丢）。新增 test/third_party_notices_check.py 固化成门并挂 CI：校验 .gitmodules 子模块 + deps/ 全部 vendored 目录 + polyfill npm 依赖均在 NOTICES 表格第一列精确登记。踩坑两处：①子串匹配太松（删掉组件名 lz4 仍通过，因 URL/license 文件名里还有 'lz4'）→ 改精确解析表格第一列；②NOTICES 展示名与目录名不一致（表 'Mbed TLS' vs deps/mbedtls）→ 归一化匹配忽略大小写空格。有效性用变异测试证明：删 cJSON 行、删 web-streams 行均被精确 ::error:: 抓到"
   affects: [full-project-review-2026-09]
