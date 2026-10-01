@@ -20,6 +20,13 @@
  *       main-RT uplink); __qz_dispatch__ handles inbound host JSON (source 0).
  */
 
+/* realpath() / dirname() 属 XSI 而非纯 POSIX：-D_POSIX_C_SOURCE=200809L 的构建
+ *（test/ 目标用它统一特性集）下 stdlib.h/libgen.h 不声明它们，隐式声明在
+ * -Werror=implicit-function-declaration 下直接编译失败。这里补 _XOPEN_SOURCE
+ * 700（XSI + POSIX.1-2008 超集），必须在任何头文件之前定义。 */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 #include "qz_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
