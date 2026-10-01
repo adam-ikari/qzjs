@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-10-01T06:01:19"
+updated: "2026-10-01T09:45:00"
 ---
 
 <!-- compiled_truth -->
@@ -105,4 +105,9 @@ updated: "2026-10-01T06:01:19"
 - time: 2026-10-01T06:01:19
   kind: decision
   summary: "P2 CI ccache 完成：新增 composite action .github/actions/ccache-setup（装 ccache via hendrikmuhs/ccache-action + restore cache + 导出 CMAKE_C/CXX_COMPILER_LAUNCHER=ccache 到 GITHUB_ENV，使所有 cmake -B 自动透明走 ccache，无需逐 job 改 configure 命令）；ci.yml 24 个含 checkout 的编译 job 各插一行 uses。cache key 按 github.job 隔离。本地验证 CCACHE+launcher 编 qzjs 通过、YAML 语法 OK、24/24 覆盖。策略：composite 封装让每 job 只一行，降低 24 处重复配置的错误面"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T09:45:00
+  kind: decision
+  summary: "P2 CI macos runner 评估后跳过：非「加 runner」而是「先做 macOS 平台移植」——ipc_process.c 无平台守卫（AF_UNIX socketpair/fork+exec/SIGKILL+waitpid Linux-only 声明但无 #ifdef）、resolve_binary 硬依赖 /proc/self/exe（macOS 无 /proc，需 _NSGetExecutablePath）、CMake ISOLATED 无 macOS 变体、deps/wamr 需额外适配。约 200-400 行改动跨 ipc_process.c/rt_host.c/CMakeLists + WAMR/mbedtls 平台分支，且「能编译」≠「能跑对」——定位是 Linux 嵌入式运行时，macOS 支持无明确需求。与 uv_io.c 拆分同性质：评审项基于直觉，现实约束使收益/风险不匹配。记录为已知约束，不立项。至此评审 P2 全清单闭环（除 macos runner 跳过、uv_io.c 跳过外，qz_apply_patch 去重/CMakePresets/CI ccache/严格模式 四项全部实施完成且 CI 29/29 实证）"
   affects: [full-project-review-2026-09]
