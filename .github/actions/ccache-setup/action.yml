@@ -1,0 +1,16 @@
+name: Setup ccache
+description: Install ccache, restore its cache, and export CMAKE launcher env so every cmake -B transparently hits the cache.
+
+runs:
+  using: composite
+  steps:
+    - name: Install ccache + restore cache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ github.job }}
+        max-size: 256M
+    - name: Export ccache as CMake launcher
+      shell: bash
+      run: |
+        echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+        echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
