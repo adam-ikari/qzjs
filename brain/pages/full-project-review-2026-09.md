@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-10-01T11:32:12"
+updated: "2026-10-01T11:54:09"
 ---
 
 <!-- compiled_truth -->
@@ -120,4 +120,9 @@ updated: "2026-10-01T11:32:12"
 - time: 2026-10-01T11:32:12
   kind: decision
   summary: "生产级发布工程：①版本号单一来源——CMakeLists project(VERSION) 注入编译期宏 QZ_VERSION，cli.c 用 'qzjs ' QZ_VERSION（此前 cli.c:18 与 CMakeLists.txt:3 两处硬编码 0.2.0 会漂移），保留字面量 fallback 供非 cmake 手敲构建。②新增 .github/workflows/release.yml：tag v*.*.* 触发（另留 workflow_dispatch 手动），构建 → cmake --install 打包 → NOTICES 校验 → tarball → upload-artifact + gh release --generate-notes。tag 与 project 版本不一致即拒（防打 tag 到版本还没跟上的提交上）。③修 install 真实缺口：此前 _qz_install_targets 只装库和头文件，发布 tarball 里零可执行文件——第三方拿到包却跑不起来。补 foreach 装 qz_cli/qz_rt/qz_ctl 到 bin/（用 TARGET 判断而非 QZ_BUILD_CLI，后者与 tests 的组合会漏 qzjs-rt）。本地全链路验证：install 产出 bin/{qzjs,qzjs-rt,qzjs-ctl} + lib/*.a + include/qzjs + pkgconfig/qzjs.pc + cmake config；产物实跑 'dist runs: 2'；tarball 4.9MB/34 项含 LICENSE+NOTICES+README。此前仅有 v0.2.0 tag 但零发布工程——版本号只存在于源码文本，第三方无法从 GitHub 拿到可安装版本"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T11:54:09
+  kind: decision
+  summary: "ABI 门控第二轮漏网修复：上一提交（126757df）只改了 gtest，漏了 .c harness——host_contract_e2e(3处)/probe_ctl_endpoint_leak/probe_ctl_reject_frames/mp7-mailbox mailbox_e2e(6处) 仍用 qz_config_t = {0}，CI asan/ubsan/e2e 五个 job 红（qz_create 报 ABI mismatch struct_size=0）。漏网根因：增量构建下 ctest 假绿（测试二进制没重链），clean rebuild 才暴露 gtest 部分；但 .c harness 在 tests=OFF 的 asan-rt/e2e 构建里，根本不进本地 mock ctest，所以本地无论如何测不到——只有 CI 的 ASan+ISOLATED 构建能触发。教训分两层：①ABI 迁移必须一次改净全部调用点（含所有 .c harness 与 examples），grep 要覆盖变量名不只 cfg（漏了 cfg2）；②mock 构建的 ctest 覆盖不到 tests=OFF 的真实-libuv harness 路径，这类回归只能靠 CI 或本地复刻 asan-rt 配置。另更新 examples/hello/README.md 的 = {0} 描述为 qz_config_init。本地复现验证：ASan+ISOLATED+tests=OFF 构建跑 mp7 mailbox e2e PASS（原 CI 失败项）"
   affects: [full-project-review-2026-09]

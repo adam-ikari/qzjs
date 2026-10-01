@@ -31,7 +31,9 @@ JS 收到宿主消息: {"cmd":"ping"}
 
 ## 要点
 
-- `qz_config_t cfg = {0}` 零初始化；配置里没有任何回调字段——出站消息走
+- `qz_config_init(&cfg)` 初始化（它填 ABI 门控字段 `struct_size` /
+  `abi_version`，零初始化 `= {0}` 会被 `qz_create` 以 ABI mismatch 拒绝——
+  让「忘了声明版本」在开发期立即暴露）；配置里没有任何回调字段——出站消息走
   邮箱，`qz_recv_message` 是唯一消费入口（配套 `qz_free_message` 释放、
   `qz_message_fd` 拿唤醒 fd）。
 - `cfg.initial_script` 是启动即执行的 JS；`onmessage` 是 JS 侧的收信入口。

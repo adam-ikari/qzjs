@@ -188,7 +188,8 @@ static int await_child_stopped(char *out_state, int budget_ms) {
 
 /* ── ①②③ basic ── */
 static int mode_basic(void) {
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kScriptEcho;
     qz_t *rt = qz_create(&cfg);
     if (!rt) { fprintf(stderr, "[basic] qz_create failed\n"); return 1; }
@@ -256,7 +257,8 @@ static int mode_basic(void) {
      * 拆除，库必须在 teardown 里自行排干并释放这些未消费节点——漏 recv
      * 不得变成内存泄漏。制造残留：投两条让 JS 回声落箱，用 fd poll 见证
      * 「已到箱」而绝不 recv，随即 qz_destroy（full teardown）。 */
-    qz_config_t cfg2 = {0};
+    qz_config_t cfg2;
+    qz_config_init(&cfg2);
     cfg2.initial_script = kScriptEcho;
     qz_t *rt2 = qz_create(&cfg2);
     if (!rt2) { fprintf(stderr, "[basic] ④ qz_create(rt2) failed\n"); return 1; }
@@ -277,7 +279,8 @@ static int mode_basic(void) {
 
 /* ── ④ crash：kill -9 主RT，wait_idle 后首 recv 即错误帧 ── */
 static int mode_crash(void) {
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kScriptEchoAlive;
     qz_t *rt = qz_create(&cfg);
     if (!rt) { fprintf(stderr, "[crash] qz_create failed\n"); return 1; }
@@ -317,7 +320,8 @@ static int mode_crash(void) {
 
 /* ── ⑤ hung：SIGSTOP 冻结主RT，destroy 墙钟预算（冻结在库宿主侧线程）── */
 static int mode_hung(void) {
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kScriptEchoAlive;
     qz_t *rt = qz_create(&cfg);
     if (!rt) { fprintf(stderr, "[hung] qz_create failed\n"); return 1; }
@@ -365,7 +369,8 @@ static int mode_hung(void) {
 
 /* ── ⑥ replay：pre-ready 帧 create 返回前已入箱 + 回发安全（H1）── */
 static int mode_replay(void) {
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kScriptReplay;
     qz_t *rt = qz_create(&cfg);
     if (!rt) { fprintf(stderr, "[replay] qz_create failed\n"); return 1; }
@@ -424,7 +429,8 @@ static void fd_clear(int fd) {
 
 /* ── ⑦ fd：可读提示 + 三步协议终止性 + 丢唤醒免疫 ── */
 static int mode_fd(void) {
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kScriptEcho;
     qz_t *rt = qz_create(&cfg);
     if (!rt) { fprintf(stderr, "[fd] qz_create failed\n"); return 1; }
@@ -510,7 +516,8 @@ static int mode_fd(void) {
 
 /* ── ⑧ dual：双实例邮箱/fd 独立 ── */
 static int mode_dual(void) {
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kScriptJobEcho;
     qz_t *rt1 = qz_create(&cfg);
     qz_t *rt2 = qz_create(&cfg);

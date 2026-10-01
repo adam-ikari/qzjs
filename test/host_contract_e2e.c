@@ -96,7 +96,8 @@ int main(int argc, char **argv) {
 
     /* ── 路径 1：文档循环，阻塞在 qz_recv_message ── */
     {
-        qz_config_t cfg = {0};
+        qz_config_t cfg;
+        qz_config_init(&cfg);
         cfg.initial_script = "onmessage = function (e) { postMessage(e.data); };";
         qz_t *rt = qz_create(&cfg);
         if (!rt) { fprintf(stderr, "FAIL: qz_create 失败\n"); return 1; }
@@ -156,7 +157,8 @@ int main(int argc, char **argv) {
 
     /* ── 路径 2：宿主自己的 eventfd + poll（qz_message_fd 契约）── */
     {
-        qz_config_t cfg = {0};
+        qz_config_t cfg;
+        qz_config_init(&cfg);
         cfg.initial_script = "onmessage = function (e) { postMessage(e.data); };";
         qz_t *rt = qz_create(&cfg);
         if (!rt) { fprintf(stderr, "FAIL: qz_create 失败（路径 2）\n"); return 1; }
@@ -205,7 +207,8 @@ int main(int argc, char **argv) {
 
     /* ── 路径 3：wait_idle 之后仍可排干（最终排干的位置就在那里）── */
     {
-        qz_config_t cfg = {0};
+        qz_config_t cfg;
+        qz_config_init(&cfg);
         cfg.initial_script = "onmessage = function (e) { postMessage(e.data); };";
         qz_t *rt = qz_create(&cfg);
         if (!rt) { fprintf(stderr, "FAIL: qz_create 失败（路径 3）\n"); return 1; }

@@ -88,7 +88,8 @@ int main(void) {
     unlink(path);   /* 上一次被杀/崩溃留下的 socket 文件 */
 
     /* setInterval 让主RT 保持存活，否则 idle 自退、端点随之消失。 */
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = "setInterval(function () {}, 1000);";
     cfg.control_plane = QZ_CONTROL_LOCAL;
     cfg.control_pipe_path = path;
