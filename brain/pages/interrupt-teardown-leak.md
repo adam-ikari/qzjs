@@ -5,49 +5,65 @@ category: project
 status: active
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-01T14:03:42"
+updated: "2026-10-01T16:01:29"
 ---
 
 <!-- compiled_truth -->
-## 结论（2026-10-01 复核，原结论部分修正）
+## 结论（2026-10-01 复核，前两版结论均已被推翻）
 
-**打断正在执行的脚本会留下有根（rooted）的 JS 对象；之后 `qz_destroy` 命中
+**打断正在执行的脚本会留下有根 JS 对象；`qz_destroy` 命中
 `quickjs.c: JS_FreeRuntime: Assertion 'list_empty(&rt->gc_obj_list)'`。**
 
-### 本轮实测的泄漏画像
+### 归属修正：不在上游，在 qzjs 集成层（2026-10-01）
 
-在断言前 dump `gc_obj_list`：**3474 个对象，class 0–16 全覆盖**，
-`ref0=0`（无「GC 未扫」的悬挂对象，全部有引用者），
-`ref1=2804`，且存在 `maxref=2466` 的对象——**有一个容器对象持有几乎全部
-引用**。这**不是**原结论推测的「解释器操作数栈上的临时值」（量级与类型分布
-都对不上），而是**一整棵对象图仍然可达**。
+原记录断言「根因在 vendored quickjs-ng 的不可捕获中断展开路径，不在本仓库
+代码里」——**该归属错误，已被 vanilla 对照实验推翻**。
 
-### 原展开点结论已被证伪
+同一份打了 3 个 patch 的 libqjs，用 vanilla C 程序跑「interrupt + 销毁」，
+6 组场景全部干净 teardown：
 
-原页断言根因在 `JS_CallInternal` 的 exception 展开块因 uncatchable 而跳过
-`while (sp > stack_buf)` 栈清理。实测**两版修复均无效**：
+| 场景 | 结果 |
+|---|---|
+| 顶层死循环 + interrupt | OK |
+| 三层嵌套调用 + interrupt | OK |
+| Promise executor / async 函数 + interrupt | OK |
+| 500 个全局闭包 + interrupt | OK |
+| interrupt 后继续 eval（6*7=42） | OK |
+| interrupt 后再新建 200 个闭包 | OK |
 
-1. **无条件展开栈**（保留 sp 减到 stack_buf）→ qjsc 自身在编译 bytecode 时
-   泄漏 294 个对象（class 109/110/111）。qjsc 在 CI 一直不泄漏，故这是补丁
-   引入的回归（`done_generator:` 会 `sf->cur_sp = sp`，改 sp 破坏 generator 语义）。
-2. **释放栈值但保持 sp 不变** → 段错误（exit=139），双重释放/UAF。
-   说明 `done:` 后续路径本就依赖「uncatchable 时 sp 与栈未被触碰」的契约。
+故 **patch 不是原因，quickjs 解释器不是原因**。故障在 qzjs 集成层——
+qzjs 相比 vanilla 只多两样：① polyfill 字节码（数千对象挂 global）
+② 消息投递链（邮箱 → JSON.parse → 调 onmessage）。
 
-两版都已回滚，源码树保持 4 补丁基线。
+两者**单独**都干净（ctest 28/28 无 interrupt 正常销毁；上表 interrupt 无 polyfill），
+**组合**才泄漏。组合为何触发，目前无证据，未解释。
 
-### 已排除的假设
+### 已被实证排除的方向（勿重复走）
 
-**ctx refcount 异常**：实测 `JS_FreeContext` 时 `JS_REF_COUNT(ctx)-1` 高达
-142–269，但这是**基线常态**——未打补丁的干净 quickjs 上数值相同，且对照组
-（不发 interrupt，能干净销毁）的 ctx 同样高。故 ctx 引用数与本缺陷无关。
+1. **解释器操作数栈未展开**（前版主推结论）：泄漏 3474 个对象 class 0–16 全覆盖，
+   量级与类型分布都对不上「栈上临时值」。两版修复均失败——无条件展开栈使 qjsc
+   自身泄漏 294 对象（generator 的 `sf->cur_sp = sp` 语义被破坏）；释放栈值但保持
+   `sp` 不变则段错误（`done:` 路径本就依赖「uncatchable 时栈未被触碰」的契约）。
+2. **ctx refcount 异常**：实测 `JS_FreeContext` 时 rc 高达 142–373，但
+   **不 interrupt 的正常测试同样是 143–208 且干净销毁**。rc 高是 polyfill 常态，
+   qzjs 本就不靠 `JS_FreeContext` 清理（它提前 return），靠 `JS_FreeRuntime` 最终 GC。
+   此线索完全无效。
+3. **error_back_trace / current_exception 残留**：二分清理后 rc 不降（142→142）。
+4. **嵌套深度 / Promise / async / 闭包密度 / interrupt 后继续执行**：见上表全干净。
+5. **三个 patch（c99-atomics / drain-jobs / bc-reader-hardening）**：vanilla 实验用的
+   就是打过 patch 的库，全干净。
 
-### 现状
+### 泄漏画像（唯一确定的事实）
 
-**仍未修**，且比原记录更深：泄漏是「一整棵对象图仍然可达」，锚点对象
-（refcount≈2466）身份未确定。修复需要继续定位该锚点，或向上游提 issue。
-建议诊断方向：interrupt 后立即检查 `ctx->error_back_trace` 与
-`rt->current_exception` 是否残留——`build_backtrace` 在 exception 标签无条件被调，
-其 backtrace 会引用整条栈帧对象图，是当前最可能的锚点（未验证）。
+`JS_FreeRuntime` 断言前 dump `gc_obj_list`：**3474 个对象**，
+`ref0=0`（无「GC 未扫」的悬挂对象，**全部有引用者**），
+`ref1=2804`，`maxref=2466` —— 存在一个容器对象持有几乎全部引用。
+即：**一整棵仍可达的对象图**，`JS_RunGC` 跑完仍在。锚点身份未定位。
+
+### 下一步
+
+在 qzjs 内做快照 diff：polyfill 加载完成后 dump 一次 `gc_obj_list` 的 class 分布，
+interrupt 后再 dump，差出来的即被 interrupt 钉住的对象，可反推引用来源。
 
 
 ## Timeline
@@ -68,4 +84,10 @@ updated: "2026-10-01T14:03:42"
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "2026-10-01 深度诊断（systematic-debugging）"
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-01T16:01:29
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "2026-10-01 vanilla 对照实验：归属被推翻，根因在 qzjs 集成层"
   affects: [interrupt-teardown-leak]
