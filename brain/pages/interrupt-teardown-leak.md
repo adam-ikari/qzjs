@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-01T16:01:29"
+updated: "2026-10-01T16:23:54"
 ---
 
 <!-- compiled_truth -->
@@ -90,4 +90,10 @@ interrupt 后再 dump，差出来的即被 interrupt 钉住的对象，可反推
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "2026-10-01 vanilla 对照实验：归属被推翻，根因在 qzjs 集成层"
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-01T16:23:54
+  kind: evidence
+  summary: "第二轮深挖：已排除 7 个方向，仍未定位根因，但确立三个架构级事实。①ctx 从未被真正释放：qzjs 的 polyfill 有 143~2466 个函数对象各持一份 realm 引用，ctx->refcount 永不为 0，JS_FreeContext 每次在第一行提前 return——不 interrupt 的正常路径（eval_ok）同样是 rc=143 且残留 3472 个对象，全靠 JS_FreeRuntime 的 GC 兜底。②interrupt 不是根因，只是把「碰巧兜得住」推成「兜不住」：打断/不打断两组 ctx 状态完全相同（rc=2466、global_tag=-1），唯一差别是残留数 3472 vs 3474，而这 2 个对象翻转了 cycle collector 的判定。③ctx->global_obj 在 JS_FreeContext 入口已是 UNDEFINED，而 quickjs 全文只有 JS_NewContext 一处赋值它、JS_FreeContext 只 FreeValue 不置 UNDEFINED——说明 global 是被 qzjs 侧（qz_ext_destroy_all/qz_ctx_cleanup_resources 一带）释放的，但释放后那 2466 个函数对象仍存活，rc 未降。强制 rc 归零会立刻崩溃（持有者是活对象，UAF），所以不能暴力归零。已排除：解释器操作数栈未展开、ctx refcount 异常、error_back_trace/current_exception 残留、嵌套深度、Promise/async、闭包密度、interrupt 后继续执行、三个 patch。剩余未知：谁在 global 之外持有那 2466 个函数对象。下一步应查 qz_ctx_destroy 里 qz_ext_destroy_all/qz_ctx_cleanup_resources 释放了什么 JS 引用"
+  source: "2026-10-01 第二轮系统化调查"
   affects: [interrupt-teardown-leak]
