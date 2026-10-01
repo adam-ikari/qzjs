@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [review, quality, security, ci, docs]
 created: "2026-09-23T04:17:41"
-updated: "2026-10-01T05:17:22"
+updated: "2026-10-01T05:37:33"
 ---
 
 <!-- compiled_truth -->
@@ -95,4 +95,9 @@ updated: "2026-10-01T05:17:22"
 - time: 2026-10-01T05:17:22
   kind: decision
   summary: "P2 CMakePresets.json 完成：cmake 3.31.10；12 个 configure preset 覆盖 CI 真实组合（default/debug-tests/minimal/all-features-off/thread/asan/asan-iso/ubsan/ubsan-iso/polyfill-compressed/polyfill-external/coverage），hidden base preset 抽 Ninja+compile_commands 公共部分；配套 build presets(jobs=0) 与 test presets(并行4)。binaryDir=build/<preset>，build/ 已在 .gitignore。验证：12/12 configure 成功；default+debug-tests+asan-iso build 成功；default ctest 28/28。目的：替代手敲 30 个 build 目录为  一键；CI 暂未改（保持绿），可选后续迁移"
+  affects: [full-project-review-2026-09]
+
+- time: 2026-10-01T05:37:33
+  kind: decision
+  summary: "P2 uv_io.c 拆分评估后选跳过：代码实证 http+TLS 占 84% (3285/3905)，TLS 内嵌 uv_io_http_op_t 状态机（tls_init_op/send_cb/recv_cb 操作 op->tcp/ssl 字段），不可独立拆出；http 是单一状态机贯穿所有回调，无法横向切小。唯一可拆是 fs+storage 数据层 ~620 行 (16%)，共享仅 json_escape 一个函数。收益被现实约束大幅压缩——http 主体 3285 行仍是巨物，主痛点未解，620 行搬移的手术成本不匹配。结论：评审项基于'该拆'直觉，但现实约束使其成为为拆而拆；记录约束供后续决策。转 CI ccache（纯收益零行为风险）"
   affects: [full-project-review-2026-09]
