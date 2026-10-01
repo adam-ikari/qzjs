@@ -88,6 +88,19 @@ void qz_mailbox_teardown(qz_t *rt)
     if (rt->out_efd >= 0) { close(rt->out_efd); rt->out_efd = -1; }
 }
 
+uint32_t qz_abi_version(void)
+{
+    return QZ_ABI_VERSION;
+}
+void qz_config_init(qz_config_t *cfg)
+{
+    if (!cfg) return;
+    memset(cfg, 0, sizeof *cfg);
+    cfg->struct_size = (uint32_t)sizeof *cfg;
+    cfg->abi_version = QZ_ABI_VERSION;
+}
+
+
 qz_t *qz_create(const qz_config_t *config)
 {
     /* 禁用 libuv 的 io_uring：部分内核（如 PVE 6.17）在 io_uring_setup 后
@@ -95,6 +108,21 @@ qz_t *qz_create(const qz_config_t *config)
      * 不覆盖宿主显式设置的 UV_USE_IO_URING。 */
     setenv("UV_USE_IO_URING", "0", 0);
     if (!config) return NULL;
+    /* ABI 门控：qz_config_t 按值传递，整块拷贝进 rt->config。宿主若用不同版本
+     * 的头文件编译（本结构体无这些头字段、或多出更新版本的尾字段），库里按
+     * 库侧 sizeof 读到的可能是越界的垃圾——本轮追加 strict_mode 等字段时正是
+     * 这个风险面。头文件与库必须同版本，否则显式失败而不是静默内存不安全。
+     * 诊断写 stderr：宿主拿不到库返回的错误码，这里是唯一的诊断出口。 */
+    if (config->abi_version != QZ_ABI_VERSION ||
+        config->struct_size != sizeof(qz_config_t)) {
+        fprintf(stderr,
+                "qzjs: ABI mismatch — qz_config_t struct_size=%u abi_version=%u, "
+                "library expects struct_size=%zu abi_version=%u. "
+                "Recompile the host against this qzjs header (qz_abi_version()).\n",
+                (unsigned)config->struct_size, (unsigned)config->abi_version,
+                sizeof(qz_config_t), (unsigned)QZ_ABI_VERSION);
+        return NULL;
+    }
     qz_t *rt = (qz_t *)calloc(1, sizeof *rt);
     if (!rt) return NULL;
     rt->magic = QZ_MAGIC;

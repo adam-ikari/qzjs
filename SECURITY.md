@@ -37,11 +37,12 @@ draws, or that let an unexpected input corrupt memory or crash the process:
 - memory-safety defects reachable from script through the public API,
 - crypto correctness (`crypto.subtle`, TLS configuration, randomness).
 
-**Out of scope by design** — capabilities script already legitimately has:
+**Out of scope by default — capabilities script legitimately has unless the
+host opts into strict mode** (see "Strict mode" below):
 
 - script can read and write any path the host process can. Path validation
   only rejects `..` components; there is no root jail and no permission
-  model. See `docs/js-api/fs.md`.
+  model in the default (trusted-script) configuration.
 - script can spawn processes (`pal.processSpawn` → `execv`) and read the
   full environment (`globalThis.env`).
 - script runs in-process with the host (THREAD backend) or in a sibling
@@ -50,6 +51,44 @@ draws, or that let an unexpected input corrupt memory or crash the process:
 - `serve()` binds `127.0.0.1` by default and has no authentication
   middleware. Passing `hostname: '0.0.0.0'` exposes it to the network —
   put your own authentication in front if you do that.
+
+## Strict mode — running untrusted script
+
+For workloads that load **untrusted or third-party** script (user plugins,
+remote-supplied code), qzjs provides a **strict mode** — a single host-side
+switch that confines three capabilities the default configuration leaves open:
+
+- **fs is root-confined** to `sandbox_root`: paths resolve via `realpath`
+  and must fall inside the root (symlinks that escape are rejected);
+  relative paths are rejected (the downstream I/O layer resolves them
+  against the process CWD, so root-relative semantics in the validator
+  would silently mismatch).
+- **process spawn is pinned to qzjs-rt**: the `binary_path` argument JS
+  passes to `pal.processSpawn` is ignored and the runtime resolves its own
+  binary (`/proc/self/exe` sibling `qzjs-rt`, the `QZ_RT_SERVER` env var,
+  or the compile-time `QZ_RT_PATH`). Nested workers keep working.
+- **env is allowlisted**: only keys the host lists are exposed to
+  `globalThis.env`; an empty allowlist yields `env = {}`.
+
+Enable it at `qz_create` time (one-shot, cannot be relaxed at runtime — JS
+cannot turn it off on itself):
+
+```c
+qz_config_t cfg; qz_config_init(&cfg);
+cfg.strict_mode  = 1;
+cfg.sandbox_root = "/srv/sandbox";
+cfg.env_allowlist = (const char *const[]){"PATH","HOME",NULL};
+qz_t *rt = qz_create(&cfg);
+```
+
+Or on the CLI: `qzjs --strict-sandbox=/srv/sandbox script.js` (the env
+allowlist defaults to `PATH,HOME,LANG`; override with `QZ_STRICT_ENV`).
+
+Strict mode is an **engine-layer mechanism**, not a full sandbox: it blocks
+the three host-takeover vectors above. It does **not** confine outbound
+network access (tcp/http) in the current revision, and it does not replace a
+proper OS-level sandbox (seccomp, containers, chroot) for high-risk code.
+Combine it with those for defense in depth.
 
 If you find a way for *untrusted input* (network bytes, bytecode, IPC frames
 from an untrusted peer) to reach memory corruption, escape a parser boundary,

@@ -47,7 +47,7 @@ If you find a way for *untrusted input* — network bytes, bytecode, IPC frames
 from an untrusted peer — to reach memory corruption, escape a parser boundary,
 or bypass an explicit validation, that is in scope.
 
-### Out of scope by design
+### Out of scope by default (unless the host opts into strict mode — see below)
 
 Capabilities script already legitimately has. These are not escapes:
 
@@ -56,7 +56,7 @@ Capabilities script already legitimately has. These are not escapes:
   permission model**. See [fs](/js-api/fs).
 - **Process spawning** — script can spawn processes (`pal.processSpawn` →
   `execv`).
-- **Environment (CLI only)** — the standalone `qzjs` CLI injects the full environment as `globalThis.env` via its bootstrap. Embedded hosts (`qz_create`) have no env interface — the script sees no environment.
+- **Environment (CLI only)** — the standalone `qzjs` CLI injects the full environment as `globalThis.env` via its bootstrap. Embedded hosts (`qz_create`) have no env interface in the default configuration — the script sees no environment unless the host sets `strict_mode` + `env_allowlist`.
 - **Host co-residence** — script runs in-process with the host (THREAD backend)
   or in a sibling process (ISOLATED backend); **neither is a security boundary**
   against malicious script.
@@ -64,6 +64,38 @@ Capabilities script already legitimately has. These are not escapes:
   authentication middleware**. Passing `hostname: '0.0.0.0'` exposes it to the
   network — put your own authentication in front if you do that.
 
+
+## Strict mode — running untrusted script
+
+For workloads that load **untrusted or third-party** script (user plugins,
+remote-supplied code), qzjs provides a host-side **strict mode** switch that
+confines three capabilities the default configuration leaves open. It is an
+**engine-layer mechanism**, not a full sandbox — use it alongside OS-level
+confinement (seccomp, containers, chroot) for high-risk code.
+
+| Capability | Default (trusted script) | Strict mode |
+|---|---|---|
+| Filesystem | any path the host can access (`..` rejected) | confined to `sandbox_root` via `realpath` prefix check; symlinks that escape the root are rejected; relative paths rejected |
+| Process spawn | `pal.processSpawn` → `execv` of any binary JS names | JS-supplied `binary_path` ignored; runtime resolves its own `qzjs-rt` (`/proc/self/exe` sibling, `QZ_RT_SERVER`, or compile-time `QZ_RT_PATH`); nested workers keep working |
+| Environment | full `globalThis.env` (CLI) / none (embedded default) | only `env_allowlist` keys exposed; empty allowlist → `env = {}` |
+
+Enable at `qz_create` time (one-shot, cannot be relaxed at runtime — JS cannot
+turn it off on itself):
+
+```c
+qz_config_t cfg; qz_config_init(&cfg);
+cfg.strict_mode   = 1;
+cfg.sandbox_root  = "/srv/sandbox";
+cfg.env_allowlist = (const char *const[]){"PATH","HOME",NULL};
+qz_t *rt = qz_create(&cfg);
+```
+
+CLI: `qzjs --strict-sandbox=/srv/sandbox script.js` (allowlist defaults to
+`PATH,HOME,LANG`; override with `QZ_STRICT_ENV=KEY1,KEY2`).
+
+**Not covered by strict mode** (still need OS-level confinement):
+outbound network access (tcp/http), the DAP debugger surface, the CTL control
+plane endpoint (use its own `LOCAL` + `SO_PEERCRED` tier for that).
 ## Deployment Guidance
 
 Because the runtime trusts its script, the security of a qzjs deployment is the

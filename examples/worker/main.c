@@ -48,7 +48,8 @@ int main(void) {
 #ifdef QZ_RT_SERVER_PATH
     setenv("QZ_RT_SERVER", QZ_RT_SERVER_PATH, 0);
 #endif
-    qz_config_t cfg = {0};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     /* 父脚本：建 worker、发消息、收回显 */
     cfg.initial_script =
         "var w = new Worker('" QZ_WORKER_SCRIPT "');\n"

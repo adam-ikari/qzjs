@@ -466,7 +466,7 @@ static int run_code(const char *code, const char *file,
     cli_host_t host = {0};
 
     qz_config_t cfg;
-    memset(&cfg, 0, sizeof cfg);
+    qz_config_init(&cfg);
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
     apply_strict_mode(&cfg);
@@ -580,7 +580,7 @@ static int repl_loop(void) {
         return 1;
     }
     qz_config_t cfg;
-    memset(&cfg, 0, sizeof cfg);
+    qz_config_init(&cfg);
     cfg.initial_script = bootstrap;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
@@ -722,7 +722,7 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     char *bootstrap = build_bootstrap(args, nargs, strict_env_allow());
     if (!bootstrap) { free(bc); return 1; }
     qz_config_t cfg;
-    memset(&cfg, 0, sizeof cfg);
+    qz_config_init(&cfg);
     cfg.initial_script = bootstrap;
     cfg.initial_bytecode = bc;
     cfg.initial_bytecode_len = (size_t)sz;

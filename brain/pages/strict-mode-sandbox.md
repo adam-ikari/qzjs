@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [security, sandbox, P2]
 created: "2026-10-01T06:59:16"
-updated: "2026-10-01T07:54:46"
+updated: "2026-10-01T10:27:10"
 ---
 
 <!-- compiled_truth -->
@@ -72,4 +72,9 @@ typedef struct qz_config_s {
 - time: 2026-10-01T07:54:46
   kind: decision
   summary: "CI 实证踩坑并修复：strict 限根用的 realpath()/dirname() 属 XSI 非纯 POSIX，CMakeLists 给 target 加 _POSIX_C_SOURCE=200809L 时 stdlib.h/libgen.h 不声明它们，-Werror=implicit-function-declaration 下首次 CI 20 个 job 红。本地 build 目录无该宏故隐式通过（本地测不出）。修：bridge.c 头部 #define _XOPEN_SOURCE 700（XSI+POSIX.1-2008 超集），须在任何头文件之前。教训：特性测试宏相关的编译问题只在带该宏的构建（test 目标/CI）暴露，本地默认构建测不出来——改用 C99+POSIX 特性时必须验 CI 配置。修复后 CI 29/29 全绿（含 asan/ubsan/feature-matrix/wamr/wasm3/polyfill-* 等全部配置）"
+  affects: [strict-mode-sandbox]
+
+- time: 2026-10-01T10:27:10
+  kind: decision
+  summary: "生产级还债：①公共 C API ABI 版本化——qz_config_t 头部加 uint32_t struct_size + uint32_t abi_version（新增字段只尾追加），qz_create 在整块拷贝前校验 abi_version==QZ_ABI_VERSION 且 struct_size==sizeof(qz_config_t)，不匹配即拒绝并 stderr 诊断。本轮加 strict_mode 三字段引入的越界读风险（rt->config=*config 按库侧 sizeof 读老宿主栈尾）变为显式失败。新增公共符号 qz_abi_version()（宿主启动时核对编译期宏）+ qz_config_init()（封装 struct_size/abi_version 填充，替代 = {0}）。约定：= {0} 零初始化现在被拒（有意——让忘了声明版本的开发期立即暴露，非静默按旧布局跑）。cli.c 3 处 + examples 3 处改用 qz_config_init。ABI 断裂点文档化。②SECURITY.md + docs/guide/security.md + docs/zh/guide/security.md 三处更新：把 strict mode 写入威胁模型（Out of scope 改为'默认放开，宿主可 opt-in 严格模式收紧'）+ 新增'严格模式——运行不可信脚本'章节（三能力对比表 + 启用代码示例 + 不覆盖范围）。修复前安全评审者读 SECURITY.md 会得出'本运行时无 fs 边界'的错误结论。验证：ctest 28/28 + examples 3 个跑通（qz_config_init 路径）"
   affects: [strict-mode-sandbox]

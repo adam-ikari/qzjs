@@ -10,11 +10,29 @@ extern "C" {
 
 typedef struct qz_t qz_t;
 
+/* ABI 版本号：qz_config_t 布局或公共 API 语义变更时 +1。宿主应在启动时调
+ * qz_abi_version() 与编译期此宏比对——不等说明头文件与库不是同一版本，必须
+ * 重新编译宿主。qz_config_t 按值跨库边界传递（qz_create 整块拷贝），跨版本
+ * 混用会越界读宿主栈上的结构体尾部，abi_version 门控把这个静默的内存不安全
+ * 变成显式的 qz_create 失败 + 诊断串。 */
+#define QZ_ABI_VERSION 1
+
+/* 库侧运行时 ABI 版本。宿主用它核对「编译时头文件」与「运行时库」是否同
+ * 版本——动态链接场景下这是唯一能提前发现 ABI 错配的手段（否则症状是随机的
+ * 越界读或配置静默失效）。 */
+uint32_t qz_abi_version(void);
+
+
 /* ================================================================
  * qzjs configuration
  * ================================================================ */
 
 typedef struct qz_config_s {
+    /* 结构体大小，宿主必须填 sizeof(qz_config_t)。与 abi_version 一起构成
+     * 版本门控：qz_create 在整块拷贝进 rt->config 之前校验两者，缺一或错配
+     * 即拒绝（新增字段只追加到尾部，abi 不变时本值恒等于库侧 sizeof）。 */
+    uint32_t struct_size;
+    uint32_t abi_version;           /* 必须 == QZ_ABI_VERSION */
     /* 主 context 启动时在 qzjs 线程上 eval；抛异常 → qz_create 返回 NULL。
      * initial_script（内联 JS）与 initial_script_path（文件，优先）二选一；
      * initial_bytecode 独立叠加——两者都设置时先跑脚本再跑字节码（宿主可
@@ -55,6 +73,19 @@ typedef struct qz_config_s {
     const char *sandbox_root;
     const char *const *env_allowlist;
 } qz_config_t;
+
+/* 初始化 qz_config_t 的 ABI 门控字段（struct_size / abi_version）与其余字段的
+ * 零值。宿主构造配置的标准起点：
+
+     qz_config_t cfg;
+     qz_config_init(&cfg);            // 或 qz_config_t cfg = QZ_CONFIG_INIT;
+     cfg.initial_script = "...";
+     qz_t *rt = qz_create(&cfg);
+
+ * 也可以直接用 `= {0}` 零初始化——但那样 struct_size / abi_version 为 0，
+ * qz_create 会以 ABI mismatch 拒绝（这是有意的：让「忘了声明版本」在开发期
+ * 立刻暴露，而不是静默按旧布局跑）。用 qz_config_init 避免这个坑。 */
+void qz_config_init(qz_config_t *cfg);
 
 /* 把 JS 源码编译为字节码 blob。独立函数（无需 qz_t/运行时）。
  * 成功返回 0 并写 *out（malloc，用 free() 释放）与 *out_len；
