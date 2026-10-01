@@ -79,7 +79,8 @@ globalThis.onmessage = function (e) {
 
 static inline HostCtx *host_create(const char *script = kTestBootstrap) {
     auto *h = new HostCtx();
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = script;
     h->rt = qz_create(&cfg);
     if (!h->rt) { delete h; return nullptr; }

@@ -165,7 +165,8 @@ static int child_main(int in_fd, int out_fd) {
     close(in_fd);
     close(out_fd);
 
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kJsProgram;
     /* QZ_DEBUG env is set by the parent; qz_create auto-attaches DAP and
      * blocks on the configuration phase before eval'ing initial_script. */
@@ -362,7 +363,8 @@ static int child_run_main(int in_fd, int out_fd)
     close(in_fd);
     close(out_fd);
 
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     /* setInterval keeps the event loop alive; the qzjs thread services it. */
     cfg.initial_script = "setInterval(() => {}, 200);\n1;\n";
     qz_t *rt = qz_create(&cfg);
@@ -717,7 +719,8 @@ static int child_conflict_main(int in_fd, int out_fd) {
     close(in_fd);
     close(out_fd);
 
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kJsTrivial;
 
     qz_t *rt1 = qz_create(&cfg);
@@ -853,7 +856,8 @@ static int child_exc_main(int in_fd, int out_fd) {
     close(in_fd);
     close(out_fd);
 
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kJsExceptionProgram;
     qz_t *rt = qz_create(&cfg);
     if (!rt) return 1;
@@ -1077,7 +1081,8 @@ static int child_expand_main(int in_fd, int out_fd) {
     close(in_fd);
     close(out_fd);
 
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kJsExpandProgram;
     qz_t *rt = qz_create(&cfg);
     if (!rt) return 1;
@@ -1394,7 +1399,8 @@ static int child_hit_main(int in_fd, int out_fd) {
     close(in_fd);
     close(out_fd);
 
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kJsHitProgram;
     qz_t *rt = qz_create(&cfg);
     if (!rt) return 1;

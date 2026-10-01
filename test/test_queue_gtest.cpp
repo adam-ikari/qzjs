@@ -32,6 +32,7 @@ namespace {
 // 建一个最朴素的运行时：只要 mailbox 在就行，不需要脚本、不需要控制面。
 qz_t *make_bare_rt() {
     auto *cfg = new qz_config_t();
+    qz_config_init(cfg);
     cfg->initial_script = "";
     cfg->control_plane = QZ_CONTROL_OFF;
     qz_t *rt = qz_create(cfg);

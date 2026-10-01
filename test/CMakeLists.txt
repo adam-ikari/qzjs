@@ -68,6 +68,11 @@ add_qz_gtest(test_ipc_ctl_gtest)
 # 出站邮箱队列的**单元**层：FIFO / 空队列 / has_pending 迁移 / teardown 幂等 /
 # 多生产者计数完整性。此前 M-P7 的核心数据结构只被整运行时间接测。
 add_qz_gtest(test_queue_gtest)
+
+# 严格模式（safe-run untrusted script）回归：fs 限根（sandbox_root）、相对路径
+# 拒绝、默认模式不误伤。判定在 bridge_validate_path（纯 realpath，不依赖 uv），
+# 故 mock_libuv 构建下可测——越界路径在建 Promise 前就拒，走不到 uv stub。
+add_qz_gtest(test_strict_mode_gtest)
 add_qz_gtest(test_context_worker_composition_gtest)   # M-R2 §14.3 组合语义（contexts × workers）
 target_compile_definitions(test_context_worker_composition_gtest PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 

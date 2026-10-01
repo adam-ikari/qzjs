@@ -11,7 +11,8 @@
 // 与 host_create 相同，但 cfg.control_plane = QZ_CONTROL_IN_PROC。
 static HostCtx *host_create_ctl() {
     auto *h = new HostCtx();
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kTestBootstrap;
     cfg.control_plane = QZ_CONTROL_IN_PROC;
     h->rt = qz_create(&cfg);
@@ -22,7 +23,8 @@ static HostCtx *host_create_ctl() {
 // 带自定义 initial_script 的 control 档运行时（interrupt 效果那组要忙等脚本）
 static HostCtx *host_create_ctl_with_script(const char *script) {
     auto *h = new HostCtx();
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = script;
     cfg.control_plane = QZ_CONTROL_IN_PROC;
     h->rt = qz_create(&cfg);

@@ -18,7 +18,7 @@ TEST(qz_create, null_config_rejected) {
 }
 
 TEST(qz_create, initial_script_exception_fails_create) {
-    qz_config_t cfg = {}; cfg.initial_script = "throw new Error('boom');";
+    qz_config_t cfg; qz_config_init(&cfg); cfg.initial_script = "throw new Error('boom');";
     EXPECT_EQ(nullptr, qz_create(&cfg));   // eval 异常 → ready_err → NULL
 }
 

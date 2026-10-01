@@ -97,7 +97,8 @@ TEST(ctl_route, cmd_target_field_defaults_to_self) {
 
 static HostCtx *host_create_ctl_plane(int plane) {
     auto *h = new HostCtx();
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kTestBootstrap;
     cfg.control_plane = plane;
     h->rt = qz_create(&cfg);

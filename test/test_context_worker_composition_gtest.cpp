@@ -29,7 +29,8 @@
  * 与 workers ×N 平级挂在同一 rt」的公开可观测入口（§14.1 两张表）。 */
 static HostCtx *host_create_ctl_plane(int plane) {
     auto *h = new HostCtx();
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kTestBootstrap;
     cfg.control_plane = plane;
     h->rt = qz_create(&cfg);

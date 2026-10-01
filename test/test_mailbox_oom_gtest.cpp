@@ -45,7 +45,8 @@ const char kEcho[] = "onmessage = function (e) { postMessage(e.data); };";
 
 HostCtx *host_create_echo() {
     auto *h = new HostCtx();
-    qz_config_t cfg = {};
+    qz_config_t cfg;
+    qz_config_init(&cfg);
     cfg.initial_script = kEcho;
     h->rt = qz_create(&cfg);
     if (!h->rt) { delete h; return nullptr; }

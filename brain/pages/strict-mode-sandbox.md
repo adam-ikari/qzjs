@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [security, sandbox, P2]
 created: "2026-10-01T06:59:16"
-updated: "2026-10-01T10:27:10"
+updated: "2026-10-01T10:57:05"
 ---
 
 <!-- compiled_truth -->
@@ -77,4 +77,9 @@ typedef struct qz_config_s {
 - time: 2026-10-01T10:27:10
   kind: decision
   summary: "生产级还债：①公共 C API ABI 版本化——qz_config_t 头部加 uint32_t struct_size + uint32_t abi_version（新增字段只尾追加），qz_create 在整块拷贝前校验 abi_version==QZ_ABI_VERSION 且 struct_size==sizeof(qz_config_t)，不匹配即拒绝并 stderr 诊断。本轮加 strict_mode 三字段引入的越界读风险（rt->config=*config 按库侧 sizeof 读老宿主栈尾）变为显式失败。新增公共符号 qz_abi_version()（宿主启动时核对编译期宏）+ qz_config_init()（封装 struct_size/abi_version 填充，替代 = {0}）。约定：= {0} 零初始化现在被拒（有意——让忘了声明版本的开发期立即暴露，非静默按旧布局跑）。cli.c 3 处 + examples 3 处改用 qz_config_init。ABI 断裂点文档化。②SECURITY.md + docs/guide/security.md + docs/zh/guide/security.md 三处更新：把 strict mode 写入威胁模型（Out of scope 改为'默认放开，宿主可 opt-in 严格模式收紧'）+ 新增'严格模式——运行不可信脚本'章节（三能力对比表 + 启用代码示例 + 不覆盖范围）。修复前安全评审者读 SECURITY.md 会得出'本运行时无 fs 边界'的错误结论。验证：ctest 28/28 + examples 3 个跑通（qz_config_init 路径）"
+  affects: [strict-mode-sandbox]
+
+- time: 2026-10-01T10:57:05
+  kind: decision
+  summary: "严格模式回归测试落地：新增 test/test_strict_mode_gtest.cpp（5 用例，全 mock_libuv 下可测——判定在 bridge_validate_path 纯 realpath 逻辑，越界路径建 Promise 前就 reject，走不到 uv stub）。覆盖：根内绝对路径放行 / 根外绝对路径拒绝 / '..' 逃逸拒绝 / 相对路径拒绝 / 默认（非 strict）模式不误伤。每个 fs 用例配「非 strict 同路径」对照，防门控误伤既有宿主。有效性已用变异测试证明：临时短路 bridge_validate_path 的 strict 检查后 AbsoluteEscapeDenied 立即变红。踩坑：host_poll_until_value 是子串匹配，期望值不能带 JS 单引号（'ok' 应写 ok）——带引号导致全部用例跑满 5s 超时才失败。顺带修 ABI 迁移遗漏：test_host.h + 6 个 gtest 文件的 qz_config_t = {} 零初始化（现在被 ABI 门控拒绝），含 test_queue_gtest 的 new qz_config_t()（C++ value-init，grep = {} 漏掉）。clean rebuild 后 ctest 从 22 failed 修到 29/29。"
   affects: [strict-mode-sandbox]
