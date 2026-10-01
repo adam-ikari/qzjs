@@ -5,61 +5,52 @@ category: project
 status: active
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-01T16:50:23"
+updated: "2026-10-01T23:46:11"
 ---
 
 <!-- compiled_truth -->
-## 结论（2026-10-01 第二轮，根因已锁定）
+## 结论（2026-10-01 第一性复核，ctx 内部环根因已被推翻）
 
-打断正在执行的脚本会留下 3474 个有根 JS 对象，`qz_destroy` 命���
+打断正在执行的脚本会留下 3474 个有根 JS 对象，`qz_destroy` 命中
 `JS_FreeRuntime: Assertion 'list_empty(&rt->gc_obj_list)'`。
 
-### 根因：quickjs 的 JSContext 内部引用环
+### 当前最准确的理解（仍有缺口）
 
-```
-rt → context_list → ctx
-ctx → class_proto[] / native_error_proto[] / function_ctor / error_ctor / global_obj …
-     → 这些对象的属性链上的 JSFunction
-     → 每个函数持有 b->realm = JS_DupContext(ctx)，ctx->ref_count++
-```
+`ctx->ref_count` 高（143–2466）是**常态**，不是 qzjs 特有——vanilla 程序创建
+500 个全局闭包后 rc 高达 1552。**ctx 内部环不是根因**（此前结论已被推翻）。
 
-**ctx 自己持有引用自己的对象。** `JS_FreeContext` 要求 `ref_count == 1` 才释放
-这些 slot，但 slot 内的函数持有 ctx，于是 ref_count 恒为 143–2466 > 1，
-每次调用都在第一行 `if (--JS_REF_COUNT(ctx) > 0) return;` 提前返回，
-slot 永不释放，ctx 与其全部对象（含 polyfill 的数千个对象）泄漏。
+**关键机制（vanilla 实证）**：rc 归零靠**函数对象的级联释放**。每个字节码函数
+对象释放时走 `quickjs.c:37218 JS_FreeContext(b->realm)` 释放其 realm 引用，
+rc 逐层递减。vanilla 里 500 个函数挂在 K 数组上，`JS_FreeValue(r)` 释放 K →
+级联释放所有函数 → 每个函数释放 realm → rc 从 1552 递减到 0 → 真正释放 ctx。
 
-qzjs 因此**一直依赖 `JS_FreeRuntime` 的 GC 兜底**回收 ctx——正常路径碰巧能收
-（残留 3472 属循环垃圾，cycle collector 一次 GC 清空），interrupt 使残留变成
-3474，差出的 2 个对象改变了引用图形状，cycle collector 收不动，断言炸掉。
+**qzjs 打断后卡住的原因**：3474 个残留对象 `ref0=0`（全部有引用者，是可达的）
+→ 函数对象未被级联释放 → realm 引用未释放 → rc 减不到 0。这些可达对象构成的
+是 cycle collector **识别不了**的环（C 内部结构如 ctx slot / realm 的环，
+collector 只认对象属性环，不认 C 结构环）。
 
-**interrupt 不是根因**，只是把「一直靠兜底且碰巧兜得住」推成「兜不住」。
+**缺口**：打断后那 3474 个对象的**引用者**究竟是谁，仍未定位。曾假设 ctx slot
+（class_proto / function_ctor / global_obj 等）持有——但 vanilla 也有这些 slot
+且能归零，故 slot 本身不是充分条件。打断到底改变了哪些对象的引用关系（使
+「可回收」变「可达」），仍是未知。
 
 ### 已实证排除（勿重复走）
 
-1. 解释器操作数栈未展开（两版修复均失败且引入新问题）
-2. ctx refcount 异常（不 interrupt 路径同样 143–208 且干净）
-3. `rt->current_exception` / `ctx->error_back_trace` 残留（二分清理后 rc 不降）
-4. global 上的属性持有者：**teardown 时 eval 删除 global 全部属性后 rc 一丝未变**
-   （143→373 与删除前完全一致），故持有者不在 global 上
-5. 嵌套深度 / Promise / async / 闭包密度 / interrupt 后继续执行 —— vanilla 全干净
-6. 三个 patch（vanilla 实验用的就是打过 patch 的库）
-7. 强制 `ref_count = 1` 后释放 —— 立刻 UAF 崩溃（持有者是活对象）
-8. 快照 diff 路线（只能给类型，给不出引用者）
+1–8 同前版（操作数栈 / rc 异常 / current_exception / error_back_trace /
+global 属性持有者 / vanilla 各场景 / 三个 patch / 强制 rc=1）。
+9. **ctx 内部引用环**（上一版锁定的根因）——vanilla rc 同样高（1552）且能递减
+   归零，故该环不是「永不释放」的原因。
 
-### 两处此前的错误结论（已推翻，勿再引用）
+### 两处此前的错误结论（已推翻）
 
-- ❌「`ctx->global_obj` 已被释放 / 被 qzjs 侧置空」——**误读 tag 编码**。
-  `JS_VALUE_GET_TAG` 中 `JS_TAG_OBJECT = -1`、`JS_TAG_UNDEFINED = 3`，
-  我把 `-1` 当成了 UNDEFINED。实际 global_obj 始终是正常对象。
-- ❌「根因在 qzjs 集成层」——见上，根因是 quickjs 的 ctx 生命周期设计。
+- ❌「ctx->global_obj 已被释放」——误读 tag 编码（OBJECT=-1 / UNDEFINED=3）。
+- ❌「根因是 ctx 内部引用环」——vanilla 同环能归零，非根因。
 
-### 修复选项
+### 修复评估
 
-- **A（qzjs 侧，不可行）**：qzjs 无法访问 ctx 内部 slot；打破环需改 quickjs。
-- **B（改 quickjs）**：给 `JS_FreeContext` 增加「无视 refcount 强制释放 slot」的
-  路径，或在 JS_NewContext 时让 slot 内的 realm 引用不计入 ctx refcount。
-  属改动 quickjs 生命周期语义的上游级修改。
-- **C（上游）**：向 quickjs-ng 报告该缺陷（ctx 内部环导致 ctx 永不释放）。
+这需要定位「打断改变了哪个 C 结构持有函数对象」，属于改 quickjs 生命周期语义
+的深度问题。qzjs 侧无可行修法（碰不到 ctx 内部 slot）。合理选项仍是：
+上游报给 quickjs-ng / 深度改 quickjs / 暂缓并保留 DISABLED 测试。
 
 
 ## Timeline
@@ -98,4 +89,10 @@ qzjs 因此**一直依赖 `JS_FreeRuntime` 的 GC 兜底**回收 ctx——正常
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "2026-10-01 第二轮收尾：根因锁定为 quickjs ctx 内部引用环，qzjs 侧无法修"
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-01T23:46:11
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "2026-10-01 第一性复核：推翻 ctx 内部环根因，收敛为 vanilla 靠级联释放归零而 qzjs 打断后函数对象不可达"
   affects: [interrupt-teardown-leak]
