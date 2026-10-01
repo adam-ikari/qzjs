@@ -549,6 +549,31 @@ if(QZ_WITH_NONUTF_ENCODINGS)
 else()
     set(_polyfill_env QZ_WITH_NONUTF_ENCODINGS=0)
 endif()
+# polyfill 字节码的生成器。默认用本构建目录自己编出来的 qjsc —— 它与引擎
+# 必然同版本，这是「生成的字节码能被引擎读」的前提（BC_VERSION 必须匹配，
+# 否则 JS_ReadObject 报 invalid version，qz_create 返回 NULL，症状看起来像
+# 宿主坏了）。
+#
+# 但交叉构建时「本构建目录的 qjsc」是**目标架构**的二进制，宿主根本跑不了
+# （Exec format error），于是整个构建在第一步就死。QZ_QJSC_HOST 就是给这种
+# 场景的出口：显式指定一个**能在宿主机上运行**的 qjsc。
+#
+# 一致性由调用方负责：那个宿主 qjsc 必须由同一份 quickjs-ng 源码编出来。
+# 交叉构建的正常顺序就是先编宿主再编目标，两者共用同一个 deps/quickjs-ng，
+# 所以 BC_VERSION 一致。用一个「碰巧版本相近」的外部 qjsc 会静默产出引擎
+# 拒读的字节码 —— 那是比构建失败更糟的失败。
+set(QZ_QJSC_HOST "" CACHE FILEPATH
+    "宿主可运行的 qjsc，用于生成 polyfill 字节码（交叉构建时必需：默认的 qjsc 是目标架构的，跑不了）")
+if(QZ_QJSC_HOST)
+    if(NOT EXISTS "${QZ_QJSC_HOST}")
+        message(FATAL_ERROR "QZ_QJSC_HOST does not exist: ${QZ_QJSC_HOST}")
+    endif()
+    set(_polyfill_qjsc "${QZ_QJSC_HOST}")
+    message(STATUS "polyfill qjsc: ${QZ_QJSC_HOST} (host tool, cross-build)")
+else()
+    set(_polyfill_qjsc "$<TARGET_FILE:qjsc>")
+endif()
+
 find_program(NPM_EXECUTABLE npm)
 if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/esbuild" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng/qjsc.c")
     set(_polyfill_rebuild_enabled TRUE)
@@ -578,7 +603,7 @@ if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/
     add_custom_command(
         OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
                "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c"
-        COMMAND ${CMAKE_COMMAND} -E env ${_polyfill_env} QZ_WITH_GRPC=$<BOOL:${QZ_WITH_GRPC}> QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE} QZ_LZ4_COMPRESS=${CMAKE_BINARY_DIR}/qz_lz4_compress QJSC=$<TARGET_FILE:qjsc> npm --prefix "${CMAKE_CURRENT_SOURCE_DIR}/polyfill" run build
+        COMMAND ${CMAKE_COMMAND} -E env ${_polyfill_env} QZ_WITH_GRPC=$<BOOL:${QZ_WITH_GRPC}> QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE} QZ_LZ4_COMPRESS=${CMAKE_BINARY_DIR}/qz_lz4_compress QJSC=${_polyfill_qjsc} npm --prefix "${CMAKE_CURRENT_SOURCE_DIR}/polyfill" run build
         DEPENDS ${QZ_POLYFILL_SRC} ${_polyfill_rebuild_tools} "${_polyfill_stamp}"
         COMMENT "Rebuilding polyfill with QZ_WITH_NONUTF_ENCODINGS=${QZ_WITH_NONUTF_ENCODINGS} QZ_WITH_GRPC=${QZ_WITH_GRPC} QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE}"
         VERBATIM
