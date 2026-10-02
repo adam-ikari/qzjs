@@ -6,6 +6,8 @@
 #include <atomic>
 #include <cstring>
 #include <thread>
+#include <cstdio>
+#include <unistd.h>
 
 // 启用控制面的 host 工厂（control_plane=IN_PROC）。
 // 与 host_create 相同，但 cfg.control_plane = QZ_CONTROL_IN_PROC。
@@ -427,6 +429,73 @@ TEST(control_, interrupt_actually_aborts_running_script) {
         host_destroy(h);
     }
 }
+
+// 打断后的**销毁期泄漏**在 Release 下不会被任何断言看见（NDEBUG 把
+// gc_obj_list 断言编掉），所以必须有一个 NDEBUG 也能跑的判据。
+//
+// 判据选进程 RSS 而非 metrics 的 heap_bytes：泄漏发生在 qz_destroy **之后**，
+// 那时 JSRuntime 已经不存在，heap_bytes（JS_ComputeMemoryUsage 挂在 rt 上）
+// 量不到它。实测 heap_bytes 在有无修复时完全相同（5329 字节，一字不差）——
+// 指标测的是「rt 活着时谁占了多少」，不是「destroy 之后漏了多少」。
+//
+// 判据形状：同进程内反复 create → 打断 → destroy，看 RSS 是否单调累积。
+// 这正是 THREAD 模型的真实场景（同进程反复起停），也是本条修复的目标形态。
+// 实测每轮泄漏约 160 KB 且完全线性（无修复：cycle1 7576 → cycle7 8552 KB），
+// 修复后 8 轮恒定 6452 KB 零增长。阈值取 128 KB：远低于一轮的 160 KB，
+// 又留得住 allocator 抖动。
+#ifdef NDEBUG
+static long rss_kb() {
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (!f) return -1;
+    long total = 0, resident = 0;
+    if (fscanf(f, "%ld %ld", &total, &resident) != 2) { fclose(f); return -1; }
+    fclose(f);
+    return resident * (sysconf(_SC_PAGESIZE) / 1024);
+}
+#endif
+
+// Debug 构建跳过：那里 gc_obj_list 断言直接 abort 掉（比 RSS 灵敏得多，也
+// 不用受 allocator 抖动干扰）。实测 Debug 下 RSS 每轮涨约 6.5 MB 而 Release
+// 下零增长——Debug 的 arena/page 保留策略与 Release 完全不同，同一个阈值在两边
+// 含义相反，跨构建复用只会让这条门禁在 Debug 侧恒红、失去意义。
+// 本条只为 Release 补盲：NDEBUG 把断言编掉后，那批残留对象曾经静默泄漏。
+#ifdef NDEBUG
+TEST(control_, interrupt_then_destroy_does_not_accumulate_across_cycles) {
+    // 读 RSS 的前提。缺 /proc/self/statm 的平台（如 macOS）跳过而不是假红——
+    // 本条判据依赖 Linux 的进程内存视图，在别的平台没有等价物。
+    if (rss_kb() < 0) {
+        GTEST_SKIP() << "/proc/self/statm 不可用，本判据只覆盖 Linux";
+    }
+
+    const int kCycles = 8;
+    const long kBudgetKb = 128;   /* 约一轮泄漏量（160KB）的 80% */
+    long baseline = 0;
+
+    for (int i = 0; i < kCycles; i++) {
+        HostCtx *h = host_create_ctl_with_script(kBusyScript);
+        ASSERT_NE(nullptr, h) << "第 " << i << " 轮建运行时失败";
+        post_go(h->rt);
+        nap_ms(150);                        /* 让 JS 线程真的进忙等 */
+        EXPECT_EQ(0, host_control(h, R"({"op":"interrupt"})"));
+        nap_ms(120);
+        host_destroy(h);                    /* 泄漏就发生在这里之后 */
+
+        long now = rss_kb();
+        // 前两轮只建基线不判定：第 0 轮含一次性开销（polyfill 字节码首次
+        // 反序列化、arena 建池、gtest 自身首次触页），量到的是这些而不是泄漏。
+        // 第 1 轮起 RSS 已进入稳态，从第 2 轮开始判定。
+        if (i < 2) { if (i == 1) baseline = now; continue; }
+        EXPECT_LE(now - baseline, kBudgetKb)
+            << "第 " << i << " 轮打断+销毁后 RSS 比基线高 " << (now - baseline)
+            << " KB（预算 " << kBudgetKb << " KB）——销毁期在累积泄漏。"
+               "无修复时每轮约涨 160 KB 且线性增长；这条门禁就是拦它。";
+    }
+}
+#else
+TEST(control_, interrupt_then_destroy_does_not_accumulate_across_cycles) {
+    GTEST_SKIP() << "Debug 构建由 gc_obj_list 断言覆盖，RSS 判据只用于 Release";
+}
+#endif
 
 // 7. 超时：阻塞 JS 线程使后续控制命令过期 → code:TIMEOUT
 // 先发普通 eval（post_message）阻塞 JS 线程 ~50-200ms（不走 host_eval 以免
