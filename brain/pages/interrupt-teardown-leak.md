@@ -5,52 +5,31 @@ category: project
 status: active
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-01T23:46:11"
+updated: "2026-10-02T03:07:13"
 ---
 
 <!-- compiled_truth -->
-## 结论（2026-10-01 第一性复核，ctx 内部环根因已被推翻）
+## 结论（2026-10-02 已修复，valgrind 实测零泄漏）
 
-打断正在执行的脚本会留下 3474 个有根 JS 对象，`qz_destroy` 命中
-`JS_FreeRuntime: Assertion 'list_empty(&rt->gc_obj_list)'`。
+打断（uncatchable InterruptedError）会让部分 GC 对象残留**GC 不可见的外部引用**，refcount>0 留在 `rt->gc_obj_list`。而 `gc_free_cycles` **只处理 `tmp_obj_list` 里 refcount==0 的对象**，故这些对象逃过回收，其 arena 内存（含 polyfill bytecode）真泄漏。
 
-### 当前最准确的理解（仍有缺口）
+### 实测证据（valgrind，Release/NDEBUG）
+- 修前：`definitely lost: 88,003 bytes in 74 blocks` + `indirectly lost: 70,629 bytes`；栈 `JS_ReadObjectRec → JS_ReadObject2 → qz_ctx_create_at`（polyfill 字节码）
+- 修后：`in use at exit: 0 bytes in 0 blocks`，`1,357 allocs / 1,357 frees` 完全平衡
 
-`ctx->ref_count` 高（143–2466）是**常态**，不是 qzjs 特有——vanilla 程序创建
-500 个全局闭包后 rc 高达 1552。**ctx 内部环不是根因**（此前结论已被推翻）。
+**重要纠正**：此前「仅 ISOLATED 受影响、Release 静默通过」的判断是错的。Debug 的 `assert` abort 掩盖了泄漏。valgrind 证明 **Release 下同样泄漏 ~158KB/次**，THREAD 模型反复 create/destroy 必然累积——必须修。
 
-**关键机制（vanilla 实证）**：rc 归零靠**函数对象的级联释放**。每个字节码函数
-对象释放时走 `quickjs.c:37218 JS_FreeContext(b->realm)` 释放其 realm 引用，
-rc 逐层递减。vanilla 里 500 个函数挂在 K 数组上，`JS_FreeValue(r)` 释放 K →
-级联释放所有函数 → 每个函数释放 realm → rc 从 1552 递减到 0 → 真正释放 ctx。
+### 修法
+`deps/quickjs-ng-teardown-sweep.patch`：`JS_FreeRuntime` 中 `JS_RunGC()` 之后调 `gc_force_sweep()`，把 `gc_obj_list` 里残留的 `JS_OBJECT`/`FUNCTION_BYTECODE` 移入 `tmp_obj_list`，再调 `gc_free_cycles` 走标准 `free_object` 路径释放。复用 `gc_phase==REMOVE_CYCLES` 保护（refcount≠0 也经 `gc_zero_ref_count_list` 统一 `js_free_rt`）。剩余无主 shape/proto **不强释**（避免 double-free 崩溃），仅 fprintf 报告。
 
-**qzjs 打断后卡住的原因**：3474 个残留对象 `ref0=0`（全部有引用者，是可达的）
-→ 函数对象未被级联释放 → realm 引用未释放 → rc 减不到 0。这些可达对象构成的
-是 cycle collector **识别不了**的环（C 内部结构如 ctx slot / realm 的环，
-collector 只认对象属性环，不认 C 结构环）。
+### 遗留：不可见引用的**来源**仍未定位
+清扫是**兜底**——泄漏归零，但不解释那 3474 个对象为何被引用。此前排除 16 个方向（全部 C 扩展/WAMR/timer_resolves/current_stack_frame/var_ref（682 个全 detached）/ctx slot/global/promise/job queue/module ns/操作数栈/ctx 内部环等）。作为独立上游议题跟进，不阻塞主线。
 
-**缺口**：打断后那 3474 个对象的**引用者**究竟是谁，仍未定位。曾假设 ctx slot
-（class_proto / function_ctor / global_obj 等）持有——但 vanilla 也有这些 slot
-且能归零，故 slot 本身不是充分条件。打断到底改变了哪些对象的引用关系（使
-「可回收」变「可达」），仍是未知。
+### 门禁
+`control_.interrupt_actually_aborts_running_script` 已从 `DISABLED_` **转正**为常规回归测试（Debug 下命中 `gc_obj_list` 断言即红），防该泄漏回归。
 
-### 已实证排除（勿重复走）
-
-1–8 同前版（操作数栈 / rc 异常 / current_exception / error_back_trace /
-global 属性持有者 / vanilla 各场景 / 三个 patch / 强制 rc=1）。
-9. **ctx 内部引用环**（上一版锁定的根因）——vanilla rc 同样高（1552）且能递减
-   归零，故该环不是「永不释放」的原因。
-
-### 两处此前的错误结论（已推翻）
-
-- ❌「ctx->global_obj 已被释放」——误读 tag 编码（OBJECT=-1 / UNDEFINED=3）。
-- ❌「根因是 ctx 内部引用环」——vanilla 同环能归零，非根因。
-
-### 修复评估
-
-这需要定位「打断改变了哪个 C 结构持有函数对象」，属于改 quickjs 生命周期语义
-的深度问题。qzjs 侧无可行修法（碰不到 ctx 内部 slot）。合理选项仍是：
-上游报给 quickjs-ng / 深度改 quickjs / 暂缓并保留 DISABLED 测试。
+### patch 应用幂等性（踩坑记录）
+该 patch 的 hunk 上下文（`void JS_FreeRuntime(JSRuntime *rt)\n{`）在应用后**仍然匹配**，`patch -p1 -f` 会 fuzz 重复应用，导致 `redefinition of 'gc_force_sweep'`。且 `execute_process(... RESULT_VARIABLE)` 配 `OUTPUT_QUIET` 的 grep 退出码探测在此不可靠。最终用纯 CMake `file(READ)` + `string(FIND)` 判定符号是否存在——连跑 3 次 configure 稳定 1 份定义。
 
 
 ## Timeline
@@ -95,4 +74,10 @@ global 属性持有者 / vanilla 各场景 / 三个 patch / 强制 rc=1）。
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "2026-10-01 第一性复核：推翻 ctx 内部环根因，收敛为 vanilla 靠级联释放归零而 qzjs 打断后函数对象不可达"
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-02T03:07:13
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
   affects: [interrupt-teardown-leak]

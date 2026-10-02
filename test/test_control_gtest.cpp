@@ -382,8 +382,13 @@ static bool wait_done(qz_t *rt, int budget_ms) {
 // 的运行时 → postMessage → 150ms 后发 `{"op":"interrupt"}`（不带 correl）→
 // 等邮箱排干 → qz_destroy，就在此断言。对照：不发 interrupt 时同一脚本销毁干净，
 // 所以与脚本本身无关。
-// 归属：根因在 vendored quickjs-ng 的不可捕获中断展开路径，不在本仓库代码里。
-TEST(control_, DISABLED_interrupt_actually_aborts_running_script) {
+// 归属：打断的展开语义在 vendored quickjs-ng；打断后的**销毁**泄漏由
+// deps/quickjs-ng-teardown-sweep.patch 修掉（残留 GC 对象带 GC 不可见的外部引用，
+// refcount>0 留在 gc_obj_list，逃过 gc_free_cycles，其 arena 内存泄漏）。
+// 该 patch 落地前本测试是 DISABLED_：host_destroy 命中 JS_FreeRuntime 的
+// gc_obj_list 断言（Debug 下 abort / Release 下静默泄漏 158KB/次）。
+// 现在转正为常规门禁，防该泄漏回归。
+TEST(control_, interrupt_actually_aborts_running_script) {
     /* 预算必须**大于**脚本的自然耗时（3s 忙等），否则「没收到 done」既可能是被打断、
      * 也可能只是还没跑完——第一版把实验组预算设成 1500ms < 3000ms，负控（摘掉中断
      * 处理器）因此照样绿。同一个预算、两个相反的结论，没有刀锋时刻。 */
