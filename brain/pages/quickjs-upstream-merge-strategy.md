@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [build, upstream]
 created: "2026-08-31T11:59:47"
-updated: "2026-09-27T04:16:03"
+updated: "2026-10-02T00:24:25"
 ---
 
 <!-- compiled_truth -->
@@ -109,4 +109,9 @@ updated: "2026-09-27T04:16:03"
   kind: decision
   summary: "debugger patch 行数刷新：416 行/12 hunks → 522 行/20 hunks（2026-09-27 行覆盖修复重镜像），证据行 npm 2/2 → 3/3"
   source: "2026-09-27 断点行覆盖修复会话"
+  affects: [quickjs-upstream-merge-strategy]
+
+- time: 2026-10-02T00:24:25
+  kind: decision
+  summary: "策略变更（2026-10-01 用户拍板）：quickjs 改为**独立维护**，quickjs-ng 仍是上游。含义：①vendored quickjs 从『跟随上游 + patch』升级为『独立 fork』——可自由修改引擎生命周期/语义，不必等上游合入，也无需仅靠 patch 表达差异；②quickjs-ng 仍是上游：安全修复要合入参考、可向上游提交，但不再阻塞 qzjs 侧的独立修复；③升级节奏从『主动跟随上游』改为『按需拉取上游安全修复 + 独立维护差异』。直接影响 interrupt-teardown-leak 的处理：此前『需改 quickjs 生命周期语义，qzjs 侧无修法，只能报上游或暂缓』——现在可在 vendored fork 内直接改，不再受『等上游』约束。patch 机制（CMake configure 期 patch -p1 + 镜像校验金标准）仍保留作为表达/回放差异的方式。"
   affects: [quickjs-upstream-merge-strategy]
