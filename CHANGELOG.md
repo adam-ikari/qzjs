@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-02
+
+> **Breaking**：`QZ_PROFILE=bare` 档移除；JS 层 flatbuffers 退役（gRPC 改 protobuf-only）；
+> 宿主通讯改 per-rt 邮箱，库不再调用宿主任何回调（M-P7）。公共 C API 已版本化，
+> 见 `docs/api-versioning.md`。升级请对照本节 Removed / Replaced 逐条核对。
+
 ### Added
 - **DAP hitCondition 命中次数断点（C 层解析门控 + 访问级计数）**：`qz_debug_add_breakpoint` 新增第 5 参 `hit_condition`，`hit_condition_parse` 在设点时一次性解析（VS Code「命中次数」菜单写法：`N`/`==N` 恰停第 N 次、`%N` 每 N 次、`>N >=N <N <=N !=N` 关系式；拒绝 `%0`/负数/无操作数/尾随垃圾，返 -2 且不注册任何东西 → DAP setBreakpoints 该条回 `verified:false` + `invalid hitCondition: …` 消息，VS Code 显示灰色未安装 glyph，适配器 `applyVerified` 中 C 的 false 为权威、不被行号检查复活，`supportsHitConditionalBreakpoints: true` 能力申报）。命中计数**访问级 edge-triggered**：`qz_bp_t` 新增 `hit/hit_op/hit_n` + 访问跟踪三元组 `reach_file/reach_line/reach_depth`——同语句的多个 opcode、调用进入 callee 都属同一次访问（返回不重计），同深度换行/换文件或返回出更浅帧才结束访问（转移规则与 re-hit guard 一致）；`bps_visit_advance` 每次派发无条件推进所有断点访问态，防其他断点停顿留脏状态；断点被重新登记时计数清零。`qz_debug_detach`/`remove_breakpoint`/`clear_breakpoints[_in_file]` 全路径释放 `reach_file`。护栏：gtest（dap 全绿）+ e2e `hit-condition.mjs`——循环行 6 次到达、`%2` 恰停 2/4/6（continue 后 resume dispatch 不虚增计数）、无效 hitCondition verified:false 不复活、程序 stdout（`s 15`）断言跑完。docs en+zh（What works + Limitations「命中计数按登记生效」+ 测试清单）同步。
 - **VS Code DAP 调试扩展（vscode/qzjs-debug，仓库首个编辑器集成）**：内联 DAP 适配器——TypeScript 实现（esbuild 打包 `out/`，`npm run compile`），`QZ_DEBUG=1` 启动 qzjs 子进程、stdio DAP 帧收发，无需外部调试适配器。真实路径断点链路：CLI eval 通道带 `file` 字段 → `__native__.nativeEvalScript`（src/bridge.c 新增、src/cli.c 透传）——栈帧/断点按 JS_Eval 源名精确匹配真实路径（此前 `(0, eval)` 恒名 `<input>`，按真实路径设的断点永不命中）。e2e 4 用例（`node --test`，真 `build_dbg/qzjs` 为被调试端，`QZJS_RUNTIME` 覆盖路径）：smoke（入口停→断点停→栈/作用域/变量/求值/单步/继续→terminated）、debugger-stmt（debugger; 命中）、line-coverage（全语句种类断点命中）、breakpoint-scope（多文件断点作用域）。**扩展 e2e 接入 CI debugger job**（setup-node 22 + `npm ci` + compile + `QZJS_RUNTIME=$PWD/build/qzjs`）；lockfile 按 CI 复现性加入 gitignore 例外（同 `docs/package-lock.json` 先例）。

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 project(qzjs
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Embeddable QuickJS-ng runtime wrapper (libuv-native)"
     HOMEPAGE_URL "https://github.com/adam-ikari/qzjs"
     LANGUAGES C CXX
@@ -1118,6 +1118,10 @@ endif()
 if(QZ_BUILD_CLI)
     add_executable(qz_cli src/cli.c)
     set_target_properties(qz_cli PROPERTIES OUTPUT_NAME qzjs)
+    # cli.c 编在 qz_cli 里，不在 qzjs 库里——qzjs 的 PRIVATE 宏到不了它。
+    # 不注入的话 CLI 会静默用 src/cli.c 里的 fallback 版本号，与真源漂移
+    # （实测：真源已是 0.3.0，qzjs --version 仍报 0.2.0）。
+    target_compile_definitions(qz_cli PRIVATE QZ_VERSION="${PROJECT_VERSION}")
     if(QZ_BUILD_TESTS)
         # Test builds compile the qzjs core against mock_libuv.h
         # (QZ_USE_MOCK_LIBUV), so the CLI must link mock_libuv too. Linking
@@ -1141,6 +1145,8 @@ endif()
 if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
     add_executable(qz_rt src/rt_main.c)
     set_target_properties(qz_rt PROPERTIES OUTPUT_NAME qzjs-rt)
+    # 同 qz_cli：rt_main.c 拼版本串也要拿真源，别用 fallback。
+    target_compile_definitions(qz_rt PRIVATE QZ_VERSION="${PROJECT_VERSION}")
     # Same -Wall -Wextra -Werror + _POSIX_C_SOURCE discipline as the qzjs lib
     # (review I8): rt_main.c is core runtime code, not an exception.
     qz_enable_warnings(qz_rt)

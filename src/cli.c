@@ -16,9 +16,14 @@
 #include <stdint.h>
 
 /* 版本号单一来源 = CMakeLists 的 project(... VERSION ...)，经编译期宏注入。
- * 保留字面量 fallback：非 cmake 构建（手敲 cc）也能编出可跑的 CLI。 */
+ * cmake 构建下 qz_cli 与 qzjs 两个 target 都会注入 QZ_VERSION（qzjs 库的
+ * PRIVATE 宏到不了本文件——它编在可执行 target 里）。
+ *
+ * 宏缺失 = 手工 cc 构建。**不给字面量 fallback**：旧版这里硬编码 "0.2.0"，
+ * 真源升到 0.3.0 后 --version 仍报 0.2.0，构建系统毫无察觉——正是「版本号
+ * 单一来源」要防的那种静默漂移。宁可让手工构建者看到明确的缺宏错误。 */
 #ifndef QZ_VERSION
-#define QZ_VERSION "0.2.0"
+#error "QZ_VERSION 未定义：请用 CMake 构建（project(VERSION) 是唯一真源）。手工构建请显式 -DQZ_VERSION=\"x.y.z\"。"
 #endif
 #define QZ_CLI_VERSION "qzjs " QZ_VERSION
 
