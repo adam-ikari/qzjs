@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-02T15:16:30"
+updated: "2026-10-02T23:27:31"
 ---
 
 <!-- compiled_truth -->
@@ -27,7 +27,7 @@ DECREF-EXT survivors=3   hist[bcode=1, shape=1, ctx=1]
 - **`SHAPE` (rc=1)** ★ 幽灵（bytecode 的一部分）
 - 对照组全程 `survivors=0`（干净）
 
-已逐层验证 GC 遍历是完整的：`func_obj → js_bytecode_function_mark → bytecode` ✓、`FUNCTION_BYTECODE → b->realm` ✓、`JS_MarkContext` 遍历 ctx 全部字段 ✓。qzjs 侧无字段持有它。故断打断执行期间存在一次**引用转移遗漏**（`JS_ReadObject2` 建 bytecode 时 refcount=1，转交后未归零的那一个）。
+已逐层验证 GC 遍历是完整的：`func_obj → js_bytecode_function_mark → bytecode` ✓、`FUNCTION_BYTECODE → b->realm` ✓、`JS_MarkContext` 遍历 ctx 全部字段 ✓。qzjs 侧无字段持有它。故打断执行期间存在一次**引用转移遗漏**（`JS_ReadObject2` 建 bytecode 时 refcount=1，转交后未归零的那一个）。
 
 **被实验推翻的假设**：uncatchable 时操作数栈不释放（`quickjs.c:20996`，那个 while 循环把"释放引用"和"匹配 catch handler"耦合在同一条件）看起来像 bug，但 `done:` 标签（`quickjs.c:21028`）已有兜底循环覆盖操作数栈。实验否定了它。**代码看起来像错的地方，未必是错的地方**——只有实验能裁决。
 
@@ -44,11 +44,18 @@ DECREF-EXT survivors=3   hist[bcode=1, shape=1, ctx=1]
 1. `control_.interrupt_actually_aborts_running_script`（Debug）—— 从 `DISABLED_` 转正为常规回归，Debug 下命中 `gc_obj_list` 断言即红。
 2. `control_.interrupt_then_destroy_does_not_accumulate_across_cycles`（Release/仅 NDEBUG）—— RSS 累积判据，Debug 下 GTEST_SKIP（同阈值跨构建复用会恒红）。反复 create→打断→destroy 8 轮看 RSS 是否单调累积。**不用 metrics 的 heap_bytes**：实测它在有无修复时完全相同（5329 字节一字不差）——它量的是 rt 存活期间的引擎占用，泄漏发生在 destroy 之后。双向验证：修复在→8轮零增长；修复移除→第2轮起逐轮报警，160/332/496…每轮正好 160KB 且线性，与 valgrind 158KB/次吻合。阈值 128KB。
 
+### 影响评估（2026-10-02 补充实测）
+**运行时零累积，销毁期已修，遗留无已知故障场景。** 用探针实测单 runtime 存活期间反复 interrupt 20 轮：RSS **恒定 7104 KB，零累积**。原因：打断残留只在那一批打断发生时产生，撑住的是那一次执行的对象图；后续打断产生独立一组，不叠加。
+
+剩余"引用来源未定位"的实际影响：
+- **不影响正确性**——无 UAF/崩溃/数据损坏；sweep 在 teardown 安全释放
+- **不影响性能**——一次打断约 160KB 残留，对真实 runtime 规模可忽略
+- **理论风险（无证据）**——若这条不对称在**其他触发条件下**也以更大规模存在，可能出问题；但至今所有测试全绿（Debug 29/29 + Release 16/16 + test262）
+
+结论：遗留的价值在"知道引擎里有个不对称"这个排查结论本身（将来遇"打断后行为诡异"能省 16 轮无效排查），不在它现在能造成什么损害。消除它需打断瞬间的引用图快照，投入产出比低，无对应故障场景等着。
+
 ### patch 应用幂等性（踩坑记录）
 该 patch 的 hunk 上下文（`void JS_FreeRuntime(JSRuntime *rt)\n{`）在应用后**仍匹配**，`patch -p1 -f` 会 fuzz 重复应用 → `redefinition of 'gc_force_sweep'`。且 `execute_process(... RESULT_VARIABLE)` 配 `OUTPUT_QUIET` 的 grep 退出码探测在此不可靠。最终用纯 CMake `file(READ)` + `string(FIND)` 判定——连跑 3 次 configure 稳定 1 份定义。
-
-### 遗留（独立上游议题，不阻塞）
-那个 bytecode 引用的具体来源仍未定位。要继续需打断瞬间的引用图快照。作为独立上游议题跟进。
 
 
 ## Timeline
@@ -102,6 +109,12 @@ DECREF-EXT survivors=3   hist[bcode=1, shape=1, ctx=1]
   affects: [interrupt-teardown-leak]
 
 - time: 2026-10-02T15:16:30
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-02T23:27:31
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
