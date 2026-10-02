@@ -5,31 +5,50 @@ category: project
 status: active
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-02T03:07:13"
+updated: "2026-10-02T15:16:30"
 ---
 
 <!-- compiled_truth -->
-## 结论（2026-10-02 已修复，valgrind 实测零泄漏）
+## 结论（2026-10-02 已修复，valgrind 实测零泄漏；根因第一性收敛到 1 个 bytecode 引用）
 
-打断（uncatchable InterruptedError）会让部分 GC 对象残留**GC 不可见的外部引用**，refcount>0 留在 `rt->gc_obj_list`。而 `gc_free_cycles` **只处理 `tmp_obj_list` 里 refcount==0 的对象**，故这些对象逃过回收，其 arena 内存（含 polyfill bytecode）真泄漏。
+打断（uncatchable InterruptedError）会让部分 GC 对象残留 **GC 不可见的外部引用**，refcount>0 留在 `rt->gc_obj_list`。`gc_free_cycles` 只处理 `tmp_obj_list` 里 refcount==0 的对象，故逃过回收，arena 内存（含 polyfill bytecode）真泄漏。
+
+### 第一性原理：正确的度量是 gc_decref 之后的 refcount
+此前排查全部徒劳，因为一直在测 **GC 完成后** 的 refcount——那是"外部引用 + gc_scan incref 回来的子引用"的**混合值**，其中大部分来自 GC 自己刚加的边。`top_rc=2466/1552` 全是假的。
+
+正确度量 = `gc_decref` 之后、`gc_scan` 之前 的 refcount（= 纯外部引用，因为 gc_decref 已减掉所有对象间引用）。换上这个度量，**3474 → 3**：
+
+```
+DECREF-EXT survivors=3   hist[bcode=1, shape=1, ctx=1]
+```
+
+- `ctx` (rc=1) —— 正常根，`rt->context_list` 持有
+- **`FUNCTION_BYTECODE` (rc=1)** ★ 幽灵，撑住 3471 个对象（polyfill 整个函数树）
+- **`SHAPE` (rc=1)** ★ 幽灵（bytecode 的一部分）
+- 对照组全程 `survivors=0`（干净）
+
+已逐层验证 GC 遍历是完整的：`func_obj → js_bytecode_function_mark → bytecode` ✓、`FUNCTION_BYTECODE → b->realm` ✓、`JS_MarkContext` 遍历 ctx 全部字段 ✓。qzjs 侧无字段持有它。故断打断执行期间存在一次**引用转移遗漏**（`JS_ReadObject2` 建 bytecode 时 refcount=1，转交后未归零的那一个）。
+
+**被实验推翻的假设**：uncatchable 时操作数栈不释放（`quickjs.c:20996`，那个 while 循环把"释放引用"和"匹配 catch handler"耦合在同一条件）看起来像 bug，但 `done:` 标签（`quickjs.c:21028`）已有兜底循环覆盖操作数栈。实验否定了它。**代码看起来像错的地方，未必是错的地方**——只有实验能裁决。
 
 ### 实测证据（valgrind，Release/NDEBUG）
-- 修前：`definitely lost: 88,003 bytes in 74 blocks` + `indirectly lost: 70,629 bytes`；栈 `JS_ReadObjectRec → JS_ReadObject2 → qz_ctx_create_at`（polyfill 字节码）
-- 修后：`in use at exit: 0 bytes in 0 blocks`，`1,357 allocs / 1,357 frees` 完全平衡
+- 修前：`definitely lost: 88,003 B / 74 blocks` + `indirectly lost: 70,629 B`
+- 修后：`in use at exit: 0 bytes`，`1,357 allocs / 1,357 frees` 完全平衡
 
-**重要纠正**：此前「仅 ISOLATED 受影响、Release 静默通过」的判断是错的。Debug 的 `assert` abort 掩盖了泄漏。valgrind 证明 **Release 下同样泄漏 ~158KB/次**，THREAD 模型反复 create/destroy 必然累积——必须修。
+**重要纠正**：此前「仅 ISOLATED 受影响、Release 静默通过」的判断是错的。Debug 的 `assert` abort 掩盖了泄漏。valgrind 证明 Release 下同样泄漏 ~158KB/次，THREAD 模型反复 create/destroy 必然累积。
 
 ### 修法
-`deps/quickjs-ng-teardown-sweep.patch`：`JS_FreeRuntime` 中 `JS_RunGC()` 之后调 `gc_force_sweep()`，把 `gc_obj_list` 里残留的 `JS_OBJECT`/`FUNCTION_BYTECODE` 移入 `tmp_obj_list`，再调 `gc_free_cycles` 走标准 `free_object` 路径释放。复用 `gc_phase==REMOVE_CYCLES` 保护（refcount≠0 也经 `gc_zero_ref_count_list` 统一 `js_free_rt`）。剩余无主 shape/proto **不强释**（避免 double-free 崩溃），仅 fprintf 报告。
+`deps/quickjs-ng-teardown-sweep.patch`：`JS_FreeRuntime` 中 `JS_RunGC()` 之后调 `gc_force_sweep()`，把 `gc_obj_list` 里残留的 `JS_OBJECT`/`FUNCTION_BYTECODE` 移入 `tmp_obj_list`，再调 `gc_free_cycles` 走标准 `free_object` 路径释放。复用 `gc_phase==REMOVE_CYCLES` 保护。剩余无主 shape/proto 不强释（避免 double-free），仅报告。**清扫是兜底**——治的是"teardown 时仍有存活对象"（teardown 是 rt 生命周期终点，此刻任何 GC 对象都不该存活），不是"引用泄漏"本身。
 
-### 遗留：不可见引用的**来源**仍未定位
-清扫是**兜底**——泄漏归零，但不解释那 3474 个对象为何被引用。此前排除 16 个方向（全部 C 扩展/WAMR/timer_resolves/current_stack_frame/var_ref（682 个全 detached）/ctx slot/global/promise/job queue/module ns/操作数栈/ctx 内部环等）。作为独立上游议题跟进，不阻塞主线。
-
-### 门禁
-`control_.interrupt_actually_aborts_running_script` 已从 `DISABLED_` **转正**为常规回归测试（Debug 下命中 `gc_obj_list` 断言即红），防该泄漏回归。
+### 门禁（两层，各司其职）
+1. `control_.interrupt_actually_aborts_running_script`（Debug）—— 从 `DISABLED_` 转正为常规回归，Debug 下命中 `gc_obj_list` 断言即红。
+2. `control_.interrupt_then_destroy_does_not_accumulate_across_cycles`（Release/仅 NDEBUG）—— RSS 累积判据，Debug 下 GTEST_SKIP（同阈值跨构建复用会恒红）。反复 create→打断→destroy 8 轮看 RSS 是否单调累积。**不用 metrics 的 heap_bytes**：实测它在有无修复时完全相同（5329 字节一字不差）——它量的是 rt 存活期间的引擎占用，泄漏发生在 destroy 之后。双向验证：修复在→8轮零增长；修复移除→第2轮起逐轮报警，160/332/496…每轮正好 160KB 且线性，与 valgrind 158KB/次吻合。阈值 128KB。
 
 ### patch 应用幂等性（踩坑记录）
-该 patch 的 hunk 上下文（`void JS_FreeRuntime(JSRuntime *rt)\n{`）在应用后**仍然匹配**，`patch -p1 -f` 会 fuzz 重复应用，导致 `redefinition of 'gc_force_sweep'`。且 `execute_process(... RESULT_VARIABLE)` 配 `OUTPUT_QUIET` 的 grep 退出码探测在此不可靠。最终用纯 CMake `file(READ)` + `string(FIND)` 判定符号是否存在——连跑 3 次 configure 稳定 1 份定义。
+该 patch 的 hunk 上下文（`void JS_FreeRuntime(JSRuntime *rt)\n{`）在应用后**仍匹配**，`patch -p1 -f` 会 fuzz 重复应用 → `redefinition of 'gc_force_sweep'`。且 `execute_process(... RESULT_VARIABLE)` 配 `OUTPUT_QUIET` 的 grep 退出码探测在此不可靠。最终用纯 CMake `file(READ)` + `string(FIND)` 判定——连跑 3 次 configure 稳定 1 份定义。
+
+### 遗留（独立上游议题，不阻塞）
+那个 bytecode 引用的具体来源仍未定位。要继续需打断瞬间的引用图快照。作为独立上游议题跟进。
 
 
 ## Timeline
@@ -77,6 +96,12 @@ updated: "2026-10-02T03:07:13"
   affects: [interrupt-teardown-leak]
 
 - time: 2026-10-02T03:07:13
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-02T15:16:30
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
