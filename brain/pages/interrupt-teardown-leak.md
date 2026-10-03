@@ -5,7 +5,7 @@ category: project
 status: active
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-03T01:14:48"
+updated: "2026-10-03T02:48:10"
 ---
 
 <!-- compiled_truth -->
@@ -134,6 +134,34 @@ updated: "2026-10-03T01:14:48"
   affects: [interrupt-teardown-leak]
 
 - time: 2026-10-03T01:14:48
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-03T02:40:54
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-03T02:41:16
+  kind: reversal
+  summary: "推翻『引擎在打断路径上存在引用转移不对称』：真根因是 qzjs 侧 5 处 `JS_GetException(ctx);` 丢弃返回值（转移语义，丢一次引用所有权），打断抛出的 Error 因此 refcount 永不归零、经 backtrace 撑住整棵栈帧图。依赖该结论的 `quickjs-ng-teardown-sweep.patch`（teardown 强清 gc_obj_list）作为多余兜底一并删除——撤掉它后仅靠 5 行修复，Debug 断言通过 + valgrind 0 bytes。qzjs 侧无引擎缺陷。"
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-03T02:42:02
+  kind: reversal
+  summary: "推翻『需改 quickjs 生命周期语义，qzjs 侧无修法』（该前提是错的）：根因全程在 qzjs 自己的代码里（漏 free 一个 JSValue），不需要碰引擎。此前基于此前提在 quickjs-upstream-merge-strategy 页把 vendored quickjs 升级为『独立 fork』的决策仍然有效（理由独立于本 bug），但其对本 bug 的那段论证作废。同时作废：①『ctx 内部环是根因』；②『uncatchable 时操作数栈不释放是根因』（done: 标签已有兜底循环，实验否定）。教训：Debug 断言触发时先查『谁的引用没释放』，别急着改引擎——teardown 兜底能消症状，但会把『为什么会这样』永久埋掉。"
+  affects: [quickjs-upstream-merge-strategy]
+
+- time: 2026-10-03T02:47:22
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-03T02:48:10
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
