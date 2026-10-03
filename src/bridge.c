@@ -161,7 +161,7 @@ static void qz_js_call_cleanup(JSContext *ctx, JSValueConst fn,
 {
     JSValue ret = JS_Call(ctx, fn, this_val, argc, argv);
     if (JS_IsException(ret))
-        JS_GetException(ctx);
+        JS_FreeValue(ctx, JS_GetException(ctx));
     JS_FreeValue(ctx, ret);
 }
 
@@ -1548,7 +1548,7 @@ static int bridge_kind_arg(JSContext *ctx, int argc, JSValueConst *argv, int idx
         return IPC_ENV_KIND_MESSAGE;
     int32_t k = IPC_ENV_KIND_MESSAGE;
     if (JS_ToInt32(ctx, &k, argv[idx]) != 0) {
-        JS_GetException(ctx);   /* 非法实参：退回 MESSAGE，不炸发送路径 */
+        JS_FreeValue(ctx, JS_GetException(ctx));   /* 非法实参：退回 MESSAGE，不炸发送路径 */
         return IPC_ENV_KIND_MESSAGE;
     }
     return k == IPC_ENV_KIND_PORT_TRANSFER ? IPC_ENV_KIND_PORT_TRANSFER
@@ -1689,7 +1689,7 @@ static void bridge_proc_msg_cb(void *user, int8_t kind, int32_t source,
          * 否则该异常会污染 context——后续每一帧的 JS_NewArrayBufferCopy /
          * JS_Call 都立即返回同一个异常，读回调在 C 层照常解码但 JS 侧从此
          * 收不到任何消息（洪水下 rcvd 卡死）。 */
-        JS_GetException(ctx);
+        JS_FreeValue(ctx, JS_GetException(ctx));
         JS_FreeValue(ctx, arg);
         JS_FreeValue(ctx, jkind);
         JS_FreeValue(ctx, jcorr);

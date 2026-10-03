@@ -105,13 +105,13 @@ static void qz_worker_notify_error(qz_t *rt, const char *msg)
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, opts);
         if (JS_IsException(ev)) {
-            JS_GetException(ctx);   /* 清 pending，防污染后续调用 */
+            JS_FreeValue(ctx, JS_GetException(ctx));   /* 清 pending，防污染后续调用 */
             JS_FreeValue(ctx, ev);
         } else {
             JSValue dsp = JS_GetPropertyStr(ctx, g, "dispatchEvent");
             if (JS_IsFunction(ctx, dsp)) {
                 JSValue r = JS_Call(ctx, dsp, g, 1, &ev);
-                if (JS_IsException(r)) JS_GetException(ctx);
+                if (JS_IsException(r)) JS_FreeValue(ctx, JS_GetException(ctx));
                 JS_FreeValue(ctx, r);
             }
             JS_FreeValue(ctx, dsp);

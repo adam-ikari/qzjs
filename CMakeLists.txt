@@ -395,46 +395,6 @@ if(EXISTS "${QZ_QUICKJS_DRAIN_PATCH}")
     endif()
 endif()
 
-# Applied unconditionally (working-tree-only; submodule stays clean).
-# Fixes teardown leak after interrupt: leftover GC objects with GC-invisible
-# external refs stay in gc_obj_list (refcount > 0) and escape gc_free_cycles,
-# leaking their arena memory. Verified by valgrind: 158 KB lost per
-# interrupt+destroy cycle before, 0 bytes after.
-set(QZ_QUICKJS_SWEEP_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng-teardown-sweep.patch")
-if(EXISTS "${QZ_QUICKJS_SWEEP_PATCH}")
-    # Idempotency: probe the symbol FIRST, and do it with pure CMake — a
-    # grep(1) exit-code probe proved unreliable here.
-    #
-    # Why dry-run probing is NOT enough for this patch: its hunk context
-    # ("void JS_FreeRuntime(JSRuntime *rt)\n{") still matches after the patch
-    # is applied, so `patch -p1 -f` fuzz-applies a SECOND copy and the build
-    # dies with "redefinition of 'gc_force_sweep'". The other quickjs patches
-    # escape this because their hunk contexts do not survive application.
-    file(READ "${QUICKJS_DIR}/quickjs.c" _sweep_src)
-    string(FIND "${_sweep_src}" "static void gc_force_sweep(JSRuntime *rt)"
-           _sweep_pos)
-    if(_sweep_pos EQUAL -1)
-        execute_process(
-            COMMAND patch -p1 --dry-run -f -i "${QZ_QUICKJS_SWEEP_PATCH}"
-            WORKING_DIRECTORY "${QUICKJS_DIR}"
-            RESULT_VARIABLE _sweep_patch_dry
-            OUTPUT_QUIET ERROR_QUIET)
-        if(NOT _sweep_patch_dry EQUAL 0)
-            message(FATAL_ERROR
-                "quickjs-ng teardown-sweep patch neither applies cleanly nor is "
-                "already applied. Regenerate deps/quickjs-ng-teardown-sweep.patch.")
-        endif()
-        execute_process(
-            COMMAND patch -p1 -f -i "${QZ_QUICKJS_SWEEP_PATCH}"
-            WORKING_DIRECTORY "${QUICKJS_DIR}"
-            RESULT_VARIABLE _sweep_patch_apply ERROR_QUIET)
-        if(NOT _sweep_patch_apply EQUAL 0)
-            message(FATAL_ERROR "Failed to apply quickjs-ng teardown-sweep patch")
-        endif()
-        message(STATUS "Applied quickjs-ng teardown-sweep patch (deps/quickjs-ng-teardown-sweep.patch)")
-    endif()
-endif()
-
 # ── QuickJS-ng bytecode reader hardening ──────────────────────────────────
 # The bytecode deserializer (JS_ReadObject with JS_READ_OBJ_BYTECODE) is the
 # loader path for bytes that do not come from the trusted build (embedded

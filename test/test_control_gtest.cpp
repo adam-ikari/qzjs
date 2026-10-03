@@ -366,30 +366,33 @@ static bool wait_done(qz_t *rt, int budget_ms) {
     return false;
 }
 
-// ⚠ DISABLED_ 而不是删掉：覆盖已经写好，被一个**既存缺陷**挡住，理由与复现见下。
-// 删掉等于把「interrupt 的效果从未被验证过」这件事重新藏起来，而那正是本轮要补的洞。
-// 启用前必须先修掉那个缺陷，否则 asan / ubsan 两个 job 会一直红——一个常红的门等于没有门。
+// 这条曾因一个**真实缺陷**长期 DISABLED_。缺陷已修，测试转正为常规门禁。
 //
-// 【既存缺陷】打断正在执行的脚本会留下**有根**的 JS 对象，于是销毁该运行时会在
-// quickjs 的断言上终止：
-//     quickjs.c:2762: JS_FreeRuntime: Assertion `list_empty(&rt->gc_obj_list)' failed
-// 机制：`qz_ctl_interrupt_handler` 返回 1 → quickjs 抛一个 **uncatchable** 的
-// InternalError 并 longjmp 展开，展开点上的解释器临时值就此无人回收。本项目已经知道
-// 这一类问题（qzjs.c 的拆除里专门有一步「排空 pending JS jobs BEFORE freeing
-// contexts/runtime」，理由写的就是这个断言），但打断这种情况它救不回来。
-// 影响面：任何带断言的构建（所有 Debug 构建，含 asan / ubsan 两个 CI job）里，
-// 对**被打断过**的运行时调 qz_destroy 会 abort；NDEBUG 构建里断言被编掉，那批对象
-// 静默泄漏——所以这不是「只在测试里出现」的问题。
+// 【缺陷本身】打断正在执行的脚本会让运行时残留一个 JS 对象，销毁时命中
+//     quickjs.c: JS_FreeRuntime: Assertion `list_empty(&rt->gc_obj_list)' failed
+// 断言在 Debug 下 abort；NDEBUG 下断言被编掉，那批对象的内存**静默泄漏**
+// （valgrind 实测 ~158KB/次，THREAD 模型反复 create/destroy 必然累积）。
+// 所以不是「只在测试里出现」的问题。
+//
+// 【根因——归属在本仓库，不在 vendored quickjs-ng】
+// 打断必然抛 uncatchable InternalError。本仓库 `qz_js_call_cleanup()` 等 5 处
+// 写成 `JS_GetException(ctx);` —— **丢掉了返回值**。JS_GetException 是**转移**
+// 语义（把 current_exception 的所有权交给调用方并清空槽），丢弃返回值等于
+// 丢掉一次引用的所有权：那个 Error 对象 refcount 永远回不到 0，而它经
+// error backtrace 撑住整棵解释器栈帧图，于是 `gc_obj_list` 永远非空。
+// 修法是补上 `JS_FreeValue(ctx, JS_GetException(ctx));`（bridge.c ×3、worker.c ×2）。
+//
+// 【归属被推翻的过程，留在注释里免得重蹈】
+// 最初判断根因是「引擎在打断路径上有引用转移不对称」，为此加过
+// deps/quickjs-ng-teardown-sweep.patch（teardown 时强清 gc_obj_list）。那个 patch
+// 确实让泄漏归零（valgrind 0 bytes），但它是**兜底不是根治**：把「销毁期还有
+// 存活对象」压下去，没解释「它们为何被引用」。撤掉它之后仅靠上述 5 行修复，
+// Debug 断言通过 + valgrind 0 bytes —— sweep patch 因此被整个删除。
+// 教训：Debug 断言触发时，先怀疑「谁的引用没释放」，别急着改引擎。
+//
 // 最小复现（不依赖本 gtest）：建一个 onmessage 里 `while (Date.now()-t<3000){x++;}`
 // 的运行时 → postMessage → 150ms 后发 `{"op":"interrupt"}`（不带 correl）→
-// 等邮箱排干 → qz_destroy，就在此断言。对照：不发 interrupt 时同一脚本销毁干净，
-// 所以与脚本本身无关。
-// 归属：打断的展开语义在 vendored quickjs-ng；打断后的**销毁**泄漏由
-// deps/quickjs-ng-teardown-sweep.patch 修掉（残留 GC 对象带 GC 不可见的外部引用，
-// refcount>0 留在 gc_obj_list，逃过 gc_free_cycles，其 arena 内存泄漏）。
-// 该 patch 落地前本测试是 DISABLED_：host_destroy 命中 JS_FreeRuntime 的
-// gc_obj_list 断言（Debug 下 abort / Release 下静默泄漏 158KB/次）。
-// 现在转正为常规门禁，防该泄漏回归。
+// 等邮箱排干 → qz_destroy，修前就在此断言。对照：不发 interrupt 时同一脚本销毁干净。
 TEST(control_, interrupt_actually_aborts_running_script) {
     /* 预算必须**大于**脚本的自然耗时（3s 忙等），否则「没收到 done」既可能是被打断、
      * 也可能只是还没跑完——第一版把实验组预算设成 1500ms < 3000ms，负控（摘掉中断
