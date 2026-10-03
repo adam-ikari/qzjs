@@ -424,6 +424,13 @@ jobs:
       - name: API surface check (mock build)
         run: python3 test/api_surface_check.py --build-dir build --model mock
 
+      # JS_GetException 返回值丢弃门：转移语义，丢弃 = 漏一次引用所有权。
+      # 那个 InternalError refcount 永不归零、经 backtrace 撑住整棵栈帧图，
+      # gc_obj_list 永远非空——Debug 断言 abort、NDEBUG 静默泄漏 ~158KB/次。
+      # 运行时测试抓不到（teardown 才显现），只能静态挡。详见脚本头注释。
+      - name: JS_GetException return-value discard check
+        run: python3 test/leaked_get_exception_check.py
+
       - name: Test (offline, ASan + leak detection)
         env:
           # GCC 13+ ASan 默认开 detect_stack_use_after_return（假栈）：WAMR 栈
