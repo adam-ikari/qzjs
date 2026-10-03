@@ -2,10 +2,10 @@
 id: interrupt-teardown-leak
 title: "interrupt 打断后残留有根 JS 对象：qz_destroy 命中 quickjs 断言（NDEBUG 下静默泄漏）"
 category: project
-status: active
+status: archived
 tags: [quickjs-ng, ctl, interrupt, teardown, leak]
 created: "2026-09-30T00:42:01"
-updated: "2026-10-03T02:48:10"
+updated: "2026-10-03T10:29:24"
 ---
 
 <!-- compiled_truth -->
@@ -165,4 +165,15 @@ updated: "2026-10-03T02:48:10"
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-03T10:28:03
+  kind: reversal
+  summary: "测试归档：确认文件是否保留、历史是否可读"
+  source: brain archive-page
+  affects: [interrupt-teardown-leak]
+
+- time: 2026-10-03T10:29:24
+  kind: decision
+  summary: "本页归档，但内容与历史均有效，不是废弃。最终结论已迁至 [[interrupt-teardown-fixed]]（标题更正了归属错误——旧标题「残留有根 JS 对象…命中 quickjs 断言」指向引擎，属被推翻的模型；根因在本仓库 qzjs 侧）。本页 16 条 timeline 保留的是排查过程与方法论：其中『引擎引用转移不对称』『ctx 内部环』『操作数栈未释放』三条已被 reversal 标注作废，另有一条『测 GC 完成后的 refcount』的度量错误——这轮能收敛全靠换成 gc_decref 之后的 refcount（纯外部引用）。新页存结论，本页存过程。"
   affects: [interrupt-teardown-leak]
