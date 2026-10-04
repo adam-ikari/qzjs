@@ -100,7 +100,18 @@ typedef void (*qz_io_done_t)(void *opaque, int status,
 typedef struct qz_io_stream_ops_s {
     void (*on_headers)(void *user_data, int status, const char *headers_json);
     void (*on_data)(void *user_data, const char *data, size_t len);
-    void (*on_end)(void *user_data, int error_status);
+    /* error_msg: human-readable diagnostic for error_status != 0 (e.g.
+     * "TLS certificate verification failed", mbedtls_strerror text). Owned by
+     * the callee — the pointer is only valid for the duration of the call, so
+     * consumers must copy it if they keep it. NULL when there is no message
+     * (success path, or a site that has nothing better than the code).
+     *
+     * Why this exists: error_status alone collapses every distinct failure
+     * into the same opaque number. fetch's JS layer only ever saw -5
+     * (QZ_ERR_NETWORK) for "connection refused", "TLS init failed",
+     * "certificate verification failed" and "mbedtls handshake error
+     * -0x7880" alike — making these undiagnosable from outside the library. */
+    void (*on_end)(void *user_data, int error_status, const char *error_msg);
     void *user_data;
 } qz_io_stream_ops_t;
 

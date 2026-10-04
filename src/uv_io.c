@@ -276,6 +276,22 @@ static int tls_init_op(uv_io_http_op_t *op) {
      * 降级到 VERIFY_OPTIONAL——那会接受任意中间人/自签名证书。 */
     mbedtls_ssl_conf_authmode(&op->ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
 
+    /* ALPN:必须声明 http/1.1。省略 ALPN 时,现代服务器(Cloudflare /
+     * Google / Fastly 等)在收到不含 ALPN 扩展的 ClientHello 时会按
+     * RFC 7301 直接以握手 alert 关闭连接 —— 表现为对端在 ClientHello
+     * 之后立刻 EOF,握手永远走不到证书校验。tcp_io.c 早已默认声明
+     * http/1.1(见其 alpn_buf 逻辑),uv_io.c 这条客户端路径此前一直缺失,
+     * 导致所有 https fetch 失败。这里补齐,并把失败降级为「不致命」:
+     * 声明失败不阻断连接,交给后续握手结果说话。 */
+    {
+        static const char *alpn_protos[] = { (const char *)"http/1.1", NULL };
+        int alpn_rc = mbedtls_ssl_conf_alpn_protocols(&op->ssl_conf, alpn_protos);
+        if (alpn_rc != 0) {
+            fprintf(stderr, "[qzjs] uv_io: failed to set ALPN http/1.1 (%d); "
+                            "some servers will reject the handshake\n", alpn_rc);
+        }
+    }
+
     ret = mbedtls_ssl_setup(&op->ssl, &op->ssl_conf);
     if (ret != 0) return -1;
 
@@ -1971,7 +1987,7 @@ static void uv_io_http_finish_error(uv_io_http_op_t *op, int status,
     if (op->streaming) {
         /* Streaming mode: deliver error via on_end callback */
         if (op->stream_ops.on_end) {
-            op->stream_ops.on_end(op->stream_ops.user_data, status);
+            op->stream_ops.on_end(op->stream_ops.user_data, status, msg);
         }
         if (op->tcp_init && !uv_is_closing((uv_handle_t *)&op->tcp)) {
             uv_io_http_close_handle(op, (uv_handle_t *)&op->tcp, uv_io_http_stream_close_cb);
@@ -2203,7 +2219,7 @@ static void uv_io_http_idle_timer_cb(uv_timer_t *handle)
     uv_io_http_op_t *op = (uv_io_http_op_t *)handle->data;
     if (op->aborted) return;  /* teardown already in progress */
     if (op->stream_ops.on_end) {
-        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "unspecified network error");
     }
     uv_io_http_stream_cleanup(op);
 }
@@ -2463,6 +2479,20 @@ static void tls_handshake_read_cb(uv_stream_t *stream, ssize_t nread,
             return;
         }
         op->tls_handshake_done = 1;
+        /* 握手完成:必须换掉读回调并停掉当前读,再发请求。
+         * 此前这里只设 tls_handshake_done 就返回 —— 读循环保持注册在
+         * tls_handshake_read_cb 上,服务器发来的响应字节会再次进入本回调
+         * 并重跑 mbedtls_ssl_handshake(此时已非握手阶段),轻则多跑一次
+         * 握手状态机、重则把响应数据当作握手记录吞掉,最终以
+         * "TLS handshake read error"(EOF) 收场。表现为所有 https fetch
+         * 失败,而同一构建的明文 http 正常。 */
+        uv_read_stop((uv_stream_t *)&op->tcp);
+        /* 换到应用层读回调再发请求:服务器可能已经把响应数据一起送来了,
+         * 那一批字节会经 tls_stream_read_cb 正常消费。 */
+        uv_read_start((uv_stream_t *)&op->tcp, uv_io_http_alloc_cb,
+                      tls_stream_read_cb);
+        uv_io_http_send_request(op);
+        return;
     } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
                ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
         char err[128];
@@ -3021,7 +3051,7 @@ static void uv_io_http_abort_op(uv_io_http_op_t *op)
      * the fetch Promise rejects rather than hanging. Use -7 (CANCELLED)
      * to mirror error codes. */
     if (op->stream_ops.on_end) {
-        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_CANCELLED);
+        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_CANCELLED, "request aborted");
     }
 
     /* Tear down handles (clears active_stream, closes TCP/timers, frees op
@@ -3181,13 +3211,13 @@ static int uv_io_http_stream_process_data(uv_io_http_op_t *op,
             if (result == 1) {
                 /* Final chunk seen */
                 if (op->stream_ops.on_end) {
-                    op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                    op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                 }
                 uv_io_http_stream_cleanup(op);
                 return 1;
             } else if (result < 0) {
                 if (op->stream_ops.on_end) {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "stream error before response headers");
                 }
                 uv_io_http_stream_cleanup(op);
                 return 1;
@@ -3205,7 +3235,7 @@ static int uv_io_http_stream_process_data(uv_io_http_op_t *op,
                 op->body_received += len;
                 if (op->body_received >= op->body_expected) {
                     if (op->stream_ops.on_end) {
-                        op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                        op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                     }
                     uv_io_http_stream_cleanup(op);
                     return 1;
@@ -3220,7 +3250,7 @@ static int uv_io_http_stream_process_data(uv_io_http_op_t *op,
     char *new_buf = (char *)realloc(op->resp_headers, new_len + 1);
     if (!new_buf) {
         if (op->stream_ops.on_end) {
-            op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+            op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "socket connect failed");
         }
         uv_io_http_stream_cleanup(op);
         return 1;
@@ -3366,22 +3396,22 @@ static void uv_io_http_stream_read_cb(uv_stream_t *stream, ssize_t nread,
             if (op->stream_ops.on_end) {
                 if (op->headers_parsed) {
                     if (op->chunked && op->chunk_state != CHUNK_STATE_DONE) {
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "truncated chunked body");
                     } else if (op->body_expected > 0 &&
                                op->body_received < op->body_expected) {
                         /* Content-Length promised more bytes than arrived —
                          * truncated body must not resolve as success. */
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "truncated body (Content-Length not satisfied)");
                     } else {
-                        op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                        op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                     }
                 } else {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "connection closed before response headers");
                 }
             }
         } else {
             if (op->stream_ops.on_end) {
-                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "socket read error");
             }
         }
         uv_io_http_stream_cleanup(op);
@@ -3426,22 +3456,22 @@ static void tls_stream_read_cb(uv_stream_t *stream, ssize_t nread,
             if (op->stream_ops.on_end) {
                 if (op->headers_parsed) {
                     if (op->chunked && op->chunk_state != CHUNK_STATE_DONE) {
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS read error");
                     } else if (op->body_expected > 0 &&
                                op->body_received < op->body_expected) {
                         /* Content-Length promised more bytes than arrived —
                          * truncated body must not resolve as success. */
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS truncated body (Content-Length not satisfied)");
                     } else {
-                        op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                        op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                     }
                 } else {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS connection closed before response headers");
                 }
             }
         } else {
             if (op->stream_ops.on_end) {
-                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS socket read error");
             }
         }
         uv_io_http_stream_cleanup(op);
@@ -3495,15 +3525,15 @@ static void tls_stream_read_cb(uv_stream_t *stream, ssize_t nread,
             /* TLS connection closed cleanly */
             if (op->stream_ops.on_end) {
                 if (op->headers_parsed) {
-                    op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                    op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                 } else {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS connection closed prematurely");
                 }
             }
             uv_io_http_stream_cleanup(op);
         } else {
             if (op->stream_ops.on_end) {
-                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS socket error");
             }
             uv_io_http_stream_cleanup(op);
         }
@@ -3708,7 +3738,7 @@ static void uv_io_http_stream_finish_error(uv_io_http_op_t *op, int error_status
     }
 
     if (op->stream_ops.on_end) {
-        op->stream_ops.on_end(op->stream_ops.user_data, error_status);
+        op->stream_ops.on_end(op->stream_ops.user_data, error_status, "stream aborted");
     }
 
     if (op->tcp_init && !uv_is_closing((uv_handle_t *)&op->tcp)) {
@@ -3793,7 +3823,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
 
     if (!url || !ops) {
         if (ops && ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG);
+            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG, "request setup failed");
         }
         return 0;
     }
@@ -3801,7 +3831,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     uv_io_http_op_t *op = (uv_io_http_op_t *)calloc(1, sizeof(*op));
     if (!op) {
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_GENERIC);
+            ops->on_end(ops->user_data, QZ_ERR_GENERIC, "request setup failed");
         }
         return 0;
     }
@@ -3818,7 +3848,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
         uv_io_url_t parts = {0};
         if (uv_io_parse_url(url, &parts) < 0) {
             if (ops->on_end) {
-                ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG);
+                ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG, "request setup failed");
             }
             free(op);
             return 0;
@@ -3835,7 +3865,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     if (uv_io_http_apply_proxy(op) < 0) {
         uv_io_http_finalize(op);
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG);
+            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG, "request setup failed");
         }
         return 0;
     }
@@ -3847,7 +3877,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
 #else
         uv_io_http_finalize(op);
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_NETWORK);
+            ops->on_end(ops->user_data, QZ_ERR_NETWORK, "request setup failed");
         }
         return 0;
 #endif
@@ -3885,7 +3915,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     if (rc < 0) {
         uv_io_http_finalize(op);
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_NETWORK);
+            ops->on_end(ops->user_data, QZ_ERR_NETWORK, "request setup failed");
         }
         return 0;
     }
