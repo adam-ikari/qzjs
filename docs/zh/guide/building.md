@@ -7,6 +7,14 @@ description: qzjs 的 CMake 构建选项 — 功能开关、C99 工具链，以�
 
 qzjs 使用 CMake 并通过功能开关进行配置。所有依赖从源码构建 — 无需系统包。
 
+::: warning 平台支持
+**qzjs 仅支持 Linux。**macOS、Windows 与各 BSD 不在支持范围内——是范围之外，
+不是"还没移植"。库中大量使用 Linux 专有原语：`eventfd`（`qz_message_fd`）、
+`AF_UNIX` 端点配 `SO_PEERCRED`，以及显式的 `UV_USE_IO_URING=0`（某些内核上
+io_uring_setup 会破坏 futex/pthread_cond 唤醒，导致 `cond_wait` 永不返回）。
+在其他平台构建不受支持，且会以本文档未记录的方式失败。
+:::
+
 ## 基本构建
 
 `make` 是命令入口——封装 CMake/Ninja：

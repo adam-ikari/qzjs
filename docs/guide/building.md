@@ -7,6 +7,15 @@ description: CMake build options for qzjs — feature toggles, C99 toolchain, an
 
 qzjs uses CMake with feature toggles. All dependencies are built from source — no system packages required.
 
+::: warning Platform support
+**qzjs supports Linux only.** macOS, Windows, and the BSDs are out of scope —
+not "not yet ported". The library uses Linux-specific primitives throughout:
+`eventfd` (`qz_message_fd`), `AF_UNIX` endpoints with `SO_PEERCRED`, and an
+explicit `UV_USE_IO_URING=0` (io_uring_setup can break futex/pthread_cond
+wakeups on some kernels, hanging `cond_wait` forever). Building elsewhere is
+unsupported and will fail in ways that are not documented here.
+:::
+
 ## Basic Build
 
 `make` is the command entry point — it wraps CMake/Ninja:
