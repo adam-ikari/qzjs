@@ -1855,12 +1855,7 @@ static void uv_io_http_stream_close_cb(uv_handle_t *handle);
 static void uv_io_http_cleanup(uv_io_http_op_t *op)
 {
     /* This is the final free for every HTTP op (streaming and non-streaming,
-     * normal/error/abort paths all funnel here before free(op)). Clear the
-     * PAL's active_stream tracker if it still points at us, so a later
-     * uv_io_http_abort() never dereferences a freed op. */
-    if (op->rt && op->rt->active_stream == op) {
-        op->rt->active_stream = NULL;
-    }
+     * normal/error/abort paths all funnel here before free(op)). */
 
     /* Unlink from the per-op abort registry. Streaming ops register here at
      * start; removing the node now means uv_io_http_abort_by_id can never
@@ -3040,13 +3035,6 @@ static void uv_io_http_stream_cleanup(uv_io_http_op_t *op)
     op->teardown_started = 1;
     op->tearing_down = 1;
 
-    /* Clear the active-stream tracker first. The op itself is freed later
-     * (in the TCP close callback or via uv_io_http_cleanup below), but no
-     * other code should reach it via active_stream after teardown begins. */
-    if (op->rt && op->rt->active_stream == op) {
-        op->rt->active_stream = NULL;
-    }
-
     /* Stop and close the idle timer if initialized and active */
     if (op->idle_timer_init && op->idle_timer.data &&
         !uv_is_closing((uv_handle_t *)&op->idle_timer)) {
@@ -3127,8 +3115,8 @@ static void uv_io_http_abort_op(uv_io_http_op_t *op)
         op->cb(op->cb_data, QZ_ERR_CANCELLED, kAborted, sizeof(kAborted) - 1);
     }
 
-    /* Tear down handles (clears active_stream, closes TCP/timers, frees op
-     * via the TCP close callback). */
+    /* Tear down handles (closes TCP/timers, frees op via the TCP close
+     * callback). */
     uv_io_http_stream_cleanup(op);
 }
 
@@ -3159,8 +3147,8 @@ void uv_io_http_abort(qz_t *rt)
      *
      * This used to be `while (rt->http_ops) { op = rt->http_ops;
      * uv_io_http_abort_op(op); }`, which assumed each abort unlinks the op
-     * synchronously. It does not: uv_io_http_stream_cleanup only clears
-     * rt->active_stream and uv_close()s the handles; the unlink happens in
+     * synchronously. It does not: uv_io_http_stream_cleanup only stops the
+     * timers and uv_close()s the handles; the unlink happens in
      * uv_io_http_cleanup, reached from the close callbacks — which run on a
      * later loop iteration. So rt->http_ops never changed inside the loop
      * and every iteration re-aborted the same head op, firing its on_end
@@ -3802,10 +3790,9 @@ void uv_io_http_request(qz_t *rt,
      * 末尾) 完全对称。
      *
      * 此前只有流式注册。非流式请求因此在 runtime 销毁时对 teardown
-     * **不可见**:qzjs.c 的 teardown 以 `if (rt->active_stream)` 为守卫,
-     * 而 active_stream 只在流式路径被赋值,故非流式在途请求走到销毁时
-     * active_stream 为 NULL → uv_io_http_abort 根本不调用 →
-     * op->cb(bridge_io_done) 不触发 → qz_free_cb_data 不执行 →
+     * **不可见**(qzjs.c 当时以 `if (rt->active_stream)` 为守卫,非流式不
+     * 设该槽):uv_io_http_abort 根本不调用 → op->cb(bridge_io_done) 不触发
+     * → qz_free_cb_data 不执行 →
      * alloc_cb_data 持有的 promise resolve/reject 两个 JSValue 泄漏 →
      * JS_FreeRuntime 在非空 gc_obj_list 上断言
      * `list_empty(&rt->gc_obj_list)' failed。
@@ -3819,7 +3806,6 @@ void uv_io_http_request(qz_t *rt,
     op->op_id = ++rt->http_op_seq;
     op->next = rt->http_ops;
     rt->http_ops = op;
-    rt->active_stream = op;
 }
 
 /* ================================================================
@@ -3845,10 +3831,6 @@ static void uv_io_http_stream_finish_error(uv_io_http_op_t *op, int error_status
         !uv_is_closing((uv_handle_t *)&op->connect_timer)) {
         uv_timer_stop(&op->connect_timer);
         uv_io_http_close_handle(op, (uv_handle_t *)&op->connect_timer, uv_io_http_timer_close_cb);
-    }
-
-    if (op->rt && op->rt->active_stream == op) {
-        op->rt->active_stream = NULL;
     }
 
     if (op->stream_ops.on_end) {
@@ -4044,6 +4026,5 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     op->op_id = ++rt->http_op_seq;
     op->next = rt->http_ops;
     rt->http_ops = op;
-    rt->active_stream = op;
     return op->op_id;
 }

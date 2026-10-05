@@ -733,13 +733,19 @@ void qz_thread_teardown(qz_t *rt)
     if (rt->msg_head != &rt->msg_stub) qz_msg_free(rt->msg_head);
     rt->msg_head = &rt->msg_stub;
 
-    /* 1.5) abort in-flight streaming HTTP op（若存在）。uv_io_http_abort 会
-     * 同步触发 on_end（JS_Call，bridge_stream_on_end 释放 bs）并关闭
+    /* 1.5) abort in-flight HTTP op（流式与非流式）。uv_io_http_abort 会
+     * 同步触发消费者回调（流式走 on_end / JS_Call，bridge_stream_on_end
+     * 释放 bs；非流式走 op->cb，bridge_io_done 释放 cb_data）并关闭
      * tcp/timer 句柄；必须赶在销毁 contexts / 释放 JSRuntime 之前，否则
-     * on_end 访问已释放的 ctx。abort 排的 JS job 由步骤 2 的循环消化。 */
-    if (rt->active_stream) {
-        uv_io_http_abort(rt);
-    }
+     * 回调访问已释放的 ctx。abort 排的 JS job 由步骤 2 的循环消化。
+     *
+     * 这里**不能**用 `if (rt->active_stream)` 当守卫。active_stream 是单槽：
+     * 多个 op 并发时只有最后一个持有者，B 先完成时 cleanup 会把它清零，
+     * 而此时 A 仍在途 —— 守卫为假、abort 不被调用、A 的回调永不触发，
+     * 正是 ab55d71e 要修的那条泄漏链。权威的「有没有在途」指示器是
+     * rt->http_ops 链表头；uv_io_http_abort 遍历它，空链表天然是 no-op，
+     * 所以这里不需要任何守卫。 */
+    uv_io_http_abort(rt);
 
     /* 2) 排空 pending JS jobs BEFORE freeing contexts/runtime，否则
      * JS_FreeRuntime 会在非空 gc_obj_list 上断言（Promise 反应引用着
