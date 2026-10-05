@@ -549,6 +549,49 @@ if(QZ_WITH_NONUTF_ENCODINGS)
 else()
     set(_polyfill_env QZ_WITH_NONUTF_ENCODINGS=0)
 endif()
+# polyfill 字节码的生成器。默认用本构建目录自己编出来的 qjsc —— 它与引擎
+# 必然同版本，这是「生成的字节码能被引擎读」的前提（BC_VERSION 必须匹配，
+# 否则 JS_ReadObject 报 invalid version，qz_create 返回 NULL，症状看起来像
+# 宿主坏了）。
+#
+# 但交叉构建时「本构建目录的 qjsc」是**目标架构**的二进制，宿主根本跑不了
+# （Exec format error），于是整个构建在第一步就死。QZ_QJSC_HOST 就是给这种
+# 场景的出口：显式指定一个**能在宿主机上运行**的 qjsc。
+#
+# 一致性由调用方负责：那个宿主 qjsc 必须由同一份 quickjs-ng 源码编出来。
+# 交叉构建的正常顺序就是先编宿主再编目标，两者共用同一个 deps/quickjs-ng，
+# 所以 BC_VERSION 一致。用一个「碰巧版本相近」的外部 qjsc 会静默产出引擎
+# 拒读的字节码 —— 那是比构建失败更糟的失败。
+# 注意作用域：只覆盖 polyfill 字节码这一条路径。上面的 qz_compile_js() 仍用
+# $<TARGET_FILE:qjsc>，交叉构建下那条路依旧不可用 —— 本变量不解决它。
+set(QZ_QJSC_HOST "" CACHE FILEPATH
+    "宿主可运行的 qjsc，用于生成 polyfill 字节码（交叉构建时必需：默认的 qjsc 是目标架构的，跑不了）")
+if(QZ_QJSC_HOST)
+    if(NOT EXISTS "${QZ_QJSC_HOST}")
+        message(FATAL_ERROR "QZ_QJSC_HOST does not exist: ${QZ_QJSC_HOST}")
+    endif()
+    set(_polyfill_qjsc "${QZ_QJSC_HOST}")
+    message(STATUS "polyfill qjsc: ${QZ_QJSC_HOST} (host tool, cross-build)")
+else()
+    set(_polyfill_qjsc "$<TARGET_FILE:qjsc>")
+endif()
+
+# compressed 模式的压缩器是同一个病：build.js 会 execSync 它，而交叉构建下
+# ${CMAKE_BINARY_DIR}/qz_lz4_compress 是目标架构的二进制，宿主跑不了
+# （Exec format error）。QZ_LZ4_HOST 与 QZ_QJSC_HOST 对称，给它一个宿主可运行
+# 的路径。这里没有版本一致性要求（lz4 格式与架构无关），宿主跑得起来即可。
+set(QZ_LZ4_HOST "" CACHE FILEPATH
+    "宿主可运行的 qz_lz4_compress，用于 compressed 模式的 polyfill 产物（交叉构建时必需：默认的是目标架构的，跑不了）")
+if(QZ_LZ4_HOST)
+    if(NOT EXISTS "${QZ_LZ4_HOST}")
+        message(FATAL_ERROR "QZ_LZ4_HOST does not exist: ${QZ_LZ4_HOST}")
+    endif()
+    set(_polyfill_lz4 "${QZ_LZ4_HOST}")
+    message(STATUS "polyfill lz4: ${QZ_LZ4_HOST} (host tool, cross-build)")
+else()
+    set(_polyfill_lz4 "${CMAKE_BINARY_DIR}/qz_lz4_compress")
+endif()
+
 find_program(NPM_EXECUTABLE npm)
 if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/esbuild" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng/qjsc.c")
     set(_polyfill_rebuild_enabled TRUE)
@@ -566,8 +609,16 @@ if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/
     # 知道从哪里生成、又只在真缺文件时才触发。qjsc / qz_lz4_compress 直接进
     # DEPENDS（add_custom_command 里的跨目录目标依赖有效，见上面的
     # qz_compile_js），比 add_dependencies 更早锁住顺序，避免并行构建 race。
-    set(_polyfill_rebuild_tools qjsc)
-    if(TARGET qz_lz4_compress)   # compressed 产物压缩器（EXCLUDE_FROM_ALL）
+    # 用宿主 qjsc 时，DEPENDS 里不能留 qjsc 目标：交叉构建下它是目标架构的
+    # 二进制，构建它纯属无用功（EXCLUDE_FROM_ALL 的目标被显式拉进依赖图会
+    # 被真的编出来），而且让依赖图与「用的是宿主工具」这个事实不一致。
+    if(QZ_QJSC_HOST)
+        set(_polyfill_rebuild_tools "")
+    else()
+        set(_polyfill_rebuild_tools qjsc)
+    endif()
+    # 同理：QZ_LZ4_HOST 指向宿主工具时不再拉 qz_lz4_compress 目标。
+    if(TARGET qz_lz4_compress AND NOT QZ_LZ4_HOST)  # compressed 产物压缩器（EXCLUDE_FROM_ALL）
         list(APPEND _polyfill_rebuild_tools qz_lz4_compress)
     endif()
     # 选项变化必须触发再生：custom target 永不过期，OUTPUT 规则只看依赖新旧。
@@ -578,7 +629,7 @@ if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/
     add_custom_command(
         OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
                "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c"
-        COMMAND ${CMAKE_COMMAND} -E env ${_polyfill_env} QZ_WITH_GRPC=$<BOOL:${QZ_WITH_GRPC}> QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE} QZ_LZ4_COMPRESS=${CMAKE_BINARY_DIR}/qz_lz4_compress QJSC=$<TARGET_FILE:qjsc> npm --prefix "${CMAKE_CURRENT_SOURCE_DIR}/polyfill" run build
+        COMMAND ${CMAKE_COMMAND} -E env ${_polyfill_env} QZ_WITH_GRPC=$<BOOL:${QZ_WITH_GRPC}> QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE} QZ_LZ4_COMPRESS=${_polyfill_lz4} QJSC=${_polyfill_qjsc} npm --prefix "${CMAKE_CURRENT_SOURCE_DIR}/polyfill" run build
         DEPENDS ${QZ_POLYFILL_SRC} ${_polyfill_rebuild_tools} "${_polyfill_stamp}"
         COMMENT "Rebuilding polyfill with QZ_WITH_NONUTF_ENCODINGS=${QZ_WITH_NONUTF_ENCODINGS} QZ_WITH_GRPC=${QZ_WITH_GRPC} QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE}"
         VERBATIM
