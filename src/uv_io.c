@@ -276,6 +276,22 @@ static int tls_init_op(uv_io_http_op_t *op) {
      * 降级到 VERIFY_OPTIONAL——那会接受任意中间人/自签名证书。 */
     mbedtls_ssl_conf_authmode(&op->ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
 
+    /* ALPN:必须声明 http/1.1。省略 ALPN 时,现代服务器(Cloudflare /
+     * Google / Fastly 等)在收到不含 ALPN 扩展的 ClientHello 时会按
+     * RFC 7301 直接以握手 alert 关闭连接 —— 表现为对端在 ClientHello
+     * 之后立刻 EOF,握手永远走不到证书校验。tcp_io.c 早已默认声明
+     * http/1.1(见其 alpn_buf 逻辑),uv_io.c 这条客户端路径此前一直缺失,
+     * 导致所有 https fetch 失败。这里补齐,并把失败降级为「不致命」:
+     * 声明失败不阻断连接,交给后续握手结果说话。 */
+    {
+        static const char *alpn_protos[] = { (const char *)"http/1.1", NULL };
+        int alpn_rc = mbedtls_ssl_conf_alpn_protocols(&op->ssl_conf, alpn_protos);
+        if (alpn_rc != 0) {
+            fprintf(stderr, "[qzjs] uv_io: failed to set ALPN http/1.1 (%d); "
+                            "some servers will reject the handshake\n", alpn_rc);
+        }
+    }
+
     ret = mbedtls_ssl_setup(&op->ssl, &op->ssl_conf);
     if (ret != 0) return -1;
 
@@ -1839,12 +1855,7 @@ static void uv_io_http_stream_close_cb(uv_handle_t *handle);
 static void uv_io_http_cleanup(uv_io_http_op_t *op)
 {
     /* This is the final free for every HTTP op (streaming and non-streaming,
-     * normal/error/abort paths all funnel here before free(op)). Clear the
-     * PAL's active_stream tracker if it still points at us, so a later
-     * uv_io_http_abort() never dereferences a freed op. */
-    if (op->rt && op->rt->active_stream == op) {
-        op->rt->active_stream = NULL;
-    }
+     * normal/error/abort paths all funnel here before free(op)). */
 
     /* Unlink from the per-op abort registry. Streaming ops register here at
      * start; removing the node now means uv_io_http_abort_by_id can never
@@ -1967,11 +1978,19 @@ static void uv_io_http_finish_error(uv_io_http_op_t *op, int status,
         uv_timer_stop(&op->connect_timer);
         uv_io_http_close_handle(op, (uv_handle_t *)&op->connect_timer, uv_io_http_timer_close_cb);
     }
+    /* read-idle timer 同理:与 finish_success 一样必须在这里显式关掉。
+     * idle_timer 内嵌在 op 里,op 随 finalize 释放;不显式 uv_close 就会在
+     * loop 句柄表里留下悬垂槽,之后派发到野函数指针。 */
+    if (op->idle_timer_init && op->idle_timer.data &&
+        !uv_is_closing((uv_handle_t *)&op->idle_timer)) {
+        uv_timer_stop(&op->idle_timer);
+        uv_io_http_close_handle(op, (uv_handle_t *)&op->idle_timer, uv_io_http_timer_close_cb);
+    }
 
     if (op->streaming) {
         /* Streaming mode: deliver error via on_end callback */
         if (op->stream_ops.on_end) {
-            op->stream_ops.on_end(op->stream_ops.user_data, status);
+            op->stream_ops.on_end(op->stream_ops.user_data, status, msg);
         }
         if (op->tcp_init && !uv_is_closing((uv_handle_t *)&op->tcp)) {
             uv_io_http_close_handle(op, (uv_handle_t *)&op->tcp, uv_io_http_stream_close_cb);
@@ -1998,6 +2017,15 @@ static void uv_io_http_finish_success(uv_io_http_op_t *op)
         !uv_is_closing((uv_handle_t *)&op->connect_timer)) {
         uv_timer_stop(&op->connect_timer);
         uv_io_http_close_handle(op, (uv_handle_t *)&op->connect_timer, uv_io_http_timer_close_cb);
+    }
+    /* read-idle timer 同样必须在这里关掉,不能只依赖 uv_io_http_cleanup。
+     * idle_timer 内嵌在 op 里,而 op 会随 finalize 一起释放;若 teardown
+     * 路径不显式 uv_close,loop 的句柄表就留下一条指向已释放内存的悬垂槽,
+     * 之后被派发到野函数指针(实测 mock 下 SIGSEGV @ uv_run)。 */
+    if (op->idle_timer_init && op->idle_timer.data &&
+        !uv_is_closing((uv_handle_t *)&op->idle_timer)) {
+        uv_timer_stop(&op->idle_timer);
+        uv_io_http_close_handle(op, (uv_handle_t *)&op->idle_timer, uv_io_http_timer_close_cb);
     }
 
     /* Parse headers and build JSON response */
@@ -2202,8 +2230,13 @@ static void uv_io_http_idle_timer_cb(uv_timer_t *handle)
 {
     uv_io_http_op_t *op = (uv_io_http_op_t *)handle->data;
     if (op->aborted) return;  /* teardown already in progress */
+    /* 两种 op 的消费者回调字段互斥(见 uv_io_http_abort_op 的说明),两条都要走:
+       非流式走 op->cb,否则 idle 超时对它完全静默 —— 既不完成也不报错。 */
     if (op->stream_ops.on_end) {
-        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "read idle timeout");
+    } else if (op->cb) {
+        static const char kIdle[] = "read idle timeout";
+        op->cb(op->cb_data, QZ_ERR_NETWORK, kIdle, sizeof(kIdle) - 1);
     }
     uv_io_http_stream_cleanup(op);
 }
@@ -2430,7 +2463,7 @@ static void tls_handshake_read_cb(uv_stream_t *stream, ssize_t nread,
                                    const uv_buf_t *buf)
 {
     uv_io_http_op_t *op = (uv_io_http_op_t *)stream->data;
-    if (op->aborted) {
+    if (op->aborted || op->teardown_started || op->tearing_down) {
         if (buf && buf->base) free(buf->base);
         return;
     }
@@ -2463,6 +2496,18 @@ static void tls_handshake_read_cb(uv_stream_t *stream, ssize_t nread,
             return;
         }
         op->tls_handshake_done = 1;
+        /* 握手完成:必须换掉读回调并停掉当前读,再发请求。
+         * 此前这里只设 tls_handshake_done 就返回 —— 读循环保持注册在
+         * tls_handshake_read_cb 上,服务器发来的响应字节会再次进入本回调
+         * 并重跑 mbedtls_ssl_handshake(此时已非握手阶段),轻则多跑一次
+         * 握手状态机、重则把响应数据当作握手记录吞掉,最终以
+         * "TLS handshake read error"(EOF) 收场。表现为所有 https fetch
+         * 失败,而同一构建的明文 http 正常。 */
+        uv_read_stop((uv_stream_t *)&op->tcp);
+        /* send_request selects the correct read callback (tls_stream_read_cb
+         * or tls_read_cb) based on op->streaming; no need to race it here. */
+        uv_io_http_send_request(op);
+        return;
     } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
                ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
         char err[128];
@@ -2606,6 +2651,28 @@ static void uv_io_http_write_cb(uv_write_t *req, int status)
     } else {
         uv_read_start((uv_stream_t *)&op->tcp, uv_io_http_alloc_cb,
                       uv_io_http_read_cb);
+        /* 非流式此前**不装** idle timer,只有流式装。后果:对端连上但一个
+         * 字节都不回时,请求既不完成也不报错 —— 无限挂起,连一个 -5 都
+         * 没有。实测 qzjs fetch 对可达站点 8/10 成功、curl 10/10,差的两次
+         * 都是挂死。挂死比报错更难用:调用方拿不到任何失败信号。
+         * 补上 read-idle 超时,语义与流式一致。
+         *
+         * `!op->idle_timer_init` 只是防御性守卫:idle_timer 内嵌在 op 里,
+         * 二次 uv_timer_init 会让同一个指针在 loop 句柄表里出现两次,而
+         * uv_close 只清第一个匹配槽。
+         *
+         * 注意:加这条 timer 时实测到的 SIGSEGV(uv_run 里 cb(t) 派发到
+         * 0xffffffff00000001)**不是**重复 init 造成的 —— 真因是 teardown
+         * 路径没关 idle_timer,见上面 finish_success / finish_error 里的
+         * 显式 uv_close。两者都要在位。 */
+        if (!op->idle_timer_init &&
+            uv_timer_init(&op->rt->loop, &op->idle_timer) == 0) {
+            op->idle_timer_init = 1;
+            op->idle_timer.data = op;
+            uv_timer_start(&op->idle_timer, uv_io_http_idle_timer_cb,
+                           PAL_UV_READ_IDLE_TIMEOUT_MS,
+                           PAL_UV_READ_IDLE_TIMEOUT_MS);
+        }
     }
 }
 
@@ -2968,13 +3035,6 @@ static void uv_io_http_stream_cleanup(uv_io_http_op_t *op)
     op->teardown_started = 1;
     op->tearing_down = 1;
 
-    /* Clear the active-stream tracker first. The op itself is freed later
-     * (in the TCP close callback or via uv_io_http_cleanup below), but no
-     * other code should reach it via active_stream after teardown begins. */
-    if (op->rt && op->rt->active_stream == op) {
-        op->rt->active_stream = NULL;
-    }
-
     /* Stop and close the idle timer if initialized and active */
     if (op->idle_timer_init && op->idle_timer.data &&
         !uv_is_closing((uv_handle_t *)&op->idle_timer)) {
@@ -3015,17 +3075,48 @@ static void uv_io_http_stream_cleanup(uv_io_http_op_t *op)
  * loop thread (JS pal calls / teardown run there). */
 static void uv_io_http_abort_op(uv_io_http_op_t *op)
 {
+    /* Idempotency guard. stream_cleanup has its own teardown_started guard,
+     * but it runs *after* the on_end call below, so it cannot protect it.
+     * Without this, an op reachable by two abort routes — e.g.
+     * pal.httpRequestAbort(opId) first, then runtime teardown's
+     * uv_io_http_abort() — fires on_end twice. bridge_stream_on_end frees
+     * the bridge ctx and its JSValues on the first call, so the second call
+     * JS_FreeValue's already-freed values (gc_prev == NULL while the object
+     * is not the gc list head) → SIGSEGV inside quickjs.
+     * Check both teardown flags: teardown_started (set by stream_cleanup)
+     * and tearing_down (set by finish_error) both mean "this op is
+     * already being torn down". Both paths must be covered — finish_error
+     * fires on_end and leaves the op in rt->http_ops until its close
+     * callbacks drain, so a later abort() would re-fire on_end on a bridge
+     * ctx that was already freed. */
+    if (op->teardown_started || op->tearing_down) return;
     op->aborted = 1;
 
     /* Deliver a cancellation error to the JS consumer before teardown so
      * the fetch Promise rejects rather than hanging. Use -7 (CANCELLED)
-     * to mirror error codes. */
+     * to mirror error codes.
+     *
+     * 非流式 op 必须走 op->cb,不能只走 stream_ops.on_end —— 两者的回调
+     * 字段是互斥的:uv_io_http_request() 设 op->cb(op->cb_data),stream_ops
+     * 全为 NULL;uv_io_http_request_stream() 反之。原先这里只调
+     * stream_ops.on_end,于是销毁 runtime 时的**非流式**在途请求收不到任何
+     * 回调:bridge_io_done 不执行 → qz_free_cb_data 不执行 →
+     * alloc_cb_data 持有的 promise resolve/reject 两个 JSValue 泄漏 →
+     * JS_FreeRuntime 时 gc_obj_list 非空,断言
+     * `list_empty(&rt->gc_obj_list)' failed。
+     *
+     * 也就是说 c1425f9 的幂等守卫本身是对的,只是覆盖面只有流式一半。
+     * 两条分支都要走,才能覆盖两种 op 的消费者。
+     * teardown_started 守卫保证每条路径的回调最多触发一次。 */
     if (op->stream_ops.on_end) {
-        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_CANCELLED);
+        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_CANCELLED, "request aborted");
+    } else if (op->cb) {
+        static const char kAborted[] = "request aborted";
+        op->cb(op->cb_data, QZ_ERR_CANCELLED, kAborted, sizeof(kAborted) - 1);
     }
 
-    /* Tear down handles (clears active_stream, closes TCP/timers, frees op
-     * via the TCP close callback). */
+    /* Tear down handles (closes TCP/timers, frees op via the TCP close
+     * callback). */
     uv_io_http_stream_cleanup(op);
 }
 
@@ -3052,12 +3143,25 @@ void uv_io_http_abort_by_id(qz_t *rt, uint64_t op_id)
  */
 void uv_io_http_abort(qz_t *rt)
 {
-    uv_io_http_op_t *op = rt->http_ops;
-    /* Each abort unlinks the op from the registry (via cleanup), so walk and
-     * re-read the head each iteration rather than chasing ->next. */
-    while (rt->http_ops) {
-        op = rt->http_ops;
+    /* Walk the registry ONCE, following ->next.
+     *
+     * This used to be `while (rt->http_ops) { op = rt->http_ops;
+     * uv_io_http_abort_op(op); }`, which assumed each abort unlinks the op
+     * synchronously. It does not: uv_io_http_stream_cleanup only stops the
+     * timers and uv_close()s the handles; the unlink happens in
+     * uv_io_http_cleanup, reached from the close callbacks — which run on a
+     * later loop iteration. So rt->http_ops never changed inside the loop
+     * and every iteration re-aborted the same head op, firing its on_end
+     * repeatedly (crash: see uv_io_http_abort_op's guard).
+     *
+     * Safe to follow ->next here: from abort_op the op is never freed
+     * synchronously — the tcp path uv_close()s (callback deferred) and the
+     * pre-tcp path uv_cancel()s the getaddrinfo request (its callback frees
+     * the op later). Both need the loop to advance first. */
+    for (uv_io_http_op_t *op = rt->http_ops; op; ) {
+        uv_io_http_op_t *next = op->next; /* snapshot before abort may reorder list */
         uv_io_http_abort_op(op);
+        op = next;
     }
 }
 
@@ -3181,13 +3285,13 @@ static int uv_io_http_stream_process_data(uv_io_http_op_t *op,
             if (result == 1) {
                 /* Final chunk seen */
                 if (op->stream_ops.on_end) {
-                    op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                    op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                 }
                 uv_io_http_stream_cleanup(op);
                 return 1;
             } else if (result < 0) {
                 if (op->stream_ops.on_end) {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "stream error before response headers");
                 }
                 uv_io_http_stream_cleanup(op);
                 return 1;
@@ -3205,7 +3309,7 @@ static int uv_io_http_stream_process_data(uv_io_http_op_t *op,
                 op->body_received += len;
                 if (op->body_received >= op->body_expected) {
                     if (op->stream_ops.on_end) {
-                        op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                        op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                     }
                     uv_io_http_stream_cleanup(op);
                     return 1;
@@ -3219,8 +3323,13 @@ static int uv_io_http_stream_process_data(uv_io_http_op_t *op,
     size_t new_len = op->resp_headers_len + len;
     char *new_buf = (char *)realloc(op->resp_headers, new_len + 1);
     if (!new_buf) {
+        /* 响应头缓冲 realloc 失败 = 内存不足。此前这里报的是
+         * "socket connect failed",把 OOM 说成连接失败 —— 正是本 PR 想消灭的
+         * 「把不同失败压成同一句话」,而且发生在最该看清的路径上:
+         * 排查 OOM 的人会去查网络。 */
         if (op->stream_ops.on_end) {
-            op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+            op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK,
+                                  "out of memory growing response headers");
         }
         uv_io_http_stream_cleanup(op);
         return 1;
@@ -3366,22 +3475,22 @@ static void uv_io_http_stream_read_cb(uv_stream_t *stream, ssize_t nread,
             if (op->stream_ops.on_end) {
                 if (op->headers_parsed) {
                     if (op->chunked && op->chunk_state != CHUNK_STATE_DONE) {
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "truncated chunked body");
                     } else if (op->body_expected > 0 &&
                                op->body_received < op->body_expected) {
                         /* Content-Length promised more bytes than arrived —
                          * truncated body must not resolve as success. */
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "truncated body (Content-Length not satisfied)");
                     } else {
-                        op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                        op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                     }
                 } else {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "connection closed before response headers");
                 }
             }
         } else {
             if (op->stream_ops.on_end) {
-                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "socket read error");
             }
         }
         uv_io_http_stream_cleanup(op);
@@ -3426,22 +3535,22 @@ static void tls_stream_read_cb(uv_stream_t *stream, ssize_t nread,
             if (op->stream_ops.on_end) {
                 if (op->headers_parsed) {
                     if (op->chunked && op->chunk_state != CHUNK_STATE_DONE) {
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS read error");
                     } else if (op->body_expected > 0 &&
                                op->body_received < op->body_expected) {
                         /* Content-Length promised more bytes than arrived —
                          * truncated body must not resolve as success. */
-                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS truncated body (Content-Length not satisfied)");
                     } else {
-                        op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                        op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                     }
                 } else {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS connection closed before response headers");
                 }
             }
         } else {
             if (op->stream_ops.on_end) {
-                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS socket read error");
             }
         }
         uv_io_http_stream_cleanup(op);
@@ -3495,15 +3604,15 @@ static void tls_stream_read_cb(uv_stream_t *stream, ssize_t nread,
             /* TLS connection closed cleanly */
             if (op->stream_ops.on_end) {
                 if (op->headers_parsed) {
-                    op->stream_ops.on_end(op->stream_ops.user_data, 0);
+                    op->stream_ops.on_end(op->stream_ops.user_data, 0, NULL);
                 } else {
-                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                    op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS connection closed prematurely");
                 }
             }
             uv_io_http_stream_cleanup(op);
         } else {
             if (op->stream_ops.on_end) {
-                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK);
+                op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "TLS socket error");
             }
             uv_io_http_stream_cleanup(op);
         }
@@ -3676,6 +3785,27 @@ void uv_io_http_request(qz_t *rt,
         cb(cb_data, QZ_ERR_NETWORK, "DNS resolution request failed", 29);
         return;
     }
+
+    /* 注册进 per-op abort registry —— 与流式路径 (uv_io_http_request_stream
+     * 末尾) 完全对称。
+     *
+     * 此前只有流式注册。非流式请求因此在 runtime 销毁时对 teardown
+     * **不可见**(qzjs.c 当时以 `if (rt->active_stream)` 为守卫,非流式不
+     * 设该槽):uv_io_http_abort 根本不调用 → op->cb(bridge_io_done) 不触发
+     * → qz_free_cb_data 不执行 →
+     * alloc_cb_data 持有的 promise resolve/reject 两个 JSValue 泄漏 →
+     * JS_FreeRuntime 在非空 gc_obj_list 上断言
+     * `list_empty(&rt->gc_obj_list)' failed。
+     *
+     * 换句话说 c1425f9 修的「in-flight 时 qz_destroy 崩溃」只覆盖了流式
+     * 一半;另一半(non-streaming,也就是 polyfill fetch 在 streaming 不可用
+     * 时的回退路径)仍然是坏的。
+     *
+     * 放在 uv_getaddrinfo 成功之后:此刻 op 才真正承诺了异步 I/O,之前的
+     * 任何失败分支都已经同步回调并 finalize 了 op。 */
+    op->op_id = ++rt->http_op_seq;
+    op->next = rt->http_ops;
+    rt->http_ops = op;
 }
 
 /* ================================================================
@@ -3703,12 +3833,8 @@ static void uv_io_http_stream_finish_error(uv_io_http_op_t *op, int error_status
         uv_io_http_close_handle(op, (uv_handle_t *)&op->connect_timer, uv_io_http_timer_close_cb);
     }
 
-    if (op->rt && op->rt->active_stream == op) {
-        op->rt->active_stream = NULL;
-    }
-
     if (op->stream_ops.on_end) {
-        op->stream_ops.on_end(op->stream_ops.user_data, error_status);
+        op->stream_ops.on_end(op->stream_ops.user_data, error_status, "stream aborted");
     }
 
     if (op->tcp_init && !uv_is_closing((uv_handle_t *)&op->tcp)) {
@@ -3793,7 +3919,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
 
     if (!url || !ops) {
         if (ops && ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG);
+            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG, "request setup failed");
         }
         return 0;
     }
@@ -3801,7 +3927,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     uv_io_http_op_t *op = (uv_io_http_op_t *)calloc(1, sizeof(*op));
     if (!op) {
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_GENERIC);
+            ops->on_end(ops->user_data, QZ_ERR_GENERIC, "request setup failed");
         }
         return 0;
     }
@@ -3818,7 +3944,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
         uv_io_url_t parts = {0};
         if (uv_io_parse_url(url, &parts) < 0) {
             if (ops->on_end) {
-                ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG);
+                ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG, "request setup failed");
             }
             free(op);
             return 0;
@@ -3835,7 +3961,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     if (uv_io_http_apply_proxy(op) < 0) {
         uv_io_http_finalize(op);
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG);
+            ops->on_end(ops->user_data, QZ_ERR_INVALID_ARG, "request setup failed");
         }
         return 0;
     }
@@ -3847,7 +3973,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
 #else
         uv_io_http_finalize(op);
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_NETWORK);
+            ops->on_end(ops->user_data, QZ_ERR_NETWORK, "request setup failed");
         }
         return 0;
 #endif
@@ -3885,7 +4011,7 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     if (rc < 0) {
         uv_io_http_finalize(op);
         if (ops->on_end) {
-            ops->on_end(ops->user_data, QZ_ERR_NETWORK);
+            ops->on_end(ops->user_data, QZ_ERR_NETWORK, "request setup failed");
         }
         return 0;
     }
@@ -3900,6 +4026,5 @@ uint64_t uv_io_http_request_stream(qz_t *rt,
     op->op_id = ++rt->http_op_seq;
     op->next = rt->http_ops;
     rt->http_ops = op;
-    rt->active_stream = op;
     return op->op_id;
 }

@@ -199,7 +199,7 @@ struct qz_pal_t {
 typedef struct qz_pal_stream_ops {
     void (*on_headers)(void *user_data, int status, const char *headers_json);
     void (*on_data)(void *user_data, const char *data, size_t len);
-    void (*on_end)(void *user_data, int error_status);  // 0=成功, 负值=错误
+    void (*on_end)(void *user_data, int error_status, const char *error_msg);  // 0=成功, 负值=错误；error_msg 仅在 error_status != 0 时非 NULL，生命周期限于回调内
     void *user_data;
 } qz_pal_stream_ops_t;
 ```

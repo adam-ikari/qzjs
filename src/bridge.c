@@ -770,13 +770,19 @@ static void bridge_stream_on_data(void *ud, const char *data, size_t len)
     JS_FreeValue(bs->ctx, buf);
 }
 
-static void bridge_stream_on_end(void *ud, int error_status)
+static void bridge_stream_on_end(void *ud, int error_status, const char *error_msg)
 {
     bridge_stream_ctx_t *bs = (bridge_stream_ctx_t *)ud;
     if (JS_IsFunction(bs->ctx, bs->on_end)) {
-        JSValue arg = JS_NewInt32(bs->ctx, error_status);
-        qz_js_call_cleanup(bs->ctx, bs->on_end, JS_UNDEFINED, 1, &arg);
-        JS_FreeValue(bs->ctx, arg);
+        JSValue argv[2];
+        argv[0] = JS_NewInt32(bs->ctx, error_status);
+        /* Second arg = diagnostic string. Back-compat: JS callbacks written
+         * for the old 1-arg signature just ignore it. */
+        argv[1] = (error_msg && *error_msg) ? JS_NewString(bs->ctx, error_msg)
+                                            : JS_NULL;
+        qz_js_call_cleanup(bs->ctx, bs->on_end, JS_UNDEFINED, 2, argv);
+        JS_FreeValue(bs->ctx, argv[0]);
+        JS_FreeValue(bs->ctx, argv[1]);
     }
     JS_FreeValue(bs->ctx, bs->on_headers);
     JS_FreeValue(bs->ctx, bs->on_data);

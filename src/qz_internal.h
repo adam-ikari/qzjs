@@ -100,7 +100,18 @@ typedef void (*qz_io_done_t)(void *opaque, int status,
 typedef struct qz_io_stream_ops_s {
     void (*on_headers)(void *user_data, int status, const char *headers_json);
     void (*on_data)(void *user_data, const char *data, size_t len);
-    void (*on_end)(void *user_data, int error_status);
+    /* error_msg: human-readable diagnostic for error_status != 0 (e.g.
+     * "TLS certificate verification failed", mbedtls_strerror text). Owned by
+     * the callee — the pointer is only valid for the duration of the call, so
+     * consumers must copy it if they keep it. NULL when there is no message
+     * (success path, or a site that has nothing better than the code).
+     *
+     * Why this exists: error_status alone collapses every distinct failure
+     * into the same opaque number. fetch's JS layer only ever saw -5
+     * (QZ_ERR_NETWORK) for "connection refused", "TLS init failed",
+     * "certificate verification failed" and "mbedtls handshake error
+     * -0x7880" alike — making these undiagnosable from outside the library. */
+    void (*on_end)(void *user_data, int error_status, const char *error_msg);
     void *user_data;
 } qz_io_stream_ops_t;
 
@@ -270,9 +281,9 @@ typedef struct uv_io_store_entry_t {
     size_t value_len;
 } uv_io_store_entry_t;
 
-/* Forward decl: uv_io_http_op_t is defined in uv_io.c; qz_t only holds a
- * pointer to the active streaming op (see active_stream below), so only the
- * struct tag is needed here. */
+/* Forward decl: uv_io_http_op_t is defined in uv_io.c; qz_t only holds
+ * pointers into the registration list, so only the struct tag is needed
+ * here. */
 struct uv_io_http_op_t;
 
 /* ================================================================
@@ -355,13 +366,10 @@ struct qz_t {
     int storage_max;     /* 存储条目上限（uv_io 用 PAL_UV_STORAGE_DEFAULT） */
     int store_count;
 
-    /* uv_io.c 当前活动的流式 HTTP op（http_abort 借它触达 in-flight 句柄） */
-    struct uv_io_http_op_t *active_stream;
-
-    /* 活跃流式 HTTP op 注册表：per-op abort（pal.httpRequestAbort(opId)）按
-     * op_id 查找。active_stream 是单槽"最近一个 op"，覆盖不了并发 fetch；
-     * registry 允许任意数量的 in-flight 流各自被精确中止。op 终结
-     * （uv_io_http_cleanup）时从链表摘除，故 abort 永远只命中存活 op。 */
+    /* 活跃流式 HTTP op 注册表：per-op abort（pal.httpRequestAbort(opId)）
+     * 与 teardown（uv_io_http_abort）都按它遍历，支持任意数量的并发
+     * in-flight 请求各自被精确中止。op 终结（uv_io_http_cleanup）时从
+     * 链表摘除，故 abort 永远只命中存活 op。空链表时 abort 是 no-op。 */
     struct uv_io_http_op_t *http_ops;
     uint64_t http_op_seq;   /* 单调递增 op id 分配器（0 = 无效 id） */
 

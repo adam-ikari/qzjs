@@ -8,7 +8,8 @@
  * PAL httpRequestStream callbacks:
  *   onHeaders(status, headersJson) — called once with response status and headers
  *   onData(arrayBuffer)            — called for each chunk of response body
- *   onEnd(errorStatus)             — called when response completes (0 = success)
+ *   onEnd(errorStatus, errorMsg)   — response completes (0 = success);
+ *                                     errorMsg = diagnostic or null
  *
  * Depends on: DOMException (from abort.js)
  */
@@ -933,7 +934,7 @@ export function setupFetch(pal) {
       try { streamController.enqueue(arr); } catch (e) {}
     }
 
-    function onEnd(errorStatus) {
+    function onEnd(errorStatus, errorMsg) {
       // Clean up abort listener
       cleanupAbort();
 
@@ -951,7 +952,11 @@ export function setupFetch(pal) {
           /* QZ_ERR_INVALID_ARG：多为无效/不支持的代理 URL（含 https:// 代理） */
           reject(new TypeError('fetch failed: invalid proxy URL'));
         } else {
-          reject(new TypeError('fetch failed: network error ' + errorStatus));
+          /* errorMsg 是 C 层传来的具体原因（"TLS certificate verification
+           * failed" / "DNS resolution failed" / mbedtls_strerror 文本…）。
+           * 只报 errorStatus 会把完全不同的失败压成同一个 -5，无法诊断。 */
+          reject(new TypeError('fetch failed: network error ' + errorStatus +
+            (errorMsg ? ' (' + errorMsg + ')' : '')));
         }
         return;
       }
