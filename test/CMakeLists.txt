@@ -52,6 +52,8 @@ add_qz_gtest(test_multi_instance_gtest)   # M-R1 §13.4 双实例回归
 add_qz_gtest(test_worker_gtest)
 target_compile_definitions(test_worker_gtest PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_qz_gtest(test_bridge_http_gtest)
+# 非流式 HTTP 在途请求销毁回归(c1425f9 只覆盖了流式一半)。
+add_qz_gtest(test_http_inflight_teardown_gtest)
 add_qz_gtest(test_bridge_stream_gtest)
 add_qz_gtest(test_fetch_stream_gtest)
 add_qz_gtest(test_polyfill_gtest)

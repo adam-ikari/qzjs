@@ -1983,6 +1983,14 @@ static void uv_io_http_finish_error(uv_io_http_op_t *op, int status,
         uv_timer_stop(&op->connect_timer);
         uv_io_http_close_handle(op, (uv_handle_t *)&op->connect_timer, uv_io_http_timer_close_cb);
     }
+    /* read-idle timer 同理:与 finish_success 一样必须在这里显式关掉。
+     * idle_timer 内嵌在 op 里,op 随 finalize 释放;不显式 uv_close 就会在
+     * loop 句柄表里留下悬垂槽,之后派发到野函数指针。 */
+    if (op->idle_timer_init && op->idle_timer.data &&
+        !uv_is_closing((uv_handle_t *)&op->idle_timer)) {
+        uv_timer_stop(&op->idle_timer);
+        uv_io_http_close_handle(op, (uv_handle_t *)&op->idle_timer, uv_io_http_timer_close_cb);
+    }
 
     if (op->streaming) {
         /* Streaming mode: deliver error via on_end callback */
@@ -2014,6 +2022,15 @@ static void uv_io_http_finish_success(uv_io_http_op_t *op)
         !uv_is_closing((uv_handle_t *)&op->connect_timer)) {
         uv_timer_stop(&op->connect_timer);
         uv_io_http_close_handle(op, (uv_handle_t *)&op->connect_timer, uv_io_http_timer_close_cb);
+    }
+    /* read-idle timer 同样必须在这里关掉,不能只依赖 uv_io_http_cleanup。
+     * idle_timer 内嵌在 op 里,而 op 会随 finalize 一起释放;若 teardown
+     * 路径不显式 uv_close,loop 的句柄表就留下一条指向已释放内存的悬垂槽,
+     * 之后被派发到野函数指针(实测 mock 下 SIGSEGV @ uv_run)。 */
+    if (op->idle_timer_init && op->idle_timer.data &&
+        !uv_is_closing((uv_handle_t *)&op->idle_timer)) {
+        uv_timer_stop(&op->idle_timer);
+        uv_io_http_close_handle(op, (uv_handle_t *)&op->idle_timer, uv_io_http_timer_close_cb);
     }
 
     /* Parse headers and build JSON response */
@@ -2218,8 +2235,13 @@ static void uv_io_http_idle_timer_cb(uv_timer_t *handle)
 {
     uv_io_http_op_t *op = (uv_io_http_op_t *)handle->data;
     if (op->aborted) return;  /* teardown already in progress */
+    /* 两种 op 的消费者回调字段互斥(见 uv_io_http_abort_op 的说明),两条都要走:
+       非流式走 op->cb,否则 idle 超时对它完全静默 —— 既不完成也不报错。 */
     if (op->stream_ops.on_end) {
-        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "unspecified network error");
+        op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "read idle timeout");
+    } else if (op->cb) {
+        static const char kIdle[] = "read idle timeout";
+        op->cb(op->cb_data, QZ_ERR_NETWORK, kIdle, sizeof(kIdle) - 1);
     }
     uv_io_http_stream_cleanup(op);
 }
@@ -2634,6 +2656,28 @@ static void uv_io_http_write_cb(uv_write_t *req, int status)
     } else {
         uv_read_start((uv_stream_t *)&op->tcp, uv_io_http_alloc_cb,
                       uv_io_http_read_cb);
+        /* 非流式此前**不装** idle timer,只有流式装。后果:对端连上但一个
+         * 字节都不回时,请求既不完成也不报错 —— 无限挂起,连一个 -5 都
+         * 没有。实测 qzjs fetch 对可达站点 8/10 成功、curl 10/10,差的两次
+         * 都是挂死。挂死比报错更难用:调用方拿不到任何失败信号。
+         * 补上 read-idle 超时,语义与流式一致。
+         *
+         * `!op->idle_timer_init` 只是防御性守卫:idle_timer 内嵌在 op 里,
+         * 二次 uv_timer_init 会让同一个指针在 loop 句柄表里出现两次,而
+         * uv_close 只清第一个匹配槽。
+         *
+         * 注意:加这条 timer 时实测到的 SIGSEGV(uv_run 里 cb(t) 派发到
+         * 0xffffffff00000001)**不是**重复 init 造成的 —— 真因是 teardown
+         * 路径没关 idle_timer,见上面 finish_success / finish_error 里的
+         * 显式 uv_close。两者都要在位。 */
+        if (!op->idle_timer_init &&
+            uv_timer_init(&op->rt->loop, &op->idle_timer) == 0) {
+            op->idle_timer_init = 1;
+            op->idle_timer.data = op;
+            uv_timer_start(&op->idle_timer, uv_io_http_idle_timer_cb,
+                           PAL_UV_READ_IDLE_TIMEOUT_MS,
+                           PAL_UV_READ_IDLE_TIMEOUT_MS);
+        }
     }
 }
 
@@ -3062,9 +3106,25 @@ static void uv_io_http_abort_op(uv_io_http_op_t *op)
 
     /* Deliver a cancellation error to the JS consumer before teardown so
      * the fetch Promise rejects rather than hanging. Use -7 (CANCELLED)
-     * to mirror error codes. */
+     * to mirror error codes.
+     *
+     * 非流式 op 必须走 op->cb,不能只走 stream_ops.on_end —— 两者的回调
+     * 字段是互斥的:uv_io_http_request() 设 op->cb(op->cb_data),stream_ops
+     * 全为 NULL;uv_io_http_request_stream() 反之。原先这里只调
+     * stream_ops.on_end,于是销毁 runtime 时的**非流式**在途请求收不到任何
+     * 回调:bridge_io_done 不执行 → qz_free_cb_data 不执行 →
+     * alloc_cb_data 持有的 promise resolve/reject 两个 JSValue 泄漏 →
+     * JS_FreeRuntime 时 gc_obj_list 非空,断言
+     * `list_empty(&rt->gc_obj_list)' failed。
+     *
+     * 也就是说 c1425f9 的幂等守卫本身是对的,只是覆盖面只有流式一半。
+     * 两条分支都要走,才能覆盖两种 op 的消费者。
+     * teardown_started 守卫保证每条路径的回调最多触发一次。 */
     if (op->stream_ops.on_end) {
         op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_CANCELLED, "request aborted");
+    } else if (op->cb) {
+        static const char kAborted[] = "request aborted";
+        op->cb(op->cb_data, QZ_ERR_CANCELLED, kAborted, sizeof(kAborted) - 1);
     }
 
     /* Tear down handles (clears active_stream, closes TCP/timers, frees op
@@ -3275,8 +3335,13 @@ static int uv_io_http_stream_process_data(uv_io_http_op_t *op,
     size_t new_len = op->resp_headers_len + len;
     char *new_buf = (char *)realloc(op->resp_headers, new_len + 1);
     if (!new_buf) {
+        /* 响应头缓冲 realloc 失败 = 内存不足。此前这里报的是
+         * "socket connect failed",把 OOM 说成连接失败 —— 正是本 PR 想消灭的
+         * 「把不同失败压成同一句话」,而且发生在最该看清的路径上:
+         * 排查 OOM 的人会去查网络。 */
         if (op->stream_ops.on_end) {
-            op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK, "socket connect failed");
+            op->stream_ops.on_end(op->stream_ops.user_data, QZ_ERR_NETWORK,
+                                  "out of memory growing response headers");
         }
         uv_io_http_stream_cleanup(op);
         return 1;
@@ -3732,6 +3797,29 @@ void uv_io_http_request(qz_t *rt,
         cb(cb_data, QZ_ERR_NETWORK, "DNS resolution request failed", 29);
         return;
     }
+
+    /* 注册进 per-op abort registry —— 与流式路径 (uv_io_http_request_stream
+     * 末尾) 完全对称。
+     *
+     * 此前只有流式注册。非流式请求因此在 runtime 销毁时对 teardown
+     * **不可见**:qzjs.c 的 teardown 以 `if (rt->active_stream)` 为守卫,
+     * 而 active_stream 只在流式路径被赋值,故非流式在途请求走到销毁时
+     * active_stream 为 NULL → uv_io_http_abort 根本不调用 →
+     * op->cb(bridge_io_done) 不触发 → qz_free_cb_data 不执行 →
+     * alloc_cb_data 持有的 promise resolve/reject 两个 JSValue 泄漏 →
+     * JS_FreeRuntime 在非空 gc_obj_list 上断言
+     * `list_empty(&rt->gc_obj_list)' failed。
+     *
+     * 换句话说 c1425f9 修的「in-flight 时 qz_destroy 崩溃」只覆盖了流式
+     * 一半;另一半(non-streaming,也就是 polyfill fetch 在 streaming 不可用
+     * 时的回退路径)仍然是坏的。
+     *
+     * 放在 uv_getaddrinfo 成功之后:此刻 op 才真正承诺了异步 I/O,之前的
+     * 任何失败分支都已经同步回调并 finalize 了 op。 */
+    op->op_id = ++rt->http_op_seq;
+    op->next = rt->http_ops;
+    rt->http_ops = op;
+    rt->active_stream = op;
 }
 
 /* ================================================================
