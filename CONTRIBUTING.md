@@ -39,6 +39,74 @@ test: add escape_for_js property-based tests
 refactor: unify WASM engine initialization
 ```
 
+
+## Branch Management
+
+### 分支命名
+
+每个分支必须归类到以下前缀之一，格式 `类型/简短描述`（小写、连字符分隔）：
+
+| 前缀 | 用途 |
+|------|------|
+| `feat/` | 新功能（如 `feat/http3-client`） |
+| `fix/` | 缺陷修复（如 `fix/https-fetch-tls`） |
+| `build/` | 构建/工具链改动（如 `build/qzjs-host-for-crossbuild`） |
+| `docs/` | 文档与仓库元数据（如 `docs/branch-policy`） |
+| `refactor/` | 重构，无行为变化（如 `refactor/unify-wasm-init`） |
+| `perf/` | 性能优化（如 `perf/stream-read-batching`） |
+| `test/` | 测试新增或修复（如 `test/fuzz-corpus-alignment`） |
+
+禁止裸名分支（`cross-build-qjsc` 这类历史遗留要迁到 `build/` 前缀下）和
+语义不明的名字（`prod-merge`）。分支名一旦推送远端即视为不可变——需要改名时
+新建分支推送、删除旧分支，而不是 force-push 重写。
+
+### 生命周期
+
+1. 从 `master` 检出功能分支（`git checkout -b fix/<desc> master`）
+2. 按 [Conventional Commits](#commit-messages) 提交，随时推送远端（远端分支 =
+   备份，不是 PR 的唯一存在）
+3. 完成后开 PR 合并回 `master`
+4. PR 合并后（`delete_branch_on_merge` 开启）远端分支自动删除；本地分支
+   `git branch -d` 清理
+
+### 合并方式
+
+统一 **Squash merge**：PR 的全部 commit 压成一条进 `master`。master 历史线性，
+每条 commit 对应一个可追溯的 PR。合并时的 squash message 默认取 PR 标题，
+并在正文附 PR 号。
+
+### master 保护
+
+`master` 已开启 branch protection，禁止直接 push、禁止 force-push、禁止删除。
+改动必须经 PR 以 **squash merge** 合并，且满足：
+
+- **CI 通过** —— 13 个必需 job 全绿（all-features-off / feature matrix 四档 /
+  wamr / wasm3 / polyfill-external / polyfill-compressed / nonutf /
+  profile=minimal / asan 两档）。strict 模式：分支落后于 master 时必须先同步
+- **线性历史** —— `required_linear_history`，PR 不能引入 merge commit
+- **review 数 0** —— 单人项目，不设 approve 门槛。审查责任落在 CI 与 PR 描述上
+
+force-push 与 delete 均被禁止，因此分支名一旦推送远端即不可变（见上）。
+
+合并后本地同步：`git checkout master && git pull --ff-only origin master`。
+
+### 新增必需 job 时
+
+往 `.github/workflows/ci.yml` 加 job 后，同步更新 master 的 required status
+checks，否则新 job 不会被纳入合并门槛：
+
+```bash
+gh api repos/adam-ikari/qzjs/branches/master/protection --jq \
+  '.required_status_checks.contexts'
+```
+
+### 清理规范
+
+- 已合并 PR 的分支由 `delete_branch_on_merge` 自动删除，无需手动
+- 超过 30 天无活动、且无对应 open PR 的远端分支视为陈旧，删除前在
+  PR 里公告 7 天
+- 遗留裸名分支（`cross-build-qjsc`、`prod-merge` 等）按上一条迁移或删除
+
 ## Adding a New Extension
 
 1. Create `src/ext_<name>.c` and `include/qzjs/ext_<name>.h`
@@ -88,6 +156,8 @@ The current baseline and per-module verdicts live in
 - [ ] No tabs in source files (spaces only)
 - [ ] No trailing whitespace
 - [ ] Commit messages follow Conventional Commits
+- [ ] Branch name uses an allowed prefix (`feat/`, `fix/`, `build/`, `docs/`, `refactor/`, `perf/`, `test/`)
+- [ ] PR targets `master` and is merged with squash merge
 - [ ] No references to upper-layer applications — qzjs is standalone
 
 ## Release Process
