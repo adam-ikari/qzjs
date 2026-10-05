@@ -2446,7 +2446,7 @@ static void tls_handshake_read_cb(uv_stream_t *stream, ssize_t nread,
                                    const uv_buf_t *buf)
 {
     uv_io_http_op_t *op = (uv_io_http_op_t *)stream->data;
-    if (op->aborted) {
+    if (op->aborted || op->teardown_started || op->tearing_down) {
         if (buf && buf->base) free(buf->base);
         return;
     }
@@ -2487,10 +2487,8 @@ static void tls_handshake_read_cb(uv_stream_t *stream, ssize_t nread,
          * "TLS handshake read error"(EOF) 收场。表现为所有 https fetch
          * 失败,而同一构建的明文 http 正常。 */
         uv_read_stop((uv_stream_t *)&op->tcp);
-        /* 换到应用层读回调再发请求:服务器可能已经把响应数据一起送来了,
-         * 那一批字节会经 tls_stream_read_cb 正常消费。 */
-        uv_read_start((uv_stream_t *)&op->tcp, uv_io_http_alloc_cb,
-                      tls_stream_read_cb);
+        /* send_request selects the correct read callback (tls_stream_read_cb
+         * or tls_read_cb) based on op->streaming; no need to race it here. */
         uv_io_http_send_request(op);
         return;
     } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
@@ -3053,9 +3051,13 @@ static void uv_io_http_abort_op(uv_io_http_op_t *op)
      * the bridge ctx and its JSValues on the first call, so the second call
      * JS_FreeValue's already-freed values (gc_prev == NULL while the object
      * is not the gc list head) → SIGSEGV inside quickjs.
-     * teardown_started is the same flag stream_cleanup uses, so the two
-     * paths agree on "this op is already being torn down". */
-    if (op->teardown_started) return;
+     * Check both teardown flags: teardown_started (set by stream_cleanup)
+     * and tearing_down (set by finish_error) both mean "this op is
+     * already being torn down". Both paths must be covered — finish_error
+     * fires on_end and leaves the op in rt->http_ops until its close
+     * callbacks drain, so a later abort() would re-fire on_end on a bridge
+     * ctx that was already freed. */
+    if (op->teardown_started || op->tearing_down) return;
     op->aborted = 1;
 
     /* Deliver a cancellation error to the JS consumer before teardown so
@@ -3108,8 +3110,10 @@ void uv_io_http_abort(qz_t *rt)
      * synchronously — the tcp path uv_close()s (callback deferred) and the
      * pre-tcp path uv_cancel()s the getaddrinfo request (its callback frees
      * the op later). Both need the loop to advance first. */
-    for (uv_io_http_op_t *op = rt->http_ops; op; op = op->next) {
+    for (uv_io_http_op_t *op = rt->http_ops; op; ) {
+        uv_io_http_op_t *next = op->next; /* snapshot before abort may reorder list */
         uv_io_http_abort_op(op);
+        op = next;
     }
 }
 
