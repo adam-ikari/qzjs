@@ -4,6 +4,9 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 
+- **fix(http): HTTPS fetch 对所有 URL 失败 + `qz_destroy` 在请求在途时崩溃**。三个独立根因，全部在 `src/uv_io.c`：**①握手完成路径不换读回调**——`tls_handshake_read_cb` 在 `mbedtls_ssl_handshake()` 返回 0 后只置 `tls_handshake_done` 就返回，读循环仍注册在握手回调上；服务器发来的响应字节会再次进入该回调并重跑 `mbedtls_ssl_handshake()`（此时已非握手阶段），轻则多跑一次握手状态机、重则把响应数据当作握手记录吞掉，最终以 "TLS handshake read error"(EOF) 收场。**②缺 ALPN**——`tls_init_op` 此前没有 `mbedtls_ssl_conf_alpn_protocols`，现代服务器（Cloudflare / Google / Fastly）在收到不含 ALPN 扩展的 ClientHello 时按 RFC 7301 直接以握手 alert 关闭连接；`tcp_io.c` 早已默认声明 `http/1.1`，`uv_io.c` 这条客户端路径一直缺失。**③二次触发 `on_end`**——`uv_io_http_abort()` 原先假设每次 abort 同步 unlink op（`while (rt->http_ops) { op = rt->http_ops; ... }`），但 unlink 只在 `uv_io_http_cleanup`（close 回调的下一次 loop 迭代）发生，`rt->http_ops` 在循环内不变，于是每轮重复 abort 同一个 head op；`bridge_stream_on_end` 首次调用即 `js_free(bs)` 并 `JS_FreeValue` 其 JSValues，第二次调用对已释放值再 `JS_FreeValue` → SIGSEGV。改为单次遍历 + 先快照 `->next`；同时 `uv_io_http_abort_op` 的幂等 guard 从只看 `teardown_started`（`stream_cleanup` 置位）扩为并列检查 `tearing_down`（`finish_error` 置位）——`finish_error` 调完 `on_end` 后 op 仍留在链表直到 close 回调回收，后续 abort 仍会二次触发。
+- **fix(http): `on_end` 回调新增第三参 `error_msg`**（`qz_io_stream_ops_t`）。此前 C 层的具体失败原因（`mbedtls_strerror` 文本、"TLS certificate verification failed"、DNS 失败等）在到达 JS 前被压成同一个 `error_status`，完全不同的失败在 `fetch` 侧无法区分。新增的诊断串只透传不解码，`fetch.js` 侧拼进 `TypeError` 消息；`error_msg` 仅在 `error_status != 0` 时非 NULL，生命周期限于回调内。旧的一参 JS 回调保持兼容（多余参数被忽略）。`docs/qwrt-architecture-design.md` 4.2 节的签名示例同步更新。
+
 ## [0.3.0] — 2026-10-02
 
 > **Breaking**：`QZ_PROFILE=bare` 档移除；JS 层 flatbuffers 退役（gRPC 改 protobuf-only）；
