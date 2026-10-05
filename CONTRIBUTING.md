@@ -80,9 +80,17 @@ refactor: unify WASM engine initialization
 `master` 已开启 branch protection，禁止直接 push、禁止 force-push、禁止删除。
 改动必须经 PR 以 **squash merge** 合并，且满足：
 
-- **CI 通过** —— 13 个必需 job 全绿（all-features-off / feature matrix 四档 /
-  wamr / wasm3 / polyfill-external / polyfill-compressed / nonutf /
-  profile=minimal / asan 两档）。strict 模式：分支落后于 master 时必须先同步
+- **CI 通过** —— 19 个必需 job 全绿：
+  - *编译/测试矩阵（13）*：all-features-off / feature matrix 四档 / wamr /
+    wasm3 / polyfill-external / polyfill-compressed / nonutf /
+    profile=minimal / asan 两档
+  - *质量门禁（6）*：ubsan（gcc + clang）/ e2e（真实 libuv + JS harness）/
+    test262（ES 一致性）/ clang-tidy / fuzz-smoke（libFuzzer 字节码读取器）
+  - strict 模式：分支落后于 master 时必须先同步
+
+  perf 套件（httpserver / h2-client / runtime / cross-runtime / js-api /
+  tls-ws-grpc）是 record-only，不进门槛；coverage / grpc-e2e / debugger /
+  release build 暂未纳入。
 - **线性历史** —— `required_linear_history`，PR 不能引入 merge commit
 - **review 数 0** —— 单人项目，不设 approve 门槛。审查责任落在 CI 与 PR 描述上
 
@@ -157,7 +165,7 @@ The current baseline and per-module verdicts live in
 - [ ] No trailing whitespace
 - [ ] Commit messages follow Conventional Commits
 - [ ] Branch name uses an allowed prefix (`feat/`, `fix/`, `build/`, `docs/`, `refactor/`, `perf/`, `test/`)
-- [ ] PR targets `master` and is merged with squash merge
+- [ ] PR targets `master`（合并由维护者以 squash 方式执行，见「合并方式」）
 - [ ] No references to upper-layer applications — qzjs is standalone
 
 ## Release Process
