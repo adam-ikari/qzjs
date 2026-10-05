@@ -3045,6 +3045,17 @@ static void uv_io_http_stream_cleanup(uv_io_http_op_t *op)
  * loop thread (JS pal calls / teardown run there). */
 static void uv_io_http_abort_op(uv_io_http_op_t *op)
 {
+    /* Idempotency guard. stream_cleanup has its own teardown_started guard,
+     * but it runs *after* the on_end call below, so it cannot protect it.
+     * Without this, an op reachable by two abort routes — e.g.
+     * pal.httpRequestAbort(opId) first, then runtime teardown's
+     * uv_io_http_abort() — fires on_end twice. bridge_stream_on_end frees
+     * the bridge ctx and its JSValues on the first call, so the second call
+     * JS_FreeValue's already-freed values (gc_prev == NULL while the object
+     * is not the gc list head) → SIGSEGV inside quickjs.
+     * teardown_started is the same flag stream_cleanup uses, so the two
+     * paths agree on "this op is already being torn down". */
+    if (op->teardown_started) return;
     op->aborted = 1;
 
     /* Deliver a cancellation error to the JS consumer before teardown so
@@ -3082,11 +3093,22 @@ void uv_io_http_abort_by_id(qz_t *rt, uint64_t op_id)
  */
 void uv_io_http_abort(qz_t *rt)
 {
-    uv_io_http_op_t *op = rt->http_ops;
-    /* Each abort unlinks the op from the registry (via cleanup), so walk and
-     * re-read the head each iteration rather than chasing ->next. */
-    while (rt->http_ops) {
-        op = rt->http_ops;
+    /* Walk the registry ONCE, following ->next.
+     *
+     * This used to be `while (rt->http_ops) { op = rt->http_ops;
+     * uv_io_http_abort_op(op); }`, which assumed each abort unlinks the op
+     * synchronously. It does not: uv_io_http_stream_cleanup only clears
+     * rt->active_stream and uv_close()s the handles; the unlink happens in
+     * uv_io_http_cleanup, reached from the close callbacks — which run on a
+     * later loop iteration. So rt->http_ops never changed inside the loop
+     * and every iteration re-aborted the same head op, firing its on_end
+     * repeatedly (crash: see uv_io_http_abort_op's guard).
+     *
+     * Safe to follow ->next here: from abort_op the op is never freed
+     * synchronously — the tcp path uv_close()s (callback deferred) and the
+     * pre-tcp path uv_cancel()s the getaddrinfo request (its callback frees
+     * the op later). Both need the loop to advance first. */
+    for (uv_io_http_op_t *op = rt->http_ops; op; op = op->next) {
         uv_io_http_abort_op(op);
     }
 }
