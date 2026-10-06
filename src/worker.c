@@ -295,6 +295,33 @@ qz_worker_t *qz_worker_create(qz_t *parent, const char *script, int *out_err)
     /* lock-free MPSC: self's inbound queue head == tail == sentinel (calloc zeroed) */
     self->msg_head = &self->msg_stub;
     self->msg_tail = &self->msg_stub;
+
+    /* 继承父 runtime 的 CA 信任库。
+     *
+     * worker 是独立的 qz_t（上面 calloc 清零），不共享父 runtime 的任何状态，
+     * 所以父进程经 qz_add_ca_pem() 装入的信任根不会自动到达 worker —— worker
+     * 里的 fetch 访问私有 CA 站点会报 X509 verification failed。
+     *
+     * 而 PROCESS 后端的 worker 是独立进程、经 rt_main.c 的 QZ_CA_FILE 装载，
+     * **拿得到**。不继承就是「同一功能在一个后端有效、另一个静默失效」，属本项目
+     * 明确要消灭的静默降级：症状（证书验证失败）与真因（信任库没传过来）毫无
+     * 关联，排查时会往证书方向跑偏。
+     *
+     * 失败（仅 OOM）不中止 worker 创建，但必须出声 —— 静默继续的话，worker 里
+     * 的 fetch 会以「证书问题」的面貌失败。 */
+    if (parent->ca_pem_len > 0) {
+        /* strdup 而非 qz_add_ca_pem：后者是**追加**语义（会补一个 '\\n' 分隔符），
+         * 用来"继承"会让 worker 的缓冲比父多一个换行。继承应是逐字节拷贝。 */
+        self->ca_pem = strdup(parent->ca_pem);
+        if (self->ca_pem) {
+            self->ca_pem_len = parent->ca_pem_len;   /* 不含末尾 NUL */
+            self->ca_pem_cap = self->ca_pem_len + 1;
+        } else {
+            fprintf(stderr, "[qzjs] worker: failed to inherit CA trust store (OOM); "
+                            "fetch to private-CA hosts inside this worker will fail "
+                            "with X509 verification errors\n");
+        }
+    }
     parent->workers[slot] = w;
     /* ── 线程后端（唯一后端；PROCESS 由 JS 层 processSpawn 封装接管，
      * C 层不再有进程 worker 分流 —— spawn 分层化 Phase C）── */

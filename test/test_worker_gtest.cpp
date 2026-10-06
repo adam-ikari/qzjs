@@ -728,3 +728,48 @@ TEST(worker_, port_endpoint_dead_notifies_peer) {
     EXPECT_NE(std::string::npos, out.find("no-throw")) << "got: " << out;
     host_destroy(h);
 }
+
+// ── worker 继承父 runtime 的 CA 信任库（qz_add_ca_pem）──────────────────
+// worker 是独立 calloc 出来的 qz_t，不共享父 runtime 状态；不显式继承的话
+// worker 里的 fetch 访问私有 CA 站点会报 X509 verification failed，而 PROCESS
+// 后端的 worker 经 QZ_CA_FILE 拿得到 —— 两后端行为不一致（静默降级）。
+//
+// 这里断言继承后的**内容**而非"调用过"：把 PEM 塞进父 rt，再让 worker 起来，
+// 然后检查 worker 自己 rt 的 ca_pem 真的带着那份 PEM。worker_echo.js 会回一条
+// 消息，用它确认 worker 确实跑过（否则"worker 没起来"会伪装成"继承失败"）。
+TEST(worker_, inherits_ca_trust_store_from_parent)
+{
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    /* 父 runtime 装一份 CA（内容用夹具证书；本用例只关心"内容是否传下去"，
+     * 解析正确性由 test_tls_ca_gtest 负责）。 */
+    const char *pem =
+        "-----BEGIN CERTIFICATE-----\n"
+        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtest\n"
+        "-----END CERTIFICATE-----\n";
+    ASSERT_EQ(0, qz_add_ca_pem(h->rt, pem));
+    ASSERT_GT(h->rt->ca_pem_len, 0u);
+
+    /* 起一个 worker：它会 postMessage 回来，证明确实跑起来了。 */
+    std::string out;
+    const char *spawn_js =
+        "globalThis.w = new Worker('file://" TEST_DIR "/worker_echo.js');\n"
+        "w.onmessage = function(e){ globalThis.__got = e.data; };\n"
+        "0";
+    host_eval(h, spawn_js, &out);
+    for (int i = 0; i < 30 && !h->rt->workers[0]; i++) host_poll_sleep();
+    for (int i = 0; i < 30; i++) host_poll_sleep();
+
+    ASSERT_NE(nullptr, h->rt->workers[0]) << "worker 未创建，继承无从验证";
+    qz_worker_t *w = h->rt->workers[0];
+    ASSERT_NE(nullptr, w->self);
+
+    /* 核心断言：worker 的 rt 真的带着父的 CA 内容。 */
+    ASSERT_NE(nullptr, w->self->ca_pem) << "worker rt 没有继承 CA 信任库";
+    ASSERT_GT(w->self->ca_pem_len, 0u);
+    EXPECT_EQ(h->rt->ca_pem_len, w->self->ca_pem_len);
+    EXPECT_STREQ(h->rt->ca_pem, w->self->ca_pem);
+
+    host_destroy(h);
+}
