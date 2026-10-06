@@ -5,58 +5,66 @@ category: decision
 status: active
 tags: [fuzz, quickjs, bytecode, security]
 created: "2026-09-19T14:33:30"
-updated: "2026-10-06T13:43:42"
+updated: "2026-10-06T14:25:58"
 ---
 
 <!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 字节码读取器加固（untrusted stream 防御）
 
-qzjs 对不可信字节码流做防御（JS_ReadObject 等）。此前回归靠固定种子语料。
+qzjs 对不可信字节码流做防御（JS_ReadObject 等）。
 
-## 2026-10-06 新发现：随机 fuzz 段命中潜在引擎 SEGV（非确定性）
+## 2026-10-06：CI 崩溃根因定位 + 源码级修复（运行时验证待定）
 
-`fuzz-smoke` job 的**随机 fuzz 段**（非种子回放段）在 v0.4.0 发版 CI 上命中一次
-崩溃。完整栈全在 `deps/quickjs-ng/quickjs.c`（引擎，非 qzjs 代码）：
+**CI 崩溃（js_mark_module_def SEGV @ 0x10）根因已确证**，与栈精确吻合：
 
-    JS_ReadObject → JS_ReadObjectRec → JS_ReadFunctionTag → JS_ReadModule
-      → JS_ThrowSyntaxError → JS_MakeError → JS_NewObjectProtoClass
-      → JS_NewObjectFromShape → js_trigger_gc → JS_RunGC → gc_decref
-      → mark_children → JS_MarkContext → js_mark_module_def
-      → SEGV on address 0x10 (READ, near-null)
+1. `js_new_module_def()`（quickjs.c:30345）创建模块时即 `list_add_tail` 到
+   `ctx->loaded_modules`——模块从诞生起就对 GC 可见。
+2. `JS_ReadModule()`（:40078）读入攻击者控制的 `X_entries_count`（leb128），
+   此刻对应 entries 数组**尚未分配**（仍 NULL）。
+3. 校验 `count < 0 || count > buf_end - ptr` 失败 → `JS_ThrowSyntaxError()` →
+   构造 Error 对象 → **可能触发 GC**（`JS_MakeError→JS_NewObjectFromShape→
+   js_trigger_gc→JS_RunGC`）。
+4. GC → `JS_MarkContext()` 遍历 `loaded_modules` 找到该半成品模块 →
+   `js_mark_module_def()` 按 `count` 遍历 `NULL` entries 数组 →
+   `me = &m->export_entries[i]` = NULL → `me->export_type`（结构体偏移 0x10）
+   → **SEGV @ 0x10**。精确对上 CI 栈 `js_mark_module_def:30361` + `SEGV 0x10`。
 
-特征：
-- 读取**格式错误**的字节码时，模块解析抛语法错误 → 构造 Error 对象触发 GC →
-  `js_mark_module_def` 解引用近空指针。即「读一半失败的模块」在 GC mark 阶段
-  遍历到了未/已失效的 def 指针。
-- 同轮日志另有大量 `AddressSanitizer failed to allocate 0xffffffffe0000087 bytes`
-  —— 字节码里的大小字段发生整数下溢/上溢，得出巨大的分配尺寸。该 job 的
-  `ASAN_OPTIONS` 设了 `allocator_may_return_null=1`，所以分配返回 NULL 而非 abort，
-  随后某处未检查 NULL 即解引用，最终以这个 SEGV 收场。
+**为何既有 `qwrt fix (2/2)` 漏了**：`fail:` 处把 count 夹到 size，但那只在
+`goto fail` 之后跑；**GC 发生在 `JS_ThrowSyntaxError` 内、`goto fail` 之前**，夹晚了。
 
-**严重性**：qzjs 读不可信字节码的路径对宿主是可达的（`qzjs --bytecode <file>`、
-内嵌 polyfill、worker boot shim）。崩溃点在引擎，但触发输入来自不可信流。
+**修复**（已应用，源码级正确）：4 处校验抛错点（req/export/star_export/import）
+在 `JS_ThrowSyntaxError` **之前**把对应 count 置 0，使 GC mark 跳过（count=0 +
+NULL 数组 = 一致的空模块）。合法输入永不进校验抛错路径，故**不可能回归**。遵循
+既有「qwrt fix」本地补丁模式（patch 位于子模块工作区未提交处，与既有 184 行同）。
 
-## 两个必须记录的**测试方法缺陷**（与本次崩溃同等重要）
+**验证状态——诚实标注为「运行时未定」**：
+- 引擎重建无错，补丁后 20 个精选种子回放 4 崩 vs 基线（无补丁）5 崩 → **不是回归**
+  （在噪声内），但也**未能证明修复消除了 CI 那个崩溃**。
+- **本地复现不可靠**：该 bug 是 GC 时序/内存压力依赖的——240s fuzz 未复现；
+  同一输入在「循环批量拉起」下崩、在「隔离单跑」下不崩（ASan 影子内存下 GC 触发
+  时机随进程拉起频率变）。我的 loop 测量与隔离测量互相矛盾 → **观测手段本身不可信**。
+- 正确的验证路径：CI fuzz job（现已有 artifact 上传）下次捕获复现输入 → 提升为
+  `test/fuzz-corpus/` 种子 → **确定性种子回放门**在每次 CI 上验证该修复。
 
-1. **崩溃输入丢失**：该 job 跑 `./fuzz_bc` 但**没有 `--artifact_prefix`、也没有
-   `actions/upload-artifact`**，所以这次命中的输入没被保存。下次不一定能重现。
-   要复现只能本地重跑 fuzz。这是 fuzz 流水线的硬伤——**发现即丢失，等于没发现**。
-2. **随机 fuzz 段挂在 required check 上 = 天然 flaky 门**：60s 随机变异，找不找得到
-   崩溃与 PR 内容无关（v0.4.0 只改了版本号 + CHANGELOG，不可能引入引擎崩溃，却
-   被它拦下；同一 master tip 上一轮是绿的）。作为合并硬门，它会随机红。
+**新发现（预存问题，非本补丁解决）**：20 个**精选**种子中约 5 个（~25%）在「循环
+批量拉起、GC 有压力」条件下崩溃，**基线（无补丁）即如此**。这些是精心策划的回归
+种子，却在内存压力下成为「地雷」——说明语料里存在触发 GC 窗口 bug 的输入。这是独立
+于本补丁的、更深的问题：种子回放门若在 CI 上以低内存/单进程方式跑，可能漏掉这批。
+值得单独立项。
 
-**确定性门（种子回放）本轮是绿的**（16 个种子全部 clean）——真正的回归底线没破。
-
-**给后来者的处置判据**：
-- 种子回放红 ⇒ 真回归，必修。
-- 仅随机 fuzz 段红 ⇒ 先按「潜在引擎缺陷」记录 + 修流水线（保存输入 / 让随机段非阻塞），
-  不要拿它当作「本 PR 引入」而回滚无关改动，也不要只靠「重跑到绿」就放过。
+**过程中的一次自身失误（教训）**：240s fuzz 把第一个 corpus 参数当读写目录，
+**往 `test/fuzz-corpus/` 写回 545 个生成输入**（20→565），污染了精选语料。已
+`git clean` 还原（20 个 tracked 种子复原）。教训：libFuzzer 第一位置参数是
+输入+输出语料目录；只想写输出必须把输出目录作为第二位置参数且输入目录只读对待，
+或每次事后核对语料被改。**又一次「观测/操作手段本身有毒」**。
 
 ## 与既有结论的关系
 
-本条**未**推翻此前的加固结论；它说明的是——固定种子语料覆盖不到的缺陷面，仍需靠
-随机 fuzz 探索，而当前流水线**既留不住发现、又拿随机结果当门**。两处都要修。
+不推翻既有加固。本条确立：CI 那次崩溃是**已定位、可源码级修复**的 GC 窗口 bug；
+但其运行时验证依赖 CI fuzz 捕获复现，而捕获能力正是本轮刚修复的流水线缺陷
+（无 artifact 上传）。**「发现即丢失」的流水线缺陷，与「修复待验证」的引擎 bug，
+是同一根因链的两端。**
 
 
 ## Timeline
@@ -90,4 +98,10 @@ qzjs 对不可信字节码流做防御（JS_ReadObject 等）。此前回归靠�
   kind: decision
   summary: "记录 fuzz 随机段新发现的潜在引擎 SEGV（js_mark_module_def，quickjs-ng），崩溃输入丢失；并指出 CI fuzz 段缺 artifact 上传"
   source: "2026-10-06 v0.4.0 发版时 fuzz-smoke job 红"
+  affects: [bc-reader-hardening]
+
+- time: 2026-10-06T14:25:58
+  kind: decision
+  summary: "定位 CI 崩溃根因（GC 在 count 校验抛错时遍历半初始化模块）+ 源码级补丁；诚实标注本地验证不可靠，并记录 20 个精选种子在 GC 压力下 ~25% 崩溃的预存问题"
+  source: "2026-10-06 v0.4.0 发版后深挖；四轮本地复现尝试"
   affects: [bc-reader-hardening]
