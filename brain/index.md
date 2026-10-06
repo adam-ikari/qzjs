@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-06T14:25:58.121Z._
+_Auto-generated. Last updated 2026-10-06T15:33:49.393Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | <!-- compiled_truth -->
@@ -41,7 +41,7 @@ _Auto-generated. Last updated 2026-10-06T14:25:58.121Z._
 - [plain-language](pages/plain-language.md) — category: decision | tags: [communication, style] | ## 结论
 - [platform-support](pages/platform-support.md) — category: decision | tags: [platform, linux, scope] | <!-- compiled_truth -->
 - [polyfill-bundling-policy](pages/polyfill-bundling-policy.md) — category: decision | tags: [polyfill, bundling, memory] | ## 启动加速决策链（2026-09-10 用户拍板）
-- [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## 现状
+- [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | <!-- compiled_truth -->
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论
