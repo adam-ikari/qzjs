@@ -130,6 +130,17 @@ typedef struct qz_worker_s {
     char *script;              /* worker 脚本源码 */
     int shutting_down;         /* 非 0 = 已请求退出：父线程回收槽位（worker.c
                                * qz_worker_reap：join→释放 runtime→清槽）的判据 */
+    /* atomic: 1 = worker 自己的 loop 上仍有在途异步工作。父的 wait_idle 判定
+     * （qz_loop_idle）据此不把父判为 idle —— worker 的 loop 独立于父 rt，
+     * 父 loop 空闲完全看不到 worker 内的 fetch/timer。
+     *
+     * 只由 worker 线程写、父线程原子读：worker 在**自己线程上**调
+     * qz_loop_idle(w->self) 算出布尔再发布，父绝不跨线程遍历 worker 的 loop
+     * 或碰它的 JS（那是 worker 线程的独占所有权，跨线程访问是竞态）。
+     *
+     * 生命周期：spawn 时置 1（worker 从创建起就在干活，boot 期间也必须算忙），
+     * 退出循环前清 0 —— 否则父会永远等一个已经结束的 worker。 */
+    int busy;
     /* 注：进程后端（M-P1 的 qz_proc_t proc / script_path 字段）已随 spawn
      * 分层化移除（Phase C）——PROCESS worker 由 JS 层经 pal.processSpawn 封装，
      * C 层 qz_worker_t 仅服务线程后端。 */

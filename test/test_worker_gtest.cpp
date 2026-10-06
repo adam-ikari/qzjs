@@ -773,3 +773,39 @@ TEST(worker_, inherits_ca_trust_store_from_parent)
 
     host_destroy(h);
 }
+
+// ── wait_idle 计入 worker 的在途异步工作 ─────────────────────────────────
+// worker 有**独立的 uv_loop**：父的 qz_loop_idle() 只看 rt 自己的 loop，worker 内
+// 发起的 fetch/timer 挂在 worker 自己的 loop 上，父完全看不到 → wait_idle 提前
+// teardown，worker 的异步结果被静默丢弃（现象：worker 脚本里只有 fetch 时，
+// 父收不到任何消息）。
+//
+// 修法：worker 在自己线程上算 busy 并发布原子位，父的 qz_loop_idle 读它；
+// worker 由忙转空闲时 uv_async_send 叫醒父的 loop（父的 uv_run 在无活动句柄时
+// 会阻塞，只靠 wait_idle 那一次唤醒不足以让它重新判定）。
+//
+// 本用例断言父在 worker 仍有在途异步工作时**不判 idle**。
+TEST(worker_, parent_stays_busy_while_worker_has_pending_async_work)
+{
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    /* worker 起一个 40ms 定时器：在它到期前，父必须判忙。
+     * 用 host_poll_sleep 推进若干轮，每轮检查 busy 位。 */
+    const char *spawn_js =
+        "globalThis.w = new Worker('file://" TEST_DIR "/worker_idle_probe.js');\n"
+        "0";
+    std::string out;
+    host_eval(h, spawn_js, &out);
+
+    int saw_busy = 0;
+    for (int i = 0; i < 200 && !saw_busy; i++) {
+        host_poll_sleep();
+        qz_worker_t *w = h->rt->workers[0];
+        if (w && __atomic_load_n(&w->busy, __ATOMIC_ACQUIRE)) saw_busy = 1;
+    }
+    EXPECT_TRUE(saw_busy) << "worker 的定时器在途期间，busy 位从未置 1——"
+                            "父会提前判 idle 并丢弃 worker 的异步结果";
+
+    host_destroy(h);
+}
