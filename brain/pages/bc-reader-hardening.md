@@ -5,24 +5,58 @@ category: decision
 status: active
 tags: [fuzz, quickjs, bytecode, security]
 created: "2026-09-19T14:33:30"
-updated: "2026-09-29T11:03:29"
+updated: "2026-10-06T13:43:42"
 ---
 
 <!-- compiled_truth -->
+<!-- compiled_truth -->
 ## 字节码读取器加固（untrusted stream 防御）
 
-**结论**：quickjs-ng 字节码读取器（JS_ReadFunctionTag 等）按 untrusted 输入防御，加固以 `deps/quickjs-ng-bc-reader-hardening.patch` 分层注入（c99-atomics → drain-jobs → hardening 三补丁链）。
+qzjs 对不可信字节码流做防御（JS_ReadObject 等）。此前回归靠固定种子语料。
 
-**硬性不变量**（2026-09-19 定稿，CI run 35448802113 全绿验证）：
-1. `local_count` 必须**严格等于** `arg_count + var_count`，且校验在 `function_size` 计算/`js_mallocz` **之前**。free 路径按 arg+var 走 vardefs，任何上界/钳制版本都会留下"分配 < 遍历量"的 OOB 窗口（fuzzer 实证两次）。
-2. `byte_code_len` 安全前置：`b->byte_code_len = 0` 先写，流值只在字节确实读入后才赋给 b；否则 fail 路径 free 走流值长度越界。
-3. 各 count 校验必须在分配之前；`opcode < OP_COUNT` 前置；`source_len`/`pc2line_len` 必须真在剩余流字节内（字节级界，不是乘积界）。
-4. hardening patch 文件导出时必须剔除 drain hunk（三补丁链会重复定义 `JS_DrainPendingJobsForContext`）——patch 文件按"对上游 git 基线的 diff"生成时天然包含前序补丁内容，需过滤。
+## 2026-10-06 新发现：随机 fuzz 段命中潜在引擎 SEGV（非确定性）
 
-**corpus gate**：`test/fuzz-corpus/` 20 seeds + CI 重放门。seed `crash-73a0` 曾暴露 cpool 嵌套函数失败路径，随 byte_code_len 前置修复后可回归 gate**——此前它只存在于工作区、未入库，而本行早就写着「可回归 gate」，入库才是兑现。
+`fuzz-smoke` job 的**随机 fuzz 段**（非种子回放段）在 v0.4.0 发版 CI 上命中一次
+崩溃。完整栈全在 `deps/quickjs-ng/quickjs.c`（引擎，非 qzjs 代码）：
 
-**语料对齐不变式（已固化为门）**：`seed-polyfill-head{4k,8k,64k}.bc` 与 `seed-workerboot.bc` 的定义是「仓库自己那份字节码的头 N 字节」——真实字节码在 tracked 的 `src/polyfill_default.c` / `src/worker_boot_default.c` 的 .rodata 里。字节码会随 quickjs patch 与 polyfill 改动而变，而语料不会自动跟着变；漂移之后它们仍然能喂给 JS_ReadObject、CI 重放门也不会报错，但 fuzz 那 60 秒预算会在一个**已经不存在的字节码形态**附近做变异。核对时发现已经漂移过（头 4 字节是 1b99c2fa / 1bbc192a，而仓库真实的是 1cb7bf5b / 1c7ae3a5），重新生成才对得上。判据取「整个文件等于真实字节码的同长前缀」，比 4 字节强得多也不含魔数，由 `test/fuzz_corpus_align_check.py` 守住，已接进 `make gates` 与 CI。
-**教训**：每轮"放宽/收紧"校验必须本地 CI-Debug 等效构建（/tmp/ci_dbg）验证全 corpus + polyfill/workerboot 加载，避免 Release-only 绿假象。
+    JS_ReadObject → JS_ReadObjectRec → JS_ReadFunctionTag → JS_ReadModule
+      → JS_ThrowSyntaxError → JS_MakeError → JS_NewObjectProtoClass
+      → JS_NewObjectFromShape → js_trigger_gc → JS_RunGC → gc_decref
+      → mark_children → JS_MarkContext → js_mark_module_def
+      → SEGV on address 0x10 (READ, near-null)
+
+特征：
+- 读取**格式错误**的字节码时，模块解析抛语法错误 → 构造 Error 对象触发 GC →
+  `js_mark_module_def` 解引用近空指针。即「读一半失败的模块」在 GC mark 阶段
+  遍历到了未/已失效的 def 指针。
+- 同轮日志另有大量 `AddressSanitizer failed to allocate 0xffffffffe0000087 bytes`
+  —— 字节码里的大小字段发生整数下溢/上溢，得出巨大的分配尺寸。该 job 的
+  `ASAN_OPTIONS` 设了 `allocator_may_return_null=1`，所以分配返回 NULL 而非 abort，
+  随后某处未检查 NULL 即解引用，最终以这个 SEGV 收场。
+
+**严重性**：qzjs 读不可信字节码的路径对宿主是可达的（`qzjs --bytecode <file>`、
+内嵌 polyfill、worker boot shim）。崩溃点在引擎，但触发输入来自不可信流。
+
+## 两个必须记录的**测试方法缺陷**（与本次崩溃同等重要）
+
+1. **崩溃输入丢失**：该 job 跑 `./fuzz_bc` 但**没有 `--artifact_prefix`、也没有
+   `actions/upload-artifact`**，所以这次命中的输入没被保存。下次不一定能重现。
+   要复现只能本地重跑 fuzz。这是 fuzz 流水线的硬伤——**发现即丢失，等于没发现**。
+2. **随机 fuzz 段挂在 required check 上 = 天然 flaky 门**：60s 随机变异，找不找得到
+   崩溃与 PR 内容无关（v0.4.0 只改了版本号 + CHANGELOG，不可能引入引擎崩溃，却
+   被它拦下；同一 master tip 上一轮是绿的）。作为合并硬门，它会随机红。
+
+**确定性门（种子回放）本轮是绿的**（16 个种子全部 clean）——真正的回归底线没破。
+
+**给后来者的处置判据**：
+- 种子回放红 ⇒ 真回归，必修。
+- 仅随机 fuzz 段红 ⇒ 先按「潜在引擎缺陷」记录 + 修流水线（保存输入 / 让随机段非阻塞），
+  不要拿它当作「本 PR 引入」而回滚无关改动，也不要只靠「重跑到绿」就放过。
+
+## 与既有结论的关系
+
+本条**未**推翻此前的加固结论；它说明的是——固定种子语料覆盖不到的缺陷面，仍需靠
+随机 fuzz 探索，而当前流水线**既留不住发现、又拿随机结果当门**。两处都要修。
 
 
 ## Timeline
@@ -51,3 +85,9 @@ updated: "2026-09-29T11:03:29"
 由此可复用的判据：当某个「样本/快照/基线」被声明为「从某个源生成的」，就要有一条机械可验的等式把两者绑住，否则漂移永远不会被发现——尤其是当消费端**不校验**来源的时候（本例是解析失败不算错误）。更一般的说法是：**一类缺陷之所以长期存在，通常不是因为难，而是因为没有任何东西会为它变红**。这与之前那条「判据/示例一旦没有执行器就等于不存在」是同一件事的另一个面向——上次的例子是文档示例没人编译，这次的例子是语料没人比对。"
   source: "2026-09-29 语料对齐不变式与新门"
   affects: [bc-reader-hardening, code-quality-requirements]
+
+- time: 2026-10-06T13:43:42
+  kind: decision
+  summary: "记录 fuzz 随机段新发现的潜在引擎 SEGV（js_mark_module_def，quickjs-ng），崩溃输入丢失；并指出 CI fuzz 段缺 artifact 上传"
+  source: "2026-10-06 v0.4.0 发版时 fuzz-smoke job 红"
+  affects: [bc-reader-hardening]
