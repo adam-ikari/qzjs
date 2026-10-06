@@ -505,6 +505,7 @@ int main(int argc, char **argv)
     int is_worker = 0;
     int worker_backend = -1;    /* --worker-backend；-1 = 编译缺省 */
     int control_plane = -1;     /* --control-plane；-1 = 缺省（OFF） */
+    int debug_arg = 0;          /* --debug；父进程经 argv 传递（见 rt_host.c） */
     const char *control_pipe = NULL;   /* --control-pipe 路径（NULL = 缺省） */
     const char *path_arg = NULL;       /* §8.2 path 链 "k1,k2,..."（父经 argv 传） */
 
@@ -541,6 +542,8 @@ int main(int argc, char **argv)
             /* §8.2：完整 path 链（逗号分隔），由直接父在 spawn 时拼好传入——
              * 父知自身 path 与本节点本地槽位 id。 */
             path_arg = argv[++i];
+        } else if (strcmp(argv[i], "--debug") == 0 && i + 1 < argc) {
+            debug_arg = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--control-plane") == 0 && i + 1 < argc) {
             const char *cp = argv[++i];
             if (strcmp(cp, "off") == 0) control_plane = QZ_CONTROL_OFF;
@@ -724,7 +727,10 @@ int main(int argc, char **argv)
     if (!rt) { free(script); return 1; }
     rt->magic = QZ_MAGIC;
     rt->config.initial_script = NULL;
-    rt->config.debug = 0;
+    /* 宿主经 qz_config_t.debug 设的 DAP 位。此前硬编码 0，使宿主设的 debug
+     * 在 ISOLATED（默认）下静默失效——runtime 只在主RT 进程，而 qz_runtime_init
+     * 的自动 attach 判定读的正是这个字段。父进程现经 --debug 传入。 */
+    rt->config.debug = debug_arg;
     rt->config.control_plane = 0;
     /* strict 模式：父进程（qzjs --strict-sandbox）经环境变量传递——子进程 exec
      * 后继承 environ，无需改 argv 协议。深拷贝语义同 qz_create（rt 拥有）。 */

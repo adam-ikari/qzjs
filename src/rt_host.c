@@ -281,6 +281,8 @@ int qz_host_start(qz_t *rt)
 
     char fd_arg[16];
     snprintf(fd_arg, sizeof fd_arg, "%d", QZ_IPC_CHANNEL_FD);
+    char debug_arg[16];
+    snprintf(debug_arg, sizeof debug_arg, "%d", rt->config.debug);
     char *argv[16];
     int n = 0;
     argv[n++] = (char *)"qzjs-rt";
@@ -295,6 +297,16 @@ int qz_host_start(qz_t *rt)
     }
     if (bytecode_src && bytecode_len > 0) {
         argv[n++] = (char *)"--bytecode-stdin";
+    }
+    /* debug 位传给主RT。qz_runtime_init 的 DAP 自动 attach 判定读
+     * rt->config.debug（qzjs.c 的 `rt->config.debug & 0x2`），而 runtime
+     * 只存在于主RT 进程（宿主进程只有通道桩）——不传的话，宿主经 qz_config_t
+     * 公开字段设的 debug 在 ISOLATED（默认进程模型）下恒不生效，且无任何
+     * 诊断。CLI 走 QZ_DEBUG 环境变量那条路（子进程 exec 继承 environ），
+     * 所以 CLI 一直没暴露这个缺口；库宿主才是受害者。 */
+    if (rt->config.debug) {
+        argv[n++] = (char *)"--debug";
+        argv[n++] = debug_arg;
     }
     /* CTL-2：控制面档位 + 端点路径传给主RT（runtime 在主RT 进程；宿主进程
      * 只有通道桩，不监听端点）。argv 仅在 spawn 期间需要（同步 fork+exec）。 */
