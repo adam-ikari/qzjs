@@ -39,6 +39,26 @@ OpenSUSE、FreeBSD）之后。
 **分工**：THREAD 模型 → 直接调 `qz_add_ca_pem()`；ISOLATED → `QZ_CA_FILE`
 （`qzjs --ca` 是它的前端）。
 
+## worker 继承（两后端一致性）
+
+worker 是**独立 `qz_t`**（`worker.c` 里 `calloc` 出来），不共享父 runtime 状态 ——
+父进程 `qz_add_ca_pem()` 装入的信任根**不会自动到达** worker。
+
+| 后端 | worker 如何拿到 CA |
+|---|---|
+| PROCESS | 独立进程 → `rt_main.c` 读 `QZ_CA_FILE` → **拿到** |
+| THREAD | 进程内独立 `qz_t` → 不继承就是空 → 曾**拿不到** |
+
+THREAD 曾是静默降级：worker 里 fetch 私有 CA 站点报 `X509 verification failed`，
+症状指向证书、真因是信任库没传过去。现已在 `worker.c` 建 `self` 后 `strdup`
+逐字节继承。
+
+**用 `strdup` 而不是 `qz_add_ca_pem`**：后者是**追加**语义（补 `'\n'` 分隔符），
+用来"继承"会让 worker 缓冲比父多一个换行——继承不该改变缓冲形状。
+
+分配失败**不中止** worker 创建但出声诊断：中止太重，但静默继续会让 fetch
+以「证书问题」的面貌失败。
+
 ## 四条裁决（各自都有否决过的替代方案）
 
 ### 1. 追加，不替换系统信任
