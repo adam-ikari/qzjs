@@ -27,7 +27,14 @@ namespace {
 static std::string load_fixture_cert()
 {
     /* TEST_DIR 由 CMakeLists 传为 test/ 目录本身，故首选项就是
-     * <repo>/test/fixtures/test.crt；后两项兜底「cwd 是仓库根/上层」的跑法。 */
+     * <repo>/test/fixtures/test.crt；后两项兜底「cwd 是仓库根/上层」的跑法。
+     *
+     * 该夹具已于 2026-08-18 过期，但**在本测试里无关**：这里只做
+     * mbedtls_x509_crt_parse —— 解析不校验有效期，日期只有走完整证书链验证
+     * （握手）才会被查。所以过期的 PEM 照样能作为「一段可解析的证书材料」。
+     * 需要真握手的 test_tls_ca_e2e.py 不复用它，改为现生成两级 PKI
+     * （拿过期证书跑会在「过期」而非「信任」上失败，测的就不是目标功能了）。
+     * 看到「夹具过期」请勿顺手替换本文件——除非同时新增了校验日期的断言。 */
     const char *paths[] = {
         TEST_DIR "/fixtures/test.crt",
         "../test/fixtures/test.crt",
