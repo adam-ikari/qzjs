@@ -5,36 +5,46 @@ category: decision
 status: active
 tags: [build, upstream]
 created: "2026-08-31T11:59:47"
-updated: "2026-10-02T00:24:25"
+updated: "2026-10-06T15:33:49"
 ---
 
 <!-- compiled_truth -->
-## 现状
+<!-- compiled_truth -->
+## quickjs-ng 上游同步与改动分层策略
 
-- deps/quickjs-ng 与 deps/libuv 均为「本地快照 + 补丁文件」双机制：源码作为 git submodule 快照锁定在仓库内，上游差异通过补丁文件维护。
-- gitlink 已修复：deps/libuv 回指上游存在的 commit 20b08342（v1.52.1 祖先，可被 CI fetch），不再指向悬空 commit。
-- **quickjs-ng 已升级至 v0.16.2（commit 1009e662，2026-09-12）**：97 commits，三补丁 3way rebase 零冲突；BC_VERSION 26→27；唯一公开 API 破坏为 realloc_func 签名（7 callsite + 3 回调改造）。polyfill.bytecode 须用同版本 qjsc 重编，否则 host_create 全挂（findQjsc 扫描 build* 会静默选到旧 qjsc，已定案：CMake 传 $QJSC 指向当前 build 目录）。
-- **quickjs-ng 已升级至 v0.17.0（commit 6d46d07，2026-09-18）**：32 commits，四补丁（c99-atomics / drain-jobs / bc-reader-hardening / debugger）rebase 零 FAILED（仅 hunk offset 位移）；BC_VERSION 27→28；polyfill.bytecode/worker-boot.bytecode 已用 v0.17.0 qjsc 重编。收获上游安全修复（TypedArray OOB / AsyncDisposableStack UAF / Promise.withResolvers refcount / hash 碰撞）。offline ctest 23/23 + e2e + seeded fuzz 全绿（CI 35451993074）。
-- libuv 已跟进 v1.x HEAD（84af0b18，2026-09-20）：上游 v1.x 线仅 8 commits（BSD/CI 类），零冲突；c99-atomics patch 扩展纳入 io_uring env workaround（见 brain/pages/libuv-io-uring-workaround.md）。master 线为 v2 dev，暂不跟随。
-- **debugger patch 含 pc2line 修复（2026-09-26 行归属 / 2026-09-27 行覆盖）**：quickjs-ng-debugger 352→416 行（行归属 3 处修复）→**522 行 / 20 hunks**（行覆盖：语句入口 marker + phase-3 录制面 + switch 收尾 marker），详见 [[dap-pc2line-line-attribution]]；重建后 a-side 基线已刷新为 configure 时的 v0.17.0 基线（旧文件 stale 在 v0.16.2，靠 offset 也能应用）。
+**推翻此前的「不 fork」决策**（2026-10-06）。旧 fork `adam-ikari/quickjs` 落后
+upstream 495 个提交、master 停在 0.9.0 时代，已不可救——根因是「改动直接堆
+master、不再同步上游」。删除重建。
 
-## 策略（最保守默认）
+### 分层（核心：同步源与偏离功能分离）
 
-- **补丁文件随 repo 提交 + CMake configure 阶段 `patch -p1` apply**：保证任何机器 checkout 后重新 configure 即得一致 vmlib（纯 C，无系统依赖）。
-- 上游新 commit 需人工 rebase 三补丁到上游后合入，本地先跑 test262 与 offline ctest 验证再合入：
-  - quickjs-ng-c99-atomics（22 行）
-  - quickjs-ng-debugger（522 行）
-  - libuv-c99-atomics（30 行）
-- 不引入 fork url、不依赖个人仓库。
-- **bytecode 工具链锁定**：polyfill.bytecode 重编必须用与引擎同版本 qjsc（realloc_func/BC_VERSION 破坏会被静默的旧 qjsc 掩盖，产出的不匹配 bytecode 直接挂 host_create 测试）。
-- **patch 镜像校验金标准**：`git -C deps/quickjs-ng diff` 是 4 个 configure-time patch 的超集（顺序见 CMakeLists.txt:333-486），单补丁 delta 必须 diff(worktree, HEAD+前序补丁)；验收 = 按 CMake 顺序在 clean HEAD 副本重放 4 补丁后 cmp（quickjs.c/quickjs.h/quickjs-opcode.h/quickjs-c-atomics.h）与工作树相同 + hunk 计数校验 + 已 patch 树 reverse dry-run 全 0。
+| 引擎改动类型 | 落地 | 与 upstream 关系 |
+|---|---|---|
+| 修复/加固（bc-reader 等） | fork master（PR 形式） | master 始终 ≡ upstream + 已采纳修复；成熟可推 upstream |
+| 大型私有功能（AOT 等） | fork 独立分支（如 `aot`） | 基于 master 定期 rebase，**绝不进 master** |
 
-## 证据
+**AOT 用户明确确认永不提交 upstream**（纯私有）→ 走独立分支，不污染 master。
+这是防止重蹈「落后 495」覆辙的关键：master 永远保持可同步，大型偏离在旁支。
 
-- `patch --dry-run` OK，补丁可干净回放。
-- v0.16.2 升级：三补丁 3way rebase 零冲突；offline ctest 通过；polyfill.bytecode 重编 155873B。
-- 无补丁状态下 test_compress_gtest 30% flaky（-std=c99 原子行为不稳），补丁后降至 10%，非产品回归。
-- debugger patch 重建（2026-09-27 行覆盖重镜像后）：ctest 26/26、npm test 3/3（SMOKE / DEBUGGER-STMT / LINE-COVERAGE）、gold 4 文件 cmp 全同 + hunk 0 mismatch + reverse dry-run OK——过程与 gotcha 见 [[dap-pc2line-line-attribution]]。
+### 子模块与 .patch
+
+- qzjs 子模块**改指向 fork master**（不再是 upstream），修复合入即被消费；开发
+  AOT 时子模块临时指向 `aot` 分支，发布回 master。
+- C99 语法补丁**维持 .patch 形式**（`deps/quickjs-ng-c99-atomics.patch`、
+  `deps/libuv-c99-atomics.patch` 等），在 fork 上继续 apply——fork master ≡
+  upstream 内容，apply 结果与原 upstream 一致。
+- 引擎实质修复从 .patch **迁移到 fork**（如 `deps/quickjs-ng-bc-reader-hardening.patch`
+  整体迁入 fork master 作为 commit；qzjs 侧删除该 .patch 与对应 CMake apply 步骤）。
+  其余 .patch（drain-jobs / debugger）归属待逐个判断：drain-jobs 偏引擎行为、
+  debugger 是 qzjs DAP 集成所需的大型私有改动（可能归 aot 类独立分支或保留 .patch）。
+
+### 旧 fork 删除前快照
+
+旧 `adam-ikari/quickjs` 各非 master 分支独有提交（已备份，删除后可从本记录找回
+SHA 在 upstream fork 网络或本地 reflog）：compile-standalone(87595818)、
+dbuf-printf-indirection(33666c8c)、function-proto-nonstandard(706dd71f+3fixup)、
+gc-threshold(2674e97f/4093f9a3)、rm-unused-compiler-flag(099bd90b)、
+simplify-asan(6c94b099)、wasm-stack-size(d3762f56)、windows-sdk(70823096/590fde8e)。
 
 
 ## Timeline
@@ -114,4 +124,16 @@ updated: "2026-10-02T00:24:25"
 - time: 2026-10-02T00:24:25
   kind: decision
   summary: "策略变更（2026-10-01 用户拍板）：quickjs 改为**独立维护**，quickjs-ng 仍是上游。含义：①vendored quickjs 从『跟随上游 + patch』升级为『独立 fork』——可自由修改引擎生命周期/语义，不必等上游合入，也无需仅靠 patch 表达差异；②quickjs-ng 仍是上游：安全修复要合入参考、可向上游提交，但不再阻塞 qzjs 侧的独立修复；③升级节奏从『主动跟随上游』改为『按需拉取上游安全修复 + 独立维护差异』。直接影响 interrupt-teardown-leak 的处理：此前『需改 quickjs 生命周期语义，qzjs 侧无修法，只能报上游或暂缓』——现在可在 vendored fork 内直接改，不再受『等上游』约束。patch 机制（CMake configure 期 patch -p1 + 镜像校验金标准）仍保留作为表达/回放差异的方式。"
+  affects: [quickjs-upstream-merge-strategy]
+
+- time: 2026-10-06T15:25:44
+  kind: reversal
+  summary: "删除旧 fork adam-ikari/quickjs（落后 upstream 495，master 停在 0.9.0 时代），重新 fork quickjs-ng/quickjs 与上游同步。旧 fork 各分支独有提交删除前快照：compile-standalone(87595818 Add standalone qjs)、dbuf-printf-indirection(33666c8c Remove dbuf_printf indirection)、function-proto-nonstandard(706dd71f Remove non-standard Function.prototype props +3 fixup)、gc-threshold(2674e97f GC threshold getter / 4093f9a3 Use 0 to disable auto GC)、rm-unused-compiler-flag(099bd90b)、simplify-asan(6c94b099 WASI/ASAN stack check)、wasm-stack-size(d3762f56)、windows-sdk(70823096 + 590fde8e Win SDK>=26100)。若日后需要可从本快照 SHA 在本地 reflog 或 upstream fork 网络找回。"
+  source: "2026-10-06 用户指示：删除旧 quickjs 仓库重新 fork，按 C99→.patch / 引擎→fork PR 原则处理"
+  affects: [quickjs-upstream-merge-strategy]
+
+- time: 2026-10-06T15:33:49
+  kind: decision
+  summary: "推翻『不 fork』：重新 fork quickjs-ng → adam-ikari/quickjs；引擎改动分层（修复→fork master 同步；AOT 等大型私有→fork 独立分支不进 master）"
+  source: "2026-10-06 用户：删除旧 fork 重新建；AOT 永不提交 upstream"
   affects: [quickjs-upstream-merge-strategy]

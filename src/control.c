@@ -855,9 +855,9 @@ void qz_ctl_teardown(qz_t *rt)
 
 /* ── Interrupt handler (QuickJS callback) ── */
 
-int qz_ctl_interrupt_handler(JSRuntime *jsrt, void *opaque)
+int qz_ctl_interrupt_handler(JSContext *ctx, void *opaque)
 {
-    (void)jsrt;
+    (void)ctx;
     qz_t *rt = (qz_t *)opaque;
     if (__atomic_load_n(&rt->ctl_interrupt, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&rt->ctl_interrupt, 0, __ATOMIC_RELEASE);

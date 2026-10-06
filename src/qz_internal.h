@@ -765,7 +765,7 @@ void qz_ctl_reap_timeouts(qz_t *rt);
 /* teardown 时回收所有未完成回执条目（无回执发出，发起方靠 timeout 侧超时）。 */
 void qz_ctl_teardown(qz_t *rt);
 /* interrupt handler（QuickJS 回调）：读 ctl_interrupt 原子标志。 */
-int qz_ctl_interrupt_handler(JSRuntime *jsrt, void *opaque);
+int qz_ctl_interrupt_handler(JSContext *ctx, void *opaque);
 /* 本节点在父树中的槽位 id（宿主 0 / 主RT 1 / worker --worker-id）。 */
 int32_t qz_ctl_local_id(qz_t *rt);
 /* 回执表：登记 correl 条目（producer 线程，锁内插入）。reply_dir 为
