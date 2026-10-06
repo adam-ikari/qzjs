@@ -790,6 +790,24 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     /* HTTP/TCP 服务写已关闭的对端连接会触发 SIGPIPE(默认杀进程,
      * wrk 压测中断连即崩)。libuv 不忽略它;宿主必须显式忽略。 */
     signal(SIGPIPE, SIG_IGN);
+#ifdef QZ_USE_MOCK_LIBUV
+    /* 本二进制是 mock-libuv 构建（-DQZ_BUILD_TESTS=ON 产物）。mock_libuv 的
+     * tcp/fs 是桩：uv_tcp_connect 同步返回成功但没有真实套接字，uv_read_start
+     * 等待预注册的 canned 响应——没有就永不完成。于是 fetch / TCP / fs 会
+     * **静默挂起**，无任何报错。
+     *
+     * 这个二进制只供 gtest 链接与本地跑纯计算脚本（-e 'console.log(...)' 之类）
+     * 用；真实 I/O / 进程 / DAP 走 ISOLATED 子进程的路径都不工作。要跑 e2e
+     * 或任何网络/进程场景，用 QZ_BUILD_TESTS=OFF 构建（见 CMakeLists 的
+     * qz_cli 那段注释与 CI 的 e2e job）。
+     *
+     * 出声是为了不再有人拿它跑 fetch 当 TLS 问题排查（本轮 #9 就被它骗过：
+     * proxy e2e 全挂，以为是证书，实际是这台二进制没有网络能力）。 */
+    fprintf(stderr, "qzjs: NOTE: this is a mock-libuv build "
+                    "(QZ_BUILD_TESTS=ON); network/process/ISOLATED features "
+                    "are stubbed and will silently hang. For real I/O use a "
+                    "QZ_BUILD_TESTS=OFF build.\n");
+#endif
     /* parse -h/-v and -e; the first non-flag argument is the script path; the rest are script args */
     const char *script_path = NULL;
     int script_index = 0;    /* argv index where script args start */
