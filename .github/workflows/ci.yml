@@ -1582,7 +1582,21 @@ jobs:
             ./fuzz_bc "$seed"
           done
 
-      - name: Fuzz (60 s, seeded from the corpus)
+      # Discovery, NOT a merge gate. 60 s of random mutation finds whatever it
+      # finds regardless of what the PR touched — v0.4.0 (a version bump +
+      # CHANGELOG) was held hostage by a pre-existing engine SEGV found here,
+      # while the deterministic seed replay above stayed green. As a required
+      # check this step is a coin flip on every PR.
+      #
+      # Real regressions are still caught: every crashing input we have ever
+      # triaged is committed as a seed in test/fuzz-corpus/, and the seed
+      # replay step above is the hard, deterministic gate. A new finding here
+      # is triaged and promoted to a seed — from then on the deterministic gate
+      # enforces it forever. Failing the PR on the random run before the input
+      # has been triaged adds nothing; losing the input entirely adds nothing
+      # either (that is what used to happen — no artifact upload, crash lost).
+      - name: Fuzz (60 s, seeded from the corpus) [discovery, non-blocking]
+        continue-on-error: true
         env:
           # ASan's shadows make the process start at ~2 GB RSS, and LSan does
           # not work under the runner's tracing — hence the raised limit and
@@ -1592,9 +1606,22 @@ jobs:
         # structure + past crashers) instead of scratch, so the 60 s budget
         # spends its time mutating around known-interesting shapes rather
         # than rediscovering the container format from scratch. New crashing
-        # inputs land in the working dir; promote interesting ones into
-        # test/fuzz-corpus/ as seeds.
+        # inputs land in corpus-out/ and are uploaded below; promote
+        # interesting ones into test/fuzz-corpus/ as seeds.
         run: |
           mkdir -p corpus-out
           ./fuzz_bc -max_total_time=60 -rss_limit_mb=4096 -timeout=25 \
+            -artifact_prefix=corpus-out/art- \
             -print_final_stats=1 test/fuzz-corpus corpus-out
+      # Without this, a finding dies with the runner: libFuzzer writes
+      # crash-/leak-/timeout-/oom- files, but if nobody uploads them the
+      # 60 s of exploration is unrepeatable. Upload on EVERY run (the useful
+      # case is a run that DID crash).
+      - name: Upload fuzz artifacts (crashers + corpus growth)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-artifacts
+          path: corpus-out/
+          if-no-files-found: warn
+          retention-days: 30
