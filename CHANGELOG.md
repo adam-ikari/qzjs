@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-06
+
+> 发版清积压：自 0.3.0（2026-10-02）以来 16 个 PR，无 breaking（ABI v1 未动）。
+> 本轮以「补覆盖」逼出并修复 4 类缺陷：CA 信任库跨进程失效、worker 两后端不一致、
+> worker 异步工作被截断、`free_port()` 名不副实；另加两道测试门（mock 构建警告、
+> qz_config_t 跨进程传递门）。
+
 - **build: 撤掉 `QZ_QJSC_HOST` / `QZ_LZ4_HOST` 交叉构建出口**。这两个 cache 变量是给交叉构建用的宿主工具出口（polyfill 字节码生成器 `qjsc` 与压缩器 `qz_lz4_compress` 在交叉构建里是目标架构二进制，宿主跑不了）。但项目范围已定为 **Linux-only**（`brain/pages/platform-support.md`，2026-10-03 用户拍板）：`qz_message_fd()` 返回 Linux 特有的 `eventfd`、控制面用 `AF_UNIX` + `SO_PEERCRED`、io_uring 须显式禁用——交叉构建本就无消费者，而该页明写「不需要抽象层或条件编译去兼容别的平台（YAGNI）」。为一个已声明不支持的场景留 54 行构建分支，属净负债：删优于加。故整块移除（`CMakeLists.txt` 完全还原到该 PR 之前的状态）。
 - **feat(tls): 新增运行时 CA 信任库 `qz_add_ca_pem()`**。TLS 客户端此前只从四个固定系统路径（Debian/RHEL/OpenSUSE/FreeBSD）加载 CA，宿主无法为自建 CA / 私有 PKI 增补信任根。`qz_add_ca_pem(rt, pem)` 让宿主追加 PEM 证书；TLS op 建连时把它**追加**进系统 CA 之后——只增加信任根，**不替换系统信任**（自建 CA 与公有 CA 同时有效）。证书校验本身不变：恒为 `VERIFY_REQUIRED` + 主机名校验，验证失败一律握手失败；本函数**不提供**跳过校验的开关（那会扩大攻击面）。可重复调用；定义刻意不在 `QZ_WITH_TLS` 条件编译内（公共头无条件声明，`test/api_surface_check.py` 要求两个编译模型都有符号）。线程约束：须在 JS 开始执行前调用（无锁）。回归测试 `test/test_tls_ca_gtest.cpp` 调用**生产函数** `uv_io_tls_load_host_ca()` 而非复现 parse——长度约定（`ca_pem_len` 不含末尾 NUL、传参 +1）是这里唯一的 off-by-one 风险点，负控已验证：去掉 `+1` 测试立即变红。
 
