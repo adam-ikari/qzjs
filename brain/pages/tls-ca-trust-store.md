@@ -59,6 +59,25 @@ THREAD 曾是静默降级：worker 里 fetch 私有 CA 站点报 `X509 verificat
 分配失败**不中止** worker 创建但出声诊断：中止太重，但静默继续会让 fetch
 以「证书问题」的面貌失败。
 
+## 关联缺陷：worker 的 idle 判定（2026-10 修复）
+
+补 CA e2e 时撞出：**worker 内 fetch 的结果被静默丢弃**。
+
+根因不在 CA，而在 worker 生命周期：worker 有**独立的 `uv_loop`**
+（`uv_loop_init(&w->self->loop)`），而 `qz_loop_idle()` 只判定 `rt` 自己的
+loop。父判空闲 → 提前 teardown → worker 的异步结果丢失，**无任何报错**。
+顶层 fetch 正常，所以是不一致而非普遍失效。
+
+修法（`qz_worker_t.busy` 原子位 + 空闲时 `uv_async_send` 叫醒父）。
+**给后来者的判据**：`qz_loop_idle` 判的是「本 rt 的 loop」，任何**独立
+loop 的执行体**（worker）的工作它都看不见。加新的独立 loop 执行体时，
+必须同步让 idle 判定认识它，否则就是静默丢数据。
+
+**跨进程/跨二进制教训（本轮实际踩到）**：worker 跑在 `qzjs-rt` 子进程里，
+它静态链接同一份 lib。改完 C 代码只 `cmake --build --target qz_cli`，
+`qzjs-rt` 仍是旧代码 —— 探针不执行、二进制里没有改动，一度误判成
+"代码没被调用"。**改 C 代码后必须同时重建所有相关 target。**
+
 ## 四条裁决（各自都有否决过的替代方案）
 
 ### 1. 追加，不替换系统信任
