@@ -1201,6 +1201,9 @@ jobs:
         run: |
           python3 test/test_httpserver_e2e.py --qzjs-bin ./build/qzjs
           python3 test/test_fetch_proxy_e2e.py --qzjs-bin ./build/qzjs
+          # 运行时 CA 信任库：真实 mbedTLS 握手，mock_libuv gtest 到不了这条路径。
+          # 需要 openssl（现生成两级 PKI，不用会腐烂的仓库夹具证书）。
+          python3 test/test_tls_ca_e2e.py --qzjs-bin ./build/qzjs
 
       - name: e2e — Service Worker (SW-0 / SW-1 / SW-2)
         run: |
