@@ -54,6 +54,12 @@ target_compile_definitions(test_worker_gtest PRIVATE TEST_DIR="${CMAKE_CURRENT_S
 add_qz_gtest(test_bridge_http_gtest)
 # 非流式 HTTP 在途请求销毁回归(c1425f9 只覆盖了流式一半)。
 add_qz_gtest(test_http_inflight_teardown_gtest)
+# 运行时 CA 信任库（qz_add_ca_pem）。依赖 mbedtls 头 + QZ_WITH_TLS 的
+# uv_io_tls_load_host_ca，故只在 TLS 构建下注册。
+if(QZ_WITH_TLS)
+    add_qz_gtest(test_tls_ca_gtest)
+    target_compile_definitions(test_tls_ca_gtest PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
 add_qz_gtest(test_bridge_stream_gtest)
 add_qz_gtest(test_fetch_stream_gtest)
 add_qz_gtest(test_polyfill_gtest)

@@ -229,6 +229,34 @@ typedef struct uv_io_http_op_t {
  * ================================================================ */
 
 #if QZ_WITH_TLS
+/* 把 rt->ca_pem（宿主经 qz_add_ca_pem 追加的信任根）解析进 chain。
+ *
+ * mbedtls_x509_crt_parse 追加到已有链，所以这是**在系统 CA 之后补充**信任，
+ * 不是替换系统信任 —— 自建 CA 与公有 CA 同时有效。
+ * ca_pem_len 不含末尾 NUL，故传 +1（含终止符），同 tcp_io.c 的 PEM 路径。
+ *
+ * 返回 0 = 成功（或本来就没有额外 CA）；-1 = 有额外 CA 但解析失败。
+ * 解析失败必须出声：静默忽略会让宿主以为私有 CA 已生效，实际握手却因
+ * 「未知颁发机构」失败，而诊断指向网络而非证书 —— 与同期修掉的
+ * 「OOM 报成 connect failed」是同一类张冠李戴。
+ *
+ * 独立成函数（而非内联在 tls_init_op）是为了让回归测试**调用生产代码**，
+ * 而不是把 mbedtls parse 在测试里复现一遍 —— 复现版测不到真实的长度约定，
+ * 而长度约定正是这里唯一的 off-by-one 风险点。 */
+int uv_io_tls_load_host_ca(qz_t *rt, mbedtls_x509_crt *chain)
+{
+    if (rt->ca_pem_len == 0) return 0;
+    int rc = mbedtls_x509_crt_parse(chain,
+                                    (const unsigned char *)rt->ca_pem,
+                                    rt->ca_pem_len + 1);
+    if (rc != 0) {
+        fprintf(stderr, "[qzjs] uv_io: failed to parse host CA bundle (%d); "
+                        "requests to hosts under that CA will fail\n", rc);
+        return -1;
+    }
+    return 0;
+}
+
 static int tls_init_op(uv_io_http_op_t *op) {
     int ret;
     mbedtls_ssl_init(&op->ssl);
@@ -268,7 +296,10 @@ static int tls_init_op(uv_io_http_op_t *op) {
             break;
         }
     }
-    if (ca_loaded) {
+
+    int ca_extra_ok = (uv_io_tls_load_host_ca(op->rt, &op->ca_certs) == 0);
+
+    if (ca_loaded || ca_extra_ok) {
         mbedtls_ssl_conf_ca_chain(&op->ssl_conf, &op->ca_certs, NULL);
     }
     /* 恒为 VERIFY_REQUIRED:证书验证失败必须让握手失败。即使没有系统 CA

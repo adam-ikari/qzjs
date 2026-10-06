@@ -379,6 +379,21 @@ struct qz_t {
      * 所有 in-flight op 已中止清理，故无悬垂。 */
     char *proxy_auth_url;    /* 已计算缓存的代理 URL（含凭据），NULL = 未缓存 */
     char *proxy_auth_value;  /* "Basic <b64>" 头值，NULL = 代理无凭据 */
+
+    /* 运行时 CA 信任库：宿主经 qz_add_ca_pem() 追加的 PEM 证书，多次追加以
+     * '\n' 分隔，末尾保留 NUL（mbedtls_x509_crt_parse 要 NUL 终止缓冲）。
+     * ca_pem_len **不含**末尾 NUL，故 parse 时传 ca_pem_len + 1。
+     *
+     * TLS op 建连时在系统 CA **之后**追加解析进自己的 op->ca_certs ——追加
+     * 信任根，不替换系统根（mbedtls_x509_crt_parse 追加到已有链）。
+     * 这里只存 PEM 字节、不存 mbedtls_x509_crt：那份结构随 op 生命周期创建/
+     * 释放，跨 op 共享会引入悬垂；各 op 各自解析是唯一无共享的做法。
+     *
+     * 非 TLS 构建（QZ_WITH_TLS=OFF）下 qz_add_ca_pem 仍可写（定义不在 TLS
+     * 条件编译内，公共头无条件声明），只是没有消费点。qzjs.c teardown 释放。 */
+    char   *ca_pem;
+    size_t  ca_pem_len;      /* 已用字节数，不含末尾 NUL */
+    size_t  ca_pem_cap;      /* 已分配容量（含末尾 NUL） */
     qz_ctx_t *contexts[QZ_MAX_CONTEXTS];  /* array of context pointers */
     int context_count;
     int active_ctx_id;   /* -1 if no active context */
@@ -696,6 +711,16 @@ void uv_io_fs_write(qz_t *rt, const char *path,
 void uv_io_fs_exists(qz_t *rt, const char *path,
                      qz_io_done_t cb, void *cb_data);
 void uv_io_http_abort(qz_t *rt);
+
+/* 把 rt->ca_pem（qz_add_ca_pem 追加的信任根）解析进 chain，追加语义。
+ * 内部函数（仅 TLS 构建存在），暴露给回归测试直接验证 —— 见 uv_io.c 处的
+ * 说明：测试须调生产代码，不能自己复现 mbedtls parse。 */
+#if QZ_WITH_TLS
+/* mbedtls_x509_crt 的前向声明（本头不 include mbedtls 头，同 struct
+ * uv_io_http_op_t 的做法）；实现在 uv_io.c 里用真类型。 */
+struct mbedtls_x509_crt;
+int uv_io_tls_load_host_ca(qz_t *rt, struct mbedtls_x509_crt *chain);
+#endif
 /* Abort a specific in-flight streaming HTTP op by id (pal.httpRequestAbort).
  * Safe to call with a stale/unknown id: no-op. */
 void uv_io_http_abort_by_id(qz_t *rt, uint64_t op_id);

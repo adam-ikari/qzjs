@@ -251,6 +251,35 @@ int qz_post_message(qz_t *rt, const char *json, size_t len)
 #endif
 }
 
+/* 运行时 CA 信任库 —— 见 qzjs.h 的契约注释。
+ *
+ * 定义刻意留在 QZ_WITH_TLS 条件编译之外：公共头无条件声明了它，
+ * test/api_surface_check.py 要求两个编译模型（isolated / thread）的
+ * 静态库里都真有这个符号。若只在 TLS 分支里定义，QZ_WITH_TLS=OFF 的
+ * 构建会编译通过、链接才炸 —— 正是那道门要抓的缺陷类别。
+ * 无 TLS 构建下本函数照常存 PEM，只是没有消费点。 */
+int qz_add_ca_pem(qz_t *rt, const char *pem)
+{
+    if (!rt || rt->magic != QZ_MAGIC || !pem || !*pem) return -1;
+
+    size_t n = strlen(pem);
+    /* 追加后需要：原内容 + pem + '\n' 分隔符 + NUL（mbedtls 要 NUL 终止） */
+    size_t need = rt->ca_pem_len + n + 2;
+    if (need > rt->ca_pem_cap) {
+        size_t cap = rt->ca_pem_cap ? rt->ca_pem_cap : 1024;
+        while (cap < need) cap *= 2;
+        char *nb = (char *)realloc(rt->ca_pem, cap);
+        if (!nb) return -1;          /* OOM：原缓冲完好，未改动 */
+        rt->ca_pem = nb;
+        rt->ca_pem_cap = cap;
+    }
+    memcpy(rt->ca_pem + rt->ca_pem_len, pem, n);
+    rt->ca_pem_len += n;
+    rt->ca_pem[rt->ca_pem_len++] = '\n';   /* 分隔相邻两张证书 */
+    rt->ca_pem[rt->ca_pem_len] = '\0';      /* mbedtls_x509_crt_parse 要 NUL */
+    return 0;
+}
+
 void qz_wait_idle(qz_t *rt)
 {
 #ifdef QZ_HOST_SPLIT
@@ -805,6 +834,13 @@ void qz_thread_teardown(qz_t *rt)
     free(rt->proxy_auth_value);
     rt->proxy_auth_url = NULL;
     rt->proxy_auth_value = NULL;
+
+    /* 6.6) 释放运行时 CA 信任库（qz_add_ca_pem 分配）。同 proxy_auth：
+     * in-flight op 已在步骤 1.5 中止，不存在仍借用该缓冲的握手。 */
+    free(rt->ca_pem);
+    rt->ca_pem = NULL;
+    rt->ca_pem_len = 0;
+    rt->ca_pem_cap = 0;
 
     /* 6.7) 释放 polyfill 字节码缓存（qz_ctx_create_at 惰性加载，各 context
      * 共享同一份）。C mode 无堆分配（unload 是 no-op）；A/B/D 释放堆缓冲。 */
