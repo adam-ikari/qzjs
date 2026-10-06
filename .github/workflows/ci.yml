@@ -422,7 +422,11 @@ jobs:
       # mock 档的 ping 家族守卫问题只有这一档能看见（QZ_USE_MOCK_LIBUV 曾经是
       # PRIVATE，消费者看不到，守卫的 mock 那半边等于没写）。
       - name: API surface check (mock build)
-        run: python3 test/api_surface_check.py --build-dir build --model mock
+        run: |
+          python3 test/api_surface_check.py --build-dir build --model mock
+          # qz_config_t 跨进程传递门：加字段忘了传给 qzjs-rt 子进程 → 宿主设了
+          # 等于没设，且无任何报错（config.debug 就这么丢过）。
+          python3 test/config_propagation_check.py
 
       # JS_GetException 返回值丢弃门：转移语义，丢弃 = 漏一次引用所有权。
       # 那个 InternalError refcount 永不归零、经 backtrace 撑住整棵栈帧图，
