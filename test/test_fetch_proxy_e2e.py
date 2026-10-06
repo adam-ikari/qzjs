@@ -28,7 +28,6 @@ Env: standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY (lowercase accepted by qzjs).
 """
 
 import argparse
-import itertools
 import os
 import socket
 import select
@@ -43,11 +42,23 @@ def test(fn):
     TESTS.append(fn)
     return fn
 
-_PORT_COUNTER = itertools.count(20000 + (os.getpid() % 400) * 100)
-
 def free_port():
-    """Monotonic per-process port: guarantees Origin/Proxy never collide."""
-    return next(_PORT_COUNTER)
+    """Ask the OS for a currently-unused TCP port (bind :0, read back, close).
+
+    This used to be a monotonic counter seeded from the pid, which only
+    guaranteed Origin/Proxy never collide with *each other* -- it never checked
+    the port was free. On a shared CI runner any other process holding that port
+    made bind() fail with EADDRINUSE (seen: test_proxy_wildcard_no_proxy,
+    "OSError(98, 'Address already in use')"). Asking the kernel removes that
+    whole class; the residual close-then-rebind race is far narrower than the
+    previous guaranteed collision.
+
+    Each caller binds what it gets, so a collision between two tests in this
+    same process is still impossible (every port is distinct at request time).
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 class Origin:
     """Minimal origin HTTP server: GET /hello -> 200 text/plain body."""
