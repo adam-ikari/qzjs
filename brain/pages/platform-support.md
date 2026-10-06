@@ -5,15 +5,28 @@ category: decision
 status: active
 tags: [platform, linux, scope]
 created: "2026-10-04T03:41:49"
-updated: "2026-10-04T03:42:03"
+updated: "2026-10-06T03:16:07"
 ---
 
+<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 结论
 
 **qzjs 只支持 Linux，不承诺 macOS / Windows / BSD。**（2026-10-03 用户拍板）
 
 这不是"还没做"，是**范围决定**。跨平台验证不在待办清单里。
+
+## 交叉构建出口的引入与撤除（2026-10 记录）
+
+`QZ_QJSC_HOST` / `QZ_LZ4_HOST`（交叉构建时给 polyfill 字节码生成器 `qjsc` 与压缩器
+`qz_lz4_compress` 换宿主可运行版本）曾于 2026-10 合入 master，随后在 PR #8 **撤除**。
+
+撤除理由：**本范围决定优先于构建灵活性**。eventfd / AF_UNIX + SO_PEERCRED / io_uring
+须禁用这三条技术约束已使交叉构建无真实消费者，为一处声明不支持的场景留 54 行构建
+分支是净负债。极简哲学「删优于加」——`CMakeLists.txt` 整块还原，不留兼容别名或废弃路径。
+
+**给后来者**：若将来真出现外部嵌入者需要交叉构建，正确做法是**先更新本页的范围决定**
+（而不是先加构建开关再补文档）。加开关的同时必须回答：目标平台有 eventfd 吗？
 
 ## 为什么写下来
 
@@ -42,7 +55,7 @@ macOS/Windows 用户读 `docs/guide/building.md`（"所有依赖从源码构建�
 
 ## 与成熟度评估的关系
 
-评估「是否成熟」时，跨平台验证原本被列为待办第 3 步。**该步作废**——
+评估「是否成熟」时，跨平台验证原本是待办第 3 步。**该步作废**——
 Linux-only 是既定范围，不是未完成项。成熟度的剩余门槛只有一条：
 冻结 breaking 变更、攒到 1.0（时间维度，无具体工作量）。
 
@@ -59,4 +72,10 @@ Linux-only 是既定范围，不是未完成项。成熟度的剩余门槛只有
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
+  affects: [platform-support]
+
+- time: 2026-10-06T03:16:07
+  kind: decision
+  summary: "补记：交叉构建出口 QZ_QJSC_HOST/QZ_LZ4_HOST 曾被合入又撤除——Linux-only 范围优先于构建灵活性"
+  source: "2026-10 PR#8：撤掉交叉构建出口，CMakeLists 还原"
   affects: [platform-support]
