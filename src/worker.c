@@ -178,7 +178,25 @@ static void qz_worker_thread_main(void *arg)
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE) ||
             __atomic_load_n(&w->shutting_down, __ATOMIC_ACQUIRE)) break;
         qz_flush_microtasks(rt);
+        /* 发布「本 worker 仍有在途异步工作」给父的 idle 判定。
+         * 在本线程上算（qz_loop_idle 对 w->self 是安全的），父只读这个位。 */
+        int busy_now = qz_loop_idle(rt) ? 0 : 1;
+        int busy_prev = __atomic_exchange_n(&w->busy, busy_now, __ATOMIC_ACQ_REL);
+        /* 由忙转空闲时必须叫醒父的 loop。
+         *
+         * qz_wait_idle 只发**一次** async 唤醒。父在那次唤醒里看到 worker 仍忙
+         * 就继续等 —— 而父的 uv_run 在无活动句柄时会阻塞。没有这次通知，worker
+         * 后续变空闲不会有任何东西唤醒父重新判定，父永远卡在旧结论上
+         * （实测：worker 有 setTimeout + fetch 时必挂）。
+         *
+         * uv_async_send 是线程安全的，可在 worker 线程上直接调父的 wake。 */
+        if (busy_prev != 0 && busy_now == 0 && w->parent) {
+            uv_async_send(&w->parent->wake);
+        }
     }
+    /* 退出前清零：worker 一旦结束就永远不会再发布，若留下 1，父的 wait_idle
+     * 会永远等一个已经结束的 worker（死锁）。 */
+    __atomic_store_n(&w->busy, 0, __ATOMIC_RELEASE);
     qz_thread_teardown(rt);
 }
 
@@ -281,6 +299,10 @@ qz_worker_t *qz_worker_create(qz_t *parent, const char *script, int *out_err)
     self->magic = QZ_MAGIC;
     self->worker_self = w;         /* 标记：这是 worker runtime（pal 绑定用） */
     w->parent = parent;
+    /* 从 spawn 起就算忙：worker 要 boot + 跑脚本 + 发首条消息，那段时间父的
+     * loop 可能已空闲。不置 1 会让父在 worker boot 完成前就 wait_idle 返回，
+     * 把 worker 的首次输出截断（与 busy 发布同源的竞态）。 */
+    w->busy = 1;
     w->id = slot + 1;              /* id = 槽位+1；0 保留给宿主 source（不冲突） */
     w->self = self;
     w->script = strdup(script);

@@ -81,6 +81,25 @@ int qz_loop_idle(qz_t *rt)
      * wait_idle 会在 work_done 处理前进入 teardown，其回调（bridge_io_done）
      * 访问已释放的 JSRuntime → UAF。 */
     if (rt->loop.active_reqs.count != 0) return 0;
+
+    /* worker 各自有**独立的 uv_loop**（worker.c 里 uv_loop_init(&w->self->loop)），
+     * 上面那些检查只看本 rt 的 loop —— 父空闲完全说明不了 worker 空闲。
+     * worker 内发起的 fetch/timer 挂在 worker 自己的 loop 上，父却看不到，
+     * 于是 wait_idle 提前 teardown，worker 的异步结果被静默丢弃
+     * （现象：worker 脚本里只有 fetch 时父收不到任何消息）。
+     *
+     * 这里只做**原子读**：busy 位由 worker 在自己线程上算出并发布
+     * （见 qz_worker_thread_main）。绝不跨线程遍历 worker 的 loop 或调用其 JS
+     * —— 那是 worker 线程的独占所有权。
+     *
+     * shutting_down 的 worker 不再等待：它正在退出，等它没有意义，且它线程
+     * 即将结束、busy 会由 worker 自己清零，但父不该在此期间卡住。 */
+    for (int i = 0; i < QZ_MAX_WORKERS; i++) {
+        qz_worker_t *w = rt->workers[i];
+        if (!w) continue;
+        if (__atomic_load_n(&w->shutting_down, __ATOMIC_ACQUIRE)) continue;
+        if (__atomic_load_n(&w->busy, __ATOMIC_ACQUIRE)) return 0;
+    }
     return 1;
 }
 
