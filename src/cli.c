@@ -40,6 +40,8 @@ static const char *g_control_pipe = NULL;
  * QZ_STRICT_ENV 环境变量可逗号分隔覆盖。 */
 static const char *g_strict_root = NULL;
 static char **g_strict_env_allow = NULL;
+/* --ca <file>: TLS client appended PEM CA root (additive to system CAs). */
+static const char *g_ca_file = NULL;
 
 static void usage(FILE *out) {
     fprintf(out,
@@ -60,6 +62,8 @@ static void usage(FILE *out) {
         "                      an AF_UNIX endpoint (see qzjs-ctl)\n"
         "  --control-pipe=<path>\n"
         "                      endpoint path (default /tmp/qzjs-<pid>-<n>.ctl)\n"
+        "  --ca <file.pem>     TLS client: append PEM CAs to trust store\n"
+        "                      (adds to system CAs; for self-signed / private PKI)\n"
         "  --strict-sandbox=<dir>\n"
         "                      strict mode: confine fs to <dir>, spawn only\n"
         "                      qzjs-rt, expose only allowlisted env (env: QZ_STRICT_ENV,\n"
@@ -471,6 +475,29 @@ static void apply_strict_mode(qz_config_t *cfg) {
 /* file: 这段 code 的来源路径（script 模式 = argv 里的脚本路径；-e / REPL 传
  * NULL）。它作为 eval 通道的 "file" 字段送进运行时，引擎用它命名这次求值，
  * 栈帧 / Error().stack / 调试器断点才认得真实文件（否则全是 "<input>"）。 */
+/* Inject --ca PEM file into runtime trust store. CLI is a real host
+ * consumer: --ca lets ops run fetch under self-signed / private PKI
+ * without installing into /etc/ssl/certs. Failure exits 2 so scripts
+ * catch it rather than silently proceeding with no trust. */
+static void apply_ca_bundle(qz_t *rt)
+{
+    if (!g_ca_file) return;
+    FILE *f = fopen(g_ca_file, "rb");
+    if (!f) { fprintf(stderr, "qzjs: --ca: cannot read %s\n", g_ca_file); exit(2); }
+    if (fseek(f, 0, SEEK_END) != 0) { fprintf(stderr, "qzjs: --ca: seek failed\n"); fclose(f); exit(2); }
+    long sz = ftell(f);
+    if (sz < 0) { fprintf(stderr, "qzjs: --ca: ftell failed\n"); fclose(f); exit(2); }
+    rewind(f);
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fprintf(stderr, "qzjs: --ca: out of memory\n"); fclose(f); exit(2); }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+    int rc = qz_add_ca_pem(rt, buf);
+    free(buf);
+    if (rc != 0) { fprintf(stderr, "qzjs: --ca: failed to load CA bundle\n"); exit(2); }
+}
+
 static int run_code(const char *code, const char *file,
                     const char *const *args, int nargs) {
     cli_host_t host = {0};
@@ -500,6 +527,7 @@ static int run_code(const char *code, const char *file,
         fprintf(stderr, "qzjs: runtime init failed\n");
         return 1;
     }
+    apply_ca_bundle(rt);
     char *cmd_json = json_escape(code);
     if (!cmd_json) {
         fprintf(stderr, "qzjs: out of memory\n");
@@ -602,6 +630,7 @@ static int repl_loop(void) {
         fprintf(stderr, "qzjs: runtime init failed\n");
         return 1;
     }
+    apply_ca_bundle(rt);
     printf("%s (WinterTC runtime) — type JS, Ctrl-D to exit\n",
            QZ_CLI_VERSION);
     fflush(stdout);
@@ -747,6 +776,7 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
         free(bc);
         return 1;
     }
+    apply_ca_bundle(rt);
     qz_wait_idle(rt);   /* 库线程自驱动；崩溃/回声帧入邮箱 */
     cli_drain_mbox(rt, &host, NULL);   /* 末次排干：bootstrap console 输出在此消费 */
     int exit_code = host.exit_code;
@@ -783,6 +813,16 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
         if (!strncmp(argv[i], "--strict-sandbox=", 17)) {
             g_strict_root = argv[i] + 17;
             if (!*g_strict_root) { usage(stderr); return 2; }
+            continue;
+        }
+        if (!strcmp(argv[i], "--ca")) {
+            if (i + 1 >= argc) { usage(stderr); return 2; }
+            g_ca_file = argv[i + 1];
+            /* 与 QZ_STRICT_SANDBOX 同一机制：ISOLATED 下 JS 跑在 spawn 出的
+             * qzjs-rt 子进程里，父进程 rt->ca_pem 传不过去。setenv 必须在
+             * qz_create（内部 exec 子进程）之前完成。 */
+            setenv("QZ_CA_FILE", g_ca_file, 1);
+            i++;
             continue;
         }
         if (!strcmp(argv[i], "--bytecode")) {

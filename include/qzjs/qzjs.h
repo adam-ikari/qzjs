@@ -247,6 +247,14 @@ int qz_control(qz_t *rt, const char *bytes, size_t len);
  * JS 开始执行前调用 —— qz_create 之后、投递启动脚本之前。运行中调用
  * 与 in-flight 握手并发会改到别人正在读的信封，不做保护。
  *
+ * **ISOLATED 执行模型下有个陷阱**：宿主与主 RT 是两个进程、各持一个 qz_t。
+ * 在 qz_create() 之后对本进程 rt 调本函数，写的是**父进程**的信任库，而真正
+ * 跑 JS、做握手的是 qzjs-rt 子进程（它自己的 ca_pem 恒为空）——于是本调用
+ * 静默无效，fetch 报 X509 verification failed，看起来像证书问题，实际是
+ * 信任库从没到达握手那一侧。要让 ISOLATED 的子进程带上信任根，走
+ * 环境变量 **QZ_CA_FILE=<pem 文件路径>**（qzjs --ca 即是它的前端；qzjs-rt
+ * 在启动时读它）。THREAD 模型下本函数直接生效，无需环境变量。
+ *
  * QZ_WITH_TLS=OFF 的构建里本函数仍可调用并正常返回（无消费点）。 */
 int qz_add_ca_pem(qz_t *rt, const char *pem);
 

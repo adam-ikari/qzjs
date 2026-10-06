@@ -754,6 +754,41 @@ int main(int argc, char **argv)
             }
         }
     }
+    /* 运行时 CA 信任库：父进程（qzjs --ca）经环境变量传递 —— 与 strict 模式
+     * 同一条路（子进程 exec 后继承 environ，无需改 argv 协议）。
+     *
+     * 为什么必须走 env：ISOLATED 模型下宿主与主 RT 是**两个进程**，各自持有
+     * 独立的 qz_t。父进程 qz_create 之后调 qz_add_ca_pem() 写的是父进程的
+     * rt->ca_pem，跑 JS 的是子进程、它的 ca_pem 恒为空 —— 不经这条传递，
+     * --ca 会静默无效（fetch 报 X509 verification failed，看起来像证书问题，
+     * 实际是信任库从没到达真正做握手的那一侧）。 */
+    {
+        const char *cafile = getenv("QZ_CA_FILE");
+        if (cafile && cafile[0]) {
+            FILE *f = fopen(cafile, "rb");
+            if (!f) {
+                fprintf(stderr, "qzjs-rt: QZ_CA_FILE unreadable: %s\n", cafile);
+                exit(2);
+            }
+            if (fseek(f, 0, SEEK_END) == 0) {
+                long sz = ftell(f);
+                if (sz > 0) {
+                    rewind(f);
+                    char *buf = (char *)malloc((size_t)sz + 1);
+                    if (buf) {
+                        size_t rd = fread(buf, 1, (size_t)sz, f);
+                        buf[rd] = '\0';
+                        if (qz_add_ca_pem(rt, buf) != 0) {
+                            fprintf(stderr, "qzjs-rt: QZ_CA_FILE load failed\n");
+                            free(buf); fclose(f); exit(2);
+                        }
+                        free(buf);
+                    }
+                }
+            }
+            fclose(f);
+        }
+    }
     rt->msg_head = &rt->msg_stub;
     rt->msg_tail = &rt->msg_stub;
     /* 子进程不消费邮箱（出站经 host_emit 上行 / worker 丢弃）：out_efd
