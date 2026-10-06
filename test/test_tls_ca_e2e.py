@@ -112,6 +112,26 @@ def run_qzjs(binpath, code, extra_args=()):
         capture_output=True, text=True, timeout=90,
     )
 
+def run_qzjs_script(binpath, script_path, extra_args=()):
+    """Run a script FILE (not -e): worker cases need a real .js file because
+    new Worker('file://...') takes a path, and the parent script itself must
+    be a file (not an -e string) for the worker's file:// URL to resolve.
+
+    Forces QZ_WORKER_BACKEND=thread: the PROCESS backend has a known
+    worker drop-out bug (documented at ci.yml in the runtime-perf job),
+    so under the CI default backend the worker's fetch result gets
+    silently truncated and this case cannot pass. THREAD is the backend
+    where worker async work actually completes (fixed by the
+    qz_wait_idle worker-accounting change); the PROCESS path is a
+    separate, pre-existing issue not in scope here.
+    """
+    env = dict(os.environ)
+    env["QZ_WORKER_BACKEND"] = "thread"
+    return subprocess.run(
+        [binpath] + list(extra_args) + [script_path],
+        capture_output=True, text=True, timeout=90, env=env,
+    )
+
 
 def assert_rejected(r, why):
     """Assert fetch FAILED for a certificate reason - not merely 'failed'.
@@ -186,6 +206,58 @@ def main():
             print("FAIL: wrong body %r (want %r)" % (got, BODY), file=sys.stderr)
             return 1
         print("ok   correct --ca -> handshake OK, body matches")
+
+        # 4) Same chain, but the fetch happens INSIDE A WORKER, not at the top
+        #    level. This is what PR#9 could not cover: a worker is a separate
+        #    qz_t, and before PR#12 it did not inherit the parent's CA trust
+        #    store -- so a worker fetching a private-CA host would fail with
+        #    X509 verification errors while the top-level fetch succeeded.
+        #    This case verifies the inheritance under a real handshake (the
+        #    gtest only checks the buffer is copied, not that mbedtls actually
+        #    trusts it).
+        #
+        #    NOTE: this case does NOT pin the worker idle-accounting (PR#14) --
+        #    the fetch here resolves fast enough that the parent's single
+        #    wait_idle wake suffices. PR#14's wake signal is pinned by the
+        #    gtest (parent_stays_busy_while_worker_has_pending_async_work)
+        #    and by manual variant-C (setTimeout+fetch hangs without it).
+        #    Keeping this case honest about what it covers.
+        worker_js = os.path.join(tmp, "worker_tls.js")
+        with open(worker_js, "w") as f:
+            f.write(
+                "fetch(%r).then(function(r){return r.text()})"
+                ".then(function(t){postMessage('BODY:'+t);})"
+                ".catch(function(e){postMessage('ERR:'+e.message);});0\n"
+                % url
+            )
+        main_js = os.path.join(tmp, "main_worker.js")
+        with open(main_js, "w") as f:
+            f.write(
+                "var w = new Worker('file://%s');"
+                "w.onmessage = function(e){console.log(e.data);};0\n"
+                % worker_js
+            )
+
+        # no --ca in worker: must reject for a certificate reason. Same
+        # strictness as case 1 -- a hang or timeout also "produces no BODY"
+        # but proves nothing about TLS.
+        if not assert_rejected(run_qzjs_script(args.qzjs_bin, main_js), "worker no --ca"):
+            return 1
+        print("ok   worker no --ca -> rejected (unknown CA)")
+
+        # correct --ca: worker inherits it (THREAD: via worker.c strdup;
+        # PROCESS: via QZ_CA_FILE in the spawned qzjs-rt). The handshake
+        # completes inside the worker and the body comes back to the parent.
+        r_wca = run_qzjs_script(args.qzjs_bin, main_js, ["--ca", ca_pem])
+        if "BODY:" not in r_wca.stdout:
+            print("FAIL: worker fetch with correct --ca did not return body\n%s"
+                  % (r_wca.stdout + r_wca.stderr), file=sys.stderr)
+            return 1
+        got = r_wca.stdout.split("BODY:", 1)[1].split("\n", 1)[0].strip()
+        if got != BODY.decode().strip():
+            print("FAIL: worker wrong body %r (want %r)" % (got, BODY), file=sys.stderr)
+            return 1
+        print("ok   worker + --ca -> handshake OK in worker, body matches")
 
         httpd.shutdown()
         print("PASS test_tls_ca_e2e")
