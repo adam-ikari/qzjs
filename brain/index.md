@@ -1,9 +1,10 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-04T03:42:03.390Z._
+_Auto-generated. Last updated 2026-10-06T00:16:27.378Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
+- [branch-management](pages/branch-management.md) — category: decision | tags: [git, workflow, branch, protection] | ## 分支命名（7 前缀）
 - [brand-display-name](pages/brand-display-name.md) — category: decision | tags: [brand, docs] | Qz.js 品牌显示名 = **Qz.js**（内部标识 qzjs）。
 - [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | <current best understanding — replace this with the real content>
 - [c-js-layering](pages/c-js-layering.md) — category: decision | tags: [arch, layering, policy] | # C/JS 分层原则与标准（判据摘要）
