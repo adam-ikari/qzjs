@@ -360,90 +360,22 @@ if(EXISTS "${QZ_QUICKJS_C99_PATCH}")
     endif()
 endif()
 
-# ── QuickJS-ng per-ctx job drain patch ────────────────────────────────────
-# Adds JS_DrainPendingJobsForContext(): qz_ctx_destroy needs to remove a
-# freed context's pending jobs from rt->job_list before JS_FreeContext, or
-# the next JS_ExecutePendingJob dereferences a dangling ctx pointer (UAF).
-# Applied unconditionally (working-tree-only; submodule stays clean).
-set(QZ_QUICKJS_DRAIN_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng-drain-jobs.patch")
-if(EXISTS "${QZ_QUICKJS_DRAIN_PATCH}")
-    execute_process(
-        COMMAND patch -p1 --dry-run -f -i "${QZ_QUICKJS_DRAIN_PATCH}"
-        WORKING_DIRECTORY "${QUICKJS_DIR}"
-        RESULT_VARIABLE _drain_patch_dry
-        OUTPUT_QUIET ERROR_QUIET)
-    if(_drain_patch_dry EQUAL 0)
-        execute_process(
-            COMMAND patch -p1 -f -i "${QZ_QUICKJS_DRAIN_PATCH}"
-            WORKING_DIRECTORY "${QUICKJS_DIR}"
-            RESULT_VARIABLE _drain_patch_apply ERROR_QUIET)
-        if(NOT _drain_patch_apply EQUAL 0)
-            message(FATAL_ERROR "Failed to apply quickjs-ng drain-jobs patch")
-        endif()
-        message(STATUS "Applied quickjs-ng drain-jobs patch (deps/quickjs-ng-drain-jobs.patch)")
-    else()
-        # Already applied (e.g. reconfigure) — verify the patched symbol is present.
-        execute_process(
-            COMMAND grep -c "JS_DrainPendingJobsForContext"
-                    "${QUICKJS_DIR}/quickjs.h"
-            OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE _drain_patch_check)
-        if(NOT _drain_patch_check EQUAL 0)
-            message(FATAL_ERROR
-                "quickjs-ng drain-jobs patch does not apply cleanly and is not "
-                "already applied. Regenerate deps/quickjs-ng-drain-jobs.patch.")
-        endif()
-    endif()
-endif()
+# ── QuickJS-ng per-ctx job drain ──────────────────────────────────────────
+# JS_DrainPendingJobsForContext now lives in the qzvm engine tree (PR #2).
+# No working-tree .patch needed; the symbol is always present.
 
 # ── QuickJS-ng bytecode reader hardening ──────────────────────────────────
 # Now lives in the engine tree (qzvm/adam-ikari/qzvm, PR #1) — the submodule
 # points at qzvm master which carries both the original hardening and the
 # GC-window SEGV fix. No working-tree .patch needed here anymore.
 
-# ── QuickJS-ng debugger patch ──────────────────────────────────────────────
-# When QZ_BUILD_DEBUGGER is ON, apply deps/quickjs-ng-debugger.patch to the
-# quickjs-ng submodule working tree BEFORE add_subdirectory so the patched
-# sources compile. The patch is the source of truth; the submodule stays clean
-# in git (working-tree-only modification). Patch failure = FATAL_ERROR with a
-# regenerate hint. QZ_DEBUG_SUPPORT is defined on the qjs target below.
+# ── QuickJS-ng debugger support ───────────────────────────────────────────
+# The DAP engine primitives (breakpoint opcodes, JS_SetDebuggerHandler, step
+# machinery) now live in the qzvm engine tree (PR #2) — no working-tree
+# .patch needed. QZ_BUILD_DEBUGGER only controls whether qzjs builds its DAP
+# adapter (src/debugger.c + src/debugger_dap.c) and defines QZ_DEBUG_SUPPORT
+# to wire the dispatch hook into the engine.
 if(QZ_BUILD_DEBUGGER)
-    set(QZ_QUICKJS_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng-debugger.patch")
-    if(NOT EXISTS "${QZ_QUICKJS_PATCH}")
-        message(FATAL_ERROR "QZ_BUILD_DEBUGGER=ON but deps/quickjs-ng-debugger.patch is missing")
-    endif()
-    execute_process(
-        COMMAND patch -p1 --dry-run -f -i "${QZ_QUICKJS_PATCH}"
-        WORKING_DIRECTORY "${QUICKJS_DIR}"
-        RESULT_VARIABLE _patch_dry
-        OUTPUT_VARIABLE _patch_out
-        ERROR_VARIABLE _patch_err)
-    if(_patch_dry EQUAL 0)
-        execute_process(
-            COMMAND patch -p1 -f -i "${QZ_QUICKJS_PATCH}"
-            WORKING_DIRECTORY "${QUICKJS_DIR}"
-            RESULT_VARIABLE _patch_apply)
-        if(NOT _patch_apply EQUAL 0)
-            message(FATAL_ERROR "Failed to apply quickjs-ng debugger patch:\n${_patch_err}")
-        endif()
-        message(STATUS "Applied quickjs-ng debugger patch (deps/quickjs-ng-debugger.patch)")
-    else()
-        # dry-run failed: either already applied, or genuinely won't apply.
-        # Distinguish by checking if the patched symbols already exist.
-        execute_process(
-            COMMAND grep -c "JS_SetDebuggerHandler"
-                    "${QUICKJS_DIR}/quickjs.h"
-            OUTPUT_VARIABLE _grep_out
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            RESULT_VARIABLE _grep_rc)
-        if(_grep_rc EQUAL 0 AND _grep_out GREATER 0)
-            message(STATUS "quickjs-ng debugger patch already applied")
-        else()
-            message(FATAL_ERROR
-                "quickjs-ng debugger patch does not apply cleanly:\n${_patch_err}\n"
-                "Regenerate deps/quickjs-ng-debugger.patch against the current "
-                "deps/quickjs-ng revision.")
-        endif()
-    endif()
     set(QZ_DEBUG_SUPPORT_DEFINE QZ_DEBUG_SUPPORT)
 endif()
 
