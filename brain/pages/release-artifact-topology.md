@@ -169,6 +169,37 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
 方向性结论成立。
 
 
+### 对象负载对比（2026-10-08 实测，修正"持平"结论）
+
+负载：`objbench(10000)` = 10000 次 `new_object + set a/b + get a`（对象操作走 quickjs
+JS_NewObject/SetPropertyStr/GetPropertyStr）。
+
+| 模式 | per objbench(10000) | vs 手写 C | vs 解释器 |
+|------|---------------------|-----------|----------|
+| 手写 C -O3（直接调 quickjs C API） | 2.29ms | 1.0x | 1.22x |
+| qzjs 解释器（JS 对象循环） | 1.875ms | 0.82x | 1.0x |
+| **wasm→wasm2c→so -O3** | 3.17ms | **1.38x** | 1.69x |
+| AS wasm AOT（iwasm + qzrt native-lib） | ~17ms | **7.4x** | 9.1x |
+| AS wasm 解释（iwasm） | ~21ms | 9.2x | 11.2x |
+
+**关键修正（推翻"so 与 wasm AOT 持平"结论）**：
+
+1. **wasm2c so 抽象税在对象负载下 1.38x（小于数值 1.76x）**——对象操作主开销在
+   quickjs C API（JS_NewObject/SetPropertyStr），wasm2c 的 tagged 值转换 + 函数指针
+   间接相对小。
+2. **wasm AOT 抽象税在对象负载下 7.4x（远大于数值 1.78x）**——每次对象操作都跨
+   wasm↔host 边界（import 调用），边界切换开销巨大。对象操作密集时 wasm AOT
+   劣势显现。
+3. **对象负载下 wasm2c so 远优于 wasm AOT**（1.38x vs 7.4x 税）。此前"so 与 wasm
+   AOT 性能持平"仅对数值负载成立，对象负载 so 显著优。
+4. **解释器对象负载接近手写 C**（0.82x）——对象操作主开销在引擎 C 实现
+   （JS_NewObject/SetPropertyStr），解释器循环开销相对小；且解释器避免
+   JSValue↔int 转换（JS 直接 o.a=i），C 版的 JS_NewInt32/JS_ToInt32 是额外开销。
+
+**对发行路线的含义**：ELF 形态（含 so 打包）在对象密集负载下远优于独立 wasm
+形态（含 wasm 模块）——so 直接调 quickjs C API，wasm 要跨 import 边界。
+数值密集负载两者持平。混合负载的性能取决于数值/对象比例。
+
 ## 真正 AOT 的定义（2026-10-07 用户澄清）
 
 **qzjs 实现真正 AOT 的方式 = 编译 TS 代码为 JS + wasm/so**（链路 A）。
