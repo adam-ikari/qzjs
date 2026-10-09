@@ -44,11 +44,26 @@ class Module {
         this._importIdx[key] = idx;
         return idx;
     }
+    declareFunc(name, params, results) {          // 两阶段：先登记签名（支持前向引用）
+        const t = this.funcType(params, results);
+        const codeIdx = this.funcs.length;                    // codes 数组索引（本地函数序号）
+        const fidx = codeIdx + this.imports.length;           // call 指令用（函数区全局索引）
+        this.funcs.push(t);
+        this._funcIdx[name] = fidx;
+        this._codeIdx = this._codeIdx || {};
+        this._codeIdx[name] = codeIdx;
+        this.codes.push(null);
+        return fidx;
+    }
+    startBody(name, locals) { this._cur = { idx: (this._codeIdx || {})[name], locals: locals || [], body: [] }; }
+    endBody() { if (this._cur) { this._cur.body.push(OP.end); this.codes[this._cur.idx] = { locals: this._cur.locals, body: this._cur.body }; this._cur = null; } }
     addFunc(name, params, results, locals) {
         const t = this.funcType(params, results);
         const fidx = this.funcs.length + this.imports.length; // funcs 索引 = imports + 本地函数序
         this.funcs.push(t);
         this._funcIdx[name] = fidx;
+        this._codeIdx = this._codeIdx || {};
+        this._codeIdx[name] = fidx - this.imports.length;
         this._cur = { name, locals: locals || [], body: [] };
         return fidx;
     }

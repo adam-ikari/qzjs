@@ -60,16 +60,15 @@ class Emitter {
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         // 模式：参数全 number 注解 → 裸 i32 快路径；否则 tagged（动态值）路径
         this.mode = f.parameters.every(p => p.type && p.type.getText && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged";
-        if (this.mode === "tagged") { for (const k of Object.keys(QZ)) this.m.importFn("qz", k, QZ[k].params, QZ[k].results); }
         this.scratch = f.parameters.length + locals.length;   // 末尾追加 scratch（后缀 ++/-- 需要）
-        this.m.addFunc(f.name.text, params, isVoid ? [] : ["i32"], locals.map(() => "i32").concat(["i32"]));
+        this.m.startBody(f.name.text, locals.map(() => "i32").concat(["i32"]));
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
         this.depth = 0; this.labels = [];
         if (this.mode === "tagged") this.emitTaggedBlock(f.body);
         else this.emitBlock(f.body);
-        this.m.finish();
+        this.m.endBody();
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
     }
@@ -245,9 +244,16 @@ function compileTS(input, outWasm, opts = {}) {
     // 预注册 import（qz.math_floor 等）
     if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
     const em = new Emitter(m);
-    for (const st of sf.statements) {
-        if (ts.isFunctionDeclaration(st) && st.name) em.emitFunc(st);
+    const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
+    // 阶段1：任一函数为 tagged → 注册全部 qz.* import；登记所有函数签名（支持前向/互递归）
+    const anyTagged = fns.some(f => !f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword));
+    if (anyTagged) registerQz(m);
+    for (const st of fns) {
+        const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
+        m.declareFunc(st.name.text, st.parameters.map(() => "i32"), isVoid ? [] : ["i32"]);
     }
+    // 阶段2：逐个发射 body
+    for (const st of fns) em.emitFunc(st);
     fs.writeFileSync(outWasm, m.build());
     return { module: m, strings: em.strings || [] };
 }
