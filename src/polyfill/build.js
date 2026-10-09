@@ -45,7 +45,9 @@ const { execSync } = require('child_process');
 // bytecode drift between invocations and every rebuild shows a bogus diff.
 process.chdir(__dirname);
 
-const ROOT_DIR = path.resolve(__dirname, '..');
+// monorepo 后 build.js 在 src/polyfill/，仓库根是上两层（此前 polyfill/ 在根下，
+// 上移一层即可；下移后漏改，手工 npm run build 的 fallback 会把 dist 写到 src/）。
+const ROOT_DIR = path.resolve(__dirname, '..', '..');
 // 输出目录：CMake 经 QZ_POLYFILL_GEN_DIR 指定构建目录（中间产物不进 src/）；
 // 无 env 时 fallback 到仓库 dist/（手工 npm run build 场景）。
 const GEN_DIR = process.env.QZ_POLYFILL_GEN_DIR || path.join(ROOT_DIR, 'dist');
@@ -76,6 +78,23 @@ function qjscVersion(qjsc) {
   }
   const m = out.match(/version\s+(\d+\.\d+\.\d+)/i);
   return m ? m[1] : null;
+}
+
+// pinned 的 deps/quickjs-ng 版本（QJS_VERSION_MAJOR/MINOR/PATCH）。读不到返回
+// null（调用方视为「不校验」，而不是拿一个硬编码版本去比）。
+function quickjsNgVersion() {
+  try {
+    const h = fs.readFileSync(
+      path.join(ROOT_DIR, 'deps', 'quickjs-ng', 'quickjs.h'), 'utf8');
+    const g = (k) => {
+      const m = h.match(new RegExp('#define\\s+QJS_VERSION_' + k + '\\s+(\\d+)'));
+      return m ? m[1] : null;
+    };
+    const maj = g('MAJOR'), min = g('MINOR'), pat = g('PATCH');
+    return (maj && min && pat) ? (maj + '.' + min + '.' + pat) : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 
@@ -204,9 +223,13 @@ if (isWatch) {
     process.exit(1);
   }
   const _qjscVer = qjscVersion(QJSC);
-  if (_qjscVer && !_qjscVer.startsWith('0.16.')) {
+  // 期望版本从 pinned 的 deps/quickjs-ng 头读，别硬编码：submodule 升级后硬编码
+  // 的字符串必然漂移，每次构建刷一条假 WARNING（0.16.x 时代码已升 0.17.0）。
+  const _expectedVer = quickjsNgVersion();
+  if (_qjscVer && _expectedVer && _qjscVer !== _expectedVer) {
     console.error('[qzjs] WARNING: ' + QJSC + ' is version ' + _qjscVer +
-      ', expected 0.16.x (BC_VERSION 27). Bytecode may be rejected by the engine.');
+      ', expected ' + _expectedVer + ' (pinned deps/quickjs-ng). ' +
+      'Bytecode may be rejected by the engine.');
   }
 
   // Compile <src> with qjsc → <bcPath> bytecode file; return the bytes.
