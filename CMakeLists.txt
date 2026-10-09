@@ -612,63 +612,64 @@ if(QZ_WITH_WASM3)
 endif()
 
 # ============================================================================
-# Core library (qzjs.c + bridge.c)
+# Core library (src/host/ + src/msg/ + src/ipc/ + src/io/ + src/control/)
 #
 # Source files that are always compiled (no feature toggle):
-#   qzjs.c, bridge.c, context.c, ext_lifecycle.c, polyfill_*.c (mode-dependent),
-#   worker_boot_default.c, thread.c (执行模型 A 自持线程主循环), msgq.c
-#   (入站消息 FIFO), ipc_envelope.c (M-P0 进程信封 fb 编解码)
+#   src/host/{qzjs.c,bridge.c,thread.c,worker.c,polyfill_load.c},
+#   src/msg/msgq.c (入站消息 FIFO), src/ipc/ipc_envelope.c (M-P0 进程信封 fb
+#   编解码), src/control/control.c, context.c/ext_lifecycle.c (src/qzvm),
+#   polyfill_*.c (mode-dependent), worker_boot_default.c
 # Extension sources are guarded by QZ_WITH_* feature toggles so they are
 # only compiled when the corresponding feature is enabled. This avoids wasting
 # compile time on dead code (e.g. ext_wasm3.c when WASM3=OFF).
 # ============================================================================
 set(_qz_core_sources
-    src/qzjs.c
-    src/bridge.c
+    src/host/qzjs.c
+    src/host/bridge.c
     ${QZVM_SOURCES}
     ${_polyfill_gen_c}
-    src/polyfill_load.c
+    src/host/polyfill_load.c
     ${_polyfill_gen_dir}/worker_boot_default.c
-    src/thread.c
-    src/msgq.c
-    src/ipc_envelope.c
-    src/ipc_ctl.c
-    src/uv_io.c
-    src/worker.c
-    src/control.c
+    src/host/thread.c
+    src/msg/msgq.c
+    src/ipc/ipc_envelope.c
+    src/ipc/ipc_ctl.c
+    src/io/uv_io.c
+    src/host/worker.c
+    src/control/control.c
 )
 if(QZ_WITH_COMPRESS)
-    list(APPEND _qz_core_sources src/ext_compress.c)
+    list(APPEND _qz_core_sources src/ext/ext_compress.c)
 endif()
 if(NOT QZ_BUILD_TESTS)
-    # M-P1 IPC process channel (src/ipc_process.c) uses real-libuv pipe APIs
+    # M-P1 IPC process channel (src/ipc/ipc_process.c) uses real-libuv pipe APIs
     # (uv_pipe_t/uv_fileno) that mock_libuv does not implement, and its spawn
     # path is only exercisable by real-process e2e (design §10.1). Test builds
     # (QZ_BUILD_TESTS) compile the core against mock_libuv.h and exclude it.
-    list(APPEND _qz_core_sources src/ipc_process.c)
+    list(APPEND _qz_core_sources src/ipc/ipc_process.c)
 
-    # CTL-2 本地控制端点（src/control_endpoint.c）：uv_pipe + SO_PEERCRED，
+    # CTL-2 本地控制端点（src/control/control_endpoint.c）：uv_pipe + SO_PEERCRED，
     # 与 ipc_process.c 同款——mock 构建无 uv_pipe，mock 下 LOCAL 档由
     # control.c 的 no-op stub 兜底（端点不可用，命令仍走进程内路径）。
-    list(APPEND _qz_core_sources src/control_endpoint.c)
+    list(APPEND _qz_core_sources src/control/control_endpoint.c)
 
 endif()
 if(QZ_PROCESS_MODEL STREQUAL "ISOLATED" AND NOT QZ_BUILD_TESTS)
-    # M-P2：宿主↔主RT 进程分离（src/rt_host.c）。THREAD 编译不编该路径——语义门见
+    # M-P2：宿主↔主RT 进程分离（src/host/rt_host.c）。THREAD 编译不编该路径——语义门见
     # §1.4：THREAD 编译下显式 worker_backend=PROCESS 求值报错。（§2.1「THREAD 不
     # 编入 ipc_*.c」的源级排除延后：先达成语义门，偏差记于 plan 状态。）
-    list(APPEND _qz_core_sources src/rt_host.c)
+    list(APPEND _qz_core_sources src/host/rt_host.c)
 endif()
 if(QZ_WITH_CRYPTO_EXT)
-    list(APPEND _qz_core_sources src/ext_crypto.c)
+    list(APPEND _qz_core_sources src/ext/ext_crypto.c)
 endif()
 if(QZ_WITH_TEXTCODEC)
-    list(APPEND _qz_core_sources src/ext_textcodec.c)
+    list(APPEND _qz_core_sources src/ext/ext_textcodec.c)
 endif()
 
 # TCP socket PAL — always available (excluded from mock-libuv test builds)
 if(NOT QZ_BUILD_TESTS)
-    list(APPEND _qz_core_sources src/tcp_io.c)
+    list(APPEND _qz_core_sources src/io/tcp_io.c)
 endif()
 
 
@@ -769,12 +770,12 @@ endif()
 # ext_compress.c includes the vendored miniz.h, whose static-inline helpers
 # (zError/crc32/inflate/…) trigger -Wunused-function under our -Werror. Relax
 # just that warning for this one file (third-party header, not qzjs code).
-set_source_files_properties(src/ext_compress.c PROPERTIES
+set_source_files_properties(src/ext/ext_compress.c PROPERTIES
     COMPILE_OPTIONS "-Wno-unused-function")
 
 # polyfill_load.c includes the vendored miniz.h in mode A for tinfl inflate;
 # its static-inline helpers trigger the same -Wunused-function as ext_compress.c.
-set_source_files_properties(src/polyfill_load.c PROPERTIES
+set_source_files_properties(src/host/polyfill_load.c PROPERTIES
     COMPILE_OPTIONS "-Wno-unused-function")
 
 # Warn-hardening + strict C99 for qzjs's own sources.
@@ -985,11 +986,11 @@ endif()
 # CLI — standalone WinterTC runtime (dogfoods the qzjs C API)
 # ============================================================================
 if(QZ_BUILD_CLI)
-    # 单入口：qzjs_main.c（argv 分发 CLI/RT 进程模式），cli.c（CLI 交互）合并
-    add_executable(qz_cli src/qzjs_main.c src/cli.c)
+    # 单入口：src/host/qzjs_main.c（argv 分发 CLI/RT 进程模式），src/cli/cli.c（CLI 交互）合并
+    add_executable(qz_cli src/host/qzjs_main.c src/cli/cli.c)
     set_target_properties(qz_cli PROPERTIES OUTPUT_NAME qzjs)
     # cli.c 编在 qz_cli 里，不在 qzjs 库里——qzjs 的 PRIVATE 宏到不了它。
-    # 不注入的话 CLI 会静默用 src/cli.c 里的 fallback 版本号，与真源漂移
+    # 不注入的话 CLI 会静默用 src/cli/cli.c 里的 fallback 版本号，与真源漂移
     # （实测：真源已是 0.3.0，qzjs --version 仍报 0.2.0）。
     target_compile_definitions(qz_cli PRIVATE QZ_VERSION="${PROJECT_VERSION}")
     if(QZ_BUILD_TESTS)
@@ -1005,7 +1006,7 @@ if(QZ_BUILD_CLI)
     else()
         # 非 test：合并 rt_main（M-P1/P2 进程模式，需 real-libuv pipe）。
         # qzjs_main.c 据此定义 QZ_WITH_RT_MAIN 才分发到 rt_main_entry。
-        target_sources(qz_cli PRIVATE src/rt_main.c)
+        target_sources(qz_cli PRIVATE src/host/rt_main.c)
         target_compile_definitions(qz_cli PRIVATE QZ_WITH_RT_MAIN)
         target_link_libraries(qz_cli PRIVATE qz_full)
     endif()
@@ -1037,7 +1038,7 @@ endif()
 # （test 构建无控制面端点）。
 # ============================================================================
 if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
-    add_executable(qz_ctl src/ctl_cli.c)
+    add_executable(qz_ctl src/cli/ctl_cli.c)
     set_target_properties(qz_ctl PROPERTIES OUTPUT_NAME qzjs-ctl)
     qz_enable_warnings(qz_ctl)
 endif()

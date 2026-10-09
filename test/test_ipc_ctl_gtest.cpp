@@ -10,7 +10,7 @@
 // 非数字 / 非法 JSON / 超长 / 空）、以及 SYSTEM 兜底（带 qzjs 但不属于任何
 // 已知家族 → SYSTEM，绝不落回 NONE 去当用户命令路由）。
 
-#include "ipc_process.h"
+#include "ipc/ipc_process.h"
 
 #include <gtest/gtest.h>
 

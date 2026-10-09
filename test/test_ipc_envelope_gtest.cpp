@@ -6,7 +6,7 @@
 // (C <-> Python flatbuffers) lives in ipc_envelope_fbcheck.py (drives the
 // ipc_envelope_cli helper); this file is the pure-C deterministic gate.
 
-#include "ipc_envelope.h"
+#include "ipc/ipc_envelope.h"
 
 #include <gtest/gtest.h>
 

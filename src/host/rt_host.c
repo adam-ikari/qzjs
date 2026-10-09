@@ -23,7 +23,7 @@
  */
 
 #include "base/qz_rt.h"
-#include "ipc_process.h"
+#include "ipc/ipc_process.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>

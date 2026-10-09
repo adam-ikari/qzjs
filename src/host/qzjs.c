@@ -49,7 +49,7 @@ static int qz_efd_create(void)
 #endif
 
 #ifndef QZ_USE_MOCK_LIBUV
-#include "ipc_process.h"
+#include "ipc/ipc_process.h"
 #endif
 
 /* ================================================================

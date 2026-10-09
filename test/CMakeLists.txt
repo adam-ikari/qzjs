@@ -106,7 +106,7 @@ endif()
 # EXCLUDE 不产出 CLI → fbcheck 测试找不到二进制必挂（本地增量构建残留的
 # 旧产物会掩盖此问题，见 test262 runner 同款教训）。纯 C99 极小，全量无害。
 add_executable(ipc_envelope_cli ipc_envelope_cli.c
-               ../src/ipc_envelope.c)
+               ../src/ipc/ipc_envelope.c)
 target_include_directories(ipc_envelope_cli PRIVATE ${PROJECT_SOURCE_DIR}/src)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(NOT Python3_Interpreter_FOUND)

@@ -38,9 +38,9 @@
 #include <limits.h>   /* PATH_MAX — strict 模式 realpath 缓冲 */
 /* ipc_envelope.h 是纯 C99（无 uv 依赖），mock 构建也要它——THREAD 路径的
  * msgq flags 与 kind 常量同源（bridge_kind_arg / QZ_MSG_FLAG_PORT_TRANSFER）。 */
-#include "ipc_envelope.h"
+#include "ipc/ipc_envelope.h"
 #ifndef QZ_USE_MOCK_LIBUV
-#include "ipc_process.h"
+#include "ipc/ipc_process.h"
 #endif
 
 /* ================================================================

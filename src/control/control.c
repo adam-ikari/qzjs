@@ -20,7 +20,7 @@
  * 已从 ipc_process.c 迁到 ipc_ctl.c，而 ipc_ctl.c 始终编入，所以 classify 与
  * QZ_IPC_MAIN_ID 在 mock 构建下同样可得。那个条件 include 变成死代码，还顺带
  * 推翻了一处注释（见 qz_control_route 里 QZ_IPC_MAIN_ID 那行）。 */
-#include "ipc_process.h"
+#include "ipc/ipc_process.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
