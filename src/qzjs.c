@@ -13,7 +13,7 @@
  * → JS_FreeRuntime → 关闭 loop）。
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>

@@ -11,7 +11,7 @@
  */
 
 #include "ipc_process.h"
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <cJSON.h>
 #include <stddef.h>
 #include <stdlib.h>

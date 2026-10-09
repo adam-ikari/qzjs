@@ -10,7 +10,7 @@
  *   - VM 内（context.c/ext_wamr.c/qzc.c）直接同层调用
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <string.h>
 #include <stdlib.h>
 

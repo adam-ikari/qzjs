@@ -12,7 +12,7 @@
  * libuv 回调（timer/io/wake）本来就跑在 qzjs 线程，直接 JS_Call 即可。
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <stdlib.h>
 #include <string.h>
 

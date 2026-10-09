@@ -13,7 +13,7 @@
  * 仅真实 libuv 构建编入（mock 构建无 uv_pipe；见 CMakeLists）。
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 
 #include <stdlib.h>
 #include <string.h>

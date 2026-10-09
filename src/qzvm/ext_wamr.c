@@ -9,7 +9,7 @@
  * Otherwise, provides stub JS API surface that throws on use.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <string.h>
 #include <stdlib.h>
 #include <sched.h>   /* sched_yield: WAMR singleton init spin */

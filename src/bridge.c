@@ -27,7 +27,7 @@
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

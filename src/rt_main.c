@@ -23,7 +23,7 @@
  * Design: docs/plans/2026-09-04-multi-process-model.md §5, §6.2, §9.2, M-P1/M-P2.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include "ipc_process.h"
 #include <stdlib.h>
 #include <string.h>

@@ -736,7 +736,8 @@ endif()
 target_include_directories(qzjs PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-# src/qzvm/（VM 定制层）include src/qz_internal.h（共享内部头，留在 src/）
+# src/ 内部头按层拆分（base/qz_types.h · qz_core.h · qz_rt.h · polyfill.h · msg/qz_msg.h），
+# 统一经 src/ 根解析（#include "base/qz_rt.h"）；src/qzvm/ 与宿主 TU 同走该 include 根。
 target_include_directories(qzjs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Vendored headers reach qzjs's TUs as -isystem: the -Wall -Wextra -Wpedantic

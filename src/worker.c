@@ -22,7 +22,7 @@
  * 回收槽位（id = 索引+1），否则反复 spawn/terminate 会耗尽 QZ_MAX_WORKERS。
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>

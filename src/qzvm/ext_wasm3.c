@@ -8,7 +8,7 @@
  * Otherwise, provides stub JS API surface that throws on use.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <string.h>
 
 /* QuickJS registers getter/setter functions via JS_NewCFunction2, which takes

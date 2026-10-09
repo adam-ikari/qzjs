@@ -15,7 +15,7 @@
  * 设计：docs/plans/2026-09-04-control-plane-design.md §1-§3、§6。
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 /* 无条件 include（早先这里是 #ifndef QZ_USE_MOCK_LIBUV 包着的）：qz_ipc_ctl_classify
  * 已从 ipc_process.c 迁到 ipc_ctl.c，而 ipc_ctl.c 始终编入，所以 classify 与
  * QZ_IPC_MAIN_ID 在 mock 构建下同样可得。那个条件 include 变成死代码，还顺带

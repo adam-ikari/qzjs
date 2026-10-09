@@ -11,7 +11,7 @@
  *
  * Compiled in only when QZ_DEBUG_SUPPORT is defined (QZ_BUILD_DEBUGGER=ON).
  */
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 
 #ifdef QZ_DEBUG_SUPPORT
 

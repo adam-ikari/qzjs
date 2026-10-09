@@ -13,7 +13,7 @@
  * crypto.subtle will fall back to the JS implementation.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 
 #if QZ_WITH_CRYPTO_EXT
 

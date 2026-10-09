@@ -14,7 +14,7 @@
  *   host               — delegates to the weak qz_polyfill_load_custom().
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

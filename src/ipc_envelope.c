@@ -2,7 +2,7 @@
  * IPC Envelope codec — see ipc_envelope.h for schema + canonical layout.
  */
 #include "ipc_envelope.h"
-#include "le_bytes.h"
+#include "base/le_bytes.h"
 
 
 #include <string.h>

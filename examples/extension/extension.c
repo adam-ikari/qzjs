@@ -17,7 +17,7 @@
  */
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "../../src/qz_internal.h"  /* qz_get_active_jsctx（内部辅助） */
+#include "../../src/base/qz_rt.h"
 
 /* 原生函数：greet(name) → 返回字符串 */
 static JSValue js_greet(JSContext *ctx, JSValueConst this_val,

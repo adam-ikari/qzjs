@@ -9,7 +9,7 @@
  * is by count (ctx->extensions_count), not by a NULL sentinel.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <stdlib.h>
 
 /* Iterate the extension table by count, skipping NULL slots (disabled

@@ -7,7 +7,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

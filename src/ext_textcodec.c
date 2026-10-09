@@ -9,7 +9,7 @@
  * per-character JS function call overhead and string concatenation.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 
 #if QZ_WITH_TEXTCODEC
 

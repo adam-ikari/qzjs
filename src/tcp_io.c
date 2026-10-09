@@ -11,7 +11,7 @@
  * provides protocol semantics.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <uv.h>
 #include <string.h>
 #include <strings.h>

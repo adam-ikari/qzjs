@@ -31,7 +31,7 @@
  *     (publish-before-signal: 丢唤醒免疫，只要宿主遵守三步消费协议)。
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>

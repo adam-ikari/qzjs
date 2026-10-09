@@ -4,7 +4,7 @@
  * Context creation, destruction, and helper functions for multi-context support.
  */
 
-#include "qz_internal.h"
+#include "base/qz_rt.h"
 #include "qzjs/qz_ext_registry.h"   /* QZ_EXTENSIONS table */
 #include <stdlib.h>
 #include <string.h>

@@ -4,7 +4,7 @@
 #pragma once
 #include "qzjs/qzjs.h"
 #ifdef QZ_USE_MOCK_LIBUV
-#include "qz_internal.h"   /* mock 构建下拿到完整 qz_t 布局（访问 h->rt->loop） */
+#include "base/qz_rt.h"
 #endif
 #include "mock_libuv.h"
 #include <gtest/gtest.h>

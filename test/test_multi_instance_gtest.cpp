@@ -13,7 +13,7 @@
 #include "test_host.h"
 
 #ifdef QZ_USE_MOCK_LIBUV
-#include "qz_internal.h"   /* mock 构建下访问 rt->thread_joined 内部标志 */
+#include "base/qz_rt.h"
 #endif
 #include <string>
 
