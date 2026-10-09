@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-/* qzrt.js — qz.* 运行时（qzjs 侧 JS 实现）。
+/* qzvm.js — qz.* 运行时（qzjs 侧 JS 实现）。
  * tagged i32 值模型：bit0=0 数值(v>>1) | bit0=1 handle(v>>1，handles 表索引)。
- * emitter 的 tagged 模式产物通过 WebAssembly.instantiate 的 { qz: qzrt(strings) } import 调用本运行时。
+ * emitter 的 tagged 模式产物通过 WebAssembly.instantiate 的 { qz: qzvm(strings) } import 调用本运行时。
  *
- * 用法: const qz = require('./qzrt.js').makeQz(["k0","k1",...]);
+ * 用法: const qz = require('./qzvm.js').makeQzvm(["k0","k1",...]);
  *        new WebAssembly.Instance(module, { qz });   // strings 由 emitter 输出
  */
 "use strict";
 
-function makeQz(strings) {
+function makeQzvm(strings) {
   const handles = [undefined];            // index 0 保留（tagged handle 0 无效）
   const isH = (v) => (v & 1) === 1;
   const toJS = (v) => (isH(v) ? handles[v >>> 1] : (v >>> 1));
@@ -47,11 +47,11 @@ function makeQz(strings) {
   };
 }
 
-module.exports = { makeQz };
+module.exports = { makeQzvm };
 
 if (require.main === module) {
   // 自检：tagged 编解码往返
-  const qz = makeQz(["a", "b"]);
+  const qz = makeQzvm(["a", "b"]);
   const n = qz._fromJS(42);            // 42<<1 = 84
   const o = qz.object_new();
   qz.object_set(o, 0, n);
