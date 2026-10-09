@@ -1009,6 +1009,19 @@ if(QZ_BUILD_CLI)
         target_sources(qz_cli PRIVATE src/host/rt_main.c)
         target_compile_definitions(qz_cli PRIVATE QZ_WITH_RT_MAIN)
         target_link_libraries(qz_cli PRIVATE qz_full)
+
+        # 单入口设计（qzjs_main.c 按 argv 分发 CLI/RT）产出的唯一 ELF 是 qzjs，
+        # 但「伴随二进制」发现契约未变——resolve_binary 找 <exe_dir>/qzjs-rt、
+        # examples 注入 QZ_RT_SERVER=<build>/qzjs-rt、e2e 脚本 pgrep -x qzjs-rt。
+        # 缺它 = 每个真 ISOLATED 构建（qz_create spawn 主RT）直接 ENOENT，
+        # 表现为 "qz_create failed"/"runtime init failed"，且无声指出根因。
+        # 生成 symlink（非第二份 ELF）：comm 名随 exec 路径 = qzjs-rt，pgrep 命中；
+        # argv 分发照常。5342631a 删独立 qz_rt target 时漏了这条。
+        add_custom_command(TARGET qz_cli POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E create_symlink
+                $<TARGET_FILE_NAME:qz_cli>
+                $<TARGET_FILE_DIR:qz_cli>/qzjs-rt
+            COMMENT "Symlink qzjs-rt -> qzjs (companion-binary discovery contract)")
     endif()
 
     # rt_main.c 用 src/ 内部头（#include "base/qz_rt.h" · "ipc/ipc_process.h"），
@@ -1123,15 +1136,18 @@ install(TARGETS ${_qz_install_targets}
     ARCHIVE DESTINATION lib
 )
 
-# 可执行产物（qz_cli/qz_rt/qz_ctl 的 OUTPUT_NAME 分别是 qzjs / qzjs-rt /
-# qzjs-ctl）。此前 install 只覆盖库与头文件，发布 tarball 里没有任何可执行文件
-# ——第三方拿到包却跑不起来。用 TARGET 判断而非 QZ_BUILD_CLI（后者与 tests 的
-# 组合会漏掉本该出的 qzjs-rt）。
-foreach(_qz_exe qz_cli qz_rt qz_ctl)
+# 可执行产物（qz_cli/qz_ctl 的 OUTPUT_NAME 分别是 qzjs / qzjs-ctl）。此前
+# install 只覆盖库与头文件，发布 tarball 里没有任何可执行文件——第三方拿到包
+# 却跑不起来。qzjs-rt 无独立 target（5342631a 单入口合并），由 qz_cli 的
+# POST_BUILD symlink 提供，随构建树同装——否则裸 tarball 跑不了 ISOLATED。
+foreach(_qz_exe qz_cli qz_ctl)
     if(TARGET ${_qz_exe})
         install(TARGETS ${_qz_exe} RUNTIME DESTINATION bin)
     endif()
 endforeach()
+if(TARGET qz_cli AND NOT QZ_BUILD_TESTS)
+    install(FILES $<TARGET_FILE_DIR:qz_cli>/qzjs-rt DESTINATION bin)
+endif()
 install(DIRECTORY include/qzjs
     DESTINATION include
 )
