@@ -35,6 +35,12 @@ class Module {
         this._typeIdx[key] = idx;
         return idx;
     }
+    importMemory(module, field, min, max) {     // memory import（WAMR AOT 要求内存来自宿主）
+        const idx = this.imports.length;
+        this.imports.push({ module, field, memory: { min, max } });
+        this._importIdx[module + "." + field] = idx;
+        return idx;
+    }
     importFn(module, field, params, results) {
         const key = module + "." + field;
         if (this._importIdx[key] !== undefined) return this._importIdx[key];
@@ -86,6 +92,7 @@ class Module {
     i32Eqz() { this._emit(OP.i32_eqz); }
     i32Eq() { this._emit(OP.i32_eq); } i32Ne() { this._emit(OP.i32_ne); } i32LtS() { this._emit(OP.i32_lt_s); } i32GtS() { this._emit(OP.i32_gt_s); } i32LeS() { this._emit(OP.i32_le_s); } i32GeS() { this._emit(OP.i32_ge_s); }
     f64Eq() { this._emit(OP.f64_eq); } f64Lt() { this._emit(OP.f64_lt); } f64Gt() { this._emit(OP.f64_gt); }
+    i32Shl() { this._emit(OP.i32_shl); } i32ShrU() { this._emit(OP.i32_shr_u); } i32Or() { this._emit(OP.i32_or); } i32And() { this._emit(OP.i32_and); }
     i32And() { this._emit(OP.i32_and); } i32Or() { this._emit(OP.i32_or); } i32Xor() { this._emit(OP.i32_xor); }
     // 控制流（label 用索引引用，wasm 相对深度）
     block(t) { this._emit(OP.block, t ? VAL[t] : VAL.void); }
@@ -103,9 +110,13 @@ class Module {
     i32Store(align, offset) { this._emit(OP.i32_store, ...uleb(align), ...uleb(offset)); }
     i32Load(align, offset) { this._emit(OP.i32_load, ...uleb(align), ...uleb(offset)); }
     // export
-    exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName] }); }
-    exportMemory() { this.exports.push({ name: "memory", idx: this.memoryIdx() }); }
-    memoryIdx() { return this.imports.length + this.funcs.length; } // memory 段索引（import 后有 func 区）
+    exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName], kind: 0x00 }); }
+    exportMemory() { this.exports.push({ name: "memory", idx: this.memoryIdx(), kind: 0x02 }); }
+    memoryIdx() {   // memory 索引空间独立于 func：无 memory import 时本地 memory 索引 = 0
+        let n = 0;
+        for (const imp of this.imports) if (imp.memory) n++;
+        return n;
+    }
 
     // ---------- 段编码 ----------
     build() {
@@ -122,11 +133,12 @@ class Module {
         }
         // import 段
         if (this.imports.length) {
-            const body = vec(this.imports.map(imp => [
-                ...uleb(imp.module.length), ...[...Buffer.from(imp.module)],
-                ...uleb(imp.field.length), ...[...Buffer.from(imp.field)],
-                0x00, ...uleb(imp.type)  // func import, type idx
-            ]));
+            const body = vec(this.imports.map(imp => {
+                const head = [...uleb(imp.module.length), ...[...Buffer.from(imp.module)],
+                              ...uleb(imp.field.length), ...[...Buffer.from(imp.field)]];
+                if (imp.memory) return [...head, 0x02, 0x03, ...uleb(imp.memory.min), ...uleb(imp.memory.max)];  // memory: shared + has max（WAMR AOT 要求 shared）
+                return [...head, 0x00, ...uleb(imp.type)];   // func import, type idx
+            }));
             out.push(2, ...uleb(body.length), ...body);
         }
         // function 段
@@ -136,14 +148,16 @@ class Module {
         }
         // memory 段
         if (this.memory !== null) {
-            const body = [0x01, 0x00, ...uleb(this.memory), ...uleb(this.memory)]; // flags=0 (min), max
+            // vec(memorytype)：count=1 + limits{flags=0x01(has max), min, max}
+            // 非 shared（shared 需 import，WAMR 不接受本地定义）
+            const body = [0x01, 0x00, ...uleb(this.memory)];   // count=1 + limits{flags=0x00(min only), min} —— WAMR classic AOT 不支持 max
             out.push(5, ...uleb(body.length), ...body);
         }
         // export 段
         if (this.exports.length) {
             const body = vec(this.exports.map(e => [
                 ...uleb(e.name.length), ...[...Buffer.from(e.name)],
-                0x00, ...uleb(e.idx)  // kind=func
+                e.kind === undefined ? 0x00 : e.kind, ...uleb(e.idx)   // 0x00=func 0x02=memory
             ]));
             out.push(7, ...uleb(body.length), ...body);
         }
