@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [bytecode, release, artifact, wasm, wintertc, abi]
 created: "2026-10-07T15:07:14"
-updated: "2026-10-09T05:41:46"
+updated: "2026-10-09T06:07:42"
 ---
 
 <!-- compiled_truth -->
@@ -351,4 +351,10 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
   kind: decision
   summary: "qzvm/qzjs 边界治理（2026-10-09）：消除 3 个 VM→宿主反向依赖。评审发现 qzvm 调宿主层 5 个函数，3 个真渗透（VM 语义实现放宿主文件）：qz_eval_internal/qz_eval_bytecode_internal（eval 核心语义）与 qz_compile（字节码编译能力）原在 src/qzjs.c，qz_get_rt_from_ctx/qz_get_rt_from_jsrt（JSContext/JSRuntime→qz_t 查询）原在 src/bridge.c。治理：新建 src/qzvm/vm_core.c（lib 源）集中这 5 个函数，CMake 加源；声明全在 qz_internal.h 共享头，宿主层经声明调用不受影响（cli.c 用 qz_compile，宿主扩展 ext_* 用 qz_get_rt_from_*）。过程 bug：qz_compile 初移 qzc.c 失败（qzc.c 是独立可执行目标 add_executable 非 libqzjs 源，lib 无定义 → cli 链接 undefined reference），改放 vm_core.c。验证：CLI eval + qzc 编译 + 构建全过。治理后 qzvm 仅剩 3 个合理宿主依赖（方案 B 裁决的桥服务）：qz_create_pal_object_ctx（pal 创建，bridge.c）、qz_polyfill_load（polyfill 字节码加载，polyfill_load.c）、qz_timer_cancel（timer，bridge.c）。依赖方向基本单向：宿主→qzvm 正常，qzvm→宿主仅桥服务。"
   source: "2026-10-09 边界评审 + 治理"
+  affects: [release-artifact-topology]
+
+- time: 2026-10-09T06:07:42
+  kind: decision
+  summary: "qzvm 独立 CMake（2026-10-09 用户裁决）：src/qzvm/CMakeLists.txt 独立构建单元，含 wasm 引擎选择 + debug 选项。wasm 引擎选择：QZ_WITH_WAMR（默认）/QZ_WITH_WASM3（替代），互斥。**wasm 引擎不允许关闭（AOT 关键）**——NOT WAMR AND NOT WASM3 时 FATAL_ERROR；minimal profile 不再关闭 QZ_WITH_WAMR（原顶层 174 行 set OFF 改为保留 ON）。debug 选项：QZ_BUILD_DEBUGGER 控制编译 debugger.c/debugger_dap.c + QZ_DEBUG_SUPPORT。源通过 QZVM_SOURCES（PARENT_SCOPE 绝对路径）交回顶层并入 libqzjs——避免 qzvm 与宿主扩展符号（ext_compress/ext_crypto/ext_textcodec 在 context.c 的 qz_default_exts[] 引用）的静态库循环链接（初试独立 qzvm STATIC 库 + qzjs 链接失败：undefined reference qz_compress_ext/qz_crypto_ext/qz_textcodec_ext + cli 的 qz_compile undefined）。顶层接线：add_subdirectory(src/qzvm) 移至 wasm deps 前（option 定义供 deps 消费），_qz_core_sources 加 ${QZVM_SOURCES}，删原 qzvm 源，恢复 debugger QZ_DEBUG_SUPPORT 段。验证：default 构建 + CLI eval + WAMR 真启用（wasm_runtime_init 2 符号）+ qzc 编译全过；minimal QZ_WITH_WAMR=ON；QZ_BUILD_DEBUGGER=ON 构建 debugger 编入（qz_dap_attach 2 符号）；全关 FATAL 逻辑就位（注：standard/minimal profile FORCE WAMR=ON，故显式全关被 profile 覆盖——wasm 恒开由 profile FORCE + qzvm FATAL 双层保证）。"
+  source: "2026-10-09 qzvm 独立 CMake 实施 + 验证"
   affects: [release-artifact-topology]
