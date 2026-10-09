@@ -18,7 +18,12 @@ function makeQz(strings) {
   const num = (a, b) => toJS(a) >>> 0;
   const bin = (f) => (a, b) => fromJS(f(toJS(a), toJS(b)));
 
+  let bump = 0, mem = null;         // wasm 线性内存 bump 分配器（对象字段区，mem = 实例 memory）
+  const bindMem = (m) => { mem = m; };
   return {
+    // POJO 分配：只返回 wasm 内存偏移（裸 i32），字段由 wasm i32.store 写入（零跨界）
+    alloc: (nbytes) => { const off = bump; bump += nbytes; return off; },
+    bindMem,
     object_new: () => tagHandle({}),
     object_set: (o, k, v) => { handles[o >>> 1][strings[k]] = toJS(v); },
     object_get: (o, k) => fromJS(handles[o >>> 1][strings[k]]),

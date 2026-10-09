@@ -17,6 +17,7 @@ const { Module } = require("./wasm-encoder.js");
 
 // ---------- qz.* import 注册（tagged 模式运行时） ----------
 const QZ = {
+  alloc:  { params: ["i32"],  results: ["i32"] },   // POJO: 分配 wasm 内存偏移
   object_new:   { params: [],        results: ["i32"] },
   object_set:   { params: ["i32", "i32", "i32"], results: [] },
   object_get:   { params: ["i32", "i32"], results: ["i32"] },
@@ -247,20 +248,29 @@ function compileTS(input, outWasm, opts = {}) {
     const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
     // 阶段1：任一函数为 tagged → 注册全部 qz.* import；登记所有函数签名（支持前向/互递归）
     const anyTagged = fns.some(f => !f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword));
-    if (anyTagged) registerQz(m);
+    if (anyTagged) { registerQz(m); m.addMemory(2); }   // 本地定义 memory（wamrc AOT 只支持本地 memory，不支持 import）
     for (const st of fns) {
         const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
         m.declareFunc(st.name.text, st.parameters.map(() => "i32"), isVoid ? [] : ["i32"]);
     }
+    if (anyTagged) m.exportMemory();          // 导出本地 memory（qz.alloc 经 exports.memory 访问）
     // 阶段2：逐个发射 body
     for (const st of fns) em.emitFunc(st);
+    // 字段槽位可能超 2 页 → 按需扩内存
+    // memory 由宿主提供（import），此处仅校验字段槽位是否放得下
     fs.writeFileSync(outWasm, m.build());
-    return { module: m, strings: em.strings || [] };
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [] };
 }
 
 
 // ================= tagged 模式发射（动态值：对象/字符串/any） =================
 // tagged i32: bit0=0 数值(v>>1) | bit0=1 handle(v>>1，qzrt 表索引)
+Emitter.prototype._fieldIndex = function (name) {
+    if (!this.fieldMap) this.fieldMap = new Map();
+    let i = this.fieldMap.get(name);
+    if (i === undefined) { i = this.fieldMap.size; this.fieldMap.set(name, i); }
+    return i * 4;                     // 字节偏移
+};
 Emitter.prototype._strId = function (text) {
     let i = this.strings.indexOf(text);
     if (i < 0) { i = this.strings.length; this.strings.push(text); }
@@ -325,20 +335,29 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isIdentifier(e)) { const idx = this._local(e.text); if (idx === undefined) throw new Error("未定义变量: " + e.text); this.m.localGet(idx); return; }
     if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
     if (ts.isObjectLiteralExpression(e)) {
-        this.m.call("qz.object_new"); this.m.localSet(this.scratch);
-        for (const p of e.properties) {
-            if (!ts.isPropertyAssignment(p)) throw new Error("[tagged] 对象属性只支持 x: v 形式");
-            this.m.localGet(this.scratch);
-            this.m.i32Const(this._strId(p.name.text));
-            this.emitTaggedExpr(p.initializer);
-            this.m.call("qz.object_set");
+        // POJO：字段驻留 wasm 线性内存（零跨界读写）。tagged handle = (offset<<1)|1。
+        if (!ts.isObjectLiteralExpression(e) || e.properties.some(p => !ts.isPropertyAssignment(p))) {
+            throw new Error("[tagged] 对象字面量只支持 { x: v } 形式");
+        }
+        const NF = e.properties.length;
+        this.m.i32Const(NF * 4);
+        this.m.call("qz.alloc");            // → 裸 offset
+        this.m.i32Const(1); this.m.i32Shl(); // offset<<1
+        this.m.i32Const(1); this.m.i32Or();  // |1 = tagged handle
+        this.m.localSet(this.scratch);
+        for (let i = 0; i < NF; i++) {
+            this.m.localGet(this.scratch);   // [h]
+            this.m.i32Const(1); this.m.i32ShrU();  // [off]
+            this.emitTaggedExpr(e.properties[i].initializer);  // [off, val]
+            this.m.i32Store(2, i * 4);       // memory[off + i*4] = val
         }
         this.m.localGet(this.scratch); return;
     }
-    if (ts.isPropertyAccessExpression(e)) {                                                 // obj.a
+    if (ts.isPropertyAccessExpression(e)) {                                                 // obj.a（POJO：wasm load，零跨界）
         this.emitTaggedExpr(e.expression);
-        this.m.i32Const(this._strId(e.name.text));
-        this.m.call("qz.object_get"); return;
+        this.m.i32Const(1); this.m.i32ShrU();          // tagged handle → offset
+        this.m.i32Load(2, this._fieldIndex(e.name.text));  // memory[off + fieldOff]（tagged 值）
+        return;
     }
     if (ts.isCallExpression(e)) {
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
