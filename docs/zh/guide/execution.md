@@ -78,7 +78,7 @@ globalThis.onmessage = (e) => postMessage("echo: " + e.data.cmd);
 ```c
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx（内部辅助）
+#include "base/qz_rt.h"    // qz_get_active_jsctx（内部辅助）
 
 static JSValue js_greet(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv) {

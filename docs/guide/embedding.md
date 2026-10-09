@@ -75,7 +75,7 @@ Register C functions as JS globals:
 
 ```c
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx (internal helper)
+#include "base/qz_rt.h"    // qz_get_active_jsctx (internal helper)
 
 static JSValue greet(JSContext *ctx, JSValue this_val,
                      int argc, JSValue *argv) {

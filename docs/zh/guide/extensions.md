@@ -39,7 +39,7 @@ typedef struct qz_ext_t {
 ```c
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx（内部辅助）
+#include "base/qz_rt.h"    // qz_get_active_jsctx（内部辅助）
 
 static JSValue my_hello_fn(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {
@@ -134,7 +134,7 @@ runtime-data 访问器，且库从不回调宿主（所有发往宿主的消息�
 
 ```c
 #include <qzjs/qzjs.h>
-#include "qz_internal.h"   /* QZ_UNUSED */
+#include "base/qz_types.h" /* QZ_UNUSED */
 
 /* 你自己的 per-rt 表：qzjs 不提供 runtime-data 通道，键只能是钩子收到的 rt。 */
 typedef struct { int refcount; } my_state_t;

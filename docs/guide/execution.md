@@ -83,7 +83,7 @@ globals via the engine's C API:
 ```c
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx (internal)
+#include "base/qz_rt.h"    // qz_get_active_jsctx (internal)
 
 static JSValue js_greet(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv) {

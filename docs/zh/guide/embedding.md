@@ -54,7 +54,7 @@ fd 归运行时所有：宿主不得 close，`qz_free` 之后即失效。`qz_rec
 
 ```c
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx（内部辅助）
+#include "base/qz_rt.h"    // qz_get_active_jsctx（内部辅助）
 
 static JSValue greet(JSContext *ctx, JSValue this_val,
                      int argc, JSValue *argv) {

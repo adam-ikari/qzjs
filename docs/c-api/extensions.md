@@ -64,7 +64,7 @@ expands to an empty array element and fails to compile.
 ```c
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "qz_internal.h"   /* qz_get_active_jsctx — internal helper */
+#include "base/qz_rt.h"    /* qz_get_active_jsctx — internal helper */
 
 static JSValue my_hello_fn(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {
@@ -110,7 +110,7 @@ identity:
 
 ```c
 #include <qzjs/qzjs.h>
-#include "qz_internal.h"   /* QZ_UNUSED */
+#include "base/qz_types.h" /* QZ_UNUSED */
 
 /* 扩展自己的东西：qzjs 不提供任何 per-runtime 宿主数据通道。 */
 typedef struct { int refcount; } my_state_t;

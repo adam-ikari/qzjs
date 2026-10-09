@@ -91,7 +91,7 @@ qzjs 及其所有依赖项在 `-std=c99 -Wall -Wextra -Werror` 下编译（通�
 
 ```c
 #include <quickjs.h>
-#include "qz_internal.h"   /* QZ_UNUSED 定义在此（内部头） */
+#include "base/qz_types.h" /* QZ_UNUSED */
 
 static JSValue my_callback(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {
