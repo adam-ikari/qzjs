@@ -1,0 +1,314 @@
+diff --git a/quickjs.c b/quickjs.c
+index 55068e3..f890180 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -39537,7 +39537,15 @@ static JSString *JS_ReadString(BCReaderState *s)
+         return NULL;
+     is_wide_char = len & 1;
+     len >>= 1;
+-    if (len > JS_STRING_LEN_MAX) {
++    /* qwrt fix: check the stream BEFORE allocating. A len equal to
++     * JS_STRING_LEN_MAX is technically legal but allocates up to 2 GB
++     * for a string whose bytes must be in the stream anyway — and
++     * libFuzzer's malloc limit turns that into a flaky OOM crash gate.
++     * Every string char costs at least one stream byte, so cap the
++     * length by the remaining input (same bound the memcpy below
++     * enforces, just earlier). */
++    if (len > JS_STRING_LEN_MAX ||
++        (uint64_t)len > (uint64_t)(s->buf_end - s->ptr)) {
+         JS_ThrowInternalError(s->ctx, "string too long");
+         return NULL;
+     }
+@@ -39584,13 +39592,32 @@ static int JS_ReadFunctionBytecode(BCReaderState *s, JSFunctionBytecode *b,
+     uint32_t idx;
+ 
+     bc_buf = (uint8_t*)b + byte_code_offset;
++    b->byte_code_buf = bc_buf;
++    b->byte_code_len = 0;   /* qwrt fix: set the safe value FIRST — if the
++                             * raw bytes are not in the stream, fail leaves
++                             * b->byte_code_len at the stream-supplied size
++                             * (up to 256 MB) while the block was allocated
++                             * from the remaining stream bytes; the failure-
++                             * path free then walks memory beyond the block
++                             * (fuzzer-found heap-buffer-overflow). */
+     if (bc_get_buf(s, bc_buf, bc_len))
+         return -1;
+-    b->byte_code_buf = bc_buf;
++    b->byte_code_len = bc_len;
+ 
+     pos = 0;
+     while (pos < bc_len) {
++        /* qwrt fix: op comes straight from the (untrusted) stream; an
++         * out-of-range value made short_opcode_info() index past
++         * opcode_info[] (OP_COUNT + short-op entries) and read garbage
++         * sizes (fuzzer-found global-buffer-overflow). Serialized
++         * bytecode only contains the OP_COUNT regular/short opcodes. */
+         op = bc_buf[pos];
++        if (op >= OP_COUNT) {
++            JS_ThrowSyntaxError(s->ctx, "invalid opcode (pos=%u)",
++                                (unsigned int)pos);
++            b->byte_code_len = pos;
++            return -1;
++        }
+         len = short_opcode_info(op).size;
+         switch(short_opcode_info(op).fmt) {
+         case OP_FMT_atom:
+@@ -39598,6 +39625,17 @@ static int JS_ReadFunctionBytecode(BCReaderState *s, JSFunctionBytecode *b,
+         case OP_FMT_atom_u16:
+         case OP_FMT_atom_label_u8:
+         case OP_FMT_atom_label_u16:
++            /* qwrt fix: the atom operand is read as a fixed u32 at
++             * bc_buf+pos+1 regardless of the opcode's declared size;
++             * require the instruction to at least cover it before
++             * touching bc_buf+pos+1 (fuzzer-found heap OOB read on a
++             * truncated last instruction). */
++            if (len < 5 || (uint64_t)pos + len > bc_len) {
++                JS_ThrowSyntaxError(s->ctx, "truncated bytecode (pos=%u)",
++                                    (unsigned int)pos);
++                b->byte_code_len = pos;
++                return -1;
++            }
+             idx = get_u32(bc_buf + pos + 1);
+             if (bc_idx_to_atom(s, &atom, idx)) {
+                 /* Note: the atoms will be freed up to this position */
+@@ -39754,9 +39792,57 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
+     byte_code_offset = function_size;
+     function_size += bc.byte_code_len;
+ 
++    /* qwrt fix: the writer emits local_count == arg_count + var_count
++     * ("redundant" per writer comment); free_function_bytecode() walks
++     * arg_count + var_count vardefs. Reject mismatch BEFORE the
++     * js_mallocz() below so the allocated vardefs block always covers
++     * exactly what the free path walks — and so a mismatched local_count
++     * cannot inflate function_size itself (fuzzer-found OOB read in
++     * free_function_bytecode via free_gc_object on the fail path). */
++    if (local_count != (int)(bc.arg_count + bc.var_count)) {
++        JS_ThrowSyntaxError(ctx, "invalid local count");
++        goto fail;
++    }
++
+     b = js_mallocz(ctx, function_size);
+     if (!b)
+         goto fail;
++    /* qwrt fix: cpool_count and byte_code_len multiply into the single
++     * js_mallocz() for the whole JSFunctionBytecode block, so absurd
++     * stream values attempt multi-GB allocations (fuzzer-found OOM).
++     * Cap at hard limits instead of comparing against remaining stream
++     * bytes: a cpool entry costs fewer stream bytes than its in-memory
++     * size, so byte-based bounds reject legitimate functions (polyfill
++     * failed to load). cpool_count also has a u16 reader-side cap below
++     * (see bc_get_u16 use); 64k entries * 16B = 1 MiB worst case. */
++    if (bc.cpool_count < 0 ||
++        (uint64_t)bc.cpool_count * sizeof(*bc.cpool) > 64u * 1024 * 1024) {
++        JS_ThrowSyntaxError(ctx, "invalid cpool count");
++        goto fail;
++    }
++    if (bc.byte_code_len < 0 ||
++        bc.byte_code_len > 256u * 1024 * 1024) {
++        JS_ThrowSyntaxError(ctx, "invalid bytecode length");
++        goto fail;
++    }
++    if (bc.closure_var_count > (int)bc.arg_count + (int)bc.var_count + 1024) {
++        /* qwrt fix: closure vars are bounded by the function's own vars
++         * plus a slack for nested scopes; an unbounded stream value made
++         * function_size (int) overflow negative → js_mallocz(size_t)
++         * sign-extended to ~16 EB (fuzzer-found allocation-size-too-big). */
++        JS_ThrowSyntaxError(ctx, "invalid closure var count");
++        goto fail;
++    }
++
++    /* qwrt fix: guard the aggregate size computation itself — every term
++     * is bounded above, but the int sum could still overflow on crafted
++     * combinations. */
++    if (bc.cpool_count > 4 * 1024 * 1024 ||
++        local_count > 4 * 1024 * 1024 ||
++        bc.closure_var_count > 4 * 1024 * 1024) {
++        JS_ThrowSyntaxError(ctx, "function section too large");
++        goto fail;
++    }
+ 
+     memcpy(b, &bc, sizeof(*b));
+     bc.func_name = JS_ATOM_NULL;
+@@ -39895,8 +39981,15 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
+         printf(", line: %d, column: %d\n", b->line_num, b->col_num);
+     }
+ #endif
++    /* qwrt fix: pc2line/source lengths feed js_mallocz() directly; an
++     * unbounded stream value attempted multi-GB allocations. Both blobs
++     * must literally be in the remaining stream bytes. */
+     if (bc_get_leb128_int(s, &b->pc2line_len))
+         goto fail;
++    if (b->pc2line_len < 0 || b->pc2line_len > s->buf_end - s->ptr) {
++        JS_ThrowSyntaxError(ctx, "invalid pc2line length");
++        goto fail;
++    }
+     if (b->pc2line_len) {
+         bc_read_trace(s, "positions: %d bytes\n", b->pc2line_len);
+         b->pc2line_buf = js_mallocz(ctx, b->pc2line_len);
+@@ -39907,6 +40000,10 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
+     }
+     if (bc_get_leb128_int(s, &b->source_len))
+         goto fail;
++    if (b->source_len < 0 || b->source_len > s->buf_end - s->ptr) {
++        JS_ThrowSyntaxError(ctx, "invalid source length");
++        goto fail;
++    }
+     if (b->source_len) {
+         bc_read_trace(s, "source: %d bytes\n", b->source_len);
+         if (s->ptr_last)
+@@ -39941,20 +40038,35 @@ static JSValue JS_ReadModule(BCReaderState *s)
+ 
+     if (bc_get_atom(s, &module_name))
+         goto fail;
+-#ifdef ENABLE_DUMPS // JS_DUMP_READ_OBJECT
+-    if (check_dump_flag(s->ctx->rt, JS_DUMP_READ_OBJECT)) {
+-        bc_read_trace(s, "name: ");
+-        print_atom(s->ctx, module_name);
+-        printf("\n");
+-    }
+-#endif
+     m = js_new_module_def(ctx, module_name);
+     if (!m)
+         goto fail;
+     obj = js_dup(JS_MKPTR(JS_TAG_MODULE, m));
+     if (bc_get_leb128_int(s, &m->req_module_entries_count))
+         goto fail;
+-    obj = JS_NewModuleValue(ctx, m);
++    /* qwrt fix: the entry counts are multiplied by their entry sizes
++     * into js_mallocz() calls below, so absurd stream values made the
++     * reader attempt multi-GB allocations (fuzzer-found OOM). Bound
++     * each count by the bytes remaining in the buffer: every entry
++     * consumes at least one stream byte, so a count larger than the
++     * remaining length can never be valid. */
++    if (m->req_module_entries_count < 0 ||
++        m->req_module_entries_count > s->buf_end - s->ptr) {
++        /* The module was added to ctx->loaded_modules by
++         * js_new_module_def() before this field was read, so the very next
++         * JS_ThrowSyntaxError() may run the GC (it allocates the Error
++         * object). If it does, JS_MarkContext() -> js_mark_module_def()
++         * walks this count against a *not-yet-allocated* entries array
++         * (still NULL) and dereferences a near-NULL JSExportEntry ->
++         * SEGV at offsetof(JSExportEntry, export_type) (fuzzer-found).
++         * The fail: clamp added above only runs AFTER the throw, so it
++         * cannot help here. Zero the count before throwing so the GC
++         * mark walk skips it (count 0 + NULL array is a consistent
++         * empty module). */
++m->req_module_entries_count = 0;
++        JS_ThrowSyntaxError(ctx, "invalid module reference count");
++        goto fail;
++    }
+     if (m->req_module_entries_count != 0) {
+         m->req_module_entries_size = m->req_module_entries_count;
+         m->req_module_entries = js_mallocz(ctx, sizeof(m->req_module_entries[0]) * m->req_module_entries_size);
+@@ -39977,6 +40089,12 @@ static JSValue JS_ReadModule(BCReaderState *s)
+             *pm = js_host_resolve_imported_module_atom(s->ctx, m->module_name,
+                                                        rme->module_name,
+                                                        rme->attributes);
++            /* qwrt fix: the entry's module_name atom is owned by the
++             * JSModuleDef stream object; js_free_module_def() frees it
++             * unconditionally. Null it out before bailing so the fail
++             * path cannot double-free it after a failed resolve
++             * (fuzzer-found SEGV in __JS_FreeAtom). */
++            rme->module_name = JS_ATOM_NULL;
+             if (!*pm)
+                 goto fail;
+         }
+@@ -39984,6 +40102,23 @@ static JSValue JS_ReadModule(BCReaderState *s)
+ 
+     if (bc_get_leb128_int(s, &m->export_entries_count))
+         goto fail;
++    if (m->export_entries_count < 0 ||
++        m->export_entries_count > s->buf_end - s->ptr) {
++        /* The module was added to ctx->loaded_modules by
++         * js_new_module_def() before this field was read, so the very next
++         * JS_ThrowSyntaxError() may run the GC (it allocates the Error
++         * object). If it does, JS_MarkContext() -> js_mark_module_def()
++         * walks this count against a *not-yet-allocated* entries array
++         * (still NULL) and dereferences a near-NULL JSExportEntry ->
++         * SEGV at offsetof(JSExportEntry, export_type) (fuzzer-found).
++         * The fail: clamp added above only runs AFTER the throw, so it
++         * cannot help here. Zero the count before throwing so the GC
++         * mark walk skips it (count 0 + NULL array is a consistent
++         * empty module). */
++m->export_entries_count = 0;
++        JS_ThrowSyntaxError(ctx, "invalid export entry count");
++        goto fail;
++    }
+     if (m->export_entries_count != 0) {
+         m->export_entries_size = m->export_entries_count;
+         m->export_entries = js_mallocz(ctx, sizeof(m->export_entries[0]) * m->export_entries_size);
+@@ -40010,6 +40145,23 @@ static JSValue JS_ReadModule(BCReaderState *s)
+ 
+     if (bc_get_leb128_int(s, &m->star_export_entries_count))
+         goto fail;
++    if (m->star_export_entries_count < 0 ||
++        m->star_export_entries_count > s->buf_end - s->ptr) {
++        /* The module was added to ctx->loaded_modules by
++         * js_new_module_def() before this field was read, so the very next
++         * JS_ThrowSyntaxError() may run the GC (it allocates the Error
++         * object). If it does, JS_MarkContext() -> js_mark_module_def()
++         * walks this count against a *not-yet-allocated* entries array
++         * (still NULL) and dereferences a near-NULL JSExportEntry ->
++         * SEGV at offsetof(JSExportEntry, export_type) (fuzzer-found).
++         * The fail: clamp added above only runs AFTER the throw, so it
++         * cannot help here. Zero the count before throwing so the GC
++         * mark walk skips it (count 0 + NULL array is a consistent
++         * empty module). */
++m->star_export_entries_count = 0;
++        JS_ThrowSyntaxError(ctx, "invalid star export entry count");
++        goto fail;
++    }
+     if (m->star_export_entries_count != 0) {
+         m->star_export_entries_size = m->star_export_entries_count;
+         m->star_export_entries = js_mallocz(ctx, sizeof(m->star_export_entries[0]) * m->star_export_entries_size);
+@@ -40024,6 +40176,23 @@ static JSValue JS_ReadModule(BCReaderState *s)
+ 
+     if (bc_get_leb128_int(s, &m->import_entries_count))
+         goto fail;
++    if (m->import_entries_count < 0 ||
++        m->import_entries_count > s->buf_end - s->ptr) {
++        /* The module was added to ctx->loaded_modules by
++         * js_new_module_def() before this field was read, so the very next
++         * JS_ThrowSyntaxError() may run the GC (it allocates the Error
++         * object). If it does, JS_MarkContext() -> js_mark_module_def()
++         * walks this count against a *not-yet-allocated* entries array
++         * (still NULL) and dereferences a near-NULL JSExportEntry ->
++         * SEGV at offsetof(JSExportEntry, export_type) (fuzzer-found).
++         * The fail: clamp added above only runs AFTER the throw, so it
++         * cannot help here. Zero the count before throwing so the GC
++         * mark walk skips it (count 0 + NULL array is a consistent
++         * empty module). */
++m->import_entries_count = 0;
++        JS_ThrowSyntaxError(ctx, "invalid import entry count");
++        goto fail;
++    }
+     if (m->import_entries_count != 0) {
+         m->import_entries_size = m->import_entries_count;
+         m->import_entries = js_mallocz(ctx, sizeof(m->import_entries[0]) * m->import_entries_size);
+@@ -40049,8 +40218,25 @@ static JSValue JS_ReadModule(BCReaderState *s)
+         goto fail;
+     return obj;
+  fail:
++    /* qwrt fix (2/2): js_free_module_def() walks the *count fields, but on
++     * a failed read a stream-supplied count (e.g. req_module_entries_count)
++     * can far exceed the allocated *entries_size — the validation below
++     * rejects the value BEFORE js_mallocz() runs. Clamp every count to its
++     * allocated size (calloc'd tail is all-zero: NULL atoms/undefined
++     * values are safe to free) so the failure-path free cannot walk
++     * unallocated memory (fuzzer-found SEGV in __JS_FreeAtom). */
+     if (m) {
+-        js_free_module_def(ctx, m);
++        if (m->req_module_entries_count > m->req_module_entries_size)
++            m->req_module_entries_count = m->req_module_entries_size;
++        if (m->export_entries_count > m->export_entries_size)
++            m->export_entries_count = m->export_entries_size;
++        if (m->star_export_entries_count > m->star_export_entries_size)
++            m->star_export_entries_count = m->star_export_entries_size;
++        if (m->import_entries_count > m->import_entries_size)
++            m->import_entries_count = m->import_entries_size;
++        if (JS_IsUndefined(m->func_obj) && JS_IsUndefined(m->module_ns)) {
++            js_free_module_def(ctx, m);
++        }
+     }
+     return JS_EXCEPTION;
+ }

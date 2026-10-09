@@ -39,7 +39,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -108,7 +108,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -151,7 +151,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -189,7 +189,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -207,7 +207,7 @@ jobs:
 
   # ============================================================================
   # Polyfill mode=external: bytecode loaded at runtime from
-  # dist/polyfill_default.polyfill (built by polyfill/build.js Mode B).
+  # dist/polyfill_default.polyfill (built by src/polyfill/build.js Mode B, under build/<bin>/generated/polyfill/).
   # Covers the external-file loader leg of QZ_POLYFILL_MODE.
   # ============================================================================
   polyfill-external:
@@ -232,7 +232,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure
         run: |
@@ -274,7 +274,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure
         run: |
@@ -316,7 +316,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure
         run: |
@@ -358,7 +358,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -405,7 +405,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (ASan)
         run: |
           cmake -B build -G Ninja \
@@ -446,7 +446,7 @@ jobs:
         working-directory: build
 
       # M-P7 邮箱路径的 ASAN 覆盖。上面的 ASAN 构建开了 QZ_BUILD_TESTS=ON，
-      # 而 src/ipc_process.c 与 src/rt_host.c 在该配置下整文件不编（mock 后端
+      # 而 src/ipc/ipc_process.c 与 src/host/rt_host.c 在该配置下整文件不编（mock 后端
       # 没有 uv_pipe）——全项目最并发的一段代码（邮箱 MPSC、eventfd 唤醒、
       # 三级终止、崩溃帧时序）就这么从没有过 ASAN 覆盖。qz_mp7_mailbox_e2e
       # harness 依赖真实 ISOLATED 后端，故另起一个 tests=OFF 的构建跑它。
@@ -520,7 +520,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (UBSan)
         run: |
           cmake -B build -G Ninja \
@@ -539,7 +539,7 @@ jobs:
         working-directory: build
 
       # 同一个结构性缺口，同 ASAN job：上面那个 UBSan 构建开了 QZ_BUILD_TESTS=ON，
-      # 而 src/ipc_process.c 与 src/rt_host.c 在该配置下整文件不编（mock 后端没有
+      # 而 src/ipc/ipc_process.c 与 src/host/rt_host.c 在该配置下整文件不编（mock 后端没有
       # uv_pipe）——邮箱 MPSC / eventfd 唤醒 / 三级终止 / 崩溃帧时序 / ping 退避这些
       # 最吃 UB（指针算术、size 溢出、原子配对）的一段代码，从没有在 UBSan 下跑过。
       # 另起一个 tests=OFF 的真实 ISOLATED 构建，跑并发最密的那支 e2e。
@@ -586,7 +586,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (Release)
         run: |
           cmake -B build -G Ninja \
@@ -629,7 +629,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, real-libuv CLI)
         run: |
@@ -643,7 +643,7 @@ jobs:
 
       - name: Rebuild polyfill (ensure dist in sync)
         run: |
-          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix polyfill run build
+          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix src/polyfill run build
 
       - name: Build
         run: cmake --build build --parallel
@@ -698,7 +698,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Benchmark HTTP/2 client stack
         run: |
@@ -764,7 +764,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, real-libuv CLI)
         run: |
@@ -778,7 +778,7 @@ jobs:
 
       - name: Rebuild polyfill (ensure dist in sync)
         run: |
-          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix polyfill run build
+          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix src/polyfill run build
 
       - name: Build
         run: cmake --build build --parallel
@@ -871,7 +871,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (Release, real-libuv CLI)
         run: |
           cmake -B build -G Ninja \
@@ -945,7 +945,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, real-libuv CLI)
         run: |
@@ -1026,7 +1026,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, CLI + TLS + gRPC)
         run: |
@@ -1111,7 +1111,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (real-libuv CLI)
         run: |
@@ -1159,7 +1159,7 @@ jobs:
       # 成立，同时仍守住真正要防的事：种子必须是内嵌字节码的真实前缀，fuzz 的 60
       # 秒预算才是在真实字节码结构附近变异，而非一个已不存在的形态。
       - name: Fuzz corpus seeds match the built bytecode
-        run: python3 test/fuzz_corpus_align_check.py
+        run: python3 test/fuzz_corpus_align_check.py build
 
       # 第三方依赖登记完整性。MIT/Apache 的分发义务要求版权声明随二进制走；
       # 新增 vendored 依赖或 polyfill npm 依赖时若漏登记 THIRD_PARTY_NOTICES.md
@@ -1171,7 +1171,7 @@ jobs:
       # 公共头声明面 vs 实际链接面。「声明了但某个编译模型下没有实现」是最难查
       # 的一类缺陷：宿主编译通过（头无条件声明），直到链接才炸出一句
       # undefined reference，看起来像构建坏了而不是「这个模型没这个功能」。
-      # qz_ping / qz_ping_path 就是这样（实现在 src/rt_host.c，仅 ISOLATED +
+      # qz_ping / qz_ping_path 就是这样（实现在 src/host/rt_host.c，仅 ISOLATED +
       # 非 test 编译，声明却无条件）。ISOLATED 侧用上面已构建的 build/，THREAD
       # 侧另起一个只编静态库的构建（--target qzjs，比全量快得多）。
       - name: Configure (THREAD, library only)
@@ -1278,7 +1278,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (QZ_WITH_GRPC=ON)
         run: |
@@ -1321,7 +1321,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (Coverage)
         run: |
           cmake -B build -G Ninja \
@@ -1371,7 +1371,7 @@ jobs:
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -1387,7 +1387,7 @@ jobs:
         working-directory: build
 
       # 扩展 e2e 以真二进制为被调试端（adapter 内联 DAP 客户端），
-      # 默认找 build_dbg/qzjs——CI 本 job 的构建目录是 build/，用
+      # 默认找 build/dbg/qzjs——CI 本 job 的构建目录是 build/，用
       # QZJS_RUNTIME 覆盖（docs/dev/debugging.md Test 节有记载）。
       - name: Install Node (extension e2e)
         uses: actions/setup-node@v4
@@ -1438,7 +1438,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -1478,7 +1478,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (clang-tidy)
         run: |
           cmake -B build -G Ninja \
@@ -1542,8 +1542,8 @@ jobs:
           cat > fuzz_bc.c <<'EOF'
           /* Minimal libFuzzer harness: feeds arbitrary bytes to the QuickJS
            * bytecode deserializer (JS_ReadObject + JS_READ_OBJ_BYTECODE) — the
-           * parse qzjs performs on the embedded polyfill (src/context.c) and
-           * on worker boot shims (src/qzjs.c). Read-only: the resulting value
+           * parse qzjs performs on the embedded polyfill (src/qzvm/context.c) and
+           * on worker boot shims (src/host/qzjs.c). Read-only: the resulting value
            * is freed, never evaluated. */
           #include <stddef.h>
           #include <stdint.h>

@@ -29,7 +29,7 @@ updated: "2026-10-01T11:54:09"
 3. `test/test_cli_gtest.cpp`（9 用例）**未在 test/CMakeLists.txt 注册** → 永不编译运行，而 `docs/dev/testing.md:58` 宣称 "CLI 9/9"。
 4. `docs/.vitepress/config.mjs:98,209` sidebar 指向 `/c-api/eval`、`/zh/c-api/eval`，两目录均无 eval.md → 中英各一条死链（VitePress 不校验 sidebar，故"0 dead link"未覆盖）。
 5. `polyfill/src/http-server.js:197` `serve()` 默认 `0.0.0.0` + 无鉴权中间件 → 默认即局域网可访问入口。
-6. `src/bridge.c:449-454` `bridge_validate_path` 明写 "Leading / is allowed"、无 root jail；`src/cli.c:198/227/247/255/273` 五处 malloc **无 NULL 检查**（OOM 即段错误）。
+6. `src/host/bridge.c:449-454` `bridge_validate_path` 明写 "Leading / is allowed"、无 root jail；`src/cli/cli.c:198/227/247/255/273` 五处 malloc **无 NULL 检查**（OOM 即段错误）。
 7. `polyfill/src/http-server.js:266-269,299,314` WS `this.buf`/`_fragParts` **无上限拼接**（HTTP body 有 1MiB 上限，WS 没有）→ 单连接内存 DoS。
 8. `docs/js-api/fs.md:132` 声称 "different contexts can have different filesystem roots" → **实现不存在**，属虚假安全声明。
 9. CI（ci.yml 1218 行 / 24 job）`permissions:` / `concurrency:` / `timeout-minutes` **三者全为 0 命中**，action 仅锁 `@v4` tag 未锁 SHA。

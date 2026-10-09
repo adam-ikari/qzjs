@@ -12,7 +12,7 @@
  * >100 KiB payload vectors in cross-verification case 3). Pure C99 +
  * ipc_envelope.c — no libuv, no qzjs.
  */
-#include "ipc_envelope.h"
+#include "ipc/ipc_envelope.h"
 
 #include <inttypes.h>
 #include <stdio.h>

@@ -54,7 +54,7 @@ fd 归运行时所有：宿主不得 close，`qz_free` 之后即失效。`qz_rec
 
 ```c
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx（内部辅助）
+#include "base/qz_rt.h"    // qz_get_active_jsctx（内部辅助）
 
 static JSValue greet(JSContext *ctx, JSValue this_val,
                      int argc, JSValue *argv) {
@@ -78,7 +78,7 @@ static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
 }
 ```
 
-`init` 钩子在 `qz_create` 期间、宿主收到运行时之前于 qzjs 的内部线程上运行 — 因此在此注册全局对象是安全的。`qz_get_active_jsctx` 是内部辅助函数（声明于 `src/qz_internal.h`），仅供扩展钩子使用。
+`init` 钩子在 `qz_create` 期间、宿主收到运行时之前于 qzjs 的内部线程上运行 — 因此在此注册全局对象是安全的。`qz_get_active_jsctx` 是内部辅助函数（声明于 `src/base/qz_rt.h`），仅供扩展钩子使用。
 
 ## 从 C 调用 JS 并传递结构化数据
 

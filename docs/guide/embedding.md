@@ -75,7 +75,7 @@ Register C functions as JS globals:
 
 ```c
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx (internal helper)
+#include "base/qz_rt.h"    // qz_get_active_jsctx (internal helper)
 
 static JSValue greet(JSContext *ctx, JSValue this_val,
                      int argc, JSValue *argv) {
@@ -102,7 +102,7 @@ static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
 The `init` hook runs on qzjs's internal thread during `qz_create`, before
 the host receives the runtime — so registering globals here is safe.
 `qz_get_active_jsctx` is an internal helper (declared in
-`src/qz_internal.h`), for use from extension hooks.
+`src/base/qz_rt.h`), for use from extension hooks.
 
 ## Calling JS from C with Structured Data
 

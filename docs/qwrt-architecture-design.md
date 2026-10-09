@@ -272,7 +272,7 @@ polyfill 提供 WinterTC 兼容的 Web API，编译为 QuickJS 字节码后嵌�
 
 ### 6.2 构建方式
 
-polyfill 源码（`polyfill/src/*.js`）通过 `polyfill/build.js` 用 esbuild 打包为单个 `polyfill.js`，再用 `qjsc -C` 编译为 C 字节数组（`polyfill_default.c`），链接进 qzjs 二进制。
+polyfill 源码（`src/polyfill/src/*.js`）通过 `src/polyfill/build.js` 用 esbuild 打包为单个 `polyfill.js`，再用 `qjsc -C` 编译为 C 字节数组（`build/<bin>/generated/polyfill/polyfill_default.c`，中间产物不落 src/），链接进 qzjs 二进制。
 
 ## 7. 构建系统
 
@@ -414,7 +414,7 @@ qzjs/
 │   └── mock/               # 测试 mock PAL
 │       ├── pal_mock.c
 │       └── pal_mock.h
-├── polyfill/
+├── src/polyfill/
 │   ├── src/                # JS polyfill 源码（21 个模块）
 │   ├── build.js            # esbuild 打包脚本
 │   └── package.json

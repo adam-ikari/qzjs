@@ -27,7 +27,7 @@ updated: "2026-09-14T05:34:30"
 
 ## 2026-09 全量审计基线（27 个自制模块）
 
-- **唯一建议替换（带硬触发）**：`src/uv_io.c` 手写 HTTP 客户端解析 → **llhttp**。约 700 行可删（parse_http_response ×2、双份 chunked 状态机、CONNECT 解析、URL 解析），消 ~290 行重复，修复 obs-fold / 多值 Transfer-Encoding / 双 Content-Length 冲突等 5 类健壮性缺口。它是全项目唯一"自制代码本身是风险源"的形状：既不在 JS 层（拿不到规范测试），也不是薄绑定（自造状态机）。**硬触发（满足其一即执行替换，不再 case-by-case）**：① 上述 5 类缺口任一在实际流量中确认触发缺陷；② 任何触及 parse_http_response / chunked 状态机的缺陷修复动工前，先做 llhttp 替换评估并留痕。
+- **唯一建议替换（带硬触发）**：`src/io/uv_io.c` 手写 HTTP 客户端解析 → **llhttp**。约 700 行可删（parse_http_response ×2、双份 chunked 状态机、CONNECT 解析、URL 解析），消 ~290 行重复，修复 obs-fold / 多值 Transfer-Encoding / 双 Content-Length 冲突等 5 类健壮性缺口。它是全项目唯一"自制代码本身是风险源"的形状：既不在 JS 层（拿不到规范测试），也不是薄绑定（自造状态机）。**硬触发（满足其一即执行替换，不再 case-by-case）**：① 上述 5 类缺口任一在实际流量中确认触发缺陷；② 任何触及 parse_http_response / chunked 状态机的缺陷修复动工前，先做 llhttp 替换评估并留痕。
 - **保留 + 触察**（触发条件写死，不许"以后再说"）：
   - `polyfill/src/url.js`（499 行，缺 IDNA）：whatwg-url 不可引入（tr46 IDNA 485KB 依赖链过大 + `__esModule` 与 esbuild IIFE 冲突，git show f350fbff）；实测解析 bug 出现 → 复核。
   - ~~`polyfill/src/url-pattern.js`~~ → 已替换为 urlpattern-polyfill@10.1.0（npm polyfill，零依赖，esbuild IIFE 无缝 bundle）。

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """IPC Envelope cross-verification (M-P0 verification gate, design doc §11).
 
-Proves the handwritten C codec (src/ipc_envelope.c) is byte-level FlatBuffers
+Proves the handwritten C codec (src/ipc/ipc_envelope.c) is byte-level FlatBuffers
 wire-format compatible with the official Python `flatbuffers` library:
 
   A) C encode -> Python decode, field-by-field compare

@@ -276,11 +276,11 @@ variable expansion (nested objects/arrays, evaluate references, stale
 references invalidated by the next stop).
 
 The extension has its own end-to-end tests that drive the inline adapter
-against a debugger-enabled binary (default `build_dbg/qzjs`, override with
+against a debugger-enabled binary (default `build/dbg/qzjs`, override with
 `QZJS_RUNTIME`):
 
 ```bash
-cmake -B build_dbg -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build build_dbg -j$(nproc)
+cmake --preset dbg && cmake --build build/dbg -j$(nproc)  # 统一 build/ 下，取代旧 build_dbg
 cd vscode/qzjs-debug && npm run compile && npm test
 ```
 
@@ -353,7 +353,7 @@ debugging silently does nothing — no error, breakpoints just never fire.
    `QZ_BUILD_DEBUGGER=ON`):
 
    ```bash
-   nm build/libqzjs.a 2>/dev/null | grep -c qz_dap_attach   # or build_dbg/libqzjs.a for the debugger build
+   nm build/libqzjs.a 2>/dev/null | grep -c qz_dap_attach   # or build/dbg/libqzjs.a for the debugger build
    ```
 
 4. Run the end-to-end client — if it passes, the whole stack works and the

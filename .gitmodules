@@ -12,7 +12,7 @@
 	url = https://github.com/richgel999/miniz.git
 [submodule "quickjs-ng"]
 	path = deps/quickjs-ng
-	url = https://github.com/adam-ikari/qzvm.git
+	url = https://github.com/quickjs-ng/quickjs.git
 [submodule "deps/wamr"]
 	path = deps/wamr
 	url = https://github.com/bytecodealliance/wasm-micro-runtime.git

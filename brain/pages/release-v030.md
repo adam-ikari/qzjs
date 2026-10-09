@@ -42,7 +42,7 @@ v0.3.0 于 2026-10-02 发布到 GitHub（tag `v0.3.0` → `cb960d97`）。自 v0
 - **Release notes 手工补**：CI 生成的默认 notes 只有一行 Full Changelog 链接，需 `gh release edit --notes-file` 补 4 段（Breaking / 新功能 / 关键修复 / 引擎）
 
 ## 发布过程修掉的一个静默漂移
-`QZ_VERSION` 宏只注入到 `qzjs` 库 target，但 `cli.c` 编在 `qz_cli` 可执行 target——宏到不了它，CLI 一直用 `src/cli.c` 里硬编码的 `"0.2.0"` fallback。真源升到 0.3.0 后 `qzjs --version` 仍报 0.2.0，构建系统毫无察觉。修法：给 `qz_cli`/`qz_rt` 补注入 + 删 fallback 改 `#error`。
+`QZ_VERSION` 宏只注入到 `qzjs` 库 target，但 `cli.c` 编在 `qz_cli` 可执行 target——宏到不了它，CLI 一直用 `src/cli/cli.c` 里硬编码的 `"0.2.0"` fallback。真源升到 0.3.0 后 `qzjs --version` 仍报 0.2.0，构建系统毫无察觉。修法：给 `qz_cli`/`qz_rt` 补注入 + 删 fallback 改 `#error`。
 
 ## 验证
 - Debug ctest 29/29

@@ -49,7 +49,7 @@ updated: "2026-09-13T10:52:49"
 
 - time: 2026-09-13T09:35:18
   kind: decision
-  summary: "external 模式（QZ_POLYFILL_MODE=external，仓库唯一非编译期锚定的 bytecode 入口）定位为「固定版防篡改」：polyfill/build.js 构建 external 产物时把官方 bytecode（dist/polyfill_default.polyfill）的 SHA-256 写进 src/polyfill_external.c（强符号 qz_polyfill_external_sha256[32]；strong 而非 weak，否则静态归档不抽取该 object）；src/polyfill_load.c external 分支读文件后自算 SHA-256 比对，不一致打印 expected/actual 并返回 QZ_ERR_PERMISSION，拒绝交给 JS_ReadObject。SHA-256 为自包含 C99 实现（FIPS 180-4，无分配，仅 external 模式编译），不引新依赖（未用 mbedtls）。定性：纵深防御，非安全边界——能改数据文件者通常也能改二进制。不加「热替换/每部署不同文件」开关（用户取舍）；自定义 polyfill 需自行重跑 build.js 更新期望 hash（注释/CHANGELOG/CMake option 描述已写明）。CI leg polyfill-external 已覆盖（configure external → polyfill_rebuild 生成 hash 数组 → ctest）。commit 246cddc0。"
+  summary: "external 模式（QZ_POLYFILL_MODE=external，仓库唯一非编译期锚定的 bytecode 入口）定位为「固定版防篡改」：polyfill/build.js 构建 external 产物时把官方 bytecode（dist/polyfill_default.polyfill）的 SHA-256 写进 src/polyfill_external.c（强符号 qz_polyfill_external_sha256[32]；strong 而非 weak，否则静态归档不抽取该 object）；src/host/polyfill_load.c external 分支读文件后自算 SHA-256 比对，不一致打印 expected/actual 并返回 QZ_ERR_PERMISSION，拒绝交给 JS_ReadObject。SHA-256 为自包含 C99 实现（FIPS 180-4，无分配，仅 external 模式编译），不引新依赖（未用 mbedtls）。定性：纵深防御，非安全边界——能改数据文件者通常也能改二进制。不加「热替换/每部署不同文件」开关（用户取舍）；自定义 polyfill 需自行重跑 build.js 更新期望 hash（注释/CHANGELOG/CMake option 描述已写明）。CI leg polyfill-external 已覆盖（configure external → polyfill_rebuild 生成 hash 数组 → ctest）。commit 246cddc0。"
   source: "2026-09-13 external 完整性锚定实现会话"
   affects: [polyfill-bundling-policy, quickjs-upstream-merge-strategy]
 

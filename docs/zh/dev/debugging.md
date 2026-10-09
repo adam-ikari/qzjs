@@ -212,10 +212,10 @@ ctest --test-dir build -L dap --output-on-failure
 `test/test_dap_gtest.cpp` 是一个进程内嵌入宿主，它 fork 一个子进程，在 `QZ_DEBUG=1` 下运行一个小型 JS 程序，然后通过管道充当 VS Code 客户端：initialize → setBreakpoints → configurationDone → 期望在断点处 `stopped` → stackTrace/scopes/variables/evaluate → step → continue → terminate。它验证了整个技术栈：引擎补丁 + 调试核心 + DAP 层 + `qz_create` 中的自动附加路径。此外还覆盖按文件作用域的断点、运行中暂停、stdio 单实例约束、异常断点过滤器（武装：一次抛出停一次；解除：不停车），以及变量展开（嵌套对象/数组、evaluate 引用、下一停顿使旧引用失效）。
 
 扩展自带端到端测试，直接以内联适配器驱动调试构建的二进制
-（默认 `build_dbg/qzjs`，可用 `QZJS_RUNTIME` 覆盖）：
+（默认 `build/dbg/qzjs`，可用 `QZJS_RUNTIME` 覆盖）：
 
 ```bash
-cmake -B build_dbg -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON && cmake --build build_dbg -j$(nproc)
+cmake --preset dbg && cmake --build build/dbg -j$(nproc)  # 统一 build/ 下，取代旧 build_dbg
 cd vscode/qzjs-debug && npm run compile && npm test
 ```
 
@@ -278,7 +278,7 @@ CI 两个门都跑：`debugger` job 执行 `ctest -L dap` 与这些 e2e 测试
 3. 确认 DAP 层已链接（仅 `QZ_BUILD_DEBUGGER=ON` 时编入 `libqzjs`）：
 
    ```bash
-   nm build/libqzjs.a 2>/dev/null | grep -c qz_dap_attach   # or build_dbg/libqzjs.a for the debugger build
+   nm build/libqzjs.a 2>/dev/null | grep -c qz_dap_attach   # or build/dbg/libqzjs.a for the debugger build
    ```
 
 4. 跑端到端客户端——通过则整栈没问题，问题在你的客户端协议交互：

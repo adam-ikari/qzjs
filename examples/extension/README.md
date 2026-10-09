@@ -34,7 +34,7 @@ cmake --build build_ext --parallel
 
 - `qz_ext_t` 的 `init` 钩子在上下文创建时（`qz_create` 内）运行，此时
   `qz_get_active_jsctx(rt)` 返回活动的 `JSContext*`（内部辅助，声明于
-  `src/qz_internal.h`，仅编译进 qzjs 的扩展可用）。
+  `src/base/qz_rt.h`，仅编译进 qzjs 的扩展可用）。
 - 用 QuickJS API（`JS_NewCFunction`/`JS_SetPropertyStr`）注册全局。
 - 扩展随 qzjs 库一起编译，`init`/`destroy`/`suspend`/`resume` 钩子对应
   上下文生命周期（见 [Extensions 指南](/guide/extensions)）。

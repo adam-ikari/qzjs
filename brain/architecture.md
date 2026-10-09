@@ -22,14 +22,14 @@ esbuild 打包）提供 WinterTC Web API 层；原生扩展通过 PAL 桥接暴�
 
 ```mermaid
 graph TD
-  H[Host C application] -->|qz_* C API + mailbox drain| R[qzjs core<br/>src/qzjs.c + bridge.c]
+  H[Host C application] -->|qz_* C API + mailbox drain| R[qzjs core<br/>src/host/qzjs.c + bridge.c]
   R -->|libuv loop| L[libuv]
   R --> Q[QuickJS-ng runtime]
   Q -->|bundle| P[polyfill ES modules<br/>fetch/streams/worker/crypto/http-server/...]
   Q -->|extensions| E[PAL extensions<br/>compress / crypto / textcodec / wamr]
   P -->|pal.* API| R
   P -->|pal.tcp*/tls*| U[serve(): raw TCP + mbedTLS<br/>HTTP1.1/HTTPS/WS/static/gzip]
-  R -->|Worker| W[Worker thread<br/>src/worker.c + MessagePort routing]
+  R -->|Worker| W[Worker thread<br/>src/host/worker.c + MessagePort routing]
   T[test/ gtest + mock_libuv] -->|offline| R
 ```
 

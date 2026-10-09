@@ -3,7 +3,7 @@
  *
  * 扩展机制：编译期把自定义 qz_ext_t 加入 QZ_EXTENSIONS 表，init 钩子在
  * 上下文创建时运行，可用 QuickJS API 注册全局（qz_get_active_jsctx 是
- * 内部辅助，声明于 src/qz_internal.h，仅编译进 qzjs 的扩展可用）。
+ * 内部辅助，声明于 src/base/qz_rt.h，仅编译进 qzjs 的扩展可用）。
  *
  * 构建（扩展必须编译进 qzjs 库，非独立可执行；在仓库根执行）：
  *   cmake -B build_ext -DCMAKE_BUILD_TYPE=Release \
@@ -17,7 +17,7 @@
  */
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "../../src/qz_internal.h"  /* qz_get_active_jsctx（内部辅助） */
+#include "../../src/base/qz_rt.h"
 
 /* 原生函数：greet(name) → 返回字符串 */
 static JSValue js_greet(JSContext *ctx, JSValueConst this_val,

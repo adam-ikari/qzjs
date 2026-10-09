@@ -78,12 +78,12 @@ and gcov denominator** — they link only in the `QZ_BUILD_TESTS=OFF`
 
 | Module | File | Why mocked out | Real coverage |
 |---|---|---|---|
-| IPC process channel | `src/ipc_process.c` | real `uv_pipe` | e2e (`test_mp*_e2e.sh`, `test_ctl_e2e.sh`) |
-| CTL-2 local endpoint | `src/control_endpoint.c` | `uv_pipe` + `SO_PEERCRED` | e2e (`test_ctl_e2e.sh`) |
-| Host↔main-RT process split | `src/rt_host.c` | fork+exec of `qzjs-rt` | e2e (`test_mp2_host_split_e2e.sh`) |
-| TCP I/O | `src/tcp_io.c` | real sockets | e2e (HTTPServer, WS, gRPC suites) |
-| Main RT entrypoint | `src/rt_main.c` (`qzjs-rt`) | standalone executable | e2e (every ISOLATED run) |
-| CTL CLI entrypoint | `src/ctl_cli.c` (`qzjs-ctl`) | standalone executable | e2e (`test_ctl_e2e.sh`) |
+| IPC process channel | `src/ipc/ipc_process.c` | real `uv_pipe` | e2e (`test_mp*_e2e.sh`, `test_ctl_e2e.sh`) |
+| CTL-2 local endpoint | `src/control/control_endpoint.c` | `uv_pipe` + `SO_PEERCRED` | e2e (`test_ctl_e2e.sh`) |
+| Host↔main-RT process split | `src/host/rt_host.c` | fork+exec of `qzjs-rt` | e2e (`test_mp2_host_split_e2e.sh`) |
+| TCP I/O | `src/io/tcp_io.c` | real sockets | e2e (HTTPServer, WS, gRPC suites) |
+| Main RT entrypoint | `src/host/rt_main.c` (`qzjs-rt`) | standalone executable | e2e (every ISOLATED run) |
+| CTL CLI entrypoint | `src/cli/ctl_cli.c` (`qzjs-ctl`) | standalone executable | e2e (`test_ctl_e2e.sh`) |
 
 This is intentional, not a gap: the mock PAL cannot exercise process
 isolation, real IPC, or live sockets — those semantics are asserted by e2e

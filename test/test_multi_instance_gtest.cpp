@@ -6,14 +6,14 @@
 //   2. wait_idle → destroy 序列不重 join 已退出的线程（双重 pthread_join UB；
 //      M-R1 G2 修复：thread_joined 跟踪）。
 //   3. port id 跨实例全局唯一（进程级原子计数器，bridge.c g_qz_next_port_id）。
-//   4. 全局状态审计表见 src/qz_internal.h（M-R1 §13.2）。
+//   4. 全局状态审计表见 src/base/qz_rt.h（M-R1 §13.2）。
 //
 // DAP stdio 单通道约束的第二实例拒绝回归在 test_dap_gtest.cpp
 // （DapDebugger.StdioConflictSecondInstanceRejected，随 QZ_BUILD_DEBUGGER 构建）。
 #include "test_host.h"
 
 #ifdef QZ_USE_MOCK_LIBUV
-#include "qz_internal.h"   /* mock 构建下访问 rt->thread_joined 内部标志 */
+#include "base/qz_rt.h"
 #endif
 #include <string>
 

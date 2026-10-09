@@ -129,44 +129,44 @@ The runtime is layered. Read these together to understand it:
   drive a loop, or receive callbacks — it posts JSON in and drains the mailbox
   out. Sovereignty rule (M-P7): qzjs never executes host code; the library
   owns all its threads/loops.
-- **`src/qz_internal.h`** — the real internal layout. `qz_t` holds a fixed
+- **`src/base/qz_rt.h`** — the real internal layout. `qz_t` holds a fixed
   array of up to `QZ_MAX_CONTEXTS` (64) `qz_ctx_t*`, an embedded `uv_loop_t`
   (BY VALUE), the internal `uv_thread_t`, **two lock-free MPSC message queues**
   (`mq_in` inbound FIFO + `mq_out` outbound mailbox, both `qz_mq_t`) plus the
   mailbox `eventfd` (`out_efd`), worker/handle tables, and the module bytecode
   (saved for re-injection). `QZ_MAGIC` validates the opaque `qz_t*`. The `uv.h`
   include switches to `mock_libuv.h` under `QZ_USE_MOCK_LIBUV`.
-- **`src/qzjs.c`** — core lifecycle (`qz_create` — ISOLATED spawns the main-RT
+- **`src/host/qzjs.c`** — core lifecycle (`qz_create` — ISOLATED spawns the main-RT
   process + the library host-side thread, THREAD starts the internal thread, both
   block until ready; `qz_destroy`/`qz_wait_idle` shutdown; `qz_recv_message`/
   `qz_message_fd` mailbox consumption; `qz_mailbox_teardown` drains `mq_out` +
   closes `out_efd`; `qz_free` dual-role via `QZ_MAGIC` + `thread_joined`;
   internals `qz_runtime_init`/`qz_eval_internal`/`qz_thread_teardown`).
-- **`src/rt_host.c`** — the ISOLATED host-side thread+loop (library-owned,
+- **`src/host/rt_host.c`** — the ISOLATED host-side thread+loop (library-owned,
   never the host's): runs `uv_run`, owns the mainRT channel handles, wake
   async, tx-spill timer; three-tier ≤2s terminate of a frozen mainRT happens on
   this thread, the calling thread only joins.
-- **`src/thread.c`** — the THREAD-model internal qzjs thread: runs
+- **`src/host/thread.c`** — the THREAD-model internal qzjs thread: runs
   `uv_run(UV_RUN_ONCE)`, drains the inbound `mq_in` via `qz_wake_cb`, and
   flushes all JS microtasks (`qz_flush_microtasks`) after each loop iteration.
-- **`src/msgq.c`** — the lock-free MPSC queue (ACQ_REL, no mutex/cond/futex)
+- **`src/msg/msgq.c`** — the lock-free MPSC queue (ACQ_REL, no mutex/cond/futex)
   instantiated twice: `mq_in` (host→runtime inbound, drained by `qz_wake_cb`
   uv_async wakeup) and `mq_out` (the host-facing mailbox — `qz_out_push` links
   then writes the `out_efd`; `qz_recv_message`/`qz_out_pop` consume). Also the
   `qz_post_to_host` funnel (`rt->host_emit` uplink for the main-RT child →
   else → mailbox) and message encode/decode. `qz_msg_push` no longer sends the
   async internally — each inbound call site wakes explicitly.
-- **`src/uv_io.c`** — direct libuv I/O: timers, fs, HTTP, TLS. The old PAL
+- **`src/io/uv_io.c`** — direct libuv I/O: timers, fs, HTTP, TLS. The old PAL
   backend logic now calls libuv directly (still exposed to JS via the `pal`
   object / `qz_io_*` functions).
 - **`src/context.c`** — multi-context lifecycle (`spawn`/`suspend`/`resume`/
   `destroy_ctx`, `qz_get_active_ctx`).
-- **`src/worker.c`** — Web Worker support: `new Worker(url)` spawns a new qz_t
+- **`src/host/worker.c`** — Web Worker support: `new Worker(url)` spawns a new qz_t
   (independent JSRuntime + independent loop) on a new thread.
 - **`src/extension.c`** — runs `qz_ext_t` hooks across the build-time
   extension table (no runtime registration; the table is fixed at compile time
   via the `QZ_EXTENSIONS` macro in `include/qzjs/qz_ext_registry.h`).
-- **`src/bridge.c`** — the JS↔libuv bridge. Builds the per-context `pal` JS
+- **`src/host/bridge.c`** — the JS↔libuv bridge. Builds the per-context `pal` JS
   object (`qz_create_pal_object_ctx`), injects the WinterTC modules,
   dispatches host messages (`onmessage`), and encodes/decodes JSON between the
   host and JS.
@@ -204,10 +204,10 @@ The runtime is layered. Read these together to understand it:
   mailbox. After `qz_wait_idle` the mailbox still yields messages until
   `qz_free` (mutually exclusive with `qz_destroy`).
 
-### Bridge layer discipline (`src/bridge.c`)
+### Bridge layer discipline (`src/host/bridge.c`)
 
 The `js_pal_*` wrappers in `bridge.c` are the only C between the libuv I/O
-layer (`src/uv_io.c`) and the WinterTC modules (JS, which closures over the `pal` JS
+layer (`src/io/uv_io.c`) and the WinterTC modules (JS, which closures over the `pal` JS
 object). C is *required* here for three things nothing else can do:
 
 1. **JSValue ↔ C conversion** (`JS_ToCString`, `JS_GetUint8Array`,

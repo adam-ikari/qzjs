@@ -5,7 +5,7 @@
 查的一类缺陷：宿主**编译通过**（头无条件声明），直到**链接**才炸出一句
 `undefined reference to 'qz_ping'`——看起来像构建/配置坏了，而不是「这个
 编译模型没这个功能」。M-P7 评审里 qz_ping / qz_ping_path 就是这样：实现在
-`src/rt_host.c`（仅 ISOLATED + 非 test 编译），声明却是无条件的。
+`src/host/rt_host.c`（仅 ISOLATED + 非 test 编译），声明却是无条件的。
 
 本门按每个编译配置各跑一遍：抽出头里声明的公共函数，逐个查静态库里是否真有
 该符号（跳过本配置下头里就没声明的——那是刻意条件编译，如 ping 家族）。
@@ -29,7 +29,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 头里出现的函数声明：分号收尾的语句里出现的 qz_xxx( 。不锚定行首——声明可能
-# 被 `extern "C" {` 之类的构造前缀包住（qz_internal.h 就是这样），锚行首会漏。
+# 被 `extern "C" {` 之类的构造前缀包住（base/qz_rt.h 就是这样），锚行首会漏。
 NAME_RE = re.compile(r"\b(qz_[a-z_0-9]+)\s*\(")
 # 这些是语句（控制流/赋值）而非声明，出现在头里的极少；排除掉以免把函数调用
 # 误认成声明。误多认只让 WARN 变安静，不会掩盖 missing，故从宽。
@@ -195,7 +195,7 @@ def main():
     # 硬门：头里声明了、库里却没有 → 宿主「编译通过、链接才炸」。这条必须 fail。
     missing = [n for n in visible if n not in syms]
     # 反方向是**参考信息，不是门**：库里有个 qz_* 代码符号，头里任何地方都没声明。
-    # 这多数是正常的——非 static 的模块内部函数（qz_tcp_io_init 就在 src/tcp_io.c
+    # 这多数是正常的——非 static 的模块内部函数（qz_tcp_io_init 就在 src/io/tcp_io.c
     # 里声明+定义）本就不该进公共头。所以只打印、不影响 rc，也不参与成功判定。
     internal = set()
     for hdr in glob.glob(os.path.join(ROOT, "src", "*.h")) + glob.glob(

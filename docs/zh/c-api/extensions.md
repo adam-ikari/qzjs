@@ -64,7 +64,7 @@ add_subdirectory(deps/qzjs)
 ```c
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "qz_internal.h"   /* qz_get_active_jsctx — 内部辅助函数 */
+#include "base/qz_rt.h"    /* qz_get_active_jsctx — 内部辅助函数 */
 
 static JSValue my_hello_fn(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {
@@ -109,7 +109,7 @@ qzjs 为扩展**不提供每运行时的宿主数据通道**：没有 `qz_get_ru
 
 ```c
 #include <qzjs/qzjs.h>
-#include "qz_internal.h"   /* QZ_UNUSED */
+#include "base/qz_types.h" /* QZ_UNUSED */
 
 /* 扩展自己的东西：qzjs 不提供任何 per-runtime 宿主数据通道。 */
 typedef struct { int refcount; } my_state_t;

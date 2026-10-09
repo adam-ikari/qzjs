@@ -52,7 +52,7 @@ build directory when mixing presets with explicit overrides.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `QZ_WITH_GRPC` | OFF | Embed the gRPC/HTTP2 stack (h2 + HPACK + protobuf + grpc, ~3.5k lines JS) in the polyfill bundle. Needs npm + esbuild + qjsc (same prerequisites as the polyfill rebuild); warns and skips when the toolchain is missing. Manual path: `QZ_WITH_GRPC=1 node polyfill/build.js`. |
+| `QZ_WITH_GRPC` | OFF | Embed the gRPC/HTTP2 stack (h2 + HPACK + protobuf + grpc, ~3.5k lines JS) in the polyfill bundle. Needs npm + esbuild + qjsc (same prerequisites as the polyfill rebuild); warns and skips when the toolchain is missing. Manual path: `QZ_WITH_GRPC=1 node src/polyfill/build.js`. |
 
 ## Build Targets (`QZ_BUILD_*`)
 
@@ -105,7 +105,7 @@ Engine callbacks have fixed signatures that may include unused parameters. Use `
 
 ```c
 #include <quickjs.h>
-#include "qz_internal.h"   /* QZ_UNUSED 定义在此（内部头） */
+#include "base/qz_types.h" /* QZ_UNUSED */
 
 static JSValue my_callback(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {

@@ -176,7 +176,7 @@ int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
 邮箱不受影响。
 
 **这两个函数只在 `QZ_PROCESS_MODEL_ISOLATED`（且非 mock 测试构建）下声明**，
-因为实现住在 `src/rt_host.c`，而那个文件只在这些配置下编译。THREAD 构建下
+因为实现住在 `src/host/rt_host.c`，而那个文件只在这些配置下编译。THREAD 构建下
 声明直接不存在——宿主误调会在**编译期**报出、指向源码那一行，而不是等到链接
 期才来一句看起来像「构建坏了」的 `undefined reference`。
 

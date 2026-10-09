@@ -42,7 +42,7 @@ qzjs 的 CMake 选项分为**两个独立的层级**：`QZ_WITH_*` 控制**可�
 
 | 选项 | 默认值 | 描述 |
 |------|--------|------|
-| `QZ_WITH_GRPC` | OFF | 把 gRPC/HTTP2 栈（h2 + HPACK + protobuf + grpc，约 3.5k 行 JS）编进 polyfill bundle。依赖 npm + esbuild + qjsc（与 polyfill rebuild 相同前提）；工具链缺失时告警并跳过。手工路径：`QZ_WITH_GRPC=1 node polyfill/build.js`。 |
+| `QZ_WITH_GRPC` | OFF | 把 gRPC/HTTP2 栈（h2 + HPACK + protobuf + grpc，约 3.5k 行 JS）编进 polyfill bundle。依赖 npm + esbuild + qjsc（与 polyfill rebuild 相同前提）；工具链缺失时告警并跳过。手工路径：`QZ_WITH_GRPC=1 node src/polyfill/build.js`。 |
 
 ## 构建目标（`QZ_BUILD_*`）
 
@@ -91,7 +91,7 @@ qzjs 及其所有依赖项在 `-std=c99 -Wall -Wextra -Werror` 下编译（通�
 
 ```c
 #include <quickjs.h>
-#include "qz_internal.h"   /* QZ_UNUSED 定义在此（内部头） */
+#include "base/qz_types.h" /* QZ_UNUSED */
 
 static JSValue my_callback(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {

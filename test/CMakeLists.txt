@@ -35,7 +35,7 @@ function(add_qz_gtest name)
     if(QZ_POLYFILL_MODE STREQUAL "external")
         set_tests_properties(${name} PROPERTIES
             LABELS "offline"
-            ENVIRONMENT "QZ_POLYFILL_FILE=${PROJECT_SOURCE_DIR}/dist/polyfill_default.polyfill")
+            ENVIRONMENT "QZ_POLYFILL_FILE=${CMAKE_BINARY_DIR}/generated/polyfill/polyfill_default.polyfill")
     else()
         set_tests_properties(${name} PROPERTIES LABELS "offline")
     endif()
@@ -66,7 +66,7 @@ add_qz_gtest(test_polyfill_gtest)
 add_qz_gtest(test_polyfill_lazy_gtest)
 add_qz_gtest(test_host_messaging_gtest)   # host-messaging 边界直接测试（P2-10）
 add_qz_gtest(test_ipc_envelope_gtest)
-# 出站邮箱 OOM 可见性（per-rt 钩子 qz_test_mailbox_fault，见 src/msgq.c）：
+# 出站邮箱 OOM 可见性（per-rt 钩子 qz_test_mailbox_fault，见 src/msg/msgq.c）：
 # 分配失败必须在流上留标记帧，不能静默留洞。
 add_qz_gtest(test_mailbox_oom_gtest)
 # CONTROL payload 分类（"qzjs" 数字键 = 通道层保留命名空间）：rt_main 分流与
@@ -106,7 +106,7 @@ endif()
 # EXCLUDE 不产出 CLI → fbcheck 测试找不到二进制必挂（本地增量构建残留的
 # 旧产物会掩盖此问题，见 test262 runner 同款教训）。纯 C99 极小，全量无害。
 add_executable(ipc_envelope_cli ipc_envelope_cli.c
-               ../src/ipc_envelope.c)
+               ../src/ipc/ipc_envelope.c)
 target_include_directories(ipc_envelope_cli PRIVATE ${PROJECT_SOURCE_DIR}/src)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(NOT Python3_Interpreter_FOUND)

@@ -39,7 +39,7 @@ typedef struct qz_ext_t {
 ```c
 #include <qzjs/qzjs.h>
 #include <quickjs.h>
-#include "qz_internal.h"   // qz_get_active_jsctx (internal helper)
+#include "base/qz_rt.h"    // qz_get_active_jsctx (internal helper)
 
 static JSValue my_hello_fn(JSContext *ctx, JSValue this_val,
                            int argc, JSValue *argv) {
@@ -126,7 +126,7 @@ instead of `QZ_DEFAULT_EXTENSIONS`.
 - **`suspend`** — called when the context is suspended. Save state, pause timers, close connections.
 - **`resume`** — called when the context is resumed. Restore state, resume timers, reopen connections.
 
-All hooks receive both the extension and the runtime. Get the active `JSContext*` via `qz_get_active_jsctx(rt)` (internal, `src/qz_internal.h`).
+All hooks receive both the extension and the runtime. Get the active `JSContext*` via `qz_get_active_jsctx(rt)` (internal, `src/base/qz_rt.h`).
 
 ### Per-runtime state in init
 
@@ -139,7 +139,7 @@ the `qz_t *` handle it receives in every hook:
 
 ```c
 #include <qzjs/qzjs.h>
-#include "qz_internal.h"   /* QZ_UNUSED */
+#include "base/qz_types.h" /* QZ_UNUSED */
 
 /* 你自己的 per-rt 表：qzjs 不提供 runtime-data 通道，键只能是钩子收到的 rt。 */
 typedef struct { int refcount; } my_state_t;

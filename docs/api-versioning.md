@@ -75,7 +75,7 @@ would read past the end of the caller's stack frame — silent memory unsafety.
 #include <qzjs/qzjs.h>
 #include <stdio.h>
 
-/* the guard qz_create runs before copying anything (src/qzjs.c) */
+/* the guard qz_create runs before copying anything (src/host/qzjs.c) */
 static int abi_mismatch(const qz_config_t *config)
 {
     return config->abi_version != QZ_ABI_VERSION ||

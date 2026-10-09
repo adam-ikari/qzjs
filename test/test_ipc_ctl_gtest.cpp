@@ -1,4 +1,4 @@
-// CONTROL payload 分类（src/ipc_ctl.c）单元测试
+// CONTROL payload 分类（src/ipc/ipc_ctl.c）单元测试
 //
 // 「payload 顶层带数字 "qzjs" 键」= 通道层系统 CONTROL 的保留命名空间，这个
 // 判据有两处消费：rt_main.c 收帧分流（SYSTEM 家族就地消费，其余路由）与
@@ -10,7 +10,7 @@
 // 非数字 / 非法 JSON / 超长 / 空）、以及 SYSTEM 兜底（带 qzjs 但不属于任何
 // 已知家族 → SYSTEM，绝不落回 NONE 去当用户命令路由）。
 
-#include "ipc_process.h"
+#include "ipc/ipc_process.h"
 
 #include <gtest/gtest.h>
 

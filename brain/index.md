@@ -1,8 +1,9 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-06T15:33:49.393Z._
+_Auto-generated. Last updated 2026-10-09T06:07:42.113Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
+- [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | <!-- compiled_truth -->
 - [branch-management](pages/branch-management.md) — category: decision | tags: [git, workflow, branch, protection] | ## 分支命名（7 前缀）
 - [brand-display-name](pages/brand-display-name.md) — category: decision | tags: [brand, docs] | Qz.js 品牌显示名 = **Qz.js**（内部标识 qzjs）。
@@ -44,6 +45,7 @@ _Auto-generated. Last updated 2026-10-06T15:33:49.393Z._
 - [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | <!-- compiled_truth -->
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
+- [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑（2026-10-07/08 用户拍板）
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论
 - [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | <current best understanding — replace this with the real content>
 - [runtime-perf-baseline](pages/runtime-perf-baseline.md) — category: reference | tags: [perf, worker, runtime, baseline] | > **测试策略（2026-09-09 用户拍板）：性能基准一律在 CI 环境（GitHub Actions ubuntu-latest）执行，不使用本机。
@@ -57,7 +59,6 @@ _Auto-generated. Last updated 2026-10-06T15:33:49.393Z._
 - [urlpattern-modifier-fix](pages/urlpattern-modifier-fix.md) — category: decision | tags: [urlpattern, wintertc, ecma429, polyfill] | ## 问题
 - [wamr-init-lazy](pages/wamr-init-lazy.md) — category: decision | tags: [wamr, startup, lazy-init] | ## 决策
 - [wasm-engine-integration](pages/wasm-engine-integration.md) — category: decision | tags: [wasm, wamr, threading] | # WAMR 线程环境（关键坑）
-- [wasm-ts-runtime](pages/wasm-ts-runtime.md) — category: decision | tags: [wasm, ts, wamr, roadmap] | <current best understanding — replace this with the real content>
 - [wintertc-byob-streams](pages/wintertc-byob-streams.md) — category: decision | tags: [wintertc, streams, byob, ecma-429] | - **背景**：ECMA-429（WinterTC Minimum common web API，2025 snapshot）要求 Streams 的三个 BYOB 接口必须暴露在 globalThis 上：`ReadableByteStreamController`、`Rea
 - [wintertc-crypto-performance-globals](pages/wintertc-crypto-performance-globals.md) — category: decision | tags: [wintertc, ecma-429, crypto, performance] | - **背景**：ECMA-429（WinterTC Minimum common web API）WEBCRYPTO 要求 globalThis 暴露 `Crypto`/`CryptoKey`/`SubtleCrypto`/`crypto`，HR-TIME 要求 `Perfor
 - [wintertc-ecma429-coverage](pages/wintertc-ecma429-coverage.md) — category: decision | tags: [wintertc, ecma-429, coverage, gtest, streams] | ## 结论

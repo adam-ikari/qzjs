@@ -29,8 +29,8 @@ import path from 'node:path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const { buildSync } = require(path.resolve(__dirname, '..', 'polyfill', 'node_modules', 'esbuild'));
-const SRC = path.resolve(__dirname, '..', 'polyfill', 'src');
+const { buildSync } = require(path.resolve(__dirname, '..', 'src', 'polyfill', 'node_modules', 'esbuild'));
+const SRC = path.resolve(__dirname, '..', 'src', 'polyfill', 'src');
 
 // 1. bundle the whole gRPC stack to a temp ESM file
 const bundlePath = '/tmp/grpc_harness.bundle.mjs';

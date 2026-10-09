@@ -7,7 +7,7 @@
 // 真实进程树的跨进程端到端由 test/test_ctl_e2e.sh 覆盖（control-plane-design
 // §6 CTL-1/CTL-2 验证门）。
 #include "test_host.h"
-#include "ipc_envelope.h"
+#include "ipc/ipc_envelope.h"
 #include <cstring>
 
 /* ── 1. 路由决策（纯函数，无副作用） ── */
