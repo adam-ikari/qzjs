@@ -4,7 +4,7 @@
 > 日期：2026-09-09
 > 范围：qzjs 运行时（QuickJS-ng 嵌入式/边缘）——"这该进 C 还是 JS"的唯一裁决依据，供所有新模块/新能力归类时引用。
 > 背景：用户指令——**C 与 JS 分层需要有原则和标准**。本文从第一性原理 + 现有实现（协议栈先例、spawn 分层化、信封/队列归类）归纳，将 ROADMAP §二.1 的单一表述（"能力原语 vs 协议策略"）展开为可逐条引用的判据、灰区决策流程与全量模块归类清单。
-> 依据：ROADMAP §二.1；`docs/archive/plans/2026-09-03-grpc-http2-design.md` §2.2-2.4；`docs/archive/plans/2026-09-04-multi-process-model.md` §4；commit `606acb81`（spawn 分层化）；`src/polyfill/src/*.js`；`src/msgq.c`、`src/ipc_envelope.c`；brain `[[oss-library-policy]]`、`[[qzjs-positioning]]`、`[[httpserver-ws-fixes]]`、`[[wpt-runner-removed]]`。
+> 依据：ROADMAP §二.1；`docs/archive/plans/2026-09-03-grpc-http2-design.md` §2.2-2.4；`docs/archive/plans/2026-09-04-multi-process-model.md` §4；commit `606acb81`（spawn 分层化）；`src/polyfill/src/*.js`；`src/msg/msgq.c`、`src/ipc/ipc_envelope.c`；brain `[[oss-library-policy]]`、`[[qzjs-positioning]]`、`[[httpserver-ws-fixes]]`、`[[wpt-runner-removed]]`。
 > 冲突处置：本文件与 brain 决策页冲突时，以 brain 为准修订本文件（ROADMAP §二.9 SSOT 分工同款）。
 
 **核心结论（TL;DR）**
@@ -249,7 +249,7 @@ polyfill bundle 是**单一替换单元**（`build.js` 打包 + `QZ_WITH_GRPC` �
 
 ## 6.5 msgq：C
 
-- **结论**：lock-free MPSC 消息队列归 C（src/msgq.c）。
+- **结论**：lock-free MPSC 消息队列归 C（src/msg/msgq.c）。
 - **依据**：性能关键（每消息一次 ACQ_REL exchange + 内存序精细控制，规避 PVE 6.17 futex 唤醒不可靠）+ 接口稳定（`qz_msg_push/pop/has_pending/free` 四符号长期不变）。线程安全是 C 才能表达的能力（C3 + C4）。
 
 ## 6.6 C 层 JSON 三站点：统一 vendored cJSON（用户指令：不手写）

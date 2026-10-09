@@ -71,7 +71,7 @@ qz_t *rt = qz_create(&cfg);
 #include <qzjs/qzjs.h>
 #include <stdio.h>
 
-/* qz_create 拷贝任何内容前跑的就是这个检查（src/qzjs.c） */
+/* qz_create 拷贝任何内容前跑的就是这个检查（src/host/qzjs.c） */
 static int abi_mismatch(const qz_config_t *config)
 {
     return config->abi_version != QZ_ABI_VERSION ||

@@ -40,7 +40,7 @@ static void fail(const char *what, const char *detail) {
     g_fail = 1;
 }
 
-/* qz_now_ms 是内部 API（qz_internal.h），宿主程序拿不到——这里用本地单调钟。
+/* qz_now_ms 是内部 API（base/qz_rt.h），宿主程序拿不到——这里用本地单调钟。
  * 顺带说明：这本身就是一条契约事实，公共头里没有暴露任何计时函数。 */
 static int64_t now_ms(void) {
     struct timespec ts;

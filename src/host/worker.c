@@ -28,7 +28,7 @@
 #include <string.h>
 #include <unistd.h>
 
-/* 父线程调用的 worker API 契约见 qz_internal.h（qz_worker_* 声明；
+/* 父线程调用的 worker API 契约见 base/qz_rt.h（qz_worker_* 声明；
  * qz_worker_s 定义也在那，bridge.c / qzjs.c 需解引用其字段）。 */
 
 /* worker 启动垫片：由 polyfill/src/worker-boot.js 经 build.js(qjsc) 编译成

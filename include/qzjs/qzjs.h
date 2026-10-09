@@ -158,7 +158,7 @@ void qz_wait_idle(qz_t *rt);
 
 /* Liveness ping 家族（仅 ISOLATED 编译存在，见下方条件编译）。
  *
- * 条件编译的理由：这两个函数的实现住在 src/rt_host.c，而该文件只在
+ * 条件编译的理由：这两个函数的实现住在 src/host/rt_host.c，而该文件只在
  * QZ_PROCESS_MODEL=ISOLATED 且非测试构建时编译。声明若无条件给出，THREAD
  * 构建的宿主会**编译通过、链接才炸**（undefined reference to `qz_ping`）——
  * 看起来像构建/配置坏了，而不是「这个编译模型没有跨进程 liveness 可测」。

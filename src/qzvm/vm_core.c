@@ -1,11 +1,11 @@
 /*
  * qzvm VM 核心语义 —— eval / 字节码编译 / rt 查询。
  *
- * 边界治理（2026-10-09）：这 5 个函数原定义在宿主层（src/qzjs.c 的
- * qz_compile/qz_eval_internal/qz_eval_bytecode_internal，src/bridge.c 的
+ * 边界治理（2026-10-09）：这 5 个函数原定义在宿主层（src/host/qzjs.c 的
+ * qz_compile/qz_eval_internal/qz_eval_bytecode_internal，src/host/bridge.c 的
  * qz_get_rt_from_ctx/qz_get_rt_from_jsrt），但均为 VM 引擎语义（纯 quickjs
  * API + qz_t 结构查询，无宿主 I/O 依赖）。移入 qzvm，消除 VM → 宿主反向依赖：
- *   - 宿主层经 qz_internal.h 声明调用（qz_compile 由 cli.c/qzc.c 用，
+ *   - 宿主层经 base/qz_rt.h 声明调用（qz_compile 由 cli.c/qzc.c 用，
  *     qz_get_rt_from_* 由宿主扩展 ext_* 用）
  *   - VM 内（context.c/ext_wamr.c/qzc.c）直接同层调用
  */
@@ -14,7 +14,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ===== 从 src/qzjs.c / src/bridge.c 移入（边界治理：eval/rt 查询是 VM 语义）===== */
+/* ===== 从 src/host/qzjs.c / src/host/bridge.c 移入（边界治理：eval/rt 查询是 VM 语义）===== */
 int qz_eval_internal(qz_t *rt, const char *script, char **err)
 {
     JSContext *ctx = qz_get_active_jsctx(rt);
@@ -96,7 +96,7 @@ qz_t *qz_get_rt_from_jsrt(JSRuntime *jsrt)
  * to find the one matching jsctx
  * ================================================================ */
 
-/* ===== 从 src/qzjs.c 移入（边界治理：编译是 VM 能力）===== */
+/* ===== 从 src/host/qzjs.c 移入（边界治理：编译是 VM 能力）===== */
 int qz_compile(const char *source, size_t len, const char *filename,
                uint8_t **out, size_t *out_len, char **err)
 {

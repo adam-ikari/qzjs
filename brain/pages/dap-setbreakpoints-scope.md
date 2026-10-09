@@ -25,7 +25,7 @@ updated: "2026-09-27T05:21:34"
 - gtest `DapDebugger.PerFileBreakpointScope`（test/test_dap_gtest.cpp，复用 child_main）：`<initial>` 断点在 `<second>` 的 set+clear 之后仍命中 line 3；清空响应回 `"breakpoints":[]`。
 - 全量：ctest 26/26、npm 4/4（SMOKE / DEBUGGER-STMT / LINE-COVERAGE / BREAKPOINT-SCOPE）、tsc 干净；非调试器 `build/` 亦编译通过。
 
-**gotcha**：qzjs 没有文件模块 loader（`import()` 报 "could not load module"），测试想拿到第二个真实文件名只能用 `__native__.nativeEvalScript(code, filename)`（`src/bridge.c`；注释写 `pal.nativeEvalScript`，实际 CLI 全局名是 `__native__`，bootstrap cli.c:196-198 也是这么用的）。
+**gotcha**：qzjs 没有文件模块 loader（`import()` 报 "could not load module"），测试想拿到第二个真实文件名只能用 `__native__.nativeEvalScript(code, filename)`（`src/host/bridge.c`；注释写 `pal.nativeEvalScript`，实际 CLI 全局名是 `__native__`，bootstrap cli.c:196-198 也是这么用的）。
 
 
 ## Timeline

@@ -59,7 +59,7 @@ int  qz_out_push(qz_t *rt, const char *json, size_t len); /* 入箱 + eventfd �
 /* 测试钩子：让 rt 接下来 N 次 qz_out_push 的主分配强制失败（N=0 关），用于直接
  * 验「OOM 时宿主能在流上看见标记帧」。生产恒 0，因此分支恒不成立。
  * per-rt 作用域——刻意不做成 env/全局：那等于在生产库里留一个静默丢消息的
- * 总开关，且同进程多个 rt 会共享额度。详见 src/msgq.c 的形态说明。
+ * 总开关，且同进程多个 rt 会共享额度。详见 src/msg/msgq.c 的形态说明。
  * 用例见 test/test_mailbox_oom_gtest.cpp。 */
 void qz_test_mailbox_fault(qz_t *rt, int n);
 qz_msg_t *qz_out_pop(qz_t *rt);                 /* 宿主 recv 线程（单消费者） */

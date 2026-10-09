@@ -358,7 +358,7 @@ int32_t qz_ctl_cmd_target(const char *json, size_t len)
  * 把非 0 一律归一化成 -1，所以这些是纯内部约定；端点按码决定回不回帧。
  *   CTL_RC_ENQUEUE_FAILED  命令没能进队列 ⇒ 不会有回执，必须当场告诉客户端
  *   CTL_RC_FORWARD_DONE    前投失败，但 NOT_FOUND 回执已由本函数写出，端点别再写
- * 其余 -2/-3 见 qz_internal.h 的契约注释。 */
+ * 其余 -2/-3 见 base/qz_rt.h 的契约注释。 */
 #define CTL_RC_ENQUEUE_FAILED  -4
 #define CTL_RC_FORWARD_DONE    -5
 
@@ -381,7 +381,7 @@ static ctl_verdict_t ctl_check_accept(const uint8_t *bytes, size_t len,
     return CTL_ACCEPT;
 }
 
-/* 判据 → 内部返回码。端点按码决定回哪一帧（见 qz_internal.h 的契约注释）。 */
+/* 判据 → 内部返回码。端点按码决定回哪一帧（见 base/qz_rt.h 的契约注释）。 */
 static int ctl_verdict_to_code(ctl_verdict_t v)
 {
     switch (v) {

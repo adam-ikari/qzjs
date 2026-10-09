@@ -94,7 +94,7 @@ void qz_tcp_io_init(JSContext *ctx, JSValue pal);
 
 /* ================================================================
  * Helper: get qz_t from JSContext / JSRuntime.
- * qz_get_rt_from_ctx is also used by extensions (declared in qz_internal.h).
+ * qz_get_rt_from_ctx is also used by extensions (declared in base/qz_rt.h).
  * ================================================================ */
 
 static qz_ctx_t *get_ctx_from_jsctx(qz_t *rt, JSContext *jsctx)

@@ -66,7 +66,7 @@ add_qz_gtest(test_polyfill_gtest)
 add_qz_gtest(test_polyfill_lazy_gtest)
 add_qz_gtest(test_host_messaging_gtest)   # host-messaging 边界直接测试（P2-10）
 add_qz_gtest(test_ipc_envelope_gtest)
-# 出站邮箱 OOM 可见性（per-rt 钩子 qz_test_mailbox_fault，见 src/msgq.c）：
+# 出站邮箱 OOM 可见性（per-rt 钩子 qz_test_mailbox_fault，见 src/msg/msgq.c）：
 # 分配失败必须在流上留标记帧，不能静默留洞。
 add_qz_gtest(test_mailbox_oom_gtest)
 # CONTROL payload 分类（"qzjs" 数字键 = 通道层保留命名空间）：rt_main 分流与

@@ -1,7 +1,7 @@
 /* lz4_compress_main.c — build-time helper: raw-LZ4-block compress stdin→stdout.
  *
  * Used by polyfill/build.js in QZ_POLYFILL_MODE=compressed to produce the
- * payload that src/polyfill_load.c decodes with LZ4_decompress_safe().
+ * payload that src/host/polyfill_load.c decodes with LZ4_decompress_safe().
  * Raw block (no frame format) keeps the C decoder to one call.
  *
  * Usage: qz_lz4_compress < level > level.lz4

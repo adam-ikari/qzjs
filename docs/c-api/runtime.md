@@ -242,7 +242,7 @@ participate.
 **calling** thread (a bounded backoff poll); the mailbox is unaffected.
 
 **These two are declared only under `QZ_PROCESS_MODEL_ISOLATED`** (and not in
-mock test builds) because their implementation lives in `src/rt_host.c`, which
+mock test builds) because their implementation lives in `src/host/rt_host.c`, which
 is compiled only there. In a THREAD build the declarations are simply absent,
 so a host that calls them fails at compile time with a diagnostic pointing at
 the line — not with a link-time `undefined reference` that looks like a broken

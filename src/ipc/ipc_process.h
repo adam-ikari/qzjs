@@ -31,7 +31,7 @@ extern "C" {
 
 /* ── Opaque handle — declared up front so the framing/terminate prototypes
  * below can use qz_proc_t without pulling in uv types (review: the typedef
- * used to sit mid-declaration list). Guarded: qz_internal.h forward-declares
+ * used to sit mid-declaration list). Guarded: base/qz_rt.h forward-declares
  * the same name (it must not include this header under mock libuv), and a
  * repeated typedef is an error under -Wpedantic. */
 #ifndef QZ_PROC_T_DEFINED

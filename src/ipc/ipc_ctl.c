@@ -4,8 +4,8 @@
  * 「payload 顶层带数字 "qzjs" 键」= 通道层系统 CONTROL（ready / idle /
  * shutdown / ping / pong / pfail，以及 M-P4 closing 等未知系统消息），不
  * 进控制面命令路由器。这个判据被两处消费：
- *   - src/rt_main.c 收帧分流：SYSTEM 家族就地消费（不进 msgq/JS），其余路由；
- *   - src/control.c 的 qz_control_sink 入口：带该键的用户命令显式拒收，
+ *   - src/host/rt_main.c 收帧分流：SYSTEM 家族就地消费（不进 msgq/JS），其余路由；
+ *   - src/control/control.c 的 qz_control_sink 入口：带该键的用户命令显式拒收，
  *     否则命令会静默消失（没有回执、没有错误）。
  *
  * 独立成文件而不是放进 ipc_process.c：本翻译单元是纯 payload 分类（cJSON +

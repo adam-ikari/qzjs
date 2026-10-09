@@ -136,8 +136,8 @@ def main():
             print("    - %s" % f, file=sys.stderr)
         print("\nISOLATED（默认进程模型）下子进程看不到这些字段的值 —— "
               "宿主设了等于没设，且无任何报错。", file=sys.stderr)
-        print("要修：在 src/rt_host.c 的 argv/env 组装里传它，"
-              "并在 src/rt_main.c 里从 argv 还原；", file=sys.stderr)
+        print("要修：在 src/host/rt_host.c 的 argv/env 组装里传它，"
+              "并在 src/host/rt_main.c 里从 argv 还原；", file=sys.stderr)
         print("若确实无需传递，加进本脚本的 ALLOWLIST 并写明理由。",
               file=sys.stderr)
         return 1

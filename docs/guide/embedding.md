@@ -102,7 +102,7 @@ static int my_ext_init(qz_ext_t *ext, qz_t *rt) {
 The `init` hook runs on qzjs's internal thread during `qz_create`, before
 the host receives the runtime — so registering globals here is safe.
 `qz_get_active_jsctx` is an internal helper (declared in
-`src/qz_internal.h`), for use from extension hooks.
+`src/base/qz_rt.h`), for use from extension hooks.
 
 ## Calling JS from C with Structured Data
 

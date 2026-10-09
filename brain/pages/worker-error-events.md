@@ -12,7 +12,7 @@ updated: "2026-08-28T15:53:31"
 ## compiled_truth
 
 ### Worker 脚本顶层异常的错误事件流（2026-08-14 实现，Task 1 完成）
-- worker 侧：`qz_worker_notify_error`（src/worker.c）在 worker 自己的 JSRuntime 内构造 `new ErrorEvent('error', {message, filename:'', lineno:0, colno:0, error:<Error>})` 并 `globalThis.dispatchEvent` → 触发 `self.onerror` / `addEventListener('error')`。
+- worker 侧：`qz_worker_notify_error`（src/host/worker.c）在 worker 自己的 JSRuntime 内构造 `new ErrorEvent('error', {message, filename:'', lineno:0, colno:0, error:<Error>})` 并 `globalThis.dispatchEvent` → 触发 `self.onerror` / `addEventListener('error')`。
 - 父侧：C 层仍经 postMessage 发 `{type:'error', error:<msg>}`（结构化克隆字节）；polyfill worker.js 的 `__qz_dispatch__` 按 `d.type === 'error'` 路由到 `w._onerror`。**注意：父侧收到的是 MessageEvent，`e.data = {type:'error', error:<msg>}`，不是 ErrorEvent 实例**（计划目标文本说"均收到 ErrorEvent"，但计划代码片段与测试用 `e.data`，实现以片段+测试为准）。
 - ErrorEvent 构造失败时回退为仅父通知；worker 继续存活（后续 postMessage 往返不受影响）。
 - 新增 Worker 实例 `onerror` 存取器（与 onmessage 同款）；路由特判对 worker 主动发送的合法 `{type:'error'}` 消息有误伤风险（已接受，见计划）。

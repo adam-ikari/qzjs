@@ -446,7 +446,7 @@ jobs:
         working-directory: build
 
       # M-P7 邮箱路径的 ASAN 覆盖。上面的 ASAN 构建开了 QZ_BUILD_TESTS=ON，
-      # 而 src/ipc_process.c 与 src/rt_host.c 在该配置下整文件不编（mock 后端
+      # 而 src/ipc/ipc_process.c 与 src/host/rt_host.c 在该配置下整文件不编（mock 后端
       # 没有 uv_pipe）——全项目最并发的一段代码（邮箱 MPSC、eventfd 唤醒、
       # 三级终止、崩溃帧时序）就这么从没有过 ASAN 覆盖。qz_mp7_mailbox_e2e
       # harness 依赖真实 ISOLATED 后端，故另起一个 tests=OFF 的构建跑它。
@@ -539,7 +539,7 @@ jobs:
         working-directory: build
 
       # 同一个结构性缺口，同 ASAN job：上面那个 UBSan 构建开了 QZ_BUILD_TESTS=ON，
-      # 而 src/ipc_process.c 与 src/rt_host.c 在该配置下整文件不编（mock 后端没有
+      # 而 src/ipc/ipc_process.c 与 src/host/rt_host.c 在该配置下整文件不编（mock 后端没有
       # uv_pipe）——邮箱 MPSC / eventfd 唤醒 / 三级终止 / 崩溃帧时序 / ping 退避这些
       # 最吃 UB（指针算术、size 溢出、原子配对）的一段代码，从没有在 UBSan 下跑过。
       # 另起一个 tests=OFF 的真实 ISOLATED 构建，跑并发最密的那支 e2e。
@@ -1171,7 +1171,7 @@ jobs:
       # 公共头声明面 vs 实际链接面。「声明了但某个编译模型下没有实现」是最难查
       # 的一类缺陷：宿主编译通过（头无条件声明），直到链接才炸出一句
       # undefined reference，看起来像构建坏了而不是「这个模型没这个功能」。
-      # qz_ping / qz_ping_path 就是这样（实现在 src/rt_host.c，仅 ISOLATED +
+      # qz_ping / qz_ping_path 就是这样（实现在 src/host/rt_host.c，仅 ISOLATED +
       # 非 test 编译，声明却无条件）。ISOLATED 侧用上面已构建的 build/，THREAD
       # 侧另起一个只编静态库的构建（--target qzjs，比全量快得多）。
       - name: Configure (THREAD, library only)
@@ -1543,7 +1543,7 @@ jobs:
           /* Minimal libFuzzer harness: feeds arbitrary bytes to the QuickJS
            * bytecode deserializer (JS_ReadObject + JS_READ_OBJ_BYTECODE) — the
            * parse qzjs performs on the embedded polyfill (src/context.c) and
-           * on worker boot shims (src/qzjs.c). Read-only: the resulting value
+           * on worker boot shims (src/host/qzjs.c). Read-only: the resulting value
            * is freed, never evaluated. */
           #include <stddef.h>
           #include <stdint.h>

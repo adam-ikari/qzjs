@@ -29,10 +29,10 @@ updated: "2026-10-03T10:29:11"
 解释器栈帧图，于是 `gc_obj_list` 永远非空。
 
 修法：补上 `JS_FreeValue(ctx, JS_GetException(ctx));`
-- `src/bridge.c:164`（`qz_js_call_cleanup` —— 打断路径必经）
-- `src/bridge.c:1551`（非法实参退回 MESSAGE）
-- `src/bridge.c:1692`（OOM 建 ArrayBuffer 跳过帧）
-- `src/worker.c:108`、`src/worker.c:114`（error 事件派发）
+- `src/host/bridge.c:164`（`qz_js_call_cleanup` —— 打断路径必经）
+- `src/host/bridge.c:1551`（非法实参退回 MESSAGE）
+- `src/host/bridge.c:1692`（OOM 建 ArrayBuffer 跳过帧）
+- `src/host/worker.c:108`、`src/host/worker.c:114`（error 事件派发）
 
 ### 验证
 

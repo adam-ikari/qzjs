@@ -126,7 +126,7 @@ instead of `QZ_DEFAULT_EXTENSIONS`.
 - **`suspend`** — called when the context is suspended. Save state, pause timers, close connections.
 - **`resume`** — called when the context is resumed. Restore state, resume timers, reopen connections.
 
-All hooks receive both the extension and the runtime. Get the active `JSContext*` via `qz_get_active_jsctx(rt)` (internal, `src/qz_internal.h`).
+All hooks receive both the extension and the runtime. Get the active `JSContext*` via `qz_get_active_jsctx(rt)` (internal, `src/base/qz_rt.h`).
 
 ### Per-runtime state in init
 

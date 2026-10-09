@@ -59,7 +59,7 @@ HTTP_PROXY=http://127.0.0.1:18082 NO_PROXY=127.0.0.1,example.com \
 
 | 能力 | 说明 |
 |---|---|
-| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | fetch 出站代理（C 层 `src/uv_io.c`，含小写与 `*` 通配） |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | fetch 出站代理（C 层 `src/io/uv_io.c`，含小写与 `*` 通配） |
 | `serve({port}, handler)` | HTTP 监听 + 回复（源站与代理都用它） |
 | `fetch` / `Response` / `URL` | 客户端请求与绝对 URL 解析 |
 | `globalThis.env` / `globalThis.arguments` | CLI 注入的环境快照与脚本参数 |

@@ -33,7 +33,7 @@ static JSValue wasm3_throw_link_error(JSContext *ctx, const char *fmt, ...);
  *
  * No file-scope mutable state: the wasm3 environment and QuickJS class IDs
  * live on qz_t (per-runtime), reached via qz_get_rt_from_ctx(ctx) or
- * qz_get_rt_from_jsrt(jsrt). See qz_internal.h.
+ * qz_get_rt_from_jsrt(jsrt). See base/qz_rt.h.
  * ================================================================ */
 
 /* ================================================================
