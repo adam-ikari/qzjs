@@ -1387,7 +1387,7 @@ jobs:
         working-directory: build
 
       # 扩展 e2e 以真二进制为被调试端（adapter 内联 DAP 客户端），
-      # 默认找 build_dbg/qzjs——CI 本 job 的构建目录是 build/，用
+      # 默认找 build/dbg/qzjs——CI 本 job 的构建目录是 build/，用
       # QZJS_RUNTIME 覆盖（docs/dev/debugging.md Test 节有记载）。
       - name: Install Node (extension e2e)
         uses: actions/setup-node@v4

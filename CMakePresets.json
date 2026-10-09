@@ -1,223 +1,248 @@
 {
-  "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
-  "configurePresets": [
-    {
-      "name": "base",
-      "hidden": true,
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
-    },
-    {
-      "name": "default",
-      "displayName": "Release standard (本地主力)",
-      "description": "Release + standard profile + tests/examples/cli — 一键本地开发。",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "QZ_PROFILE": "standard",
-        "QZ_BUILD_TESTS": "ON",
-        "QZ_BUILD_EXAMPLES": "ON"
-      }
-    },
-    {
-      "name": "debug-tests",
-      "displayName": "Debug standard + tests",
-      "description": "CI 主 job 等价：Debug + standard + tests ON。",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "QZ_PROFILE": "standard",
-        "QZ_BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "minimal",
-      "displayName": "Minimal profile",
-      "description": "QZ_PROFILE=minimal（ECMA-429 必备集，仅 TLS 切除）+ tests ON。",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "QZ_PROFILE": "minimal",
-        "QZ_BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "all-features-off",
-      "displayName": "All features OFF (wasm3-only)",
-      "description": "WAMR/TLS/CRYPTO/COMPRESS/TEXTCODEC 全 OFF — CI all-features-off job 等价。",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "QZ_BUILD_TESTS": "ON",
-        "QZ_WITH_WAMR": "OFF",
-        "QZ_WITH_TLS": "OFF",
-        "QZ_WITH_CRYPTO_EXT": "OFF",
-        "QZ_WITH_COMPRESS": "OFF",
-        "QZ_WITH_TEXTCODEC": "OFF"
-      }
-    },
-    {
-      "name": "thread",
-      "displayName": "THREAD process model",
-      "description": "Debug + THREAD 后端 + tests OFF — CI thread job 等价。",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "QZ_BUILD_TESTS": "OFF",
-        "QZ_PROCESS_MODEL": "THREAD"
-      }
-    },
-    {
-      "name": "asan",
-      "displayName": "ASan + tests",
-      "description": "Debug + AddressSanitizer + tests ON — CI asan 主 job 等价。",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "QZ_BUILD_TESTS": "ON",
-        "CMAKE_C_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address"
-      }
-    },
-    {
-      "name": "asan-iso",
-      "displayName": "ASan + ISOLATED (tests off)",
-      "description": "Debug + ASan + tests OFF + ISOLATED — CI asan-rt job 等价（跑 mp7 mailbox e2e）。",
-      "inherits": "asan",
-      "cacheVariables": {
-        "QZ_BUILD_TESTS": "OFF",
-        "QZ_PROCESS_MODEL": "ISOLATED"
-      }
-    },
-    {
-      "name": "ubsan",
-      "displayName": "UBSan + tests",
-      "description": "Debug + UndefinedBehaviorSanitizer + tests ON — CI ubsan 主 job 等价。",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "QZ_BUILD_TESTS": "ON",
-        "CMAKE_C_FLAGS": "-fsanitize=undefined -fno-omit-frame-pointer -g",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined"
-      }
-    },
-    {
-      "name": "ubsan-iso",
-      "displayName": "UBSan + ISOLATED (tests off)",
-      "description": "Debug + UBSan + tests OFF + ISOLATED — CI ubsan-rt job 等价。",
-      "inherits": "ubsan",
-      "cacheVariables": {
-        "QZ_BUILD_TESTS": "OFF",
-        "QZ_PROCESS_MODEL": "ISOLATED"
-      }
-    },
-    {
-      "name": "polyfill-compressed",
-      "displayName": "Polyfill mode = compressed",
-      "description": "Debug + lz4-compressed polyfill — CI polyfill compressed job 等价。",
-      "inherits": "debug-tests",
-      "cacheVariables": {
-        "QZ_POLYFILL_MODE": "compressed"
-      }
-    },
-    {
-      "name": "polyfill-external",
-      "displayName": "Polyfill mode = external",
-      "description": "Debug + external .polyfill file — CI polyfill external job 等价。",
-      "inherits": "debug-tests",
-      "cacheVariables": {
-        "QZ_POLYFILL_MODE": "external"
-      }
-    },
-    {
-      "name": "coverage",
-      "displayName": "Coverage (gcov)",
-      "description": "Debug + tests ON + --coverage flags — CI coverage job 等价。",
-      "inherits": "debug-tests",
-      "cacheVariables": {
-        "CMAKE_C_FLAGS": "--coverage",
-        "CMAKE_EXE_LINKER_FLAGS": "--coverage"
-      }
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "default",
-      "configurePreset": "default",
-      "jobs": 0
-    },
-    {
-      "name": "debug-tests",
-      "configurePreset": "debug-tests",
-      "jobs": 0
-    },
-    {
-      "name": "minimal",
-      "configurePreset": "minimal",
-      "jobs": 0
-    },
-    {
-      "name": "all-features-off",
-      "configurePreset": "all-features-off",
-      "jobs": 0
-    },
-    {
-      "name": "thread",
-      "configurePreset": "thread",
-      "jobs": 0
-    },
-    {
-      "name": "asan",
-      "configurePreset": "asan",
-      "jobs": 0
-    },
-    {
-      "name": "asan-iso",
-      "configurePreset": "asan-iso",
-      "jobs": 0
-    },
-    {
-      "name": "ubsan",
-      "configurePreset": "ubsan",
-      "jobs": 0
-    },
-    {
-      "name": "ubsan-iso",
-      "configurePreset": "ubsan-iso",
-      "jobs": 0
-    },
-    {
-      "name": "polyfill-compressed",
-      "configurePreset": "polyfill-compressed",
-      "jobs": 0
-    },
-    {
-      "name": "polyfill-external",
-      "configurePreset": "polyfill-external",
-      "jobs": 0
-    },
-    {
-      "name": "coverage",
-      "configurePreset": "coverage",
-      "jobs": 0
-    }
-  ],
-  "testPresets": [
-    {
-      "name": "default",
-      "configurePreset": "default",
-      "output": { "outputOnFailure": true },
-      "execution": { "parallel": 4, "noTestsAction": "error" }
-    },
-    {
-      "name": "debug-tests",
-      "configurePreset": "debug-tests",
-      "output": { "outputOnFailure": true },
-      "execution": { "parallel": 4, "noTestsAction": "error" }
-    }
-  ]
+ "version": 3,
+ "cmakeMinimumRequired": {
+  "major": 3,
+  "minor": 21,
+  "patch": 0
+ },
+ "configurePresets": [
+  {
+   "name": "base",
+   "hidden": true,
+   "generator": "Ninja",
+   "binaryDir": "${sourceDir}/build/${presetName}",
+   "cacheVariables": {
+    "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+   }
+  },
+  {
+   "name": "default",
+   "displayName": "Release standard (本地主力)",
+   "description": "Release + standard profile + tests/examples/cli — 一键本地开发。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Release",
+    "QZ_PROFILE": "standard",
+    "QZ_BUILD_TESTS": "ON",
+    "QZ_BUILD_EXAMPLES": "ON"
+   }
+  },
+  {
+   "name": "debug-tests",
+   "displayName": "Debug standard + tests",
+   "description": "CI 主 job 等价：Debug + standard + tests ON。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "QZ_PROFILE": "standard",
+    "QZ_BUILD_TESTS": "ON"
+   }
+  },
+  {
+   "name": "minimal",
+   "displayName": "Minimal profile",
+   "description": "QZ_PROFILE=minimal（ECMA-429 必备集，仅 TLS 切除）+ tests ON。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "QZ_PROFILE": "minimal",
+    "QZ_BUILD_TESTS": "ON"
+   }
+  },
+  {
+   "name": "all-features-off",
+   "displayName": "All features OFF (wasm3-only)",
+   "description": "WAMR/TLS/CRYPTO/COMPRESS/TEXTCODEC 全 OFF — CI all-features-off job 等价。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "QZ_BUILD_TESTS": "ON",
+    "QZ_WITH_WAMR": "OFF",
+    "QZ_WITH_TLS": "OFF",
+    "QZ_WITH_CRYPTO_EXT": "OFF",
+    "QZ_WITH_COMPRESS": "OFF",
+    "QZ_WITH_TEXTCODEC": "OFF"
+   }
+  },
+  {
+   "name": "thread",
+   "displayName": "THREAD process model",
+   "description": "Debug + THREAD 后端 + tests OFF — CI thread job 等价。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "QZ_BUILD_TESTS": "OFF",
+    "QZ_PROCESS_MODEL": "THREAD"
+   }
+  },
+  {
+   "name": "asan",
+   "displayName": "ASan + tests",
+   "description": "Debug + AddressSanitizer + tests ON — CI asan 主 job 等价。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "QZ_BUILD_TESTS": "ON",
+    "CMAKE_C_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -g",
+    "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address"
+   }
+  },
+  {
+   "name": "asan-iso",
+   "displayName": "ASan + ISOLATED (tests off)",
+   "description": "Debug + ASan + tests OFF + ISOLATED — CI asan-rt job 等价（跑 mp7 mailbox e2e）。",
+   "inherits": "asan",
+   "cacheVariables": {
+    "QZ_BUILD_TESTS": "OFF",
+    "QZ_PROCESS_MODEL": "ISOLATED"
+   }
+  },
+  {
+   "name": "ubsan",
+   "displayName": "UBSan + tests",
+   "description": "Debug + UndefinedBehaviorSanitizer + tests ON — CI ubsan 主 job 等价。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "QZ_BUILD_TESTS": "ON",
+    "CMAKE_C_FLAGS": "-fsanitize=undefined -fno-omit-frame-pointer -g",
+    "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined"
+   }
+  },
+  {
+   "name": "ubsan-iso",
+   "displayName": "UBSan + ISOLATED (tests off)",
+   "description": "Debug + UBSan + tests OFF + ISOLATED — CI ubsan-rt job 等价。",
+   "inherits": "ubsan",
+   "cacheVariables": {
+    "QZ_BUILD_TESTS": "OFF",
+    "QZ_PROCESS_MODEL": "ISOLATED"
+   }
+  },
+  {
+   "name": "polyfill-compressed",
+   "displayName": "Polyfill mode = compressed",
+   "description": "Debug + lz4-compressed polyfill — CI polyfill compressed job 等价。",
+   "inherits": "debug-tests",
+   "cacheVariables": {
+    "QZ_POLYFILL_MODE": "compressed"
+   }
+  },
+  {
+   "name": "polyfill-external",
+   "displayName": "Polyfill mode = external",
+   "description": "Debug + external .polyfill file — CI polyfill external job 等价。",
+   "inherits": "debug-tests",
+   "cacheVariables": {
+    "QZ_POLYFILL_MODE": "external"
+   }
+  },
+  {
+   "name": "coverage",
+   "displayName": "Coverage (gcov)",
+   "description": "Debug + tests ON + --coverage flags — CI coverage job 等价。",
+   "inherits": "debug-tests",
+   "cacheVariables": {
+    "CMAKE_C_FLAGS": "--coverage",
+    "CMAKE_EXE_LINKER_FLAGS": "--coverage"
+   }
+  },
+  {
+   "name": "dbg",
+   "displayName": "Debug + DAP debugger",
+   "description": "调试器构建：Debug + QZ_BUILD_DEBUGGER=ON + tests ON（统一 build/dbg，取代旧 build_dbg）。",
+   "inherits": "base",
+   "cacheVariables": {
+    "CMAKE_BUILD_TYPE": "Debug",
+    "QZ_BUILD_DEBUGGER": "ON",
+    "QZ_BUILD_TESTS": "ON"
+   }
+  }
+ ],
+ "buildPresets": [
+  {
+   "name": "default",
+   "configurePreset": "default",
+   "jobs": 0
+  },
+  {
+   "name": "debug-tests",
+   "configurePreset": "debug-tests",
+   "jobs": 0
+  },
+  {
+   "name": "minimal",
+   "configurePreset": "minimal",
+   "jobs": 0
+  },
+  {
+   "name": "all-features-off",
+   "configurePreset": "all-features-off",
+   "jobs": 0
+  },
+  {
+   "name": "thread",
+   "configurePreset": "thread",
+   "jobs": 0
+  },
+  {
+   "name": "asan",
+   "configurePreset": "asan",
+   "jobs": 0
+  },
+  {
+   "name": "asan-iso",
+   "configurePreset": "asan-iso",
+   "jobs": 0
+  },
+  {
+   "name": "ubsan",
+   "configurePreset": "ubsan",
+   "jobs": 0
+  },
+  {
+   "name": "ubsan-iso",
+   "configurePreset": "ubsan-iso",
+   "jobs": 0
+  },
+  {
+   "name": "polyfill-compressed",
+   "configurePreset": "polyfill-compressed",
+   "jobs": 0
+  },
+  {
+   "name": "polyfill-external",
+   "configurePreset": "polyfill-external",
+   "jobs": 0
+  },
+  {
+   "name": "coverage",
+   "configurePreset": "coverage",
+   "jobs": 0
+  }
+ ],
+ "testPresets": [
+  {
+   "name": "default",
+   "configurePreset": "default",
+   "output": {
+    "outputOnFailure": true
+   },
+   "execution": {
+    "parallel": 4,
+    "noTestsAction": "error"
+   }
+  },
+  {
+   "name": "debug-tests",
+   "configurePreset": "debug-tests",
+   "output": {
+    "outputOnFailure": true
+   },
+   "execution": {
+    "parallel": 4,
+    "noTestsAction": "error"
+   }
+  }
+ ]
 }
