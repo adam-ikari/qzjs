@@ -636,6 +636,7 @@ set(_qz_core_sources
     src/qzjs.c
     src/bridge.c
     src/qzvm/context.c
+    src/qzvm/vm_core.c
     src/qzvm/ext_lifecycle.c
     ${_polyfill_gen_c}
     src/polyfill_load.c

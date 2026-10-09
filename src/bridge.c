@@ -97,28 +97,6 @@ void qz_tcp_io_init(JSContext *ctx, JSValue pal);
  * qz_get_rt_from_ctx is also used by extensions (declared in qz_internal.h).
  * ================================================================ */
 
-qz_t *qz_get_rt_from_ctx(JSContext *ctx)
-{
-    if (!ctx) {
-        return NULL;
-    }
-    return qz_get_rt_from_jsrt(JS_GetRuntime(ctx));
-}
-
-qz_t *qz_get_rt_from_jsrt(JSRuntime *jsrt)
-{
-    qz_t *rt = (qz_t *)JS_GetRuntimeOpaque(jsrt);
-    if (!rt || rt->magic != QZ_MAGIC) {
-        return NULL;
-    }
-    return rt;
-}
-
-/* ================================================================
- * Helper: get qz_ctx_t from JSContext — iterate rt->contexts
- * to find the one matching jsctx
- * ================================================================ */
-
 static qz_ctx_t *get_ctx_from_jsctx(qz_t *rt, JSContext *jsctx)
 {
     if (!rt || !jsctx) {
