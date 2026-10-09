@@ -47,7 +47,7 @@ if(NOT _qz_profile)
 endif()
 option(QZ_WITH_GRPC "Embed gRPC/HTTP2 stack in polyfill bundle (~3.5k lines JS; needs polyfill rebuild toolchain)" OFF)
 option(QZ_BUILD_TESTS "Build tests" OFF)
-option(QZ_BUILD_DEBUGGER "Build the DAP step-debugger (applies the QuickJS-ng debugger patch; adds src/debugger.c + src/debugger_dap.c to libqzjs)" OFF)
+option(QZ_BUILD_DEBUGGER "Build the DAP step-debugger (applies the QuickJS-ng debugger patch; adds src/qzvm/debugger.c + src/qzvm/debugger_dap.c to libqzjs)" OFF)
 
 option(QZ_WITH_WAMR "Link WAMR WASM engine (default; enables real WebAssembly via WAMR with Fast Interp + AOT)" "${_prof_wamr}")
 option(QZ_WITH_WASM3 "Link wasm3 WASM engine (alternative, more portable)" "${_prof_wasm3}")
@@ -96,15 +96,17 @@ if(NOT _polyfill_mode MATCHES "^(rodata|compressed|external|host)$")
 endif()
 set(QZ_POLYFILL_MODE "${_polyfill_mode}")
 
-# Generated polyfill C file per mode (polyfill/build.js uses the same mapping).
-# rodata lands in the tracked baseline src/polyfill_default.c so a fresh clone
-# without the polyfill toolchain still compiles; every other mode lands in
-# untracked src/polyfill_<mode>.c, so switching modes can neither overwrite the
-# baseline nor leave a stale object file carrying the previous mode's symbols.
+# 中间产物生成目录：一律进 build/（不污染 src/ 源目录）。build.js 经
+# QZ_POLYFILL_GEN_DIR 环境变量接收；dist 字节码 + C 数组 + worker_boot 同目录。
+set(_polyfill_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/polyfill")
+
+# Generated polyfill C file per mode (src/polyfill/build.js uses the same mapping).
+# 生成物进 build/generated/polyfill/（非源目录）；模式切换既不覆盖基线也不留
+# 旧模式符号的 stale object。
 if(_polyfill_mode STREQUAL "rodata")
-    set(_polyfill_gen_c "src/polyfill_default.c")
+    set(_polyfill_gen_c "${_polyfill_gen_dir}/polyfill_default.c")
 else()
-    set(_polyfill_gen_c "src/polyfill_${_polyfill_mode}.c")
+    set(_polyfill_gen_c "${_polyfill_gen_dir}/polyfill_${_polyfill_mode}.c")
 endif()
 
 # sanitizer 构建检测（ASan/UBSan/TSan）：CMAKE_C_FLAGS 显式注入
@@ -254,7 +256,7 @@ if(EXISTS "${LZ4_SRC_DIR}/lz4.c")
     target_include_directories(lz4_static PUBLIC "${LZ4_SRC_DIR}")
     # lz4.h warns about unused Kxx constants at -Wall -Wextra -Werror paths
     target_compile_options(lz4_static PRIVATE -w)
-    # 压缩器 CLI（构建期工具，供 polyfill/build.js 调用；不进安装面）
+    # 压缩器 CLI（构建期工具，供 src/polyfill/build.js 调用；不进安装面）
     add_executable(qz_lz4_compress EXCLUDE_FROM_ALL "${LZ4_SRC_DIR}/lz4.c" cmake/lz4_compress_main.c)
     target_include_directories(qz_lz4_compress PRIVATE "${LZ4_SRC_DIR}")
     message(STATUS "lz4 vendored (${LZ4_SRC_DIR}) — polyfill compressed mode + build tool")
@@ -360,20 +362,37 @@ if(EXISTS "${QZ_QUICKJS_C99_PATCH}")
     endif()
 endif()
 
-# ── QuickJS-ng per-ctx job drain ──────────────────────────────────────────
-# JS_DrainPendingJobsForContext now lives in the qzvm engine tree (PR #2).
-# No working-tree .patch needed; the symbol is always present.
-
-# ── QuickJS-ng bytecode reader hardening ──────────────────────────────────
-# Now lives in the engine tree (qzvm/adam-ikari/qzvm, PR #1) — the submodule
-# points at qzvm master which carries both the original hardening and the
-# GC-window SEGV fix. No working-tree .patch needed here anymore.
+# ── qzvm engine patches（DAP debugger + per-ctx drain + bc-reader 加固）────
+# 上游 quickjs-ng submodule（deps/quickjs-ng）不含这些定制；构建时应用到工作区
+# （working-tree-only，子模块保持干净）。src/qzvm/patches/ 管理。reconfigure 时
+# dry-run 失败（已应用）即跳过。
+set(QZVM_PATCHES
+    "engine-bc-reader-harden.patch"   # #1: bc-reader 加固 + GC-window SEGV 防护
+    "engine-dap-debugger.patch"       # #2: DAP debugger + JS_DrainPendingJobsForContext
+)
+foreach(_qz_patch IN LISTS QZVM_PATCHES)
+    set(_qz_patch_file "${CMAKE_CURRENT_SOURCE_DIR}/src/qzvm/patches/${_qz_patch}")
+    execute_process(
+        COMMAND patch -p1 --dry-run -f -i "${_qz_patch_file}"
+        WORKING_DIRECTORY "${QUICKJS_DIR}"
+        RESULT_VARIABLE _qz_patch_dry OUTPUT_QUIET ERROR_QUIET)
+    if(_qz_patch_dry EQUAL 0)
+        execute_process(
+            COMMAND patch -p1 -f -i "${_qz_patch_file}"
+            WORKING_DIRECTORY "${QUICKJS_DIR}"
+            RESULT_VARIABLE _qz_patch_apply ERROR_QUIET)
+        if(NOT _qz_patch_apply EQUAL 0)
+            message(FATAL_ERROR "Failed to apply qzvm patch: ${_qz_patch}")
+        endif()
+        message(STATUS "Applied qzvm patch: ${_qz_patch}")
+    endif()
+endforeach()
 
 # ── QuickJS-ng debugger support ───────────────────────────────────────────
 # The DAP engine primitives (breakpoint opcodes, JS_SetDebuggerHandler, step
 # machinery) now live in the qzvm engine tree (PR #2) — no working-tree
 # .patch needed. QZ_BUILD_DEBUGGER only controls whether qzjs builds its DAP
-# adapter (src/debugger.c + src/debugger_dap.c) and defines QZ_DEBUG_SUPPORT
+# adapter (src/qzvm/debugger.c + src/qzvm/debugger_dap.c) and defines QZ_DEBUG_SUPPORT
 # to wire the dispatch hook into the engine.
 if(QZ_BUILD_DEBUGGER)
     set(QZ_DEBUG_SUPPORT_DEFINE QZ_DEBUG_SUPPORT)
@@ -446,10 +465,10 @@ else()
     set(_polyfill_env QZ_WITH_NONUTF_ENCODINGS=0)
 endif()
 find_program(NPM_EXECUTABLE npm)
-if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/esbuild" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng/qjsc.c")
+if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/polyfill/node_modules/esbuild" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng/qjsc.c")
     set(_polyfill_rebuild_enabled TRUE)
-    # 源依赖：polyfill/src/** 变更必须触发 rebuild，否则旧字节码静默进产物
-    file(GLOB_RECURSE QZ_POLYFILL_SRC "${CMAKE_SOURCE_DIR}/polyfill/src/*.js")
+    # 源依赖：src/polyfill/src/** 变更必须触发 rebuild，否则旧字节码静默进产物
+    file(GLOB_RECURSE QZ_POLYFILL_SRC "${CMAKE_SOURCE_DIR}/src/polyfill/src/*.js")
     # qjsc 必须由 CMake 决定：当前 build 目录自编译的 qjsc 与引擎版本
     # 必然一致（QJSC=$<TARGET_FILE:qjsc>）。否则 build.js 回落 fs 扫描，
     # readdir 顺序不确定，撞上残留旧版 qjsc（如 0.15.1 → BC_VERSION 26）
@@ -472,17 +491,17 @@ if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/polyfill/node_modules/
     set(_polyfill_stamp "${CMAKE_CURRENT_BINARY_DIR}/polyfill_${_polyfill_mode}_nonutf${QZ_WITH_NONUTF_ENCODINGS}_grpc${QZ_WITH_GRPC}.stamp")
     file(GENERATE OUTPUT "${_polyfill_stamp}" CONTENT "")
     add_custom_command(
-        OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
-               "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c"
-        COMMAND ${CMAKE_COMMAND} -E env ${_polyfill_env} QZ_WITH_GRPC=$<BOOL:${QZ_WITH_GRPC}> QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE} QZ_LZ4_COMPRESS=${CMAKE_BINARY_DIR}/qz_lz4_compress QJSC=$<TARGET_FILE:qjsc> npm --prefix "${CMAKE_CURRENT_SOURCE_DIR}/polyfill" run build
+        OUTPUT "${_polyfill_gen_c}"
+               "${_polyfill_gen_dir}/worker_boot_default.c"
+        COMMAND ${CMAKE_COMMAND} -E env ${_polyfill_env} QZ_WITH_GRPC=$<BOOL:${QZ_WITH_GRPC}> QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE} QZ_LZ4_COMPRESS=${CMAKE_BINARY_DIR}/qz_lz4_compress QJSC=$<TARGET_FILE:qjsc> QZ_POLYFILL_GEN_DIR=${_polyfill_gen_dir} npm --prefix "${CMAKE_CURRENT_SOURCE_DIR}/src/polyfill" run build
         DEPENDS ${QZ_POLYFILL_SRC} ${_polyfill_rebuild_tools} "${_polyfill_stamp}"
         COMMENT "Rebuilding polyfill with QZ_WITH_NONUTF_ENCODINGS=${QZ_WITH_NONUTF_ENCODINGS} QZ_WITH_GRPC=${QZ_WITH_GRPC} QZ_POLYFILL_MODE=${QZ_POLYFILL_MODE}"
         VERBATIM
     )
     # Phony handle: `--target polyfill_rebuild` 仍可用，其他 target 也能对它排序。
     add_custom_target(polyfill_rebuild DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c")
+        "${_polyfill_gen_c}"
+        "${_polyfill_gen_dir}/worker_boot_default.c")
 else()
     set(_polyfill_rebuild_enabled FALSE)
     # 内嵌字节码是纯构建产物（不 committed，见 .gitignore），构建 qzjs 需要 polyfill
@@ -492,16 +511,16 @@ else()
     # 的 OUTPUT 规则：configure 照常通过；真去构建 qzjs 时这条命令才跑，并给出可操作
     # 提示（而不是编译期那句看不懂的 "Cannot find source file"）。
     add_custom_command(
-        OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
-               "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c"
+        OUTPUT "${_polyfill_gen_c}"
+               "${_polyfill_gen_dir}/worker_boot_default.c"
         COMMAND ${CMAKE_COMMAND} -E echo
-                "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain to build qzjs: the embedded bytecode is a build product and is not committed. Run `npm --prefix polyfill ci` (installs node_modules/esbuild) and make sure npm is on PATH, then re-configure."
+                "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain to build qzjs: the embedded bytecode is a build product and is not committed. Run `npm --prefix src/polyfill ci` (installs node_modules/esbuild) and make sure npm is on PATH, then re-configure."
         COMMAND ${CMAKE_COMMAND} -E false
         VERBATIM
     )
     add_custom_target(polyfill_rebuild DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_boot_default.c")
+        "${_polyfill_gen_c}"
+        "${_polyfill_gen_dir}/worker_boot_default.c")
     message(STATUS "Polyfill toolchain NOT found (npm / node_modules/esbuild / qjsc.c missing) — configure OK; building qzjs will fail with an actionable message. Only 'qjs'-only builds (e.g. fuzz-smoke) are unaffected.")
 endif()
 
@@ -521,8 +540,8 @@ if(Python3_Interpreter_FOUND)
                "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus/seed-polyfill-head64k.bc"
                "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus/seed-workerboot.bc"
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/gen_fuzz_seeds.py"
-                "${CMAKE_CURRENT_SOURCE_DIR}/dist" "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${_polyfill_gen_c}"
+                "${_polyfill_gen_dir}" "${CMAKE_CURRENT_SOURCE_DIR}/test/fuzz-corpus"
+        DEPENDS "${_polyfill_gen_c}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/test/gen_fuzz_seeds.py"
         COMMENT "Generating fuzz corpus seeds from built bytecode"
         VERBATIM
@@ -606,7 +625,7 @@ endif()
 # Core library (qzjs.c + bridge.c)
 #
 # Source files that are always compiled (no feature toggle):
-#   qzjs.c, bridge.c, context.c, extension.c, polyfill_*.c (mode-dependent),
+#   qzjs.c, bridge.c, context.c, ext_lifecycle.c, polyfill_*.c (mode-dependent),
 #   worker_boot_default.c, thread.c (执行模型 A 自持线程主循环), msgq.c
 #   (入站消息 FIFO), ipc_envelope.c (M-P0 进程信封 fb 编解码)
 # Extension sources are guarded by QZ_WITH_* feature toggles so they are
@@ -616,11 +635,11 @@ endif()
 set(_qz_core_sources
     src/qzjs.c
     src/bridge.c
-    src/context.c
-    src/extension.c
+    src/qzvm/context.c
+    src/qzvm/ext_lifecycle.c
     ${_polyfill_gen_c}
     src/polyfill_load.c
-    src/worker_boot_default.c
+    ${_polyfill_gen_dir}/worker_boot_default.c
     src/thread.c
     src/msgq.c
     src/ipc_envelope.c
@@ -630,10 +649,10 @@ set(_qz_core_sources
     src/control.c
 )
 if(QZ_WITH_WAMR)
-    list(APPEND _qz_core_sources src/ext_wamr.c)
+    list(APPEND _qz_core_sources src/qzvm/ext_wamr.c)
 endif()
 if(QZ_WITH_WASM3)
-    list(APPEND _qz_core_sources src/ext_wasm3.c)
+    list(APPEND _qz_core_sources src/qzvm/ext_wasm3.c)
 endif()
 if(QZ_WITH_COMPRESS)
     list(APPEND _qz_core_sources src/ext_compress.c)
@@ -670,7 +689,7 @@ if(NOT QZ_BUILD_TESTS)
 endif()
 
 if(QZ_BUILD_DEBUGGER)
-    list(APPEND _qz_core_sources src/debugger.c src/debugger_dap.c)
+    list(APPEND _qz_core_sources src/qzvm/debugger.c src/qzvm/debugger_dap.c)
 endif()
 
 
@@ -726,6 +745,8 @@ endif()
 target_include_directories(qzjs PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+# src/qzvm/（VM 定制层）include src/qz_internal.h（共享内部头，留在 src/）
+target_include_directories(qzjs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Vendored headers reach qzjs's TUs as -isystem: the -Wall -Wextra -Wpedantic
 # -Werror gate below judges qzjs's own sources only, and libuv's uv.h is not
@@ -786,7 +807,7 @@ function(qz_enable_warnings target)
 endfunction()
 qz_enable_warnings(qzjs)
 
-# QZ_DEBUG_SUPPORT gates the debugger code in src/debugger.c, src/debugger_dap.c
+# QZ_DEBUG_SUPPORT gates the debugger code in src/qzvm/debugger.c, src/qzvm/debugger_dap.c
 # and the auto-attach path in qzjs.c. The engine patch's DEBUGGER_CHECK hook is
 # also gated on this macro (it's a no-op when undefined). Only defined when
 # QZ_BUILD_DEBUGGER=ON, so non-debugger builds have zero debug overhead.
@@ -972,7 +993,8 @@ endif()
 # CLI — standalone WinterTC runtime (dogfoods the qzjs C API)
 # ============================================================================
 if(QZ_BUILD_CLI)
-    add_executable(qz_cli src/cli.c)
+    # 单入口：qzjs_main.c（argv 分发 CLI/RT 进程模式），cli.c（CLI 交互）合并
+    add_executable(qz_cli src/qzjs_main.c src/cli.c)
     set_target_properties(qz_cli PROPERTIES OUTPUT_NAME qzjs)
     # cli.c 编在 qz_cli 里，不在 qzjs 库里——qzjs 的 PRIVATE 宏到不了它。
     # 不注入的话 CLI 会静默用 src/cli.c 里的 fallback 版本号，与真源漂移
@@ -989,24 +1011,13 @@ if(QZ_BUILD_CLI)
         # build (e.g. build_cli).
         target_link_libraries(qz_cli PRIVATE qzjs mock_libuv)
     else()
+        # 非 test：合并 rt_main（M-P1/P2 进程模式，需 real-libuv pipe）。
+        # qzjs_main.c 据此定义 QZ_WITH_RT_MAIN 才分发到 rt_main_entry。
+        target_sources(qz_cli PRIVATE src/rt_main.c)
+        target_compile_definitions(qz_cli PRIVATE QZ_WITH_RT_MAIN)
         target_link_libraries(qz_cli PRIVATE qz_full)
     endif()
 qz_enable_warnings(qz_cli)
-endif()
-# ============================================================================
-# qzjs-rt — standalone worker process binary (M-P1 multi-process model)
-# Spawned by qz_proc_spawn via fork+exec. Uses real-libuv pipe APIs, so it
-# only builds in non-test builds (mock_libuv has no pipe API — design §10.1).
-# ============================================================================
-if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
-    add_executable(qz_rt src/rt_main.c)
-    set_target_properties(qz_rt PROPERTIES OUTPUT_NAME qzjs-rt)
-    # 同 qz_cli：rt_main.c 拼版本串也要拿真源，别用 fallback。
-    target_compile_definitions(qz_rt PRIVATE QZ_VERSION="${PROJECT_VERSION}")
-    # Same -Wall -Wextra -Werror + _POSIX_C_SOURCE discipline as the qzjs lib
-    # (review I8): rt_main.c is core runtime code, not an exception.
-    qz_enable_warnings(qz_rt)
-    target_link_libraries(qz_rt PRIVATE qz_full)
 endif()
 
 # ============================================================================
@@ -1018,7 +1029,7 @@ endif()
 # 相同（qz_compile 不依赖 uv loop），字节码可互换（同引擎构建）。
 # ============================================================================
 if(QZ_BUILD_CLI)
-    add_executable(qz_qzc src/qzc.c)
+    add_executable(qz_qzc src/qzvm/qzc.c)
     set_target_properties(qz_qzc PROPERTIES OUTPUT_NAME qzc)
     qz_enable_warnings(qz_qzc)
     if(QZ_BUILD_TESTS)

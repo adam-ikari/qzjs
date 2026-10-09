@@ -87,3 +87,18 @@ __pycache__/
 
 # Claude Code skill symlinks (point at .agents/skills)
 .claude/
+
+# AOT 实验构建产物（可复现，不进版本库）
+src/qzvm/aot/*.a
+src/qzvm/aot/*.so
+src/qzvm/aot/host
+src/qzvm/aot/*.o
+*.wasm
+*.aot
+node_modules/
+package-lock.json
+
+# AOT 中间产物（build.js 生成，可复现，不入库）
+*.strings.json
+*.meta.json
+*.glue.js

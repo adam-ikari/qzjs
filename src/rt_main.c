@@ -493,7 +493,7 @@ static void pipe_read_cb(uv_stream_t *s, ssize_t nread, const uv_buf_t *buf)
 
 /* ── Main ── */
 
-int main(int argc, char **argv)
+int rt_main_entry(int argc, char **argv)
 {
     int parent_fd = -1;
     int worker_id = 0;

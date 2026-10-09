@@ -666,7 +666,7 @@ qz_t *qz_get_rt_from_jsrt(JSRuntime *jsrt);
 qz_t *qz_get_rt_from_ctx(JSContext *ctx);
 void qz_ctx_cleanup_resources(qz_t *rt, qz_ctx_t *ctx);
 
-/* extension.c — extension lifecycle hooks */
+/* ext_lifecycle.c (src/qzvm) — extension lifecycle hooks */
 int qz_ext_init_all(qz_t *rt, qz_ctx_t *ctx);
 void qz_ext_destroy_all(qz_t *rt, qz_ctx_t *ctx);
 int qz_ext_suspend_all(qz_t *rt, qz_ctx_t *ctx);

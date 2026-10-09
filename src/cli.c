@@ -786,7 +786,7 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     return exit_code;
 }
 
- int main(int argc, char **argv) {
+int cli_main(int argc, char **argv) {
     /* HTTP/TCP 服务写已关闭的对端连接会触发 SIGPIPE(默认杀进程,
      * wrk 压测中断连即崩)。libuv 不忽略它;宿主必须显式忽略。 */
     signal(SIGPIPE, SIG_IGN);

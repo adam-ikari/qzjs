@@ -280,13 +280,13 @@ strip build_profile_min/qzjs   # 2,573,536 B
 
 `QZ_WITH_GRPC`（默认 OFF）现在是 CMake option：ON 时构建系统向
 polyfill rebuild 传 `QZ_WITH_GRPC=1`，把 gRPC/HTTP2 栈（h2 + HPACK +
-protobuf + grpc，~3.5k 行 JS）编进 `src/polyfill_default.c`。依赖 npm +
+protobuf + grpc，~3.5k 行 JS）编进 `build/<bin>/generated/polyfill/polyfill_default.c`（中间产物不落 src/）。依赖 npm +
 esbuild + qjsc（polyfill rebuild 本来就依赖，无新增前提）。手工路径仍是
-`QZ_WITH_GRPC=1 node polyfill/build.js`。
+`QZ_WITH_GRPC=1 node src/polyfill/build.js`。
 
 > Note: before `QZ_WITH_GRPC` was a CMake option, the stack was gated only
 > inside the polyfill **build** step (`QZ_WITH_GRPC=1 node
-> polyfill/build.js`). The CMake option drives the same rebuild
+> src/polyfill/build.js`). The CMake option drives the same rebuild
 > automatically; the manual path still works.
 
 ### Build Targets (`QZ_BUILD_*`)

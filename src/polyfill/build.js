@@ -46,7 +46,10 @@ const { execSync } = require('child_process');
 process.chdir(__dirname);
 
 const ROOT_DIR = path.resolve(__dirname, '..');
-const DIST_DIR = path.join(ROOT_DIR, 'dist');
+// 输出目录：CMake 经 QZ_POLYFILL_GEN_DIR 指定构建目录（中间产物不进 src/）；
+// 无 env 时 fallback 到仓库 dist/（手工 npm run build 场景）。
+const GEN_DIR = process.env.QZ_POLYFILL_GEN_DIR || path.join(ROOT_DIR, 'dist');
+const DIST_DIR = GEN_DIR;
 const ENTRY_POINT = path.join(__dirname, 'src', 'index.js');
 
 // Ensure dist directory exists
@@ -91,7 +94,7 @@ if (!['rodata', 'compressed', 'external', 'host'].includes(QZ_POLYFILL_MODE)) {
 //   rodata → src/polyfill_default.c (tracked baseline, shipped so a fresh clone
 //            compiles without the polyfill toolchain)
 //   others → src/polyfill_<mode>.c (untracked, regenerated per build)
-const OUT_C = path.join(ROOT_DIR, 'src',
+const OUT_C = path.join(GEN_DIR,
   QZ_POLYFILL_MODE === 'rodata' ? 'polyfill_default.c' : 'polyfill_' + QZ_POLYFILL_MODE + '.c');
 const QZ_WITH_NONUTF_ENCODINGS = process.env.QZ_WITH_NONUTF_ENCODINGS === '1';
 // gRPC/HTTP2 stack (http2.js + hpack.js + protobuf.js + grpc.js).
@@ -317,7 +320,7 @@ if (isWatch) {
     const bootBytes = compileToBytecode(
       path.join(__dirname, 'src', 'worker-boot.js'),
       path.join(DIST_DIR, 'worker-boot.bytecode'));
-    writeCArray(path.join(ROOT_DIR, 'src', 'worker_boot_default.c'),
+    writeCArray(path.join(GEN_DIR, 'worker_boot_default.c'),
       'qz_default_worker_boot', bootBytes);
   } catch (e) {
     console.error('Error: qjsc not found, cannot generate bytecode header: ' + e.message);

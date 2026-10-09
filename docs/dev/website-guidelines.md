@@ -91,9 +91,10 @@ const nav = [
 When editing `polyfill/src/*.js`:
 
 ```bash
-cd polyfill
-QJSC=../build/deps/quickjs-ng/qjsc npm run build
-# This regenerates src/polyfill_<mode>.c (rodata default: src/polyfill_default.c)
+cd src/polyfill
+QJSC=../../build/deps/quickjs-ng/qjsc npm run build
+# This regenerates build/<bin>/generated/polyfill/polyfill_<mode>.c (rodata
+# default: polyfill_default.c) — intermediate products never land in src/.
 # Then rebuild qzjs: cmake --build build
 ```
 
