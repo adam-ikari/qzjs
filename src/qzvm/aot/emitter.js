@@ -261,12 +261,18 @@ function compileTS(input, outWasm, opts = {}) {
     // 字段槽位可能超 2 页 → 按需扩内存
     // memory 由宿主提供（import），此处仅校验字段槽位是否放得下
     fs.writeFileSync(outWasm, m.build());
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [] };
+    // funcMeta: 每导出函数 {name, mode(num/tagged), params}
+    const funcMeta = fns.map(f => ({
+        name: f.name.text,
+        mode: f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged",
+        params: f.parameters.length,
+    }));
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta };
 }
 
 
 // ================= tagged 模式发射（动态值：对象/字符串/any） =================
-// tagged i32: bit0=0 数值(v>>1) | bit0=1 handle(v>>1，qzrt 表索引)
+// tagged i32: bit0=0 数值(v>>1) | bit0=1 handle(v>>1，qzvm 表索引)
 Emitter.prototype._fieldIndex = function (name) {
     if (!this.fieldMap) this.fieldMap = new Map();
     let i = this.fieldMap.get(name);
