@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [bytecode, release, artifact, wasm, wintertc, abi]
 created: "2026-10-07T15:07:14"
-updated: "2026-10-09T05:13:56"
+updated: "2026-10-09T05:41:46"
 ---
 
 <!-- compiled_truth -->
@@ -345,4 +345,10 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
   kind: decision
   summary: "工程结构检出到 master（2026-10-09 用户裁决）：experiment/aot 分支的工程结构修改检出到 master，AOT 实验保留在 experiment/aot。master 原落后到分叉点（9ec3e2db，无独立 commit），工程 commit 与 AOT 实验交错演进且深度耦合（monorepo 移动 src/qzvm/aot），无法干净 cherry-pick 分离——采用「master 快进到 HEAD + 从 master 移除 AOT 实验」路径。master 工作树 = 纯工程结构：monorepo（src/qzvm 分层：context/debugger/debugger_dap/ext_lifecycle/ext_wamr/ext_wasm3/qzc/patches）、polyfill 迁移（src/polyfill + src/polyfill.js）、中间产物治理（polyfill 产物进 build/generated/polyfill/）、入口合并（qz_rt+qz_cli 单 ELF，src/qzjs_main.c argv 分发）。AOT 实验（src/qzvm/aot 工具链：emitter/wasm-encoder/qzvm.js/build.js + 实验数据 as_bench + 文档 ASSESSMENT/STR_BACKEND_DESIGN）完整保留在 experiment/aot 分支。master 验证：CMake 配置 + 22/22 编译 + CLI 回归（fetch/计算正常）。分支关系：master 领先 experiment/aot（多一个移除 AOT commit），experiment/aot 保留全部 AOT。"
   source: "2026-10-09 工程结构检出 master"
+  affects: [release-artifact-topology]
+
+- time: 2026-10-09T05:41:46
+  kind: decision
+  summary: "qzvm/qzjs 边界治理（2026-10-09）：消除 3 个 VM→宿主反向依赖。评审发现 qzvm 调宿主层 5 个函数，3 个真渗透（VM 语义实现放宿主文件）：qz_eval_internal/qz_eval_bytecode_internal（eval 核心语义）与 qz_compile（字节码编译能力）原在 src/qzjs.c，qz_get_rt_from_ctx/qz_get_rt_from_jsrt（JSContext/JSRuntime→qz_t 查询）原在 src/bridge.c。治理：新建 src/qzvm/vm_core.c（lib 源）集中这 5 个函数，CMake 加源；声明全在 qz_internal.h 共享头，宿主层经声明调用不受影响（cli.c 用 qz_compile，宿主扩展 ext_* 用 qz_get_rt_from_*）。过程 bug：qz_compile 初移 qzc.c 失败（qzc.c 是独立可执行目标 add_executable 非 libqzjs 源，lib 无定义 → cli 链接 undefined reference），改放 vm_core.c。验证：CLI eval + qzc 编译 + 构建全过。治理后 qzvm 仅剩 3 个合理宿主依赖（方案 B 裁决的桥服务）：qz_create_pal_object_ctx（pal 创建，bridge.c）、qz_polyfill_load（polyfill 字节码加载，polyfill_load.c）、qz_timer_cancel（timer，bridge.c）。依赖方向基本单向：宿主→qzvm 正常，qzvm→宿主仅桥服务。"
+  source: "2026-10-09 边界评审 + 治理"
   affects: [release-artifact-topology]
