@@ -61,8 +61,10 @@ class Emitter {
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         // 模式：参数全 number 注解 → 裸 i32 快路径；否则 tagged（动态值）路径
         this.mode = f.parameters.every(p => p.type && p.type.getText && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged";
-        this.scratch = f.parameters.length + locals.length;   // 末尾追加 scratch（后缀 ++/-- 需要）
-        this.m.startBody(f.name.text, locals.map(() => "i32").concat(["i32"]));
+        this.scratch = f.parameters.length + locals.length;   // scratch（后缀 ++/--）
+        this.scratchA = this.scratch + 1;                    // guard 暂存 a
+        this.scratchB = this.scratch + 2;                    // guard 暂存 b
+        this.m.startBody(f.name.text, locals.map(() => "i32").concat(["i32", "i32", "i32"]));   // + scratch(++)/scratchA/scratchB（guard 暂存）
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -248,7 +250,7 @@ function compileTS(input, outWasm, opts = {}) {
     const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
     // 阶段1：任一函数为 tagged → 注册全部 qz.* import；登记所有函数签名（支持前向/互递归）
     const anyTagged = fns.some(f => !f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword));
-    if (anyTagged) { registerQz(m); m.addMemory(2); }   // 本地定义 memory（wamrc AOT 只支持本地 memory，不支持 import）
+    if (anyTagged) { registerQz(m); m.addMemory(2); m.addGlobal("i32", 0); }   // global0 = wasm 内 bump 分配器   // 本地定义 memory（wamrc AOT 只支持本地 memory，不支持 import）
     for (const st of fns) {
         const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
         m.declareFunc(st.name.text, st.parameters.map(() => "i32"), isVoid ? [] : ["i32"]);
@@ -287,7 +289,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
     if (ts.isIfStatement(s)) {
         this.emitTaggedExpr(s.expression !== undefined ? s.expression : s.condition);
-        this.m.call("qz.truthy"); this.m.ifBlock(); this.depth++;
+        this.m.ifBlock(); this.depth++;          // 条件是 tagged bool（0 假/非0 真），wasm if 直接用
         this.labels.push({ brk: this.depth, cont: null });
         this.emitTaggedStmt(s.thenStatement);
         if (s.elseStatement) { this.m.else_(); this.emitTaggedStmt(s.elseStatement); }
@@ -297,7 +299,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
         this.labels.push({ brk: this.depth - 1, cont: this.depth });
         this.emitTaggedExpr(s.expression !== undefined ? s.expression : s.condition);
-        this.m.call("qz.truthy"); this.m.i32Eqz(); this.m.brIf(1);
+        this.m.i32Eqz(); this.m.brIf(1);      // 条件已是 tagged bool（guard 产出 0/2），无需 qz.truthy
         this.emitTaggedStmt(s.statement);
         this.m.br(0);
         this.labels.pop(); this.depth--; this.m.end(); this.depth--; this.m.end(); return;
@@ -310,7 +312,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         }
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
         this.labels.push({ brk: this.depth - 1, cont: this.depth });
-        if (s.condition) { this.emitTaggedExpr(s.condition); this.m.call("qz.truthy"); this.m.i32Eqz(); this.m.brIf(1); }
+        if (s.condition) { this.emitTaggedExpr(s.condition); this.m.i32Eqz(); this.m.brIf(1); }
         if (s.statement) this.emitTaggedStmt(s.statement);
         if (s.incrementor) { this.emitTaggedExpr(s.incrementor); this.m.drop(); }
         this.m.br(0);
@@ -340,10 +342,16 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             throw new Error("[tagged] 对象字面量只支持 { x: v } 形式");
         }
         const NF = e.properties.length;
+        // 内联 bump：global0 += NF*4; offset = new_bump - NF*4（零跨界）
+        this.m.globalGet(0);
         this.m.i32Const(NF * 4);
-        this.m.call("qz.alloc");            // → 裸 offset
-        this.m.i32Const(1); this.m.i32Shl(); // offset<<1
-        this.m.i32Const(1); this.m.i32Or();  // |1 = tagged handle
+        this.m.i32Add();
+        this.m.globalSet(0);
+        this.m.globalGet(0);
+        this.m.i32Const(NF * 4);
+        this.m.i32Sub();                      // → offset
+        this.m.i32Const(1); this.m.i32Shl();  // offset<<1
+        this.m.i32Const(1); this.m.i32Or();   // |1 = tagged handle
         this.m.localSet(this.scratch);
         for (let i = 0; i < NF; i++) {
             this.m.localGet(this.scratch);   // [h]
@@ -379,8 +387,41 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isBinaryExpression(e)) { this.emitTaggedBinary(e); return; }
     throw new Error("[tagged] 不支持的表达式: " + ts.SyntaxKind[e.kind]);
 };
+// guarded 数值特化：栈 [a b] → 若都是 tagged number（bit0=0）走原生指令，
+// 否则回退 qz.*（JS 语义：字符串拼接 / 对象等）。跨界仅在慢路径。
+Emitter.prototype.emitGuardedOp = function (qzName, fastEmit) {
+    this.m.localSet(this.scratchB);
+    this.m.localSet(this.scratchA);
+    this.m.localGet(this.scratchA); this.m.i32Const(1); this.m.i32And();
+    this.m.localGet(this.scratchB); this.m.i32Const(1); this.m.i32And();
+    this.m.i32Or();
+    this.m.ifBlock("i32");
+    this.m.localGet(this.scratchA); this.m.localGet(this.scratchB); this.m.call(qzName);
+    this.m.else_();
+    this.m.localGet(this.scratchA); this.m.i32Const(1); this.m.i32ShrU();
+    this.m.localGet(this.scratchB); this.m.i32Const(1); this.m.i32ShrU();
+    fastEmit.call(this.m);
+    this.m.i32Const(1); this.m.i32Shl();
+    this.m.end();
+};
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
+    // 数值可特化：guard 判定后原生运算（tagged number），否则 qz.* JS 语义
+    const GUARD = {
+        [ts.SyntaxKind.PlusToken]: () => this.emitGuardedOp("qz.add", this.m.i32Add),
+        [ts.SyntaxKind.MinusToken]: () => this.emitGuardedOp("qz.sub", this.m.i32Sub),
+        [ts.SyntaxKind.AsteriskToken]: () => this.emitGuardedOp("qz.mul", this.m.i32Mul),
+        [ts.SyntaxKind.SlashToken]: () => this.emitGuardedOp("qz.div", this.m.i32DivS),
+        [ts.SyntaxKind.PercentToken]: () => this.emitGuardedOp("qz.rem", this.m.i32RemS),
+        [ts.SyntaxKind.LessThanToken]: () => this.emitGuardedOp("qz.lt", this.m.i32LtS),
+        [ts.SyntaxKind.GreaterThanToken]: () => this.emitGuardedOp("qz.gt", this.m.i32GtS),
+        [ts.SyntaxKind.LessThanEqualsToken]: () => this.emitGuardedOp("qz.le", this.m.i32LeS),
+        [ts.SyntaxKind.GreaterThanEqualsToken]: () => this.emitGuardedOp("qz.ge", this.m.i32GeS),
+        [ts.SyntaxKind.EqualsEqualsToken]: () => this.emitGuardedOp("qz.seq", this.m.i32Eq),
+        [ts.SyntaxKind.EqualsEqualsEqualsToken]: () => this.emitGuardedOp("qz.seq", this.m.i32Eq),
+        [ts.SyntaxKind.ExclamationEqualsToken]: () => this.emitGuardedOp("qz.sne", this.m.i32Ne),
+        [ts.SyntaxKind.ExclamationEqualsEqualsToken]: () => this.emitGuardedOp("qz.sne", this.m.i32Ne),
+    };
     const map = {
         [ts.SyntaxKind.PlusToken]: "qz.add", [ts.SyntaxKind.MinusToken]: "qz.sub",
         [ts.SyntaxKind.AsteriskToken]: "qz.mul", [ts.SyntaxKind.SlashToken]: "qz.div",
@@ -390,6 +431,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         [ts.SyntaxKind.EqualsEqualsEqualsToken]: "qz.seq", [ts.SyntaxKind.ExclamationEqualsToken]: "qz.sne",
         [ts.SyntaxKind.ExclamationEqualsEqualsToken]: "qz.sne",
     };
+    if (GUARD[op]) { this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); GUARD[op](); return; }
     if (map[op]) { this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this.m.call(map[op]); return; }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
         this.emitTaggedExpr(e.left); this.m.call("qz.truthy"); this.m.i32Eqz();
