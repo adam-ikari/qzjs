@@ -82,6 +82,10 @@ class Module {
     i64Const(v) { this._emit(OP.i64_const, ...sleb(Number(BigInt(v) & 0xffffffffn))); }
     f64Const(v) { const b = Buffer.alloc(8); b.writeDoubleLE(v); this._emit(OP.f64_const, ...b); }
     call(name) { const idx = this._importIdx[name] !== undefined ? this._importIdx[name] : this._funcIdx[name]; if (idx === undefined) throw new Error("call 未定义: " + name); this._emit(OP.call, ...uleb(idx)); }
+    addGlobal(type, init) { (this.globals = this.globals || []).push({ type, init: init || 0 }); return this.globals.length - 1; }
+    globalGet(i) { this._emit(OP.global_get, ...uleb(i)); }
+    globalSet(i) { this._emit(OP.global_set, ...uleb(i)); }
+    globalTee(i) { /* wasm 无 global.tee：用 get+set+get 等价序列 */ this.globalGet(i); this.globalSet(i); this.globalGet(i); }
     localGet(i) { this._emit(OP.local_get, ...uleb(i)); }
     localSet(i) { this._emit(OP.local_set, ...uleb(i)); }
     localTee(i) { this._emit(OP.local_tee, ...uleb(i)); }
@@ -152,6 +156,11 @@ class Module {
             // 非 shared（shared 需 import，WAMR 不接受本地定义）
             const body = [0x01, 0x00, ...uleb(this.memory)];   // count=1 + limits{flags=0x00(min only), min} —— WAMR classic AOT 不支持 max
             out.push(5, ...uleb(body.length), ...body);
+        }
+        // global 段：mutable i32（wasm 内 bump 分配器）
+        if (this.globals && this.globals.length) {
+            const body = vec(this.globals.map(g => [VAL[g.type], 0x01, 0x41, ...sleb(g.init || 0), OP.end]));
+            out.push(6, ...uleb(body.length), ...body);
         }
         // export 段
         if (this.exports.length) {
