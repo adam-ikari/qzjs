@@ -348,9 +348,9 @@ polyfill 构建期引入 npm 依赖（esbuild + 3 个库），均 devDependencie
 
 | 包名 | 版本 | 许可 | 目标 polyfill | 说明 |
 |------|------|------|--------------|------|
-| `urlpattern-polyfill` | 10.1.0 | MIT | `polyfill/src/url-pattern.js` | URLPattern 规范实现 |
-| `@ungap/structured-clone` | 1.4.0 | ISC | `polyfill/src/structured-clone.js` | 深拷贝算法，保留 qzjs 扩展分支（MessagePort transfer、ArrayBuffer transfer、DataView offset/len、Blob/File、DOMException） |
-| `web-streams-polyfill` | 4.3.0 | MIT | `polyfill/src/streams.js` | 三大流类规范实现（ReadableStream / WritableStream / TransformStream） |
+| `urlpattern-polyfill` | 10.1.0 | MIT | `src/polyfill/src/url-pattern.js` | URLPattern 规范实现 |
+| `@ungap/structured-clone` | 1.4.0 | ISC | `src/polyfill/src/structured-clone.js` | 深拷贝算法，保留 qzjs 扩展分支（MessagePort transfer、ArrayBuffer transfer、DataView offset/len、Blob/File、DOMException） |
+| `web-streams-polyfill` | 4.3.0 | MIT | `src/polyfill/src/streams.js` | 三大流类规范实现（ReadableStream / WritableStream / TransformStream） |
 
 > 注：whatwg-url 未引入（tr46 IDNA 485KB 依赖链过大 + esbuild IIFE 时序冲突），保留自研。
 

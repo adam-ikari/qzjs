@@ -63,6 +63,6 @@ qzjs/
 │   ├── worker.c         #   Message dispatch (onmessage/postMessage)
 │   ├── bridge.c         #   JS ↔ runtime bridge
 │   └── context.c        #   Multi-context
-├── polyfill/src/        # WinterTC module source
+├── src/polyfill/src/        # WinterTC module source
 
 ```

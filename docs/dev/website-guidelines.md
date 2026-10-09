@@ -88,7 +88,7 @@ const nav = [
 
 ## Polyfill Rebuild
 
-When editing `polyfill/src/*.js`:
+When editing `src/polyfill/src/*.js`:
 
 ```bash
 cd src/polyfill

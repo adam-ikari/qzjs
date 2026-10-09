@@ -67,7 +67,7 @@ qzjs/
 │   ├── worker.c         #   消息分发（onmessage/postMessage）
 │   ├── bridge.c         #   JS ↔ 运行时桥接
 │   └── context.c        #   多上下文
-├── polyfill/src/        # WinterTC 模块源
+├── src/polyfill/src/        # WinterTC 模块源
 ├── test/                # 测试套件（C + gtest + mock_libuv）
 ├── deps/                # Git 子模块（引擎、libuv、mbedTLS……）
 └── docs/                # 本文档
