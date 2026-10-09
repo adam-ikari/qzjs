@@ -68,6 +68,7 @@ class Module {
     i32Add() { this._emit(OP.i32_add); } i32Sub() { this._emit(OP.i32_sub); } i32Mul() { this._emit(OP.i32_mul); } i32DivS() { this._emit(OP.i32_div_s); } i32RemS() { this._emit(OP.i32_rem_s); }
     i64Add() { this._emit(OP.i64_add); } i64Sub() { this._emit(OP.i64_sub); } i64Mul() { this._emit(OP.i64_mul); }
     f64Add() { this._emit(OP.f64_add); } f64Sub() { this._emit(OP.f64_sub); } f64Mul() { this._emit(OP.f64_mul); } f64Div() { this._emit(OP.f64_div); }
+    i32Eqz() { this._emit(OP.i32_eqz); }
     i32Eq() { this._emit(OP.i32_eq); } i32Ne() { this._emit(OP.i32_ne); } i32LtS() { this._emit(OP.i32_lt_s); } i32GtS() { this._emit(OP.i32_gt_s); } i32LeS() { this._emit(OP.i32_le_s); } i32GeS() { this._emit(OP.i32_ge_s); }
     f64Eq() { this._emit(OP.f64_eq); } f64Lt() { this._emit(OP.f64_lt); } f64Gt() { this._emit(OP.f64_gt); }
     i32And() { this._emit(OP.i32_and); } i32Or() { this._emit(OP.i32_or); } i32Xor() { this._emit(OP.i32_xor); }
