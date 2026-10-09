@@ -15,8 +15,31 @@ const fs = require("fs");
 const path = require("path");
 const { Module } = require("./wasm-encoder.js");
 
+// ---------- qz.* import 注册（tagged 模式运行时） ----------
+const QZ = {
+  object_new:   { params: [],        results: ["i32"] },
+  object_set:   { params: ["i32", "i32", "i32"], results: [] },
+  object_get:   { params: ["i32", "i32"], results: ["i32"] },
+  string_new:   { params: ["i32"],   results: ["i32"] },
+  string_concat:{ params: ["i32", "i32"], results: ["i32"] },
+  add:  { params: ["i32", "i32"], results: ["i32"] },
+  sub:  { params: ["i32", "i32"], results: ["i32"] },
+  mul:  { params: ["i32", "i32"], results: ["i32"] },
+  div:  { params: ["i32", "i32"], results: ["i32"] },
+  rem:  { params: ["i32", "i32"], results: ["i32"] },
+  lt:   { params: ["i32", "i32"], results: ["i32"] },
+  gt:   { params: ["i32", "i32"], results: ["i32"] },
+  le:   { params: ["i32", "i32"], results: ["i32"] },
+  ge:   { params: ["i32", "i32"], results: ["i32"] },
+  seq:  { params: ["i32", "i32"], results: ["i32"] },
+  sne:  { params: ["i32", "i32"], results: ["i32"] },
+  truthy: { params: ["i32"], results: ["i32"] },
+  log:  { params: ["i32"], results: [] },
+};
+function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
+
 class Emitter {
-    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; }
+    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this.strings = []; }
     _local(name) { return this.varMap.get(name); }
 
     // 收集函数体里的 let/const（分配 local 索引）
@@ -35,13 +58,17 @@ class Emitter {
         const params = f.parameters.map(p => "i32");
         const locals = this._collectLocals(f.body);
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
+        // 模式：参数全 number 注解 → 裸 i32 快路径；否则 tagged（动态值）路径
+        this.mode = f.parameters.every(p => p.type && p.type.getText && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged";
+        if (this.mode === "tagged") { for (const k of Object.keys(QZ)) this.m.importFn("qz", k, QZ[k].params, QZ[k].results); }
         this.scratch = f.parameters.length + locals.length;   // 末尾追加 scratch（后缀 ++/-- 需要）
-        this.m.addFunc(f.name.text, params, isVoid ? [] : ["i32"], locals.map(() => "i32").concat(["i32"]));  // 局部全 i32 + scratch
+        this.m.addFunc(f.name.text, params, isVoid ? [] : ["i32"], locals.map(() => "i32").concat(["i32"]));
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
         this.depth = 0; this.labels = [];
-        this.emitBlock(f.body);
+        if (this.mode === "tagged") this.emitTaggedBlock(f.body);
+        else this.emitBlock(f.body);
         this.m.finish();
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
@@ -222,8 +249,142 @@ function compileTS(input, outWasm, opts = {}) {
         if (ts.isFunctionDeclaration(st) && st.name) em.emitFunc(st);
     }
     fs.writeFileSync(outWasm, m.build());
-    return m;
+    return { module: m, strings: em.strings || [] };
 }
+
+
+// ================= tagged 模式发射（动态值：对象/字符串/any） =================
+// tagged i32: bit0=0 数值(v>>1) | bit0=1 handle(v>>1，qzrt 表索引)
+Emitter.prototype._strId = function (text) {
+    let i = this.strings.indexOf(text);
+    if (i < 0) { i = this.strings.length; this.strings.push(text); }
+    return i;
+};
+Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
+Emitter.prototype.emitTaggedStmt = function (s) {
+    if (ts.isVariableStatement(s)) {
+        for (const d of s.declarationList.declarations) {
+            if (d.initializer) { this.emitTaggedExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
+        }
+        return;
+    }
+    if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
+    if (ts.isIfStatement(s)) {
+        this.emitTaggedExpr(s.expression !== undefined ? s.expression : s.condition);
+        this.m.call("qz.truthy"); this.m.ifBlock(); this.depth++;
+        this.labels.push({ brk: this.depth, cont: null });
+        this.emitTaggedStmt(s.thenStatement);
+        if (s.elseStatement) { this.m.else_(); this.emitTaggedStmt(s.elseStatement); }
+        this.labels.pop(); this.depth--; this.m.end(); return;
+    }
+    if (ts.isWhileStatement(s)) {
+        this.m.block(); this.depth++; this.m.loop(); this.depth++;
+        this.labels.push({ brk: this.depth - 1, cont: this.depth });
+        this.emitTaggedExpr(s.expression !== undefined ? s.expression : s.condition);
+        this.m.call("qz.truthy"); this.m.i32Eqz(); this.m.brIf(1);
+        this.emitTaggedStmt(s.statement);
+        this.m.br(0);
+        this.labels.pop(); this.depth--; this.m.end(); this.depth--; this.m.end(); return;
+    }
+    if (ts.isForStatement(s)) {
+        if (s.initializer) {
+            if (ts.isVariableDeclarationList(s.initializer)) {
+                for (const d of s.initializer.declarations) if (d.initializer) { this.emitTaggedExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
+            } else { this.emitTaggedExpr(s.initializer); this.m.drop(); }
+        }
+        this.m.block(); this.depth++; this.m.loop(); this.depth++;
+        this.labels.push({ brk: this.depth - 1, cont: this.depth });
+        if (s.condition) { this.emitTaggedExpr(s.condition); this.m.call("qz.truthy"); this.m.i32Eqz(); this.m.brIf(1); }
+        if (s.statement) this.emitTaggedStmt(s.statement);
+        if (s.incrementor) { this.emitTaggedExpr(s.incrementor); this.m.drop(); }
+        this.m.br(0);
+        this.labels.pop(); this.depth--; this.m.end(); this.depth--; this.m.end(); return;
+    }
+    if (ts.isBlock(s)) { this.emitTaggedBlock(s); return; }
+    if (ts.isExpressionStatement(s)) {
+        // console.log(x) → qz.log（边界输出）
+        const ex = s.expression;
+        if (ts.isCallExpression(ex) && ts.isPropertyAccessExpression(ex.expression) && ex.expression.expression.text === "console") {
+            for (const a of ex.arguments) { this.emitTaggedExpr(a); this.m.call("qz.log"); }
+            return;
+        }
+        this.emitTaggedExpr(ex); this.m.drop(); return;
+    }
+    if (ts.isEmptyStatement(s)) return;
+    throw new Error("[tagged] 不支持的语句: " + ts.SyntaxKind[s.kind]);
+};
+Emitter.prototype.emitTaggedExpr = function (e) {
+    if (ts.isNumericLiteral(e)) { this.m.i32Const(Number(e.text) * 2); return; }          // tagged number = n<<1
+    if (ts.isStringLiteral(e)) { this.m.i32Const(this._strId(e.text)); this.m.call("qz.string_new"); return; }
+    if (ts.isIdentifier(e)) { const idx = this._local(e.text); if (idx === undefined) throw new Error("未定义变量: " + e.text); this.m.localGet(idx); return; }
+    if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
+    if (ts.isObjectLiteralExpression(e)) {
+        this.m.call("qz.object_new"); this.m.localSet(this.scratch);
+        for (const p of e.properties) {
+            if (!ts.isPropertyAssignment(p)) throw new Error("[tagged] 对象属性只支持 x: v 形式");
+            this.m.localGet(this.scratch);
+            this.m.i32Const(this._strId(p.name.text));
+            this.emitTaggedExpr(p.initializer);
+            this.m.call("qz.object_set");
+        }
+        this.m.localGet(this.scratch); return;
+    }
+    if (ts.isPropertyAccessExpression(e)) {                                                 // obj.a
+        this.emitTaggedExpr(e.expression);
+        this.m.i32Const(this._strId(e.name.text));
+        this.m.call("qz.object_get"); return;
+    }
+    if (ts.isCallExpression(e)) {
+        if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
+        for (const a of e.arguments) this.emitTaggedExpr(a);
+        this.m.call(e.expression.text); return;
+    }
+    if (ts.isPrefixUnaryExpression(e)) {
+        this.emitTaggedExpr(e.operand);
+        if (e.operator === ts.SyntaxKind.ExclamationToken) this.m.call("qz.truthy");
+        else if (e.operator === ts.SyntaxKind.MinusToken) { this.m.i32Const(0); this.m.call("qz.sub"); }
+        return;
+    }
+    if (ts.isPostfixUnaryExpression(e)) {                                                    // x++（tagged +1）
+        const idx = this._local(e.operand.text);
+        this.m.localGet(idx); this.m.localTee(this.scratch);
+        this.m.localGet(idx); this.m.i32Const(2); this.m.call("qz.add"); this.m.localSet(idx);
+        return;
+    }
+    if (ts.isBinaryExpression(e)) { this.emitTaggedBinary(e); return; }
+    throw new Error("[tagged] 不支持的表达式: " + ts.SyntaxKind[e.kind]);
+};
+Emitter.prototype.emitTaggedBinary = function (e) {
+    const op = e.operatorToken.kind;
+    const map = {
+        [ts.SyntaxKind.PlusToken]: "qz.add", [ts.SyntaxKind.MinusToken]: "qz.sub",
+        [ts.SyntaxKind.AsteriskToken]: "qz.mul", [ts.SyntaxKind.SlashToken]: "qz.div",
+        [ts.SyntaxKind.PercentToken]: "qz.rem", [ts.SyntaxKind.LessThanToken]: "qz.lt",
+        [ts.SyntaxKind.GreaterThanToken]: "qz.gt", [ts.SyntaxKind.LessThanEqualsToken]: "qz.le",
+        [ts.SyntaxKind.GreaterThanEqualsToken]: "qz.ge", [ts.SyntaxKind.EqualsEqualsToken]: "qz.seq",
+        [ts.SyntaxKind.EqualsEqualsEqualsToken]: "qz.seq", [ts.SyntaxKind.ExclamationEqualsToken]: "qz.sne",
+        [ts.SyntaxKind.ExclamationEqualsEqualsToken]: "qz.sne",
+    };
+    if (map[op]) { this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this.m.call(map[op]); return; }
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+        this.emitTaggedExpr(e.left); this.m.call("qz.truthy"); this.m.i32Eqz();
+        this.emitTaggedExpr(e.right); this.m.call("qz.truthy");
+        if (op === ts.SyntaxKind.AmpersandAmpersandToken) this.m.i32And(); else this.m.i32Or();
+        return;
+    }
+    if (op === ts.SyntaxKind.FirstAssignment || Object.values(ts.SyntaxKind).includes(op) && /Equals/.test(ts.SyntaxKind[op] || "")) {
+        const idx = this._local(e.left.text);
+        const bin = op === ts.SyntaxKind.FirstAssignment ? null : ts.SyntaxKind[op].replace("Equals", "");
+        if (bin !== null) { this.m.localGet(idx); this.emitTaggedExpr(e.right); this.m.call(this._taggedOpFor(bin)); }
+        else this.emitTaggedExpr(e.right);
+        this.m.localTee(idx); return;
+    }
+    throw new Error("[tagged] 不支持的运算符: " + ts.SyntaxKind[op]);
+};
+Emitter.prototype._taggedOpFor = function (binKind) {
+    const m = { Add: "qz.add", Subtract: "qz.sub", Asterisk: "qz.mul", Slash: "qz.div", Percent: "qz.rem" };
+    return m[binKind] || "qz.add";
+};
 
 module.exports = { compileTS, Emitter };
 
@@ -231,6 +392,6 @@ if (require.main === module) {
     const input = process.argv[2];
     const out = process.argv[3] || "/tmp/out.wasm";
     const opts = { needMathFloor: true };
-    const m = compileTS(input, out, opts);
-    console.log("wrote", out, fs.statSync(out).size, "bytes; imports:", m.imports.length, "funcs:", m.funcs.length);
+    const r = compileTS(input, out, opts);
+    console.log("wrote", out, fs.statSync(out).size, "bytes; imports:", r.module.imports.length, "funcs:", r.module.funcs.length, "strings:", r.strings.length);
 }
