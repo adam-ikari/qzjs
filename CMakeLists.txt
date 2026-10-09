@@ -1010,6 +1010,12 @@ if(QZ_BUILD_CLI)
         target_compile_definitions(qz_cli PRIVATE QZ_WITH_RT_MAIN)
         target_link_libraries(qz_cli PRIVATE qz_full)
     endif()
+
+    # rt_main.c 用 src/ 内部头（#include "base/qz_rt.h" · "ipc/ipc_process.h"），
+    # 经 src/ 根解析。该 include 根是 qzjs 库的 PRIVATE（不传播），而 qz_cli
+    # 直接编 src/host/rt_main.c，故须显式补上——否则非 test 构建报
+    # "base/qz_rt.h: No such file or directory"。
+    target_include_directories(qz_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 qz_enable_warnings(qz_cli)
 endif()
 

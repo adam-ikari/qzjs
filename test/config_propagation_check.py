@@ -31,8 +31,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HEADER = os.path.join(ROOT, "include", "qzjs", "qzjs.h")
-PRODUCER = os.path.join(ROOT, "src", "rt_host.c")   # 宿主侧：组装 argv
-CONSUMER = os.path.join(ROOT, "src", "rt_main.c")   # 子进程侧：从 argv 还原
+PRODUCER = os.path.join(ROOT, "src", "host", "rt_host.c")   # 宿主侧：组装 argv
+CONSUMER = os.path.join(ROOT, "src", "host", "rt_main.c")   # 子进程侧：从 argv 还原
 
 
 def strip_comments(text):

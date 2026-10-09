@@ -35,7 +35,7 @@ function(add_qz_gtest name)
     if(QZ_POLYFILL_MODE STREQUAL "external")
         set_tests_properties(${name} PROPERTIES
             LABELS "offline"
-            ENVIRONMENT "QZ_POLYFILL_FILE=${PROJECT_SOURCE_DIR}/dist/polyfill_default.polyfill")
+            ENVIRONMENT "QZ_POLYFILL_FILE=${CMAKE_BINARY_DIR}/generated/polyfill/polyfill_default.polyfill")
     else()
         set_tests_properties(${name} PROPERTIES LABELS "offline")
     endif()

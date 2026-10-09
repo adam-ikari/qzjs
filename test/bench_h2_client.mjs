@@ -30,8 +30,8 @@ import path from 'node:path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const { buildSync } = require(path.resolve(__dirname, '..', 'polyfill', 'node_modules', 'esbuild'));
-const SRC = path.resolve(__dirname, '..', 'polyfill', 'src');
+const { buildSync } = require(path.resolve(__dirname, '..', 'src', 'polyfill', 'node_modules', 'esbuild'));
+const SRC = path.resolve(__dirname, '..', 'src', 'polyfill', 'src');
 
 // ── CLI args ──
 const args = process.argv.slice(2);

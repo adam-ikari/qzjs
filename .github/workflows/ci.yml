@@ -1159,7 +1159,7 @@ jobs:
       # 成立，同时仍守住真正要防的事：种子必须是内嵌字节码的真实前缀，fuzz 的 60
       # 秒预算才是在真实字节码结构附近变异，而非一个已不存在的形态。
       - name: Fuzz corpus seeds match the built bytecode
-        run: python3 test/fuzz_corpus_align_check.py
+        run: python3 test/fuzz_corpus_align_check.py build
 
       # 第三方依赖登记完整性。MIT/Apache 的分发义务要求版权声明随二进制走；
       # 新增 vendored 依赖或 polyfill npm 依赖时若漏登记 THIRD_PARTY_NOTICES.md
