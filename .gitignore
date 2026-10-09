@@ -44,6 +44,7 @@ package-lock.json
 # but commit lockfiles a CI job installs from (reproducibility)
 !docs/package-lock.json
 !vscode/qzjs-debug/package-lock.json
+!src/polyfill/package-lock.json
 
 # IDE / editor
 .vscode/

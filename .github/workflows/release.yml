@@ -48,7 +48,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       # tag 与源码版本必须一致——不一致就意味着这个 tag 打到了一个
       # project() 版本还没跟上的提交上，产物元数据会说谎。

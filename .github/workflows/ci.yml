@@ -39,7 +39,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -108,7 +108,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -151,7 +151,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -189,7 +189,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -232,7 +232,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure
         run: |
@@ -274,7 +274,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure
         run: |
@@ -316,7 +316,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure
         run: |
@@ -358,7 +358,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -405,7 +405,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (ASan)
         run: |
           cmake -B build -G Ninja \
@@ -520,7 +520,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (UBSan)
         run: |
           cmake -B build -G Ninja \
@@ -586,7 +586,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (Release)
         run: |
           cmake -B build -G Ninja \
@@ -629,7 +629,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, real-libuv CLI)
         run: |
@@ -643,7 +643,7 @@ jobs:
 
       - name: Rebuild polyfill (ensure dist in sync)
         run: |
-          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix polyfill run build
+          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix src/polyfill run build
 
       - name: Build
         run: cmake --build build --parallel
@@ -698,7 +698,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Benchmark HTTP/2 client stack
         run: |
@@ -764,7 +764,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, real-libuv CLI)
         run: |
@@ -778,7 +778,7 @@ jobs:
 
       - name: Rebuild polyfill (ensure dist in sync)
         run: |
-          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix polyfill run build
+          QJSC=$PWD/build/deps/quickjs-ng/qjsc npm --prefix src/polyfill run build
 
       - name: Build
         run: cmake --build build --parallel
@@ -871,7 +871,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (Release, real-libuv CLI)
         run: |
           cmake -B build -G Ninja \
@@ -945,7 +945,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, real-libuv CLI)
         run: |
@@ -1026,7 +1026,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (Release, CLI + TLS + gRPC)
         run: |
@@ -1111,7 +1111,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (real-libuv CLI)
         run: |
@@ -1278,7 +1278,7 @@ jobs:
           node-version: 22
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
 
       - name: Configure (QZ_WITH_GRPC=ON)
         run: |
@@ -1321,7 +1321,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (Coverage)
         run: |
           cmake -B build -G Ninja \
@@ -1371,7 +1371,7 @@ jobs:
           sudo apt-get install -y build-essential cmake pkg-config ninja-build
 
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -1438,7 +1438,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -1478,7 +1478,7 @@ jobs:
         with:
           node-version: 22
       - name: Install polyfill deps (esbuild)
-        run: npm --prefix polyfill ci
+        run: npm --prefix src/polyfill ci
       - name: Configure (clang-tidy)
         run: |
           cmake -B build -G Ninja \
@@ -1542,7 +1542,7 @@ jobs:
           cat > fuzz_bc.c <<'EOF'
           /* Minimal libFuzzer harness: feeds arbitrary bytes to the QuickJS
            * bytecode deserializer (JS_ReadObject + JS_READ_OBJ_BYTECODE) — the
-           * parse qzjs performs on the embedded polyfill (src/context.c) and
+           * parse qzjs performs on the embedded polyfill (src/qzvm/context.c) and
            * on worker boot shims (src/host/qzjs.c). Read-only: the resulting value
            * is freed, never evaluated. */
           #include <stddef.h>
