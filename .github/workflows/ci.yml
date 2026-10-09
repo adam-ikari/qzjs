@@ -207,7 +207,7 @@ jobs:
 
   # ============================================================================
   # Polyfill mode=external: bytecode loaded at runtime from
-  # dist/polyfill_default.polyfill (built by polyfill/build.js Mode B).
+  # dist/polyfill_default.polyfill (built by src/polyfill/build.js Mode B, under build/<bin>/generated/polyfill/).
   # Covers the external-file loader leg of QZ_POLYFILL_MODE.
   # ============================================================================
   polyfill-external:
