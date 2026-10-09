@@ -171,8 +171,8 @@ endif()
 if(NOT QZ_PROFILE_LAST STREQUAL _qz_profile)
     message(STATUS "QZ_PROFILE changed: '${QZ_PROFILE_LAST}' -> '${_qz_profile}' — recalculating QZ_WITH_* cache defaults")
     if(_qz_profile STREQUAL "minimal")
-        # minimal：WebAssembly 默认关闭（更小）；需 WASM 时 -DQZ_WITH_WAMR=ON
-        set(QZ_WITH_WAMR       OFF CACHE BOOL "" FORCE)
+        # WebAssembly 是 AOT 关键（不允许关闭，src/qzvm/CMakeLists.txt 强制）：
+        # minimal 不再关闭 QZ_WITH_WAMR，保留默认 ON
         set(QZ_WITH_TLS        OFF CACHE BOOL "" FORCE)
         set(QZ_WITH_COMPRESS   ON  CACHE BOOL "" FORCE)
         set(QZ_WITH_CRYPTO_EXT ON  CACHE BOOL "" FORCE)
@@ -388,16 +388,6 @@ foreach(_qz_patch IN LISTS QZVM_PATCHES)
     endif()
 endforeach()
 
-# ── QuickJS-ng debugger support ───────────────────────────────────────────
-# The DAP engine primitives (breakpoint opcodes, JS_SetDebuggerHandler, step
-# machinery) now live in the qzvm engine tree (PR #2) — no working-tree
-# .patch needed. QZ_BUILD_DEBUGGER only controls whether qzjs builds its DAP
-# adapter (src/qzvm/debugger.c + src/qzvm/debugger_dap.c) and defines QZ_DEBUG_SUPPORT
-# to wire the dispatch hook into the engine.
-if(QZ_BUILD_DEBUGGER)
-    set(QZ_DEBUG_SUPPORT_DEFINE QZ_DEBUG_SUPPORT)
-endif()
-
 add_subdirectory(${QUICKJS_DIR} ${CMAKE_BINARY_DIR}/deps/quickjs-ng EXCLUDE_FROM_ALL)
 
 # test262 runner：quickjs-ng 子目录 EXCLUDE_FROM_ALL → 全量 build 默认不产出
@@ -405,12 +395,6 @@ add_subdirectory(${QUICKJS_DIR} ${CMAKE_BINARY_DIR}/deps/quickjs-ng EXCLUDE_FROM
 # CI/本地默认构建即包含 runner。
 if(QZ_BUILD_TESTS AND TARGET run-test262)
   add_custom_target(qz_test262_runner ALL DEPENDS run-test262)
-endif()
-
-# Expose QZ_DEBUG_SUPPORT on the qjs target so the engine's DEBUGGER_CHECK
-# dispatch hook compiles in (it's a no-op when the macro is undefined).
-if(QZ_BUILD_DEBUGGER AND TARGET qjs)
-    target_compile_definitions(qjs PUBLIC ${QZ_DEBUG_SUPPORT_DEFINE})
 endif()
 
 set(CMAKE_C_STANDARD         ${_qz_saved_c_standard})
@@ -553,6 +537,12 @@ else()
 endif()
 
 # ============================================================================
+# ── qzvm（纯 VM 构建单元，独立 CMake）──
+# 定义 wasm 引擎选择（QZ_WITH_WAMR/WASM3，AOT 关键不允许关闭）+ debug 选项
+# （QZ_BUILD_DEBUGGER），产出 QZVM_SOURCES 交回顶层并入 libqzjs。须在 wasm
+# deps 之前（其 option 定义供下方 wasm 引擎 add_subdirectory 消费）。
+add_subdirectory(src/qzvm)
+
 # WAMR dependency (default WASM engine) — built from source via add_subdirectory
 # ============================================================================
 # WAMR-2.4.5: Fast Interpreter + AOT. Target vmlib → libiwasm.a.
@@ -635,9 +625,7 @@ endif()
 set(_qz_core_sources
     src/qzjs.c
     src/bridge.c
-    src/qzvm/context.c
-    src/qzvm/vm_core.c
-    src/qzvm/ext_lifecycle.c
+    ${QZVM_SOURCES}
     ${_polyfill_gen_c}
     src/polyfill_load.c
     ${_polyfill_gen_dir}/worker_boot_default.c
@@ -649,12 +637,6 @@ set(_qz_core_sources
     src/worker.c
     src/control.c
 )
-if(QZ_WITH_WAMR)
-    list(APPEND _qz_core_sources src/qzvm/ext_wamr.c)
-endif()
-if(QZ_WITH_WASM3)
-    list(APPEND _qz_core_sources src/qzvm/ext_wasm3.c)
-endif()
 if(QZ_WITH_COMPRESS)
     list(APPEND _qz_core_sources src/ext_compress.c)
 endif()
@@ -689,12 +671,20 @@ if(NOT QZ_BUILD_TESTS)
     list(APPEND _qz_core_sources src/tcp_io.c)
 endif()
 
-if(QZ_BUILD_DEBUGGER)
-    list(APPEND _qz_core_sources src/qzvm/debugger.c src/qzvm/debugger_dap.c)
-endif()
+
 
 
 add_library(qzjs STATIC ${_qz_core_sources})
+
+# ── debug 功能（选项在 src/qzvm/CMakeLists.txt 定义）──
+# QZ_DEBUG_SUPPORT gates debugger.c/debugger_dap.c + qzjs.c auto-attach + 引擎
+# DEBUGGER_CHECK hook（无此宏时为 no-op）。
+if(QZ_BUILD_DEBUGGER)
+    target_compile_definitions(qzjs PUBLIC QZ_DEBUG_SUPPORT)
+    if(TARGET qjs)
+        target_compile_definitions(qjs PUBLIC QZ_DEBUG_SUPPORT)
+    endif()
+endif()
 
 # 版本号单一来源：project(... VERSION ...) 是唯一真源，注入编译期宏供 cli.c /
 # qzjs-rt 拼版本串（此前 cli.c 里另有一份硬编码 "0.2.0"，两处会漂移）。
