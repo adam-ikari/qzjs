@@ -22,7 +22,7 @@ function sleb(n) { const out = []; let more = true; while (more) { let b = n & 0
 function vec(items) { const out = uleb(items.length); for (const i of items) out.push(...i); return out; }
 
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c, func: 0x60, void: 0x40 };
-const OP = { end: 0x0b, else: 0x05, block: 0x02, loop: 0x03, if: 0x04, br: 0x0c, br_if: 0x0d, br_table: 0x0e, return: 0x0f, call: 0x10, call_indirect: 0x11, drop: 0x1a, local_get: 0x20, local_set: 0x21, local_tee: 0x22, global_get: 0x23, global_set: 0x24, i32_load: 0x28, i64_load: 0x29, f64_load: 0x2a, i32_store: 0x36, i64_store: 0x37, f64_store: 0x38, i32_const: 0x41, i64_const: 0x42, f64_const: 0x44, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_s: 0x48, i32_lt_u: 0x49, i32_gt_s: 0x4a, i32_gt_u: 0x4b, i32_le_s: 0x4c, i32_le_u: 0x4d, i32_ge_s: 0x4e, i32_ge_u: 0x4f, i64_eq: 0x51, i64_lt_s: 0x53, i64_gt_s: 0x55, i64_add: 0x6c, i64_sub: 0x6d, i64_mul: 0x6e, i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_div_s: 0x6d, i32_rem_s: 0x6f, i64_div_s: 0x71, f64_add: 0xa0, f64_sub: 0xa1, f64_mul: 0xa2, f64_div: 0xa3, f64_lt: 0x63, f64_gt: 0x64, f64_eq: 0x61, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, i32_shl: 0x74, i32_shr_s: 0x75, i32_shr_u: 0x76, select: 0x1b, unreachable: 0x00 };
+const OP = { end: 0x0b, else: 0x05, block: 0x02, loop: 0x03, if: 0x04, br: 0x0c, br_if: 0x0d, br_table: 0x0e, return: 0x0f, call: 0x10, call_indirect: 0x11, drop: 0x1a, local_get: 0x20, local_set: 0x21, local_tee: 0x22, global_get: 0x23, global_set: 0x24, i32_load: 0x28, i64_load: 0x29, f64_load: 0x2a, i32_store: 0x36, i64_store: 0x37, f64_store: 0x38, i32_const: 0x41, i64_const: 0x42, f64_const: 0x44, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_s: 0x48, i32_lt_u: 0x49, i32_gt_s: 0x4a, i32_gt_u: 0x4b, i32_le_s: 0x4c, i32_le_u: 0x4d, i32_ge_s: 0x4e, i32_ge_u: 0x4f, i64_eq: 0x51, i64_lt_s: 0x53, i64_gt_s: 0x55, i64_add: 0x6c, i64_sub: 0x6d, i64_mul: 0x6e, i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_div_s: 0x6d, i32_rem_s: 0x6f, i64_div_s: 0x71, f64_add: 0xa0, f64_sub: 0xa1, f64_mul: 0xa2, f64_div: 0xa3, f64_lt: 0x63, f64_gt: 0x64, f64_eq: 0x61, f64_le: 0x65, f64_ge: 0x66, f64_ne: 0x62, f64_neg: 0x9a, f64_max: 0xa5, f64_trunc: 0x9d, f64_floor: 0x9c, f64_convert_i32_s: 0xb7, i32_trunc_f64_s: 0xaa, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, i32_shl: 0x74, i32_shr_s: 0x75, i32_shr_u: 0x76, select: 0x1b, unreachable: 0x00};
 
 class Module {
     constructor() { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null; }
@@ -96,6 +96,10 @@ class Module {
     i32Eqz() { this._emit(OP.i32_eqz); }
     i32Eq() { this._emit(OP.i32_eq); } i32Ne() { this._emit(OP.i32_ne); } i32LtS() { this._emit(OP.i32_lt_s); } i32GtS() { this._emit(OP.i32_gt_s); } i32LeS() { this._emit(OP.i32_le_s); } i32GeS() { this._emit(OP.i32_ge_s); }
     f64Eq() { this._emit(OP.f64_eq); } f64Lt() { this._emit(OP.f64_lt); } f64Gt() { this._emit(OP.f64_gt); }
+    f64Le() { this._emit(OP.f64_le); } f64Ge() { this._emit(OP.f64_ge); } f64Ne() { this._emit(OP.f64_ne); }
+    f64Neg() { this._emit(OP.f64_neg); } f64Max() { this._emit(OP.f64_max); } f64Trunc() { this._emit(OP.f64_trunc); } f64Floor() { this._emit(OP.f64_floor); }
+    f64ConvertI32S() { this._emit(OP.f64_convert_i32_s); }
+    i32TruncF64S() { this._emit(OP.i32_trunc_f64_s); }
     i32Shl() { this._emit(OP.i32_shl); } i32ShrU() { this._emit(OP.i32_shr_u); } i32Or() { this._emit(OP.i32_or); } i32And() { this._emit(OP.i32_and); }
     i32And() { this._emit(OP.i32_and); } i32Or() { this._emit(OP.i32_or); } i32Xor() { this._emit(OP.i32_xor); }
     // 控制流（label 用索引引用，wasm 相对深度）

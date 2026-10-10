@@ -17,8 +17,16 @@ const { compileTS } = require("./emitter.js");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+// wamrc 查找顺序：WAMRC 环境变量 > PATH 上的 wamrc > 旧 demo 内的固定路径
+function resolveWamrc() {
+    if (process.env.WAMRC) return process.env.WAMRC;
+    const onPath = (() => { try { return execSync("command -v wamrc", { encoding: "utf8" }).trim(); } catch { return ""; } })();
+    if (onPath) return onPath;
+    const legacy = "/home/gem/project/perry_wasm_demo/.deps/wamr/wamr-compiler/build/wamrc";
+    if (fs.existsSync(legacy)) return legacy;
+    return "wamrc";
+}
 
-const DEFAULT_WAMRC = "/home/gem/project/perry_wasm_demo/.deps/wamr/wamr-compiler/build/wamrc";
 // 中间产物统一到工程 build/aot/（与 CMake build/ 一致），AOT_OUT_DIR 可覆盖
 function outDir() {
     return process.env.AOT_OUT_DIR || path.join(__dirname, "..", "..", "..", "build", "aot");
@@ -88,7 +96,7 @@ if (cmd === "build") {
     const nameArg = process.argv[4];
     const name = (nameArg && !nameArg.startsWith("--")) ? nameArg : path.basename(src).replace(/\.ts$/, "");
     const prefix = path.join(outDir(), name);
-    const wamrc = process.env.WAMRC || DEFAULT_WAMRC;
+    const wamrc = resolveWamrc();
     fs.mkdirSync(outDir(), { recursive: true });
     const r = compileTS(src, prefix + ".wasm", {});
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));

@@ -1,0 +1,12 @@
+{
+  "name": "qzjs-aot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "qzjs AOT 实验：自研 TS→wasm 编译器（emitter + wasm-encoder + qzvm 运行时）",
+  "scripts": {
+    "build": "node build.js build mix.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

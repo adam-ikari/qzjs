@@ -45,6 +45,7 @@ package-lock.json
 !docs/package-lock.json
 !vscode/qzjs-debug/package-lock.json
 !src/polyfill/package-lock.json
+!src/qzvm/aot/package-lock.json
 
 # IDE / editor
 .vscode/
@@ -94,10 +95,9 @@ src/qzvm/aot/*.a
 src/qzvm/aot/*.so
 src/qzvm/aot/host
 src/qzvm/aot/*.o
-*.wasm
-*.aot
-node_modules/
-package-lock.json
+# AOT/源码内生成的 wasm/aot 仅限本目录（构建产物统一在 build/，已忽略）
+src/qzvm/aot/*.wasm
+src/qzvm/aot/*.aot
 
 # AOT 中间产物（build.js 生成，可复现，不入库）
 *.strings.json

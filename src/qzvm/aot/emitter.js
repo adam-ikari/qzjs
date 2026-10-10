@@ -56,15 +56,16 @@ class Emitter {
 
     // ---------- 函数 ----------
     emitFunc(f) {
-        const params = f.parameters.map(p => "i32");
-        const locals = this._collectLocals(f.body);
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
-        // 模式：参数全 number 注解 → 裸 i32 快路径；否则 tagged（动态值）路径
+        // 模式：参数全 number 注解 → f64 快路径；否则 tagged（动态值）路径
         this.mode = f.parameters.every(p => p.type && p.type.getText && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged";
+        // num 值 = f64（对齐 TS number：除法/取模/大数语义正确；tagged 用 i32 位模型）
+        const vt = this.mode === "num" ? "f64" : "i32";
+        const locals = this._collectLocals(f.body);
         this.scratch = f.parameters.length + locals.length;   // scratch（后缀 ++/--）
         this.scratchA = this.scratch + 1;                    // guard 暂存 a
         this.scratchB = this.scratch + 2;                    // guard 暂存 b
-        this.m.startBody(f.name.text, locals.map(() => "i32").concat(["i32", "i32", "i32"]));   // + scratch(++)/scratchA/scratchB（guard 暂存）
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]));   // + scratch(++)/scratchA/scratchB
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -92,7 +93,7 @@ class Emitter {
             return;
         }
         if (ts.isIfStatement(s)) {
-            this.emitExpr(s.expression !== undefined ? s.expression : s.condition);
+            this.emitExpr(s.expression !== undefined ? s.expression : s.condition); this.emitCond();
             this.m.ifBlock();          // 语句 if 无返回值
             this.depth++;
             this.labels.push({ brk: this.depth, cont: null });
@@ -116,8 +117,9 @@ class Emitter {
         this.m.loop(); this.depth++;
         this.labels.push({ brk: this.depth - 1, cont: this.depth });
         this.emitExpr(s.expression !== undefined ? s.expression : s.condition);
+        this.emitCond();
         this.m.i32Eqz();
-        this.m.brIf(1);                     // 退出外层 block
+        this.m.brIf(1);                     // 退出外层 block（条件为假）
         this.emitStmt(s.statement);
         this.m.br(0);                        // 继续 loop
         this.labels.pop();
@@ -133,7 +135,7 @@ class Emitter {
         this.m.block(); this.depth++;
         this.m.loop(); this.depth++;
         this.labels.push({ brk: this.depth - 1, cont: this.depth });
-        if (s.condition) { this.emitExpr(s.condition); this.m.i32Eqz(); this.m.brIf(1); }
+        if (s.condition) { this.emitExpr(s.condition); this.emitCond(); this.m.i32Eqz(); this.m.brIf(1); }
         if (s.statement) this.emitStmt(s.statement);
         if (s.incrementor) { this.emitExpr(s.incrementor); this.m.drop(); }
         this.m.br(0);
@@ -144,7 +146,7 @@ class Emitter {
 
     // ---------- 表达式（number 域） ----------
     emitExpr(e) {
-        if (ts.isNumericLiteral(e)) { this.m.i32Const(Number(e.text)); return; }
+        if (ts.isNumericLiteral(e)) { this.m.f64Const(Number(e.text)); return; }
         if (ts.isIdentifier(e)) {
             const idx = this._local(e.text);
             if (idx === undefined) throw new Error("未定义变量: " + e.text);
@@ -152,10 +154,18 @@ class Emitter {
         }
         if (ts.isParenthesizedExpression(e)) { this.emitExpr(e.expression); return; }
         if (ts.isPrefixUnaryExpression(e)) {
+            // ++/-- 需先判是否自增自减
+            if (ts.isIdentifier(e.operand) && (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken)) {
+                const idx = this._local(e.operand.text);
+                if (idx === undefined) throw new Error("未定义变量: " + e.operand.text);
+                const dec = e.operator === ts.SyntaxKind.MinusMinusToken;
+                this.m.localGet(idx); this.m.f64Const(1); dec ? this.m.f64Sub() : this.m.f64Add(); this.m.localTee(idx);
+                return;
+            }
             this.emitExpr(e.operand);
-            if (e.operator === ts.SyntaxKind.MinusToken) { this.m.i32Const(0); this.m.i32Sub(); }
+            if (e.operator === ts.SyntaxKind.MinusToken) { this.m.f64Neg(); }
             else if (e.operator === ts.SyntaxKind.PlusToken) { /* noop */ }
-            else if (e.operator === ts.SyntaxKind.ExclamationToken) { this.m.i32Eqz(); }
+            else if (e.operator === ts.SyntaxKind.ExclamationToken) { this.m.f64Const(0); this.m.f64Eq(); this.m.f64ConvertI32S(); }
             else throw new Error("不支持的一元运算符: " + ts.SyntaxKind[e.operator]);
             return;
         }
@@ -165,21 +175,14 @@ class Emitter {
             const dec = e.operator === ts.SyntaxKind.MinusMinusToken;
             // x++：栈留旧值（localTee scratch），x 更新
             this.m.localGet(idx); this.m.localTee(this.scratch);
-            this.m.localGet(idx); this.m.i32Const(1); dec ? this.m.i32Sub() : this.m.i32Add(); this.m.localSet(idx);
-            return;
-        }
-        if (ts.isPrefixUnaryExpression(e)) {
-            const idx = this._local(e.operand.text);
-            if (idx === undefined) throw new Error("未定义变量: " + e.operand.text);
-            const dec = e.operator === ts.SyntaxKind.MinusMinusToken;
-            this.m.localGet(idx); this.m.i32Const(1); dec ? this.m.i32Sub() : this.m.i32Add(); this.m.localTee(idx);
+            this.m.localGet(idx); this.m.f64Const(1); dec ? this.m.f64Sub() : this.m.f64Add(); this.m.localSet(idx);
             return;
         }
         if (ts.isBinaryExpression(e)) { this.emitBinary(e); return; }
         if (ts.isCallExpression(e)) {
             if (!ts.isIdentifier(e.expression)) throw new Error("不支持的调用目标");
             const fn = e.expression.text;
-            if (fn === "Math_floor") { this.emitExpr(e.arguments[0]); this.m.call("qz.math_floor"); return; }
+            if (fn === "Math_floor") { this.emitExpr(e.arguments[0]); this.m.f64Floor(); return; }
             for (const a of e.arguments) this.emitExpr(a);
             this.m.call(fn);
             return;
@@ -207,36 +210,53 @@ class Emitter {
             return;
         }
 
-        // 短路逻辑
+        // 短路逻辑（数值域：非 0 即真）
         if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
-            // 简化：非短路直接算两边（数值域布尔即 0/1）
-            this.emitBinaryOperandValue(e.left); this.emitBinaryOperandValue(e.right);
+            // 简化：非短路直接算两边（truthy→0/1 f64）；结果 0/1
+            this.emitBinaryOperandValue(e.left); this.emitCond();
+            this.emitBinaryOperandValue(e.right); this.emitCond();
             if (op === ts.SyntaxKind.AmpersandAmpersandToken) this.m.i32And(); else this.m.i32Or();
+            this.m.f64ConvertI32S();
             return;
         }
         this.emitBinaryOperandValue(e.left);
         this.emitBinaryOperandValue(e.right);
         this.emitBinaryOp(op);
     }
+    // 条件求值：栈顶 f64 → i32（!=0 为真）
+    emitCond() { this.m.f64Const(0); this.m.f64Ne(); }
+    emitBinaryOperandValue(e) { if (ts.isBinaryExpression(e)) this.emitBinary(e); else this.emitExpr(e); }
     emitBinaryOp(op) {
         switch (op) {
-            case ts.SyntaxKind.PlusToken: this.m.i32Add(); break;
-            case ts.SyntaxKind.MinusToken: this.m.i32Sub(); break;
-            case ts.SyntaxKind.AsteriskToken: this.m.i32Mul(); break;
-            case ts.SyntaxKind.SlashToken: this.m.i32DivS(); break;
-            case ts.SyntaxKind.PercentToken: this.m.i32RemS(); break;
-            case ts.SyntaxKind.LessThanToken: this.m.i32LtS(); break;
-            case ts.SyntaxKind.GreaterThanToken: this.m.i32GtS(); break;
-            case ts.SyntaxKind.LessThanEqualsToken: this.m.i32LeS(); break;
-            case ts.SyntaxKind.GreaterThanEqualsToken: this.m.i32GeS(); break;
-            case ts.SyntaxKind.EqualsEqualsToken: case ts.SyntaxKind.EqualsEqualsEqualsToken: this.m.i32Eq(); break;
-            case ts.SyntaxKind.ExclamationEqualsToken: case ts.SyntaxKind.ExclamationEqualsEqualsToken: this.m.i32Ne(); break;
-            case ts.SyntaxKind.AmpersandToken: this.m.i32And(); break;
-            case ts.SyntaxKind.BarToken: this.m.i32Or(); break;
+            case ts.SyntaxKind.PlusToken: this.m.f64Add(); break;
+            case ts.SyntaxKind.MinusToken: this.m.f64Sub(); break;
+            case ts.SyntaxKind.AsteriskToken: this.m.f64Mul(); break;
+            case ts.SyntaxKind.SlashToken: this.m.f64Div(); break;
+            case ts.SyntaxKind.PercentToken: this.emitRem(); break;
+            case ts.SyntaxKind.LessThanToken: this.m.f64Lt(); this.m.f64ConvertI32S(); break;
+            case ts.SyntaxKind.GreaterThanToken: this.m.f64Gt(); this.m.f64ConvertI32S(); break;
+            case ts.SyntaxKind.LessThanEqualsToken: this.m.f64Le(); this.m.f64ConvertI32S(); break;
+            case ts.SyntaxKind.GreaterThanEqualsToken: this.m.f64Ge(); this.m.f64ConvertI32S(); break;
+            case ts.SyntaxKind.EqualsEqualsToken: case ts.SyntaxKind.EqualsEqualsEqualsToken: this.m.f64Eq(); this.m.f64ConvertI32S(); break;
+            case ts.SyntaxKind.ExclamationEqualsToken: case ts.SyntaxKind.ExclamationEqualsEqualsToken: this.m.f64Ne(); this.m.f64ConvertI32S(); break;
             default: throw new Error("不支持的二元运算符: " + ts.SyntaxKind[op]);
         }
     }
-    emitBinaryOperandValue(e) { if (ts.isBinaryExpression(e)) this.emitBinary(e); else this.emitExpr(e); }
+    // f64 取模：a - b * trunc(a / b)（wasm 无 f64.rem，语义对齐 JS %）
+    emitRem() {
+        // 栈: a b → 需 (a - b*trunc(a/b))；借用 scratch 保存 a、b
+        this.m.localSet(this.scratchB);        // b
+        this.m.localTee(this.scratchA);        // a（保留）
+        this.m.localGet(this.scratchB);
+        this.m.f64Div();                       // a/b
+        this.m.f64Trunc();                     // trunc(a/b)
+        this.m.localGet(this.scratchB);
+        this.m.f64Mul();                       // b*trunc(a/b)
+        this.m.localGet(this.scratchA);
+        this.m.f64Sub();                       // b*trunc - ... 需 a - that
+        // 修正顺序：上面得 (b*trunc) - a，取负
+        this.m.f64Neg();
+    }
 }
 
 // ---------- 主流程 ----------
@@ -253,7 +273,9 @@ function compileTS(input, outWasm, opts = {}) {
     if (anyTagged) { registerQz(m); m.addMemory(2); m.addGlobal("i32", 0); }   // global0 = wasm 内 bump 分配器   // 本地定义 memory（wamrc AOT 只支持本地 memory，不支持 import）
     for (const st of fns) {
         const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
-        m.declareFunc(st.name.text, st.parameters.map(() => "i32"), isVoid ? [] : ["i32"]);
+        const isNum = st.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
+        const vt = isNum ? "f64" : "i32";       // num 快路径值 = f64
+        m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
     }
     if (anyTagged) m.exportMemory();          // 导出本地 memory（qz.alloc 经 exports.memory 访问）
     // 阶段2：逐个发射 body
