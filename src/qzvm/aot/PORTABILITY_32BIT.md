@@ -123,8 +123,14 @@ wamrc 可用 ABI：`gnu eabi eabihf gnueabihf msvc ilp32 ilp32f ilp32d lp64 lp64
 
 ---
 
-## 7. 未验证项（诚实标注）
+## 7. 验证状态
 
-- 未在真实 32 位设备/交叉编译产物上实测 f64 NaN-box 端到端（`[INFERENCE]`：wasm 语义保证数值正确，代价是 §5.5 的浮点/内存）。
-- 未跑 wamrc `--target=armv7` / `riscv32` 端到端（仅确认 target 列表与 ABI 可用）。
-- wasm2c 32 位 C 构建未实测。
+**已在真实 32 位宿主（i386）实测通过**（2026-10-10）：用 `-m32` 编 WAMR `libiwasm.a` + `iwasm` 2.4.5，写最小 WAMR host（`sizeof(void*)=4`）加载 `wamrc --target=i386 --target-abi=gnu` 产物，解释器与 AOT 两路结果一致：
+
+| 调用 | 结果 | 说明 |
+| --- | --- | --- |
+| `big(3000)` | 3000000000000 | **3e12 > 2^32**，证明 32 位宿主 f64 NaN-box 精确表示 64 位量 |
+| `div(7,2)` | 3.5 | 浮点除法 |
+| `mod(10,3)` / `neg(5)` / `wsum(1000)` | 1 / -5 / 499500 | 取模/取负/循环 |
+
+未测：armv7 / riscv32 真机或 QEMU（仅确认 wamrc 支持该 target/ABI、交叉编译产出成功）；wasm2c 32 位 C 构建。
