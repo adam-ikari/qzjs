@@ -46,7 +46,8 @@ const OP = {
     i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_s: 0x48, i32_lt_u: 0x49,
     i32_gt_s: 0x4a, i32_gt_u: 0x4b, i32_le_s: 0x4c, i32_le_u: 0x4d, i32_ge_s: 0x4e, i32_ge_u: 0x4f,
     i64_eqz: 0x50, i64_eq: 0x51, i64_ne: 0x52, i64_lt_s: 0x53, i64_lt_u: 0x54,
-    i64_gt_s: 0x55, i64_gt_u: 0x56, i64_le_s: 0x57, i64_le_u: 0x58, i64_ge_s: 0x59, i64_ge_u: 0x5a,
+    i32_load: 0x28, i64_load: 0x29, f64_load: 0x2b, i32_load8_u: 0x2d,
+    i32_store: 0x36, i64_store: 0x37, f64_store: 0x39, i32_store8: 0x3a, i64_store32: 0x3e,
     f64_eq: 0x61, f64_ne: 0x62, f64_lt: 0x63, f64_gt: 0x64, f64_le: 0x65, f64_ge: 0x66,
     i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_div_s: 0x6d, i32_div_u: 0x6e, i32_rem_s: 0x6f, i32_rem_u: 0x70,
     i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, i32_shl: 0x74, i32_shr_s: 0x75, i32_shr_u: 0x76,
@@ -62,7 +63,7 @@ const OP = {
 };
 
 class Module {
-    constructor() { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null; }
+    constructor() { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null; }
     // type: {name, params:[valtype], results:[valtype]}（results 空 = void）
     funcType(params, results) {
         const key = JSON.stringify([params, results]);
@@ -129,8 +130,11 @@ class Module {
     localTee(i) { this._emit(OP.local_tee, ...uleb(i)); }
     // 算术
     i32Add() { this._emit(OP.i32_add); } i32Sub() { this._emit(OP.i32_sub); } i32Mul() { this._emit(OP.i32_mul); } i32DivS() { this._emit(OP.i32_div_s); } i32RemS() { this._emit(OP.i32_rem_s); }
+    i32DivU() { this._emit(OP.i32_div_u); } i32RemU() { this._emit(OP.i32_rem_u); }
+    truncI64F64S() { this._emit(0xb0); }   // i64.trunc_f64_s
     i64Add() { this._emit(OP.i64_add); } i64Sub() { this._emit(OP.i64_sub); } i64Mul() { this._emit(OP.i64_mul); }
     i64DivS() { this._emit(OP.i64_div_s); } i64RemS() { this._emit(OP.i64_rem_s); }
+    i64DivU() { this._emit(OP.i64_div_u); } i64RemU() { this._emit(OP.i64_rem_u); }
     i64And() { this._emit(OP.i64_and); } i64Or() { this._emit(OP.i64_or); } i64Xor() { this._emit(OP.i64_xor); }
     i64Shl() { this._emit(OP.i64_shl); } i64ShrU() { this._emit(OP.i64_shr_u); } i64ShrS() { this._emit(OP.i64_shr_s); }
     i64Eqz() { this._emit(OP.i64_eqz); }
@@ -164,9 +168,13 @@ class Module {
     unreachable() { this._emit(OP.unreachable); }
     // 内存（字符串/数组共享内存用）
     addMemory(pages) { this.memory = pages; }
+    addData(offset, bytes) { this.data.push({ offset, bytes: Uint8Array.from(bytes) }); }   // 数据段（字符串字面量 UTF-8）
     i32Store(align, offset) { this._emit(OP.i32_store, ...uleb(align), ...uleb(offset)); }
+    i32Store8(align, offset) { this._emit(OP.i32_store8, ...uleb(align), ...uleb(offset)); }
     i32Load(align, offset) { this._emit(OP.i32_load, ...uleb(align), ...uleb(offset)); }
+    i32Load8U(align, offset) { this._emit(OP.i32_load8_u, ...uleb(align), ...uleb(offset)); }
     i64Store(align, offset) { this._emit(OP.i64_store, ...uleb(align), ...uleb(offset)); }
+    i64Store32(align, offset) { this._emit(OP.i64_store32, ...uleb(align), ...uleb(offset)); }
     i64Load(align, offset) { this._emit(OP.i64_load, ...uleb(align), ...uleb(offset)); }
     // export
     exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName], kind: 0x00 }); }
@@ -225,19 +233,24 @@ class Module {
             ]));
             out.push(7, ...uleb(body.length), ...body);
         }
-        // code 段
         if (this.codes.length) {
             const body = vec(this.codes.map(c => {
                 const localGroups = [];
                 for (const l of c.locals) {
-                    const found = localGroups.find(g => g[1] === VAL[l]);
-                    if (found) found[0]++; else localGroups.push([1, VAL[l]]);
+                    const last = localGroups[localGroups.length - 1];
+                    if (last && last[1] === VAL[l]) last[0]++;
+                    else localGroups.push([1, VAL[l]]);
                 }
                 const header = vec(localGroups.map(g => uleb(g[0]).concat(g[1])));
                 const code = [...header, ...c.body];
                 return uleb(code.length).concat(code);
             }));
             out.push(10, ...uleb(body.length), ...body);
+        }
+        // data 段（字符串字面量 UTF-8；active，i32.const offset + 字节）—— wasm 段序要求排在 code(10) 之后
+        if (this.data.length) {
+            const body = vec(this.data.map(d => [...uleb(0x00), OP.i32_const, ...sleb(d.offset), OP.end, ...uleb(d.bytes.length), ...d.bytes]));
+            out.push(11, ...uleb(body.length), ...body);
         }
         return Buffer.from(out.flat());
     }
