@@ -63,8 +63,6 @@
 | wasm-encoder.js | wasm 二进制生成（6 段 + 指令最小集 + 本地 memory + global） |
 | emitter.js      | tsc AST → wasm 栈式（双模式：裸 f64 快路径 / tagged f64 NaN-box 动态） |
 | qzvm.js         | qz.\* 运行时（JS 侧，20 符号 + f64 NaN-box 编解码 + handle 表；32/64 位共用） |
-| splitter.js     | AS 切分器（历史，已被完整 TS→wasm 取代）                    |
-| bridge_test     | wasm↔qzjs 能力对接验证                                      |
 
 ## 后续（按优先级）
 

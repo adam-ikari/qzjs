@@ -10,8 +10,7 @@ qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→
 |`emitter.js`|tsc AST → wasm 栈式发射。**双模式**：参数全 `number` 注解 → **裸 f64 快路径**（原生指令零跨界）；含 `unknown`/对象/字符串 → tagged 动态路径（guard 特化 + qz.\* import）。tagged 值 = i64 **f64 NaN-box**（数值=原始 f64 位型→原生 f64 指令零跨界；句柄=高16位 `0x7FF9`；字段 8 字节；精确 53 位）。表示与宿主字长无关，32/64 位共用|✅ 生产级|
 |`qzvm.js`|`qz.*` 运行时（f64 NaN-box；i64/BigInt 跨界）。32/64 位宿主共用|✅ 自检通过|
 |`ASSESSMENT.md`|全部实验数据消化：性能画像/限制/方法论教训/后续优先级|✅ 评估权威|
-|`build.js` + `build.sh`|编译流水线：TS→wasm→validate→AOT→自包含 glue.js|✅ 一键|
-|`bridge_test`|wasm↔qzjs 能力对接验证（host import 机制实证，已删，见 git 历史）|—|
+|`build.js`|编译流水线：TS→wasm→wamrc AOT→自包含 glue.js（`--target` 支持 32 位交叉编译）|✅ 一键|
 
 ## 使用（编译流水线）
 
@@ -43,7 +42,7 @@ cd build/aot && qzjs <name>.glue.js
 
 ## 已知限制
 - **tagged 数值精确 53 位**（f64 NaN-box），32/64 位一致；无 31 位上限（旧 i32 模型已删，`test_aot.js` bigAcc=3e12 守此）
-- 32 位设备要交叉编译产物（armv7/riscv32/i386）：wasm/表示本身可移植，仅需 `build.js` 给 wamrc 加 `--target` — 详见 `PORTABILITY_32BIT.md`
+- 32 位设备：`build.js --target <arch> --target-abi <abi>` 交叉编译 `.aot`（i386 实测通过），表示层/f64 语义不变 — 详见 `PORTABILITY_32BIT.md`
 - 字符串拼接跨界慢 14x → 设计见 `STR_BACKEND_DESIGN.md`（独立实现计划）
 - `qzvm` 20 符号（对象方法/数组方法未覆盖）
 - wasm 解释模式无意义，必须 AOT（wamrc）或 JIT
@@ -57,9 +56,8 @@ cd build/aot && qzjs <name>.glue.js
 |**wasm2c 中间产物**（`ab3k.c`/`wrap_*.c` 等）|so 由 wasm 派生的早期实验|
 
 ## 设计文档
-- `SPLITTER_DESIGN.md` — AS 切分器设计（历史路线）
 - `STR_BACKEND_DESIGN.md` — 字符串后端优化设计（独立实现计划）
-- `PORTABILITY_32BIT.md` — 32 位可移植性评估与 target-aware 表示裁决
+- `PORTABILITY_32BIT.md` — 32 位可移植性评估与「单 f64 表示」裁决（i386 实测通过）
 
 ## 测试
 - `test_aot.js` — 最小 e2e 回归门：编译 TS→wasm→node WebAssembly 运行→比对期望（不依赖 wamrc）。`node src/qzvm/aot/test_aot.js`，覆盖 num 快路径 f64 语义 + tagged **f64 NaN-box**（含 bigAcc=3e12 精度断言）
