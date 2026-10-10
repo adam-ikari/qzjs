@@ -68,7 +68,7 @@
 
 ## 后续（按优先级）
 
-1. **~~f64 tagged~~ 已完成**（tagged 值 = f64 NaN-box，精确 53 位，32/64 位统一）。剩余：`build.js` 给 wamrc 传 `--target` 支持 32 位交叉编译。
+1. **~~f64 tagged + build.js `--target`~~ 已完成**（tagged = f64 NaN-box，精确 53 位，32/64 位统一；`--target/--target-abi` 交叉编译，i386 实测通过）。
 2. **字符串后端**（wasm 内拼接，STR_BACKEND_DESIGN.md）
 3. qzvm 补全（对象方法/数组）
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
