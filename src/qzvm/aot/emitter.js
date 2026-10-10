@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-/* emitter.js — tsc AST → wasm 发射器（切片 2a：number-only）。
- * 值模型：TS 标注 number 的值 = 裸 i32 local，算术走原生 wasm 指令（零跨界）。
- * 动态值（any/string/对象）本切片报不支持，切片 2b 加 tagged i32 + qz.* import。
+/* emitter.js — tsc AST → wasm 发射器。
+ * 值模型（双模式）：
+ *   num 快路径（参数全 number 注解）：值 = 裸 f64 local，算术走原生 wasm 指令（零跨界）。
+ *   tagged 动态路径（含 unknown/对象/字符串）：值经 qz.* import。表示由 opts.tagged 选：
+ *     默认 f64 NaN-box（值=i64，数值=原始 f64 位型，句柄=高16位0x7FF9；字段 8 字节）；
+ *     "i32" = 32 位宿主回退位模型（31 位有效；字段 4 字节）。
  *
  * 控制流用 wasm 栈式惯用法：
  *   if:      <cond> if(t) <then> else <else> end
@@ -37,7 +40,32 @@ const QZ = {
   truthy: { params: ["i32"], results: ["i32"] },
   log:  { params: ["i32"], results: [] },
 };
-function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
+// f64 NaN-box 变体（64 位宿主默认）：值恒 i64；数值=原始 f64 位型，句柄=高16位0x7FF9。
+// 索引/长度类（alloc 偏移、字段名 id）仍 i32；truthy 返回裸 i32（0/1）供 wasm 条件直接用。
+const QZ_F64 = {
+  alloc:  { params: ["i32"],  results: ["i32"] },
+  object_new:   { params: [],             results: ["i64"] },
+  object_set:   { params: ["i64", "i32", "i64"], results: [] },
+  object_get:   { params: ["i64", "i32"], results: ["i64"] },
+  string_new:   { params: ["i32"],        results: ["i64"] },
+  string_concat:{ params: ["i64", "i64"], results: ["i64"] },
+  add:  { params: ["i64", "i64"], results: ["i64"] },
+  sub:  { params: ["i64", "i64"], results: ["i64"] },
+  mul:  { params: ["i64", "i64"], results: ["i64"] },
+  div:  { params: ["i64", "i64"], results: ["i64"] },
+  rem:  { params: ["i64", "i64"], results: ["i64"] },
+  lt:   { params: ["i64", "i64"], results: ["i64"] },
+  gt:   { params: ["i64", "i64"], results: ["i64"] },
+  le:   { params: ["i64", "i64"], results: ["i64"] },
+  ge:   { params: ["i64", "i64"], results: ["i64"] },
+  seq:  { params: ["i64", "i64"], results: ["i64"] },
+  sne:  { params: ["i64", "i64"], results: ["i64"] },
+  truthy: { params: ["i64"], results: ["i32"] },
+  log:  { params: ["i64"], results: [] },
+};
+const TAG_HI = 0x7ff9n;                 // 句柄高 16 位标记
+const MASK32 = 0xffffffffn;
+function registerQz(m, rep) { const T = rep === "f64" ? QZ_F64 : QZ; for (const k of Object.keys(T)) m.importFn("qz", k, T[k].params, T[k].results); return m; }
 
 class Emitter {
     constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this.strings = []; }
@@ -59,13 +87,19 @@ class Emitter {
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         // 模式：参数全 number 注解 → f64 快路径；否则 tagged（动态值）路径
         this.mode = f.parameters.every(p => p.type && p.type.getText && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged";
-        // num 值 = f64（对齐 TS number：除法/取模/大数语义正确；tagged 用 i32 位模型）
-        const vt = this.mode === "num" ? "f64" : "i32";
+        // tagged 值表示：this.rep 由 compileTS 设定，f64 NaN-box（默认）/ i32 位模型
+        const rep = this.rep || "f64";
+        // num 值 = f64；tagged 值 = i64（f64 位型）/ i32（旧 31 位模型）
+        const vt = this.mode === "num" ? "f64" : (rep === "f64" ? "i64" : "i32");
         const locals = this._collectLocals(f.body);
-        this.scratch = f.parameters.length + locals.length;   // scratch（后缀 ++/--）
-        this.scratchA = this.scratch + 1;                    // guard 暂存 a
-        this.scratchB = this.scratch + 2;                    // guard 暂存 b
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]));   // + scratch(++)/scratchA/scratchB
+        const nLoc = f.parameters.length + locals.length;
+        this.scratch = nLoc;                                 // scratch（后缀 ++/--）
+        this.scratchA = nLoc + 1;                            // 暂存 a
+        this.scratchB = nLoc + 2;                            // 暂存 b
+        // f64 rep 的 guard 快路径需 f64 浮点临时（值 local 是 i64）；num 模式 scratchA/B 本就是 f64
+        const extra = (this.mode === "tagged" && rep === "f64") ? ["f64", "f64"] : [];
+        this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra));
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -270,11 +304,13 @@ function compileTS(input, outWasm, opts = {}) {
     const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
     // 阶段1：任一函数为 tagged → 注册全部 qz.* import；登记所有函数签名（支持前向/互递归）
     const anyTagged = fns.some(f => !f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword));
-    if (anyTagged) { registerQz(m); m.addMemory(2); m.addGlobal("i32", 0); }   // global0 = wasm 内 bump 分配器   // 本地定义 memory（wamrc AOT 只支持本地 memory，不支持 import）
+    const rep = opts.tagged === "i32" ? "i32" : "f64";
+    em.rep = rep;
+    if (anyTagged) { registerQz(m, rep); m.addMemory(2); m.addGlobal("i32", 0); }   // 本地定义 memory（wamrc AOT 只支持本地 memory）
     for (const st of fns) {
         const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
         const isNum = st.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
-        const vt = isNum ? "f64" : "i32";       // num 快路径值 = f64
+        const vt = isNum ? "f64" : (rep === "f64" ? "i64" : "i32");   // num=f64；tagged=f64 NaN-box(i64)/旧 i32
         m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
     }
     if (anyTagged) m.exportMemory();          // 导出本地 memory（qz.alloc 经 exports.memory 访问）
@@ -289,17 +325,20 @@ function compileTS(input, outWasm, opts = {}) {
         mode: f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged",
         params: f.parameters.length,
     }));
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta };
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, rep };
 }
 
 
 // ================= tagged 模式发射（动态值：对象/字符串/any） =================
-// tagged i32: bit0=0 数值(v>>1) | bit0=1 handle(v>>1，qzvm 表索引)
+// f64 rep（默认）：值 = i64，数值=原始 f64 位型，句柄=高16位0x7FF9；字段 8 字节。
+// i32 rep：值 = i32，bit0=0 数值(v>>1)/bit0=1 handle；字段 4 字节。
+const _fbuf = Buffer.alloc(8);
+function f64Bits(v) { _fbuf.writeDoubleLE(v); return [_fbuf.readUInt32LE(0), _fbuf.readUInt32LE(4)]; }   // [lo, hi]
 Emitter.prototype._fieldIndex = function (name) {
     if (!this.fieldMap) this.fieldMap = new Map();
     let i = this.fieldMap.get(name);
     if (i === undefined) { i = this.fieldMap.size; this.fieldMap.set(name, i); }
-    return i * 4;                     // 字节偏移
+    return i * (((this.rep || "f64") === "f64") ? 8 : 4);   // 字节偏移（f64 rep 字段 8 字节）
 };
 Emitter.prototype._strId = function (text) {
     let i = this.strings.indexOf(text);
@@ -316,8 +355,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     }
     if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
     if (ts.isIfStatement(s)) {
-        this.emitTaggedExpr(s.expression !== undefined ? s.expression : s.condition);
-        this.m.ifBlock(); this.depth++;          // 条件是 tagged bool（0 假/非0 真），wasm if 直接用
+        this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
+        this.m.ifBlock(); this.depth++;          // 条件已归约为裸 i32 布尔
         this.labels.push({ brk: this.depth, cont: null });
         this.emitTaggedStmt(s.thenStatement);
         if (s.elseStatement) { this.m.else_(); this.emitTaggedStmt(s.elseStatement); }
@@ -326,8 +365,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isWhileStatement(s)) {
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
         this.labels.push({ brk: this.depth - 1, cont: this.depth });
-        this.emitTaggedExpr(s.expression !== undefined ? s.expression : s.condition);
-        this.m.i32Eqz(); this.m.brIf(1);      // 条件已是 tagged bool（guard 产出 0/2），无需 qz.truthy
+        this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
+        this.m.i32Eqz(); this.m.brIf(1);
         this.emitTaggedStmt(s.statement);
         this.m.br(0);
         this.labels.pop(); this.depth--; this.m.end(); this.depth--; this.m.end(); return;
@@ -340,7 +379,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         }
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
         this.labels.push({ brk: this.depth - 1, cont: this.depth });
-        if (s.condition) { this.emitTaggedExpr(s.condition); this.m.i32Eqz(); this.m.brIf(1); }
+        if (s.condition) { this.emitCondI32(s.condition); this.m.i32Eqz(); this.m.brIf(1); }
         if (s.statement) this.emitTaggedStmt(s.statement);
         if (s.incrementor) { this.emitTaggedExpr(s.incrementor); this.m.drop(); }
         this.m.br(0);
@@ -360,39 +399,57 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     throw new Error("[tagged] 不支持的语句: " + ts.SyntaxKind[s.kind]);
 };
 Emitter.prototype.emitTaggedExpr = function (e) {
-    if (ts.isNumericLiteral(e)) { this.m.i32Const(Number(e.text) * 2); return; }          // tagged number = n<<1
+    const F = (this.rep || "f64") === "f64";
+    if (ts.isNumericLiteral(e)) {
+        if (F) this.m.i64ConstBits(...f64Bits(Number(e.text)));   // 数值 = 原始 f64 位型
+        else this.m.i32Const(Number(e.text) * 2);                 // i32 位模型：n<<1
+        return;
+    }
     if (ts.isStringLiteral(e)) { this.m.i32Const(this._strId(e.text)); this.m.call("qz.string_new"); return; }
     if (ts.isIdentifier(e)) { const idx = this._local(e.text); if (idx === undefined) throw new Error("未定义变量: " + e.text); this.m.localGet(idx); return; }
     if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
     if (ts.isObjectLiteralExpression(e)) {
-        // POJO：字段驻留 wasm 线性内存（零跨界读写）。tagged handle = (offset<<1)|1。
-        if (!ts.isObjectLiteralExpression(e) || e.properties.some(p => !ts.isPropertyAssignment(p))) {
+        // POJO：字段驻留 wasm 线性内存（零跨界读写）。句柄 = box(高16位0x7FF9 | offset)。字段宽 8 字节（i64）。
+        if (e.properties.some(p => !ts.isPropertyAssignment(p))) {
             throw new Error("[tagged] 对象字面量只支持 { x: v } 形式");
         }
         const NF = e.properties.length;
-        // 内联 bump：global0 += NF*4; offset = new_bump - NF*4（零跨界）
+        const W = F ? 8 : 4;                        // 字段宽度
+        // 内联 bump：global0 += NF*W; offset = new_bump - NF*W（零跨界）
         this.m.globalGet(0);
-        this.m.i32Const(NF * 4);
+        this.m.i32Const(NF * W);
         this.m.i32Add();
         this.m.globalSet(0);
         this.m.globalGet(0);
-        this.m.i32Const(NF * 4);
-        this.m.i32Sub();                      // → offset
-        this.m.i32Const(1); this.m.i32Shl();  // offset<<1
-        this.m.i32Const(1); this.m.i32Or();   // |1 = tagged handle
-        this.m.localSet(this.scratch);
+        this.m.i32Const(NF * W);
+        this.m.i32Sub();                            // → offset(i32)
+        if (F) {                                     // 句柄 = 高16位0x7FF9 | offset(低32)
+            this.m.i64ExtendI32U(); this.m.i64ConstBits(0, 0x7ff9); this.m.i64Or();
+        } else { this.m.i32Const(1); this.m.i32Shl(); this.m.i32Const(1); this.m.i32Or(); }
+        this.m.localSet(this.scratch);              // scratch 保存句柄（F: i64 / i32）
         for (let i = 0; i < NF; i++) {
-            this.m.localGet(this.scratch);   // [h]
-            this.m.i32Const(1); this.m.i32ShrU();  // [off]
-            this.emitTaggedExpr(e.properties[i].initializer);  // [off, val]
-            this.m.i32Store(2, i * 4);       // memory[off + i*4] = val
+            this.m.localGet(this.scratch);          // [h]
+            if (F) {
+                this.m.i32WrapI64();                                            // 低32位=offset
+                this.emitTaggedExpr(e.properties[i].initializer);              // [off(i32), val(i64)]
+                this.m.i64Store(3, i * 8);          // memory[off + i*8] = val
+            } else {
+                this.m.i32Const(1); this.m.i32ShrU();                          // → off(i32)
+                this.emitTaggedExpr(e.properties[i].initializer);
+                this.m.i32Store(2, i * 4);
+            }
         }
         this.m.localGet(this.scratch); return;
     }
     if (ts.isPropertyAccessExpression(e)) {                                                 // obj.a（POJO：wasm load，零跨界）
         this.emitTaggedExpr(e.expression);
-        this.m.i32Const(1); this.m.i32ShrU();          // tagged handle → offset
-        this.m.i32Load(2, this._fieldIndex(e.name.text));  // memory[off + fieldOff]（tagged 值）
+        if (F) {
+            this.m.i32WrapI64();                       // 低32位=offset
+            this.m.i64Load(3, this._fieldIndex(e.name.text));                               // 字段 +8 字节步进
+        } else {
+            this.m.i32Const(1); this.m.i32ShrU();
+            this.m.i32Load(2, this._fieldIndex(e.name.text));
+        }
         return;
     }
     if (ts.isCallExpression(e)) {
@@ -403,23 +460,54 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isPrefixUnaryExpression(e)) {
         this.emitTaggedExpr(e.operand);
         if (e.operator === ts.SyntaxKind.ExclamationToken) this.m.call("qz.truthy");
-        else if (e.operator === ts.SyntaxKind.MinusToken) { this.m.i32Const(0); this.m.call("qz.sub"); }
+        else if (e.operator === ts.SyntaxKind.MinusToken) {
+            if (F) { this.m.f64ReinterpretI64(); this.m.f64Neg(); this.m.i64ReinterpretF64(); }
+            else { this.m.i32Const(0); this.m.call("qz.sub"); }
+        }
         return;
     }
     if (ts.isPostfixUnaryExpression(e)) {                                                    // x++（tagged +1）
         const idx = this._local(e.operand.text);
         this.m.localGet(idx); this.m.localTee(this.scratch);
-        this.m.localGet(idx); this.m.i32Const(2); this.m.call("qz.add"); this.m.localSet(idx);
+        this.m.localGet(idx);
+        if (F) { this.m.i64ConstBits(...f64Bits(1)); this.m.call("qz.add"); }
+        else { this.m.i32Const(2); this.m.call("qz.add"); }
+        this.m.localSet(idx);
         return;
     }
     if (ts.isBinaryExpression(e)) { this.emitTaggedBinary(e); return; }
     throw new Error("[tagged] 不支持的表达式: " + ts.SyntaxKind[e.kind]);
 };
-// guarded 数值特化：栈 [a b] → 若都是 tagged number（bit0=0）走原生指令，
-// 否则回退 qz.*（JS 语义：字符串拼接 / 对象等）。跨界仅在慢路径。
-Emitter.prototype.emitGuardedOp = function (qzName, fastEmit) {
+// 栈顶裸 i32 布尔 → tagged 值（f64 rep: i64.extend_u；i32 rep: <<1）
+Emitter.prototype.emitBoxBool = function () {
+    if ((this.rep || "f64") === "f64") this.m.i64ExtendI32U();
+    else { this.m.i32Const(1); this.m.i32Shl(); }
+};
+// tagged 值 → 裸 i32 布尔（条件用）
+Emitter.prototype.emitCondI32 = function (expr) { this.emitTaggedExpr(expr); this.m.call("qz.truthy"); };
+// guarded 数值特化：栈 [a b] → 都是 tagged number 走原生指令，否则回退 qz.* 跨界。
+// f64 rep：数值=原始 f64 位型，句柄=高16位0x7FF9 → reinterpret 后原生 f64 运算（零跨界）。
+// cmp=true 时 fastEmit 产出 i32 谓词（f64.lt 等），需 extend 回 i64。
+Emitter.prototype.emitGuardedOp = function (qzName, fastEmit, cmp) {
+    const F = (this.rep || "f64") === "f64";
     this.m.localSet(this.scratchB);
     this.m.localSet(this.scratchA);
+    if (F) {
+        // guard: (a>>48==0x7FF9) | (b>>48==0x7FF9)
+        this.m.localGet(this.scratchA); this.m.i64Const(0x7ff9n); this.m.i64ShrU(); this.m.i64Const(0x7ff9n); this.m.i64Eq();
+        this.m.localGet(this.scratchB); this.m.i64Const(0x7ff9n); this.m.i64ShrU(); this.m.i64Const(0x7ff9n); this.m.i64Eq();
+        this.m.i32Or();
+        this.m.ifBlock("i64");
+        this.m.localGet(this.scratchA); this.m.localGet(this.scratchB); this.m.call(qzName);
+        this.m.else_();
+        this.m.localGet(this.scratchA); this.m.f64ReinterpretI64();
+        this.m.localGet(this.scratchB); this.m.f64ReinterpretI64();
+        fastEmit.call(this.m);
+        if (cmp) this.m.i64ExtendI32U(); else this.m.i64ReinterpretF64();
+        this.m.end();
+        return;
+    }
+    // i32 rep（旧 31 位模型）
     this.m.localGet(this.scratchA); this.m.i32Const(1); this.m.i32And();
     this.m.localGet(this.scratchB); this.m.i32Const(1); this.m.i32And();
     this.m.i32Or();
@@ -434,21 +522,24 @@ Emitter.prototype.emitGuardedOp = function (qzName, fastEmit) {
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
-    // 数值可特化：guard 判定后原生运算（tagged number），否则 qz.* JS 语义
+    const F = (this.rep || "f64") === "f64";
+    // 数值可特化：guard 判定后原生运算，否则 qz.* JS 语义。
+    // f64 rep：原生 f64 指令（比较产出 i32 → cmp=true）；i32 rep：原生 i32 指令（cmp=false，内部 shl<<1）。
+    const G = (qz, f64op, i32op, cmp) => F ? () => this.emitGuardedOp(qz, f64op, cmp) : () => this.emitGuardedOp(qz, i32op, false);
     const GUARD = {
-        [ts.SyntaxKind.PlusToken]: () => this.emitGuardedOp("qz.add", this.m.i32Add),
-        [ts.SyntaxKind.MinusToken]: () => this.emitGuardedOp("qz.sub", this.m.i32Sub),
-        [ts.SyntaxKind.AsteriskToken]: () => this.emitGuardedOp("qz.mul", this.m.i32Mul),
-        [ts.SyntaxKind.SlashToken]: () => this.emitGuardedOp("qz.div", this.m.i32DivS),
-        [ts.SyntaxKind.PercentToken]: () => this.emitGuardedOp("qz.rem", this.m.i32RemS),
-        [ts.SyntaxKind.LessThanToken]: () => this.emitGuardedOp("qz.lt", this.m.i32LtS),
-        [ts.SyntaxKind.GreaterThanToken]: () => this.emitGuardedOp("qz.gt", this.m.i32GtS),
-        [ts.SyntaxKind.LessThanEqualsToken]: () => this.emitGuardedOp("qz.le", this.m.i32LeS),
-        [ts.SyntaxKind.GreaterThanEqualsToken]: () => this.emitGuardedOp("qz.ge", this.m.i32GeS),
-        [ts.SyntaxKind.EqualsEqualsToken]: () => this.emitGuardedOp("qz.seq", this.m.i32Eq),
-        [ts.SyntaxKind.EqualsEqualsEqualsToken]: () => this.emitGuardedOp("qz.seq", this.m.i32Eq),
-        [ts.SyntaxKind.ExclamationEqualsToken]: () => this.emitGuardedOp("qz.sne", this.m.i32Ne),
-        [ts.SyntaxKind.ExclamationEqualsEqualsToken]: () => this.emitGuardedOp("qz.sne", this.m.i32Ne),
+        [ts.SyntaxKind.PlusToken]: G("qz.add", this.m.f64Add, this.m.i32Add),
+        [ts.SyntaxKind.MinusToken]: G("qz.sub", this.m.f64Sub, this.m.i32Sub),
+        [ts.SyntaxKind.AsteriskToken]: G("qz.mul", this.m.f64Mul, this.m.i32Mul),
+        [ts.SyntaxKind.SlashToken]: G("qz.div", this.m.f64Div, this.m.i32DivS),
+        // % 走 map → qz.rem（f64 无原生 rem；i32 rep 亦不强特化）
+        [ts.SyntaxKind.LessThanToken]: G("qz.lt", this.m.f64Lt, this.m.i32LtS, true),
+        [ts.SyntaxKind.GreaterThanToken]: G("qz.gt", this.m.f64Gt, this.m.i32GtS, true),
+        [ts.SyntaxKind.LessThanEqualsToken]: G("qz.le", this.m.f64Le, this.m.i32LeS, true),
+        [ts.SyntaxKind.GreaterThanEqualsToken]: G("qz.ge", this.m.f64Ge, this.m.i32GeS, true),
+        [ts.SyntaxKind.EqualsEqualsToken]: G("qz.seq", this.m.f64Eq, this.m.i32Eq, true),
+        [ts.SyntaxKind.EqualsEqualsEqualsToken]: G("qz.seq", this.m.f64Eq, this.m.i32Eq, true),
+        [ts.SyntaxKind.ExclamationEqualsToken]: G("qz.sne", this.m.f64Ne, this.m.i32Ne, true),
+        [ts.SyntaxKind.ExclamationEqualsEqualsToken]: G("qz.sne", this.m.f64Ne, this.m.i32Ne, true),
     };
     const map = {
         [ts.SyntaxKind.PlusToken]: "qz.add", [ts.SyntaxKind.MinusToken]: "qz.sub",
@@ -465,6 +556,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         this.emitTaggedExpr(e.left); this.m.call("qz.truthy"); this.m.i32Eqz();
         this.emitTaggedExpr(e.right); this.m.call("qz.truthy");
         if (op === ts.SyntaxKind.AmpersandAmpersandToken) this.m.i32And(); else this.m.i32Or();
+        this.emitBoxBool();   // 布尔结果回 tagged 值
         return;
     }
     if (op === ts.SyntaxKind.FirstAssignment || Object.values(ts.SyntaxKind).includes(op) && /Equals/.test(ts.SyntaxKind[op] || "")) {

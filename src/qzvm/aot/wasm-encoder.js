@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /* wasm-encoder.js — 最小 wasm 二进制生成器（自研 TS→wasm 的基础层）。
  * 支持段: type / import / function / memory / export / code。
- * 支持指令最小集（数值 i32/f64 + 控制流）——足够生成完整 TS 的动态类型 wasm
- * （所有值 i32 tagged，对象/字符串经 qz.* import）。
+ * 支持指令最小集（数值 i32/i64/f64 + 控制流）——足够生成完整 TS 的动态类型 wasm
+ * （tagged 值 i64 f64 NaN-box 或 i32 位模型，均经 qz.* import）。
  *
  * 用法: const { Module } = require('./wasm-encoder.js');
  *       const m = new Module();
@@ -20,9 +20,46 @@
 function uleb(n) { const out = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; out.push(b); } while (n); return out; }
 function sleb(n) { const out = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && !(b & 0x40)) || (n === -1 && (b & 0x40))) more = false; else b |= 0x80; out.push(b); } return out; }
 function vec(items) { const out = uleb(items.length); for (const i of items) out.push(...i); return out; }
+// 64 位 LEB（i64 常量、大偏移）：BigInt 版，`>>`/`|` 均为 32 位不可用
+function uleb64(n) { n = BigInt(n) & 0xffffffffffffffffn; const out = []; do { let b = Number(n & 0x7fn); n >>= 7n; if (n) b |= 0x80; out.push(b); } while (n); return out; }
+function sleb64(n) {
+    n = BigInt.asIntN(64, BigInt(n));
+    const out = []; let more = true;
+    while (more) {
+        let b = Number(n & 0x7fn);
+        n >>= 7n;
+        if ((n === 0n && !(b & 0x40)) || (n === -1n && (b & 0x40))) more = false; else b |= 0x80;
+        out.push(b);
+    }
+    return out;
+}
 
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c, func: 0x60, void: 0x40 };
-const OP = { end: 0x0b, else: 0x05, block: 0x02, loop: 0x03, if: 0x04, br: 0x0c, br_if: 0x0d, br_table: 0x0e, return: 0x0f, call: 0x10, call_indirect: 0x11, drop: 0x1a, local_get: 0x20, local_set: 0x21, local_tee: 0x22, global_get: 0x23, global_set: 0x24, i32_load: 0x28, i64_load: 0x29, f64_load: 0x2a, i32_store: 0x36, i64_store: 0x37, f64_store: 0x38, i32_const: 0x41, i64_const: 0x42, f64_const: 0x44, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_s: 0x48, i32_lt_u: 0x49, i32_gt_s: 0x4a, i32_gt_u: 0x4b, i32_le_s: 0x4c, i32_le_u: 0x4d, i32_ge_s: 0x4e, i32_ge_u: 0x4f, i64_eq: 0x51, i64_lt_s: 0x53, i64_gt_s: 0x55, i64_add: 0x6c, i64_sub: 0x6d, i64_mul: 0x6e, i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_div_s: 0x6d, i32_rem_s: 0x6f, i64_div_s: 0x71, f64_add: 0xa0, f64_sub: 0xa1, f64_mul: 0xa2, f64_div: 0xa3, f64_lt: 0x63, f64_gt: 0x64, f64_eq: 0x61, f64_le: 0x65, f64_ge: 0x66, f64_ne: 0x62, f64_neg: 0x9a, f64_max: 0xa5, f64_trunc: 0x9d, f64_floor: 0x9c, f64_convert_i32_s: 0xb7, i32_trunc_f64_s: 0xaa, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, i32_shl: 0x74, i32_shr_s: 0x75, i32_shr_u: 0x76, select: 0x1b, unreachable: 0x00};
+// 指令集（值来自 wasm core spec；i32/f64 为解释器快路径，i64 用于 tagged NaN-box）
+const OP = {
+    end: 0x0b, else: 0x05, block: 0x02, loop: 0x03, if: 0x04, br: 0x0c, br_if: 0x0d,
+    br_table: 0x0e, return: 0x0f, call: 0x10, call_indirect: 0x11, drop: 0x1a, select: 0x1b,
+    local_get: 0x20, local_set: 0x21, local_tee: 0x22, global_get: 0x23, global_set: 0x24,
+    i32_load: 0x28, i64_load: 0x29, f64_load: 0x2b,
+    i32_store: 0x36, i64_store: 0x37, f64_store: 0x39,
+    i32_const: 0x41, i64_const: 0x42, f64_const: 0x44,
+    i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_s: 0x48, i32_lt_u: 0x49,
+    i32_gt_s: 0x4a, i32_gt_u: 0x4b, i32_le_s: 0x4c, i32_le_u: 0x4d, i32_ge_s: 0x4e, i32_ge_u: 0x4f,
+    i64_eqz: 0x50, i64_eq: 0x51, i64_ne: 0x52, i64_lt_s: 0x53, i64_lt_u: 0x54,
+    i64_gt_s: 0x55, i64_gt_u: 0x56, i64_le_s: 0x57, i64_le_u: 0x58, i64_ge_s: 0x59, i64_ge_u: 0x5a,
+    f64_eq: 0x61, f64_ne: 0x62, f64_lt: 0x63, f64_gt: 0x64, f64_le: 0x65, f64_ge: 0x66,
+    i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_div_s: 0x6d, i32_div_u: 0x6e, i32_rem_s: 0x6f, i32_rem_u: 0x70,
+    i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, i32_shl: 0x74, i32_shr_s: 0x75, i32_shr_u: 0x76,
+    i64_add: 0x7c, i64_sub: 0x7d, i64_mul: 0x7e, i64_div_s: 0x7f, i64_div_u: 0x80, i64_rem_s: 0x81, i64_rem_u: 0x82,
+    i64_and: 0x83, i64_or: 0x84, i64_xor: 0x85, i64_shl: 0x86, i64_shr_s: 0x87, i64_shr_u: 0x88,
+    f64_neg: 0x9a, f64_floor: 0x9c, f64_trunc: 0x9d, f64_abs: 0x99,
+    f64_add: 0xa0, f64_sub: 0xa1, f64_mul: 0xa2, f64_div: 0xa3, f64_min: 0xa4, f64_max: 0xa5,
+    i32_wrap_i64: 0xa7, i32_trunc_f64_s: 0xaa, i32_trunc_f64_u: 0xab,
+    i64_extend_i32_s: 0xac, i64_extend_i32_u: 0xad,
+    f64_convert_i32_s: 0xb7, f64_convert_i32_u: 0xb8, f64_convert_i64_s: 0xb9, f64_convert_i64_u: 0xba,
+    i64_reinterpret_f64: 0xbd, f64_reinterpret_i64: 0xbf,
+    unreachable: 0x00,
+};
 
 class Module {
     constructor() { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null; }
@@ -79,7 +116,8 @@ class Module {
     end() { this._emit(OP.end); }        // 结束 block/loop/if（只 push end）
     finish() { this._emit(OP.end); if (this._cur) { this.codes.push({ locals: this._cur.locals, body: this._cur.body }); this._cur = null; } }
     i32Const(v) { this._emit(OP.i32_const, ...sleb(v | 0)); }
-    i64Const(v) { this._emit(OP.i64_const, ...sleb(Number(BigInt(v) & 0xffffffffn))); }
+    i64Const(v) { this._emit(OP.i64_const, ...sleb64(v)); }
+    i64ConstBits(lo, hi) { this._emit(OP.i64_const, ...sleb64((BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0))); }
     f64Const(v) { const b = Buffer.alloc(8); b.writeDoubleLE(v); this._emit(OP.f64_const, ...b); }
     call(name) { const idx = this._importIdx[name] !== undefined ? this._importIdx[name] : this._funcIdx[name]; if (idx === undefined) throw new Error("call 未定义: " + name); this._emit(OP.call, ...uleb(idx)); }
     addGlobal(type, init) { (this.globals = this.globals || []).push({ type, init: init || 0 }); return this.globals.length - 1; }
@@ -92,6 +130,17 @@ class Module {
     // 算术
     i32Add() { this._emit(OP.i32_add); } i32Sub() { this._emit(OP.i32_sub); } i32Mul() { this._emit(OP.i32_mul); } i32DivS() { this._emit(OP.i32_div_s); } i32RemS() { this._emit(OP.i32_rem_s); }
     i64Add() { this._emit(OP.i64_add); } i64Sub() { this._emit(OP.i64_sub); } i64Mul() { this._emit(OP.i64_mul); }
+    i64DivS() { this._emit(OP.i64_div_s); } i64RemS() { this._emit(OP.i64_rem_s); }
+    i64And() { this._emit(OP.i64_and); } i64Or() { this._emit(OP.i64_or); } i64Xor() { this._emit(OP.i64_xor); }
+    i64Shl() { this._emit(OP.i64_shl); } i64ShrU() { this._emit(OP.i64_shr_u); } i64ShrS() { this._emit(OP.i64_shr_s); }
+    i64Eqz() { this._emit(OP.i64_eqz); }
+    i64Eq() { this._emit(OP.i64_eq); } i64Ne() { this._emit(OP.i64_ne); }
+    i64LtS() { this._emit(OP.i64_lt_s); } i64GtS() { this._emit(OP.i64_gt_s); } i64LeS() { this._emit(OP.i64_le_s); } i64GeS() { this._emit(OP.i64_ge_s); }
+    i64LtU() { this._emit(OP.i64_lt_u); } i64GtU() { this._emit(OP.i64_gt_u); } i64LeU() { this._emit(OP.i64_le_u); } i64GeU() { this._emit(OP.i64_ge_u); }
+    i32WrapI64() { this._emit(OP.i32_wrap_i64); }
+    i64ExtendI32S() { this._emit(OP.i64_extend_i32_s); } i64ExtendI32U() { this._emit(OP.i64_extend_i32_u); }
+    f64ConvertI64S() { this._emit(OP.f64_convert_i64_s); }
+    i64ReinterpretF64() { this._emit(OP.i64_reinterpret_f64); } f64ReinterpretI64() { this._emit(OP.f64_reinterpret_i64); }
     f64Add() { this._emit(OP.f64_add); } f64Sub() { this._emit(OP.f64_sub); } f64Mul() { this._emit(OP.f64_mul); } f64Div() { this._emit(OP.f64_div); }
     i32Eqz() { this._emit(OP.i32_eqz); }
     i32Eq() { this._emit(OP.i32_eq); } i32Ne() { this._emit(OP.i32_ne); } i32LtS() { this._emit(OP.i32_lt_s); } i32GtS() { this._emit(OP.i32_gt_s); } i32LeS() { this._emit(OP.i32_le_s); } i32GeS() { this._emit(OP.i32_ge_s); }
@@ -117,6 +166,8 @@ class Module {
     addMemory(pages) { this.memory = pages; }
     i32Store(align, offset) { this._emit(OP.i32_store, ...uleb(align), ...uleb(offset)); }
     i32Load(align, offset) { this._emit(OP.i32_load, ...uleb(align), ...uleb(offset)); }
+    i64Store(align, offset) { this._emit(OP.i64_store, ...uleb(align), ...uleb(offset)); }
+    i64Load(align, offset) { this._emit(OP.i64_load, ...uleb(align), ...uleb(offset)); }
     // export
     exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName], kind: 0x00 }); }
     exportMemory() { this.exports.push({ name: "memory", idx: this.memoryIdx(), kind: 0x02 }); }

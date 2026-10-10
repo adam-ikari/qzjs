@@ -7,8 +7,9 @@ qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→
 |文件|职责|状态|
 |---|---|---|
 |`wasm-encoder.js`|wasm 二进制生成（type/import/function/memory/global/export/code 段 + LEB128 + 指令集）|✅ 生产级（经 wasm-validate + WAMR AOT）|
-|`emitter.js`|tsc AST → wasm 栈式发射。**双模式**：参数全 `number` 注解 → **裸 f64 快路径**（原生指令零跨界，对齐 TS number：除法/取模/大数语义正确）；含 `any`/对象/字符串 → tagged 动态路径（guard 特化 + qz.\* import，值为 i32 tagged）|✅ 生产级（correctness 全规模）|
-|`qzvm.js`|`qz.*` 运行时（JS 侧）：tagged 编解码 + handle 表 + 20 符号（对象/字符串/算术/比较/truthy/log/alloc/bindMem）|✅ 自检通过|
+|`emitter.js`|tsc AST → wasm 栈式发射。**双模式**：参数全 `number` 注解 → **裸 f64 快路径**（原生指令零跨界）；含 `unknown`/对象/字符串 → tagged 动态路径（guard 特化 + qz.\* import）。tagged 值二元表示由 `opts.tagged` 选：默认 **f64 NaN-box**（值=i64，数值=原始 f64 位型→原生 f64 指令零跨界；句柄=高16位 `0x7FF9`；字段 8 字节；精确 53 位）或 `"i32"`（32 位宿主回退，31 位有效，字段 4 字节）|✅ 生产级|
+|`qzvm-f64.js`|`qz.*` 运行时（f64 NaN-box，64 位 i64/BigInt 跨界）。与 `qzvm.js`（i32 tagged）并列；glue 按产物 `rep` 自动选|✅ 自检通过|
+|`qzvm.js`|`qz.*` 运行时（i32 tagged，31 位）：32 位宿主回退路径|✅ 自检通过|
 |`ASSESSMENT.md`|全部实验数据消化：性能画像/限制/方法论教训/后续优先级|✅ 评估权威|
 |`build.js` + `build.sh`|编译流水线：TS→wasm→validate→AOT→自包含 glue.js|✅ 一键|
 |`bridge_test`|wasm↔qzjs 能力对接验证（host import 机制实证，已删，见 git 历史）|—|
@@ -17,7 +18,7 @@ qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→
 
 ```bash
 # JS 技术栈主入口：TS → wasm → wamrc AOT → glue（一键）
-node src/qzvm/aot/build.js build src.ts [name] [--main "fn(a); fn2(b)"]
+node src/qzvm/aot/build.js build src.ts [name] [--main "fn(a); fn2(b)"] [--tagged i32]
 
 # 产物（统一到工程 build/aot/，AOT_OUT_DIR 可覆盖）
 build/aot/<name>.{wasm,aot,glue.js}   # 分离三文件（不 base64 内嵌）
@@ -27,7 +28,7 @@ cd build/aot && qzjs <name>.glue.js
 
 
 - **JS 技术栈**：`build.js` 是唯一主入口（node 编排 compile→wamrc→glue），全部 JS（wamrc 是唯一外部后端）
-- **`--main "fn(a); fn2(b)"`**：解析调用列表自动生成主逻辑（`console.log("fn(a) =", __call("fn",[a]))`），免手写 glue；省略则留 `__main` 钩子
+- **`--tagged i32`**：tagged 值改用 32 位宿主回退位模型（31 位有效，字段 4 字节）；默认 **f64 NaN-box**（64 位宿主，精确 53 位，字段 8 字节）。glue 按产物 meta 的 `rep` 自动选 runtime
 - **产物分离**：`glue.js` + `.wasm` + `.aot` 三文件（不 base64 内嵌防膨胀），全部 gitignore（`build/`）
 - wamrc 查找顺序：`WAMRC` 环境变量 > `PATH` 上的 wamrc > 旧 demo 固定路径；质量门 = wamrc 编译成功（隐含 wasm 有效）
 
@@ -41,7 +42,7 @@ cd build/aot && qzjs <name>.glue.js
 |字符串拼接|0.07x|guard 回退 qz.add 跨界|
 
 ## 已知限制
-- **tagged i32 31 位有效**（`i32<<1`）：`sum > 2^30` 溢出，大数需 f64 tagged 或 handle 降级
+- **tagged i32 31 位有效**（`i32<<1`）：`sum > 2^30` 溢出 → 仅 32 位宿主回退用；64 位默认 **f64 NaN-box** 精确到 53 位（`test_aot.js` bigAcc=3e12 守此差异）
 - 32 位设备（armv7/riscv32/i386）：表示随目标位宽选，前置修 `build.js` wamrc `--target` — 详见 `PORTABILITY_32BIT.md`
 - 字符串拼接跨界慢 14x → 设计见 `STR_BACKEND_DESIGN.md`（独立实现计划）
 - `qzvm` 20 符号（对象方法/数组方法未覆盖）
@@ -61,7 +62,7 @@ cd build/aot && qzjs <name>.glue.js
 - `PORTABILITY_32BIT.md` — 32 位可移植性评估与 target-aware 表示裁决
 
 ## 测试
-- `test_aot.js` — 最小 e2e 回归门：编译 TS→wasm→node WebAssembly 运行→比对期望（不依赖 wamrc）。`node src/qzvm/aot/test_aot.js`，覆盖 num 快路径 f64 语义（除法/取模/大数溢出）与 tagged 对象 I/O
+- `test_aot.js` — 最小 e2e 回归门：编译 TS→wasm→node WebAssembly 运行→比对期望（不依赖 wamrc）。`node src/qzvm/aot/test_aot.js`，覆盖 num 快路径 f64 语义 + tagged **f64 NaN-box（默认）** 与 **i32（回退）** 两 rep（含 bigAcc=3e12 精度断言）
 - `mix.ts` — 混合负载（数值 + 对象计算），实测 ~70x
 - `strwork.ts` — 字符串拼接，实测慢 14x
 - （AS 化率抽样样本 algo/strproc/objbiz 已删除，数据见 ASSESSMENT）

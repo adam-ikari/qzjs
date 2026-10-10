@@ -17,3 +17,9 @@ function objWork(n: any): any {
   }
   return total;
 }
+// tagged 数值精度：累加超 32 位（f64 rep 精确；旧 i32 31 位模型会溢出）
+function bigAcc(n: unknown): unknown {
+  let total = 0;
+  for (let i = 0; i < n; i++) total = total + 1000000000;
+  return total;
+}
