@@ -2,8 +2,7 @@
 
 ## 结论（一句话）
 
-自研 TS→wasm（不依赖 Perry/AssemblyScript）已跑通全链，**计算密集 ~70x、对象计算 ~70x、字符串慢 14x**，但 tagged i32 数值域仅 31 位有效——AOT 是"数值/计算热点加速器"，不是通用 TS 加速。
-> **注**：f64 tagged（后续优先级 1）须按 `PORTABILITY_32BIT.md` 的 target-aware 约束实现，不能写死 f64。
+自研 TS→wasm（不依赖 Perry/AssemblyScript）已跑通全链，**计算密集 ~70x、对象计算 ~70x、字符串慢 14x**。tagged 值采用 f64 NaN-box（精确 53 位，32/64 位宿主统一）——AOT 是"数值/计算热点加速器"，不是通用 TS 加速。
 
 ## 路线演进（决策链）
 
@@ -18,7 +17,7 @@
 
 | 负载                        | 倍率                | 机制                             |
 | --------------------------- | ------------------- | -------------------------------- |
-| 纯数值（fib/sum bench3000） | **68.6x**           | 裸 i32 + 原生指令，零跨界        |
+| 纯数值（fib/sum bench3000） | **68.6x**           | 裸 f64 + 原生指令，零跨界        |
 | 对象计算（r.id+r.sq）       | **~70x**            | guard 特化命中 number → 原生     |
 | 混合三档（数值/均衡/对象）  | **68-74x**          | guard 全命中                     |
 | 字符串拼接（s=s+i, 8000）   | **0.07x（慢 14x）** | guard 回退 qz.add 跨界，每轮边界 |
@@ -35,7 +34,7 @@
 
 ## 已知限制（诚实标注）
 
-1. **tagged i32 31 位有效**（i32<<1）：sum>2^30 溢出（objWork(3000) AOT 410064408 vs 解释器 8999999000）。与 TS number（double 53 位）不对齐。
+1. **数值运算已对齐 TS number**（tagged = f64 NaN-box，53 位；早期 i32 31 位模型已删）：`objWork(3000)` AOT 与解释器一致 = 8999999000。
 2. **字符串拼接跨界**（guard 回退 qz.add）：慢 14x，wasm 内拼接是独立工程（见 STR_BACKEND_DESIGN.md）。
 3. **qzvm 仅 20 符号**（Perry 规模 211）——对象方法/数组方法/更多 API 未覆盖。
 4. **wasm 解释模式无意义**（1.74x）——必须 AOT（wamrc）或 JIT。
@@ -43,13 +42,11 @@
 
 ## 32 位可移植性（armv7 / riscv32 / i386）
 
-详见 `PORTABILITY_32BIT.md`。裁决：**编译期 target-aware 表示选择**，拒绝运行时双表示。
+详见 `PORTABILITY_32BIT.md`。裁决（2026-10-10 修订）：**单一 f64 NaN-box 表示，32/64 位宿主共用**——wasm f64 恒 IEEE-754 double，与宿主字长无关，32 位由 wamrc 降到软/硬浮点，**故 32 位设备也能精确算 >2^31 的大数**。i32 rep 与「编译期 target-aware 切换」已否（31 位静默出错）。
 
-- **64 位宿主** → f64 NaN-box（对齐 TS number），原优先级 1 方案。
-- **32 位宿主** → i32 tagged 保持通用（单寄存器/4 字节字段原生最优），显式标 31 位上限；编译期探测到大数需求的模块降级 f64（仅硬浮点目标）或解释器。
-- **快路径按目标位宽原生**：64 位 f64、32 位 i32（emitter 既有 `anyTagged` 分流扩为 target-aware）。
-- **既有链路无 i64 污染**（emitter 零 i64、qzvm 全 32 位位运算、wasm 地址空间恒 32 位）；**唯一 64 位硬假设是 `build.js:97` wamrc 未传 `--target`** → 32 位支持的前置修复。
-- f64 在软浮点/D16/ilp32f 目标是 10–30x 算术回退 + 对象字段内存翻倍（8B vs 4B）；仅在硬浮点 D32/ilp32d 可接受。
+- **所有宿主** → f64 NaN-box（对齐 TS number 53 位），值=i64，字段 8 字节。
+- **缺口**：`.aot` 是绑宿主架构的原生 ELF，要在 32 位设备跑须让 `build.js` 给 wamrc 传 `--target`（交叉编译），表示层无需改动。
+- f64 在软浮点/D16/ilp32f 目标是 10–30x 算术回退 + 对象字段内存翻倍（8B vs 4B）；硬浮点 D32/ilp32d 可接受。
 
 ## 方法论教训
 
@@ -63,17 +60,17 @@
 | 文件            | 职责                                                        |
 | --------------- | ----------------------------------------------------------- |
 | wasm-encoder.js | wasm 二进制生成（6 段 + 指令最小集 + 本地 memory + global） |
-| emitter.js      | tsc AST → wasm 栈式（双模式：裸 i32 快路径 / tagged 动态）  |
-| qzvm.js         | qz.\* 运行时（JS 侧，20 符号 + tagged 编解码 + handle 表）  |
+| emitter.js      | tsc AST → wasm 栈式（双模式：裸 f64 快路径 / tagged f64 NaN-box 动态） |
+| qzvm.js         | qz.\* 运行时（JS 侧，20 符号 + f64 NaN-box 编解码 + handle 表；32/64 位共用） |
 | splitter.js     | AS 切分器（历史，已被完整 TS→wasm 取代）                    |
 | bridge_test     | wasm↔qzjs 能力对接验证                                      |
 
 ## 后续（按优先级）
 
-1. **f64 tagged**（解决 31 位溢出，对齐 TS number）——**按 `PORTABILITY_32BIT.md` target-aware 实现**：64 位宿主 f64、32 位宿主 i32 tagged + 大数降级；前置修 `build.js` 的 wamrc `--target`。
+1. **~~f64 tagged~~ 已完成**（tagged 值 = f64 NaN-box，精确 53 位，32/64 位统一）。剩余：`build.js` 给 wamrc 传 `--target` 支持 32 位交叉编译。
 2. **字符串后端**（wasm 内拼接，STR_BACKEND_DESIGN.md）
 3. qzvm 补全（对象方法/数组）
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
 
 ## 设计文档
-- `PORTABILITY_32BIT.md` — 32 位可移植性评估与 target-aware 表示裁决
+- `PORTABILITY_32BIT.md` — 32 位可移植性评估与「单 f64 表示」裁决

@@ -1,18 +1,19 @@
 # AOT 32 位可移植性评估（armv7 / riscv32 / i386 / wasm32 宿主）
 
 > 触发背景：ASSESSMENT.md「后续优先级 1」计划把 tagged i32（31 位）升级为 f64 NaN-box。
-> 新约束：**AOT 必须兼容 32 位设备**。本文只出结论与约束，不含实现改动。
-> 日期 2026-10-08。数据来源：wamrc-2.4.3 `--target=help`、本仓 emitter/encoder/qzvm/build.js 源码、ext_wamr.c dispatch。
+> 新约束：**AOT 必须兼容 32 位设备，且 32 位设备也要能算 64 位整数/大数**。
+> 日期 2026-10-08 初稿；**2026-10-10 修订**（用户裁决「32 位机器也要能计算 64 位」→ 反转 i32 回退，见下）。
+> 数据来源：wamrc-2.4.3 `--target=help`、本仓 emitter/encoder/qzvm/build.js 源码、ext_wamr.c dispatch。
 
 ## 0. 结论速览（先看这段）
 
 | 问题 | 结论 |
 | --- | --- |
 | f64 tagged 在 32 位设备成本 | 硬浮点(D32/ilp32d)约 1–3x；**软浮点 / VFPv3-D16 / ilp32f 时 10–30x 算术代价 + 对象字段内存翻倍** |
-| i32 tagged 在 32 位 | **天然最优**（单寄存器、无 i64 pair、无对齐）；但 31 位精度在真实 TS 负载里会**静默出错**，不能作唯一 number 表示 |
-| 折衷 | **编译期按目标位宽选表示**（target-aware），**不做运行时双表示自适应** |
-| 裁决 | 64 位宿主 → f64 NaN-box 单表示；32 位宿主 → i32 tagged 通用 + 大数模块降级 f64/解释器；快路径按目标位宽原生化 |
-| 既有链路 64 位假设 | **wasm/emitter/qzvm 均无 i64 污染**；唯一硬编码是 `build.js:97` wamrc 无 `--target`（产物绑宿主架构） |
+| i32 tagged 在 32 位 | **天然最优**（单寄存器、无 i64 pair、无对齐）；但 31 位精度在真实 TS 负载里会**静默出错**，不能作 number 表示 |
+| 折衷 | **单一 f64 NaN-box 表示，32/64 位共用**；不做 target-aware 切换，不做运行时双表示 |
+| 裁决（2026-10-10 修订） | **单 f64 NaN-box**：wasm f64 恒 IEEE-754 double，与宿主字长无关，32 位由 wamrc 降到软/硬浮点，数值语义（含 >2^31 整数）不变。i32 rep 已删 |
+| 既有链路与 32 位 | wasm/emitter/qzvm 表示层**无 32 位假设**；唯一缺口是 `build.js` wamrc 未传 `--target`（产物绑宿主架构，需交叉编译才能在 32 位设备跑） |
 
 ---
 
@@ -69,17 +70,15 @@ f64 在 wasm 里恒为 IEEE-754 double（与宿主字长无关）。成本全在
 - 32 位上代价叠加：guard 分支 + i64 pair 位操作 + 字段内存 8 字节。
 - **否决**：在 32 位设备上是「最差组合」——既付 f64 贵算术，又付 guard 开销。
 
-**选项 B — 编译期静态分流（target-aware）**
-- emitter **已具备**该机制雏形：`anyTagged`（emitter.js:253）按模块决定注册 qz.* / 建 memory；`mode==="num"` 裸 i32 快路径 vs tagged 动态路径。
-- 把它从「模块级」扩为「**目标位宽感知**」：
-  - 全 `number` 注解的函数 → 裸原生路径，**位宽随目标**：64 位宿主用 f64、32 位宿主用 i32（整数热点在 32 位上是 1 条指令，最优）。
-  - 动态路径 → 通用 tagged 表示，位宽同样随目标选。
-- 无运行时分支，静态可判定，符合 YAGNI。
+**选项 B — 编译期静态分流（target-aware）** — **否决（2026-10-10）**
+- 思路：emitter 现有 `anyTagged` 分流扩为「目标位宽感知」——32 位宿主用 i32 tagged、64 位用 f64。
+- **否决理由**：32 位路径的 i32 tagged 只有 31 位精度，真实负载静默出错（§2）；靠「编译期大数探测 + 模块降级」裁剪代价会把复杂度摊给每个模块，且探测规则不可靠。表示统一优先于局部省算力。
 
-**选项 C — 全 f64 单表示（原 edit_plan 默认）**
-- 只在 64 位宿主成立；32 位软浮点目标不可接受（见 §1）。
+**选项 C — 全 f64 单表示（已采纳）**
+- 32/64 位宿主统一；wasm f64 恒 double、与宿主字长无关，32 位由 wamrc 降到软/硬浮点，**数值语义（含 >2^31 大数）不变**，满足「32 位也要算 64 位」约束。
+- 代价：软浮点 32 位目标算术 10–30x + 字段内存翻倍（§1）；换取正确性与表示统一。
 
-**推荐：B 为骨架，按目标选 C 或「i32 tagged + 大数降级」。** 详见 §5 裁决。
+**推荐（2026-10-10 修订）：选项 C（单 f64 NaN-box）。** 初稿的 B（target-aware 切换）与 C 里的 i32 回退已被否，理由见 §5。
 
 ---
 
@@ -88,56 +87,44 @@ f64 在 wasm 里恒为 IEEE-754 double（与宿主字长无关）。成本全在
 | 环节 | 结论 | 证据 |
 | --- | --- | --- |
 | wasm 地址空间 | **32 位，无 64 位污染** | wasm spec memory index 恒 32 位；`addMemory(2)`=2 页=128 KiB（emitter.js:253） |
-| emitter i64 使用 | **零**——全 i32 + `i32.load/store` | `grep i64 emitter.js` 无命中；字段访问 `i32Store(2, i*4)`（:366） |
-| encoder i64 | 仅 4 处 OP 常量定义，**未被 emitter 调用** | `grep i64 wasm-encoder.js` = 4 |
-| 宽度语义假设 | `NF*4` 步长、`offset<<1`、global0 bump、QZ import 全 i32 | emitter.js:353/359/366；QZ 表 :19–39 |
-| qzvm.js | 全 32 位位运算（`<<1`/`>>>1`/`>>>0`/`v&1`），天然 32 位 | qzvm.js:13–18,28–29 |
-| AOT 产物形态 | `.aot` = **wamrc 目标三元组绑定的原生 ELF**；要 32 位设备必须交叉编译 | build.js:97 调 wamrc；wamrc-2.4.3 支持 i386/riscv32/armv7/thumb/mips |
+| emitter 值表示 | tagged 值 = **i64 f64 NaN-box**；num 快路径 = 裸 f64 | QZ 表全 i64；字段 `i64Store(3, i*8)` |
+| encoder i64 | i64 指令集已补（and/or/shl/shr_u/eq/ne/lt..、wrap/extend、reinterpret、i64 load/store） | wasm-encoder.js |
+| 宽度语义假设 | 字段步长 `NF*8`、句柄 `高16位0x7FF9\|offset`、bump `NF*8`、QZ import 全 i64 | emitter.js `_fieldIndex`/object literal；QZ 表 |
+| qzvm.js | BigInt i64 编解码（`f64↔i64` reinterpret）；32/64 位宿主同一实现 | qzvm.js |
 | **`build.js` 目标** | **缺陷**：`:97` 无 `--target`/`--target-abi` → 默认宿主 CPU 架构，产物不可跨架构分发 | build.js:91,97 |
 | wasm2c→C99→.so | 可行：wasm2c（已装 `/usr/bin/wasm2c`）生成 `uint32_t` 地址 + C `double`，32 位 C 编译器可编；但继承 f64 软浮点代价 | README.md:55（历史路线） |
 | ext_wamr.c | **I32/I64/F32/F64 参数与返回转换全支持，无阻塞** | :860–877 参数、:908–939 返回（已阅） |
 
-**唯一需要修的 32 位假设在构建脚本**：加显式 `--target=<arch> --target-abi=<abi>` 并透传给 wamrc。wasm 产物本身可移植。
+**唯一需要修的 32 位缺口在构建脚本**：加显式 `--target=<arch> --target-abi=<abi>` 并透传给 wamrc；表示层本身可移植。
 
 wamrc 可用 ABI：`gnu eabi eabihf gnueabihf msvc ilp32 ilp32f ilp32d lp64 lp64f lp64d`。
 32 位常用组合：`armv7 + gnueabihf`、`riscv32 + ilp32d`、`i386 + gnu`。
 
 ---
 
-## 5. 裁决
+## 5. 裁决（2026-10-10 修订，反转初稿）
 
-**采用「编译期 target-aware 表示选择」，拒绝运行时双表示。**
+**采用「单一 f64 NaN-box 表示，32/64 位共用」，删除 i32 rep。**
 
-1. **64 位宿主（x86_64 / aarch64 / riscv64 lp64）** → f64 NaN-box 单表示（即原 edit_plan）。零额外成本，对齐 TS number 53 位。
-2. **32 位宿主（armv7 / riscv32 / i386）** → **i32 tagged 保持为通用动态表示**（单寄存器、4 字节字段、无 i64 pair），**显式标注 31 位上限**；对需要 >2^30 的模块，**编译期检测**（大字面量 / 已知大范围表达式 / 时间戳 API 使用）→ 该模块整体切 f64 tagged（仅在硬浮点目标）或退回解释器执行。
-3. **快路径（全 `number` 注解函数）按目标位宽原生**：64 位 → f64；32 位 → i32。emitter 既有 `anyTagged` 模块分流扩为 target-aware 常量即可。
-4. **不做运行时双表示自适应**——32 位上是 guard + i64 pair + 内存翻倍的最差组合（§3-A）。
-
-理由：正确性优先于统一性；32 位设备上 i32 是原生最优且内存最省，代价是 31 位语义上限——用「编译期探测 + 模块降级」把代价限制在真正需要大数的代码，而非全局买单。
+1. **所有宿主（32/64 位）** → 同一 f64 NaN-box 表示（值 = i64；数值=原始 f64 位型，句柄=高16位 0x7FF9|低32 offset；字段 8 字节）。
+2. **理由**：wasm 的 f64 恒为 IEEE-754 double，**与宿主字长无关**；32 位宿主由 wamrc 把 f64 算术降到软/硬浮点指令，`i64.reinterpret_f64` 等也由引擎按 wasm 语义实现。因此 **32 位设备同样能精确表示 53 位整数（含 >2^31、>2^32 的大数）** —— 这是用户约束「32 位机器也要能计算 64 位」的直接满足。
+3. **不做 target-aware 切换**：初稿的「32 位 → i32 tagged（31 位上限）+ 编译期大数探测降级」被否——31 位上限在真实负载静默出错（见 §2），用「探测 + 降级」把复杂度推给每个模块是错误取舍；单表示更简单、语义统一、无需探测。
+4. **不做运行时双表示自适应**：guard + i64 pair + 内存翻倍的最差组合（§3-A），仍拒绝。
+5. **成本代价（诚实标注）**：软浮点 32 位目标（VFPv3-D16 / ilp32f / 无 FPU）的 f64 算术约 10–30x，对象字段内存翻倍。这是正确性换来的代价；需要极致省内存/省算力的 32 位嵌入式场景，退回解释器或另议。
 
 ---
 
-## 6. 对既有 `edit_plan`（wasm-encoder / qzvm / emitter 三文件）的**新增约束项**
+## 6. 既有链路与 32 位的差距
 
-原 edit_plan 假设单一 f64 表示、硬编码 i32→f64 替换。加入 32 位约束后必须改为**参数化**：
+表示层（emitter / wasm-encoder / qzvm）**无 32 位假设**——wasm 是 32 位地址空间，i64 值经 BigInt 跨界，均在标准 wasm/JS 语义内，32/64 位宿主行为一致。唯一缺口：
 
-1. **表示模式常量化**：引入 `NUMBER_MODE ∈ {f64, i32}`（编译期/构建期确定），而非写死 f64。
-   - `f64`：字段步长 8、handle 标记 `offset<<3`、bump 增量 `NF*8`、i64 reinterpret 做 NaN-box。
-   - `i32`：保持 4 / `<<1` / `NF*4`（现行为）。
-   影响：emitter.js:353/359/366、字段访问所有 `i32Store/i32Load` 点。
-2. **QZ import 签名参数化**：emitter.js:19–39 的 `QZ` 表 params/results 不能硬编码类型；按 `NUMBER_MODE` 生成 `["f64"]` 或 `["i32"]`。ext_wamr.c 已支持两种，无需改。
-3. **qzvm.js 编解码参数化**：`isH/toJS/fromJS/tagHandle/bool/num`（qzvm.js:13–18）需按模式实现，不能只写 f64 版。
-4. **guard 判定按模式分派**：f64 模式用 `f64.eq(x,x)`（NaN 判定）；i32 模式保持 `i32.and 1`。两套 fastEmit。
-5. **`build.js` 增 `--target` / `--target-abi`**：透传 wamrc（:97），并在文档/产物命名标注目标架构。**否则任何 32 位支持都落不了地。**
-6. **编译期大数探测**：新增阶段——扫描字面量/表达式范围，决定模块用 i32 还是降级 f64/解释器（32 位路径）。
-7. **内存预算**：f64 模式字段 8 字节，32 位嵌入式需评估 RAM；建议 f64 模式**仅 64 位宿主默认开**。
-8. **文档联动**：ASSESSMENT.md 已知限制第 1 条、后续优先级 1；README.md:44 性能画像——均须标注「表示随目标位宽选择」而非单一 f64 升级。
+1. **`build.js` 未给 wamrc 传 `--target` / `--target-abi`**：`.aot` 产物是**绑定宿主架构的原生 ELF**，默认编宿主架构，不可跨架构分发。要在 32 位设备跑，必须交叉编译（`armv7 + gnueabihf` / `riscv32 + ilp32d` / `i386 + gnu`）。
+2. **档位命名/分发**：产物名应标注目标三元组（如 `<name>.aot` vs `<name>-armv7.aot`），避免混用。
 
 ---
 
 ## 7. 未验证项（诚实标注）
 
-- 未在真实 32 位设备/交叉编译产物上实测 f64 vs i32 倍率（表中为基于 ISA 特性的推断，标 `[INFERENCE]`）。
+- 未在真实 32 位设备/交叉编译产物上实测 f64 NaN-box 端到端（`[INFERENCE]`：wasm 语义保证数值正确，代价是 §5.5 的浮点/内存）。
 - 未跑 wamrc `--target=armv7` / `riscv32` 端到端（仅确认 target 列表与 ABI 可用）。
-- 编译期大数探测的具体判定规则未设计。
 - wasm2c 32 位 C 构建未实测。
