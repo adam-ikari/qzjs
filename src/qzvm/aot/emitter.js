@@ -65,7 +65,12 @@ class Emitter {
     emitFunc(f) {
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         // 模式：参数全 number 注解 → f64 快路径；否则 tagged（动态值）路径
-        this.mode = f.parameters.every(p => p.type && p.type.getText && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged";
+        // 模式：参数全 number 且返回 number/void/无标注 → f64 快路径；否则 tagged
+        // 关键：零参函数 .every() 恒 true，须额外看返回类型——返回 any → tagged
+        const rt = f.type;
+        const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
+        const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
+        this.mode = (allNum && rtOk && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
         const locals = this._collectLocals(f.body);
@@ -377,7 +382,7 @@ function compileTS(input, outWasm, opts = {}) {
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
     const funcMeta = fns.map(f => ({
         name: f.name.text,
-        mode: f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword) ? "num" : "tagged",
+        mode: (() => { const rt=f.type; const rtOk=!rt||rt.kind===ts.SyntaxKind.NumberKeyword||rt.kind===ts.SyntaxKind.VoidKeyword; const allNum=f.parameters.every(p=>p.type&&p.type.kind===ts.SyntaxKind.NumberKeyword); return allNum&&rtOk&&(f.parameters.length>0||(rt&&rt.kind===ts.SyntaxKind.NumberKeyword))?"num":"tagged"; })(),
         params: f.parameters.length,
     }));
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta };
@@ -706,15 +711,32 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         this.m.localTee(idx); return;
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
-        // 简化：两边都求值（非真短路），结果为布尔 tagged 0/1（TS 值语义 a&&b→b 未实现）。
-        // 原实现左操作数误加 i32Eqz，等价 (!a)&b，条件语义错。
-        this.emitTaggedExpr(e.left); this.m.call("qz.truthy");
-        this.emitTaggedExpr(e.right); this.m.call("qz.truthy");
-        if (op === ts.SyntaxKind.AmpersandAmpersandToken) this.m.i32And(); else this.m.i32Or();
-        this.emitBoxBool(); return;
+        this.emitShortCircuit(op === ts.SyntaxKind.AmpersandAmpersandToken, e.left, e.right);
+        return;
     }
     this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right);
     this._emitBinOp(op);
+};
+// 短路逻辑（值语义，真短路）：结果留 tagged i64。
+//  && : truthy(a) ? b : a；|| : truthy(a) ? a : b
+Emitter.prototype.emitShortCircuit = function (isAnd, left, right) {
+    const M = this.m;
+    this.emitTaggedExpr(left);                       // [a]
+    M.localTee(this.scratch);                        // [a], scratch=a
+    M.call("qz.truthy");                             // [i32]
+    M.ifBlock("i64");                                // if (result i64)
+    if (isAnd) {
+        this.emitTaggedExpr(right);                  // && truthy → return b
+    } else {
+        M.localGet(this.scratch);                    // || truthy → return a
+    }
+    M.else_();
+    if (isAnd) {
+        M.localGet(this.scratch);                    // && falsy → return a
+    } else {
+        this.emitTaggedExpr(right);                  // || falsy → return b
+    }
+    M.end();
 };
 // 操作数已在栈上 [a, b]；按 op 发射运算
 Emitter.prototype._emitBinOp = function (op) {
