@@ -25,6 +25,21 @@ static const unsigned char kAddModule[] = {
     0x00, 0x20, 0x01, 0x6a, 0x0b
 };
 
+// i64.wat — exports id64(i64)->i64, add64(i64,i64)->i64, hi()->i64.
+// Guards the export-side i64 bridge: arguments accepted as BigInt
+// (JS_ToInt64Ext) and results returned as BigInt (JS_NewBigInt64) — a plain
+// Number return corrupts values above 2^31 (NaN-box handles live there).
+static const unsigned char kI64Module[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x60,
+    0x01, 0x7e, 0x01, 0x7e, 0x60, 0x02, 0x7e, 0x7e, 0x01, 0x7e, 0x60, 0x00,
+    0x01, 0x7e, 0x03, 0x04, 0x03, 0x00, 0x01, 0x02, 0x07, 0x15, 0x03, 0x04,
+    0x69, 0x64, 0x36, 0x34, 0x00, 0x00, 0x05, 0x61, 0x64, 0x64, 0x36, 0x34,
+    0x00, 0x01, 0x02, 0x68, 0x69, 0x00, 0x02, 0x0a, 0x1c, 0x03, 0x04, 0x00,
+    0x20, 0x00, 0x0b, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x7c, 0x0b, 0x0d,
+    0x00, 0x42, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0xc0, 0xfc, 0xff, 0x00,
+    0x0b
+};
+
 // Forged .aot: \0aot magic (0x00 0x61 0x6f 0x74) + version 0 (≠ 5). WAMR's
 // wasm_runtime_load routes on the magic to aot_load_from_aot_file, which
 // rejects the version -> load fails -> the JS shim must fall back to .wasm.
@@ -46,6 +61,12 @@ static const std::string kFixtures = [] {
     for (size_t i = 0; i < sizeof(kBadAotModule); i++) {
         if (i) s += ",";
         s += std::to_string(kBadAotModule[i]);
+    }
+    s += "]).buffer;\n";
+    s += "var _i64Bytes = new Uint8Array([";
+    for (size_t i = 0; i < sizeof(kI64Module); i++) {
+        if (i) s += ",";
+        s += std::to_string(kI64Module[i]);
     }
     s += "]).buffer;\n";
     s += "var _src = { arrayBuffer: function(){ return Promise.resolve(_wasmBytes); } };";
@@ -210,5 +231,29 @@ TEST(wasm_aot, no_options_unaffected) {
     std::string v;
     ASSERT_TRUE(host_poll_until_value(h, "String(_r)", "11", &v))
         << "no-options instantiate regressed, got: " << v;
+    host_destroy(h);
+}
+
+// Export-side i64 bridge: arguments must round-trip as BigInt and results
+// must come back as BigInt (not Number). A Number return truncates to f64
+// and destroys NaN-box handles above 2^31.
+TEST(wasm_aot, export_i64_bigint_roundtrip) {
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    std::string out;
+    ASSERT_TRUE(host_eval(h, (kFixtures +
+        "\nvar _r = null;\n"
+        "WebAssembly.instantiate(_i64Bytes).then(function(res){\n"
+        "  var e = res.instance.exports;\n"
+        "  _r = [typeof e.id64(7n), String(e.add64(5n, 9n)), String(e.hi())].join('|');\n"
+        "}).catch(function(e){ _r = 'ERR:' + e.message; });\n"
+        "0").c_str(), &out));
+
+    // hi() = 0x7FF9000000000001 = 9221401712017801217.
+    std::string v;
+    ASSERT_TRUE(host_poll_until_value(h, "String(_r)",
+        "bigint|14|9221401712017801217", &v))
+        << "i64 export bridge wrong (expected bigint args + bigint result), got: " << v;
     host_destroy(h);
 }

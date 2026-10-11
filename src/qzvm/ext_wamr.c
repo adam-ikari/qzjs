@@ -1279,7 +1279,9 @@ static JSValue wamr_call_exported_func(JSContext *ctx, JSValueConst this_val,
                 return JS_ThrowTypeError(ctx, "WebAssembly function: invalid i32 argument %u", j);
             break;
         case WASM_I64:
-            if (JS_ToInt64(ctx, &wargs[j].of.i64, argv[j]) != 0)
+            /* 看不到 NaN-box 的宿主直接传 BigInt（qzvm._fromJS 恒返回 BigInt）；
+             * JS_ToInt64 拒收 BigInt，须用 ...Ext 版本。 */
+            if (JS_ToInt64Ext(ctx, &wargs[j].of.i64, argv[j]) != 0)
                 return JS_ThrowTypeError(ctx, "WebAssembly function: invalid i64 argument %u", j);
             break;
         case WASM_F32: {
@@ -1327,7 +1329,9 @@ static JSValue wamr_call_exported_func(JSContext *ctx, JSValueConst this_val,
     if (results[0].kind == WASM_I32)
         return JS_NewInt32(ctx, results[0].of.i32);
     else if (results[0].kind == WASM_I64)
-        return JS_NewInt64(ctx, results[0].of.i64);
+        /* 必须返回 BigInt：JS_NewInt64 对 >2^31 的值转 float64，
+         * 会毁掉 NaN-box 位型（句柄高 16 位 0x7FF9/0x7FFA 恰在 f64 NaN 区外）。 */
+        return JS_NewBigInt64(ctx, results[0].of.i64);
     else if (results[0].kind == WASM_F32)
         return JS_NewFloat64(ctx, (double)results[0].of.f32);
     else if (results[0].kind == WASM_F64)
