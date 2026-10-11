@@ -572,12 +572,14 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         return;
     }
-    if (ts.isPostfixUnaryExpression(e)) {                                                    // x++（tagged +1）
+    if (ts.isPostfixUnaryExpression(e)) {                                                    // x++（tagged +1，guard 命中走原生 f64）
         const idx = this._local(e.operand.text);
-        this.m.localGet(idx); this.m.localTee(this.scratch);
+        this.m.localGet(idx); this.m.localSet(this.scratch);    // scratch=旧值（表达式结果）
         this.m.localGet(idx);
-        this.m.i64ConstBits(...f64Bits(1)); this.m.call("qz.add");
+        this.m.i64ConstBits(...f64Bits(1));
+        this.emitGuardedOp("qz.add", this.m.f64Add);
         this.m.localSet(idx);
+        this.m.localGet(this.scratch);                          // 留旧值
         return;
     }
     if (ts.isBinaryExpression(e)) { this.emitTaggedBinary(e); return; }
@@ -587,17 +589,59 @@ Emitter.prototype.emitTaggedExpr = function (e) {
 Emitter.prototype.emitBoxBool = function () {
     this.m.i64ExtendI32U();
 };
-// tagged 值 → 裸 i32 布尔（条件用）
-Emitter.prototype.emitCondI32 = function (expr) { this.emitTaggedExpr(expr); this.m.call("qz.truthy"); };
+// tagged 值 → 裸 i32 布尔（条件用）。比较二元表达式走 guard 特化：命中 number
+// 走原生 f64 谓词（零跨界）；回退才调 qz.<op>。其余表达式经 qz.truthy。
+const CMP_GUARD = {
+    [ts.SyntaxKind.LessThanToken]: ["qz.lt", "f64Lt"],
+    [ts.SyntaxKind.GreaterThanToken]: ["qz.gt", "f64Gt"],
+    [ts.SyntaxKind.LessThanEqualsToken]: ["qz.le", "f64Le"],
+    [ts.SyntaxKind.GreaterThanEqualsToken]: ["qz.ge", "f64Ge"],
+    [ts.SyntaxKind.EqualsEqualsToken]: ["qz.seq", "f64Eq"],
+    [ts.SyntaxKind.EqualsEqualsEqualsToken]: ["qz.seq", "f64Eq"],
+    [ts.SyntaxKind.ExclamationEqualsToken]: ["qz.sne", "f64Ne"],
+    [ts.SyntaxKind.ExclamationEqualsEqualsToken]: ["qz.sne", "f64Ne"],
+};
+// 栈顶 i64 句柄判定 → 在栈上留 i32：高16位 == 0x7FF9（对象）或 0x7FFA（字符串）。
+// 仅靠 0x7FF9 会漏字符串句柄，导致字符串比较回落 f64（两 NaN eq → 恒 false）。
+Emitter.prototype._emitIsHandle = function (scratch) {
+    const M = this.m;
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+    M.i32Or();
+};
+Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
+    const M = this.m;
+    M.localSet(this.scratchB); M.localSet(this.scratchA);
+    this._emitIsHandle(this.scratchA); this._emitIsHandle(this.scratchB);
+    M.i32Or();
+    M.ifBlock("i32");
+    // 含句柄：回退 qz.<op>，返回 tagged 0/1 位型 → reinterpret 后 !=0 转 i32
+    M.localGet(this.scratchA); M.localGet(this.scratchB); M.call(qzName);
+    M.f64ReinterpretI64(); M.f64Const(0); M.f64Ne();
+    M.else_();
+    M.localGet(this.scratchA); M.f64ReinterpretI64();
+    M.localGet(this.scratchB); M.f64ReinterpretI64();
+    M[f64cmp]();
+    M.end();
+};
+Emitter.prototype.emitCondI32 = function (expr) {
+    if (ts.isBinaryExpression(expr) && CMP_GUARD[expr.operatorToken.kind]) {
+        const [qz, f64] = CMP_GUARD[expr.operatorToken.kind];
+        this.emitTaggedExpr(expr.left); this.emitTaggedExpr(expr.right);
+        this.emitCmpI32(qz, f64);
+        return;
+    }
+    this.emitTaggedExpr(expr); this.m.call("qz.truthy");
+};
 // guarded 数值特化：栈 [a b] → 都是 tagged number 走原生指令，否则回退 qz.* 跨界。
-// 数值=原始 f64 位型，句柄=高16位0x7FF9 → reinterpret 后原生 f64 运算（零跨界）。
+// 数值=原始 f64 位型，句柄=高16位 0x7FF9（对象）/0x7FFA（字符串）→ reinterpret 后原生 f64 运算（零跨界）。
 // cmp=true 时 fastEmit 产出 i32 谓词（f64.lt 等），需 extend 回 i64。
 Emitter.prototype.emitGuardedOp = function (qzName, fastEmit, cmp) {
     this.m.localSet(this.scratchB);
     this.m.localSet(this.scratchA);
-    // guard: (a>>48==0x7FF9) | (b>>48==0x7FF9)
-    this.m.localGet(this.scratchA); this.m.i64Const(0x7ff9n); this.m.i64ShrU(); this.m.i64Const(0x7ff9n); this.m.i64Eq();
-    this.m.localGet(this.scratchB); this.m.i64Const(0x7ff9n); this.m.i64ShrU(); this.m.i64Const(0x7ff9n); this.m.i64Eq();
+    // guard: 任一操作数是句柄即回退 qz.*（覆盖对象 + 字符串两种句柄）
+    this._emitIsHandle(this.scratchA);
+    this._emitIsHandle(this.scratchB);
     this.m.i32Or();
     this.m.ifBlock("i64");
     this.m.localGet(this.scratchA); this.m.localGet(this.scratchB); this.m.call(qzName);

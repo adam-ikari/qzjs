@@ -1,6 +1,6 @@
 # AOT 实验目录
 
-qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→wasm 编译器**（`emitter.js` + `wasm-encoder.js` + `qzvm.js`），已被评估（`ASSESSMENT.md`）验证：计算密集 ~70x、对象计算 ~70x、字符串 wasm 内原生表示（原地追加，无跨界）。
+qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→wasm 编译器**（`emitter.js` + `wasm-encoder.js` + `qzvm.js`），已被评估（`ASSESSMENT.md`）验证：计算密集 ~130x、对象计算 ~50x、字符串 wasm 内原生表示（原地追加，无跨界）。
 
 ## 核心组件（推荐，当前有效）
 
@@ -31,14 +31,15 @@ cd build/aot && qzjs <name>.glue.js
 - **32 位设备交叉编译**：`.aot` 是绑宿主架构的原生 ELF；加 `--target <arch> --target-abi <abi>` 透传 wamrc（`armv7 + gnueabihf` / `riscv32 + ilp32d` / `i386 + gnu`）。表示层不变，f64 语义一致
 - wamrc 查找顺序：`WAMRC` 环境变量 > `PATH` 上的 wamrc > 旧 demo 固定路径；质量门 = wamrc 编译成功（隐含 wasm 有效）
 
-## 性能画像（qzjs 内 AOT vs 解释器）
+## 性能画像（qzjs 内 AOT vs 解释器，本机实测 2026-10-11）
+
+基准：`node src/qzvm/aot/bench_mix.js`（负载同 `mixbench.ts`）。
 
 |负载|倍率|机制|
 |---|---|---|
-|纯数值（fib/sum）|68.6x|裸 f64 原生指令|
-|对象计算（guard 命中 number）|~70x|guard 特化原生|
-|混合计算|68-74x|guard 全命中|
-|字符串拼接（wasm 内原地追加）|wasm 原生|data 段字面量 + bump 顶原地追加（零跨界）；见下|
+|纯数值 numWork(3000)|~130x|裸 f64 原生指令，零跨界|
+|对象计算 objWork(30000)|~50x|条件/`++` guard 命中 number → 原生，零跨界|
+|字符串拼接 strWork(8000)|wasm 内原生|data 段字面量 + bump 顶原地追加（零跨界）；V8 rope 惰性更快|
 
 ## 已知限制
 - **tagged 数值精确 53 位**（f64 NaN-box），32/64 位一致；无 31 位上限（旧 i32 模型已删，`test_aot.js` bigAcc=3e12 守此）

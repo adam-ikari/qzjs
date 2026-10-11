@@ -2,7 +2,7 @@
 
 ## 结论（一句话）
 
-自研 TS→wasm（不依赖 Perry/AssemblyScript）已跑通全链，**计算密集 ~70x、对象计算 ~70x、字符串 wasm 内原生（无跨界）**。tagged 值采用 f64 NaN-box（精确 53 位，32/64 位宿主统一）；字符串句柄 `0x7FFA`|offset，内存 `[len][utf8]`（2026-10-11 落地）。AOT 是"数值/计算热点加速器"，也是通用 TS 加速。
+自研 TS→wasm（不依赖 Perry/AssemblyScript）已跑通全链，**计算密集 ~130x、对象计算 ~50x、字符串 wasm 内原生（无跨界）**。tagged 值采用 f64 NaN-box（精确 53 位，32/64 位宿主统一）；字符串句柄 `0x7FFA`|offset，内存 `[len][utf8]`（2026-10-11 落地）。AOT 是"数值/计算热点加速器"，也是通用 TS 加速。
 
 ## 路线演进（决策链）
 
@@ -13,16 +13,22 @@
 | Perry            | **只借鉴不复用**——NaN-box ABI 与 qzjs import 机制（JS 函数 + 参数转 JS 值）结构性不兼容 | bridge_test + ext_wamr 源码 |
 | **完整 TS→wasm** | 自研 encoder/emitter/qzvm，覆盖完整 TS（不限严格类型）                                  | 切片1/2 实测                |
 
-## 性能画像（qzjs 内 AOT vs 解释器）
+## 性能画像（qzjs 内 AOT vs 解释器，本机实测 2026-10-11）
 
-| 负载                        | 倍率                | 机制                             |
-| --------------------------- | ------------------- | -------------------------------- |
-| 纯数值（fib/sum bench3000） | **68.6x**           | 裸 f64 + 原生指令，零跨界        |
-| 对象计算（r.id+r.sq）       | **~70x**            | guard 特化命中 number → 原生     |
-| 混合三档（数值/均衡/对象）  | **68-74x**          | guard 全命中                     |
-| 字符串拼接（s=s+i, 200000） | **wasm 原生**（80ms/1.08MB） | data 段字面量 + bump 顶原地追加，零跨界；vs node V8 rope 10ms（惰性） |
+基准：`node src/qzvm/aot/bench_mix.js`（负载同 `mixbench.ts`；每负载独立子进程，bump 不重置）。
 
-## 优化演进（动态路径 0.18x → ~70x）
+| 负载                        | AOT 倍率       | 机制                             |
+| --------------------------- | -------------- | -------------------------------- |
+| 纯数值 numWork(3000)        | **~130x**      | 裸 f64 + 原生指令，零跨界        |
+| 对象计算 objWork(30000)     | **~50x**       | 条件/++ 经 guard 命中 number → 原生，零跨界 |
+| 字符串拼接 strWork(8000)    | ~0.2x（vs V8） | wasm 内原生原地追加；V8 rope 惰性更快 |
+
+> 2026-10-11 修复：此前 objWork **慢 5.6x**（AOT 292ms vs 解释器 50ms）——循环条件 `i<n` 与 `i++` 每轮各一次 `qz.truthy`/`qz.add` 跨界（30000 轮 → 60001 次 host 调用，~4.9µs/次）。修 `emitCondI32`（比较走 guard 原生 i32 谓词）+ tagged `++`（guard 化 add）。跨界计数 60001 → 0，objWork 292ms → 1ms。
+
+## 优化演进（早期 i32-rep 时代，动态路径 0.18x → ~70x）
+
+> 下表是 f64 NaN-box 切换**前**的历史快照（i32 rep 的 sumXY 微基准），仅存档。
+> 「条件去冗余」一项当时只覆盖 num 快路径；**tagged 路径的条件与 `++` 直到 2026-10-11 才 guard 化**（见前文修复注），此前 tagged 循环每轮跨界。
 
 | 步骤           | 机制                              | sumXY(30000) |
 | -------------- | --------------------------------- | ------------ |
@@ -32,10 +38,18 @@
 | 条件去冗余     | wasm eqz 替代 qz.truthy           | 21ms(0.48x)  |
 | alloc 内联     | bump 移入 wasm 全局               | 16ms(1.06x)  |
 
+**2026-10-11 补齐（tagged 路径）**：
+
+| 步骤              | 机制                                     | 效果              |
+| ----------------- | ---------------------------------------- | ----------------- |
+| 条件 guard 化     | 比较运算符产原生 i32 谓词（`emitCmpI32`） | objWork(30000) 292→1ms |
+| tagged `++` guard 化 | `x++` 用 guard add（原无条件 qz.add）  | 同上（同轮跨界）  |
+
 ## 已知限制（诚实标注）
 
-1. **数值运算已对齐 TS number**（tagged = f64 NaN-box，53 位；早期 i32 31 位模型已删）：`objWork(3000)` AOT 与解释器一致 = 8999999000。
+1. **数值运算已对齐 TS number**（tagged = f64 NaN-box，53 位；早期 i32 31 位模型已删）：`objWork(30000)` AOT 与解释器一致 = 8999999990000。
 2. **字符串已 wasm 内原生**（2026-10-11）：句柄 `0x7FFA`|offset，内存 `[len][utf8]`；字面量 data 段去重、`s+x` bump 顶原地追加、数字→十进制 `qzs_numstr`。原「慢 14x 跨界」已消除。a 数 + b 串仍回退 `qz.string_concat`。
+   - 修复（2026-10-11）：guard 谓词原只识别对象句柄 `0x7FF9`，漏字符串 `0x7FFA` → `s == "..."` 等字符串比较回落 f64（两 NaN `f64.eq` 恒 false）。抽 `_emitIsHandle`（识别两种句柄）修 `emitGuardedOp` 与 `emitCmpI32`；`s=="..."` 命中/`!=` 现正确。
 3. **qzvm 仅 20 符号**（Perry 规模 211）——对象方法/数组方法/更多 API 未覆盖。
 4. **wasm 解释模式无意义**（1.74x）——必须 AOT（wamrc）或 JIT。
 5. **WAMR classic AOT 约束**：memory 必须本地定义（不能 import）、不能带 max、导出索引 0（wasm index space 独立）。
