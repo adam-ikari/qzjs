@@ -79,13 +79,19 @@ class Emitter {
         // 字符串逻辑临时（仅 tagged）：sT0..sT7 共 8 个 i32
         const sT = this.mode === "tagged" ? Array.from({ length: 8 }, () => "i32") : [];
         this.sT = this.mode === "tagged" ? Array.from({ length: 8 }, (_, i) => nLoc + 5 + i) : null;
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT));
+        // 尾部追加：sT(8×i32，tagged) + 1×i32（switch 入口索引）。
+        this.swIdx = nLoc + 3 + extra.length + sT.length;
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(["i32"]));
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
         this.depth = 0; this.labels = [];
         if (this.mode === "tagged") this.emitTaggedBlock(f.body);
         else this.emitBlock(f.body);
+        // 末尾非 return 且函数有返回值 → fallthrough 路径缺值（穷尽 switch/if-else 全 return）。
+        // 合法代码不会到达；补 unreachable 满足 wasm 验证。
+        const last = f.body.statements[f.body.statements.length - 1];
+        if (!isVoid && !(last && ts.isReturnStatement(last))) this.m.unreachable();
         this.m.endBody();
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
@@ -110,32 +116,34 @@ class Emitter {
             this.emitExpr(s.expression !== undefined ? s.expression : s.condition); this.emitCond();
             this.m.ifBlock();          // 语句 if 无返回值
             this.depth++;
-            this.labels.push({ brk: this.depth, cont: null });
             this.emitStmt(s.thenStatement);
             if (s.elseStatement) { this.m.else_(); this.emitStmt(s.elseStatement); }
-            this.labels.pop();
             this.depth--;
             this.m.end();
             return;
         }
-        if (ts.isBreakStatement(s)) { this.m.br(this._loopLabel().brkRel); return; }
+        if (ts.isBreakStatement(s)) { this.m.br(this._breakRel()); return; }
         if (ts.isDoStatement(s)) { this.emitDoWhile(s, false); return; }
-        if (ts.isContinueStatement(s)) { this.m.br(this._loopLabel().contRel); return; }
+        if (ts.isContinueStatement(s)) { this.m.br(this._contRel()); return; }
         if (ts.isWhileStatement(s)) { this.emitWhile(s); return; }
         if (ts.isForStatement(s)) { this.emitFor(s); return; }
+        if (ts.isSwitchStatement(s)) { this.emitSwitch(s, false); return; }
         if (ts.isBlock(s)) { this.emitBlock(s); return; }
         if (ts.isExpressionStatement(s)) { this.emitExpr(s.expression); this.m.drop(); return; }
         if (ts.isEmptyStatement(s)) return;
         throw new Error("不支持的语句: " + ts.SyntaxKind[s.kind]);
     }
 
-    // break/continue → 最近的循环 label（cont != null），算 wasm 相对深度。
-    _loopLabel() {
-        for (let i = this.labels.length - 1; i >= 0; i--) {
-            const L = this.labels[i];
-            if (L.cont != null) return { brkRel: this.depth - L.brk, contRel: this.depth - L.cont };
-        }
-        throw new Error("break/continue 不在循环内");
+    // break → 最近可 break 的 label（循环或 switch）；continue → 最近的循环 label。
+    _breakRel() {
+        for (let i = this.labels.length - 1; i >= 0; i--)
+            if (this.labels[i].brk != null) return this.depth - this.labels[i].brk;
+        throw new Error("break 不在循环/switch 内");
+    }
+    _contRel() {
+        for (let i = this.labels.length - 1; i >= 0; i--)
+            if (this.labels[i].cont != null) return this.depth - this.labels[i].cont;
+        throw new Error("continue 不在循环内");
     }
 
     emitWhile(s) {
@@ -521,16 +529,17 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         return;
     }
     if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
-    if (ts.isBreakStatement(s)) { this.m.br(this._loopLabel().brkRel); return; }
-    if (ts.isContinueStatement(s)) { this.m.br(this._loopLabel().contRel); return; }
+    if (ts.isBreakStatement(s)) { this.m.br(this._breakRel()); return; }
+    if (ts.isContinueStatement(s)) { this.m.br(this._contRel()); return; }
     if (ts.isDoStatement(s)) { this.emitDoWhile(s, true); return; }
+    if (ts.isSwitchStatement(s)) { this.emitSwitch(s, true); return; }
     if (ts.isIfStatement(s)) {
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         this.m.ifBlock(); this.depth++;          // 条件已归约为裸 i32 布尔
-        this.labels.push({ brk: this.depth, cont: null });
+        this.depth++;
         this.emitTaggedStmt(s.thenStatement);
         if (s.elseStatement) { this.m.else_(); this.emitTaggedStmt(s.elseStatement); }
-        this.labels.pop(); this.depth--; this.m.end(); return;
+        this.depth--; this.m.end(); return;
     }
     if (ts.isWhileStatement(s)) {
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
@@ -572,6 +581,42 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     }
     if (ts.isEmptyStatement(s)) return;
     throw new Error("[tagged] 不支持的语句: " + ts.SyntaxKind[s.kind]);
+};
+
+// switch：entry-index 方案。先算入口 clause 序号（无匹配→default，无 default→len），
+// 再按源码序遍历，swIdx<=i 激活（fallthrough 天然正确，default 位置无关）。break → 外层 block。
+Emitter.prototype.emitSwitch = function (s, tagged) {
+    const M = this.m;
+    const clauses = s.caseBlock.clauses;
+    let defaultIdx = clauses.findIndex(c => ts.isDefaultClause(c));
+    if (defaultIdx < 0) defaultIdx = clauses.length;
+    M.block(); this.depth++;
+    this.labels.push({ brk: this.depth, cont: null });
+    if (tagged) this.emitTaggedExpr(s.expression); else this.emitExpr(s.expression);
+    M.localSet(this.scratch);
+    M.i32Const(defaultIdx); M.localSet(this.swIdx);
+    // scan：首个 disc===caseVal → entry=i 并跳出（br 1 出 scan block）；全不匹配保持 defaultIdx。
+    M.block(); this.depth++;
+    for (let i = 0; i < clauses.length; i++) {
+        const c = clauses[i];
+        if (ts.isDefaultClause(c)) continue;
+        M.localGet(this.scratch);
+        if (tagged) { this.emitTaggedExpr(c.expression); M.call("qz.seq"); M.call("qz.truthy"); }
+        else { this.emitExpr(c.expression); M.f64Eq(); }
+        M.ifBlock(); this.depth++;
+        M.i32Const(i); M.localSet(this.swIdx);
+        M.br(1);
+        M.end(); this.depth--;
+    }
+    this.depth--; M.end();                                  // end scan
+    for (let i = 0; i < clauses.length; i++) {                          // 源码序执行（fallthrough）
+        M.localGet(this.swIdx); M.i32Const(i); M.i32LeS();
+        M.ifBlock(); this.depth++;
+        for (const st of clauses[i].statements) { if (tagged) this.emitTaggedStmt(st); else this.emitStmt(st); }
+        M.end(); this.depth--;
+    }
+    this.labels.pop();
+    this.depth--; M.end();
 };
 Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isNumericLiteral(e)) {
