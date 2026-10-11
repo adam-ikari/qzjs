@@ -279,6 +279,7 @@ class Emitter {
 // 字面量驻留 data 段（STR_BASE 起）；动态拼接走 bump 堆（global0 从 STR_BUMP 起）。
 // 数字→字符串用固定 scratch 区（SCRATCH 起）。
 const STR_TAG_HI = 0x7ffa;                       // 字符串句柄高 16 位标记
+const ARR_TAG_HI = 0x7ff8;                       // 数组句柄高 16 位标记（布局 [len:i32][pad:i32][elem:i64×N]，元素 +8 起）
 const SCRATCH = 16;                              // numstr 临时区（48 字节，够 20 位 + 负号 + len）
 const STR_BASE = 1 << 20;                        // 字面量 data 段基址（1 MiB，heap 不会撞）
 const STR_BUMP = 128;                            // bump 堆起始（跳过 scratch）
@@ -562,13 +563,44 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this.m.localGet(this.scratch); return;
     }
+    if (ts.isArrayLiteralExpression(e)) {
+        // 数组：bump 分配 [len:i32][pad:i32][elem:i64×N]（元素自 +8，8B 步进）。
+        // 句柄 = 高16位 0x7FF8 | offset(低32)。零跨界。
+        const N = e.elements.length;
+        const bytes = 8 + N * 8;
+        this.m.globalGet(0); this.m.i32Const(bytes); this.m.i32Add(); this.m.globalSet(0);
+        this.m.globalGet(0); this.m.i32Const(bytes); this.m.i32Sub();          // → offset(i32)
+        this.m.localSet(this.sT[0]);                                           // sT0 = offset
+        this.m.localGet(this.sT[0]); this.m.i32Const(N); this.m.i32Store(2, 0); // [off] = len
+        for (let i = 0; i < N; i++) {
+            this.m.localGet(this.sT[0]);                                       // [off]
+            this.emitTaggedExpr(e.elements[i]);                                // [off, val:i64]
+            this.m.i64Store(3, 8 + i * 8);                                     // [off+8+i*8] = val
+        }
+        this.m.localGet(this.sT[0]); this.m.i64ExtendI32U();
+        this.m.i64ConstBits(0, 0x7ff80000); this.m.i64Or();                    // 句柄
+        return;
+    }
+    if (ts.isElementAccessExpression(e)) {
+        // a[i]：数组句柄(0x7FF8) → load [off + 8 + i*8]；i 须 number（f64→i32）。
+        this.emitTaggedExpr(e.expression); this.m.localSet(this.scratch);   // scratch = 数组值
+        this.emitTaggedExpr(e.argumentExpression);                          // [i_value:i64]
+        this.m.f64ReinterpretI64(); this.m.i32TruncF64S();                  // → i32 index
+        this.m.i32Const(8); this.m.i32Mul();
+        this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Add(); // [off + 8 + i*8]
+        this.m.i64Load(3, 8);                                               // 元素自 off+8 起
+        return;
+    }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
-        // s.length：运行时判别字符串句柄（高16位 0x7FFA）→ load [off](i32 len)；
-        // 非字符串回退 qz.str_len（跨界，罕见）。
+        // .length：字符串(0x7FFA)/数组(0x7FF8) 结构首 i32 即 len → wasm 内 load；
+        // 其余回退 qz.str_len（跨界，罕见）。
         this.emitTaggedExpr(e.expression);
         this.m.localSet(this.scratch);
         this.m.localGet(this.scratch); this.m.i64Const(48n); this.m.i64ShrU();
         this.m.i64Const(0x7ffan); this.m.i64Eq();
+        this.m.localGet(this.scratch); this.m.i64Const(48n); this.m.i64ShrU();
+        this.m.i64Const(0x7ff8n); this.m.i64Eq();
+        this.m.i32Or();
         this.m.ifBlock("i64");
         this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Load(2, 0);
         this.m.f64ConvertI32U(); this.m.i64ReinterpretF64();
@@ -587,6 +619,15 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
         for (const a of e.arguments) this.emitTaggedExpr(a);
         this.m.call(e.expression.text); return;
+    }
+    if (ts.isConditionalExpression(e)) {                                                     // a ? b : c
+        this.emitCondI32(e.condition);
+        this.m.ifBlock("i64");
+        this.emitTaggedExpr(e.whenTrue);
+        this.m.else_();
+        this.emitTaggedExpr(e.whenFalse);
+        this.m.end();
+        return;
     }
     if (ts.isPrefixUnaryExpression(e)) {
         if (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken) {
