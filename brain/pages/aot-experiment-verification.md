@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-11T01:47:41"
+updated: "2026-10-11T05:11:44"
 ---
 
 <!-- compiled_truth -->
@@ -234,4 +234,22 @@ string 拼接不支持，console.log 用多参数替代。
   kind: evidence
   summary: "字符串切片完成：wasm 内原生字符串表示（2026-10-11）。新表示：句柄高16位 0x7FFA（区分对象 0x7FF9），低32位=data段/堆 offset；内存 [len:i32 LE][utf8 字节]。字面量编译进 data 段（emitter 汇总 addData 一次性 emit，不逐条），_litOffset 去重。数字→十进制 qzs_numstr（i64 div/rem 循环 + 倒写）。拼接 s+x：qzs_append 判 buf 是否在 bump 顶（原地追加，零拷贝）否则新建拷贝——实测 strWork(200000) 80ms/1.08MB vs node V8 rope 10ms（真字节写入 vs 惰性 rope，符合预期）。guard 用 (v>>48)==0x7FFA 运行时判别；a 数 + b 串回退 qz.string_concat。qzvm._toJS 读内存解 0x7FFA 句柄；_utf8 手写解码 + DataView 位型（去掉 Buffer/TextDecoder，真 qzjs 运行时无这些全局）。glue 调 qz.bindMem(exports.memory)。修 3 个既有编码 bug：i64.shr_u 移位量误写 0x7FF9/0x7FFA（应为 48）、qzs_memcpy/qzs_numstr local.set on 空栈（应先 local.get 参数）、i64.trunc_f64_s 误用 0xAF（实为 0xB0）。test_aot.js 加字符串用例，全 22 检查 ALL PASS。"
   source: "2026-10-11 自研 emitter 字符串表示 + node/qzjs 实测"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-11T04:39:04
+  kind: note
+  summary: "tagged 路径循环条件与 i++ 跨界修复（2026-10-11）：emitCondI32 比较走 guard 原生 i32 谓词（新增 emitCmpI32）、tagged x++ 改 guard add（原无条件 qz.add / 条件 qz.truthy）。objWork(30000) 跨界 60001→0，292ms→1ms（~50x 反转）。顺带修 pre-existing guard 缺陷：谓词只认对象句柄 0x7FF9，漏字符串 0x7FFA → s==\"...\" 回落 f64 恒 false；抽 _emitIsHandle 覆盖两路。基准工具 bench_mix.js（复用 mix.ts/strwork.ts）。"
+  source: "src/qzvm/aot/{emitter.js,bench_mix.js,ASSESSMENT.md,README.md}"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-11T05:03:20
+  kind: note
+  summary: "tagged 布尔/自增/逻辑语义修复（2026-10-11，评审跟进）：比较/!/&&/|| 改产 tagged bool f64 位型 0.0/1.0（原 i64ExtendI32U 产整数 1 → 当值得 5e-324）；if(!x) 原编译崩（prefix ! 直调 qz.truthy 产 i32 违 i64 契约，现 i32Eqz 取反+emitBoxBool 装箱）；&&/|| 左操作数误加 i32Eqz（等价 (!a)&b）已删；postfix 按 operator 分派 ++/--；prefix ++x/--x 实现。encoder 补 f64ConvertI32U。test_aot 全绿，objWork 仍 0 跨界。&&/|| 值语义(a&&b→b)仍未精确（简化为布尔）。"
+  source: "src/qzvm/aot/{emitter.js,wasm-encoder.js,ASSESSMENT.md}"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-11T05:11:44
+  kind: note
+  summary: "% 运算符 wasm 内原生（2026-10-11）：tagged 新增 emitTaggedRem，命中 number 走 a - trunc(a/b)*b（= JS 余数，含负数/除零 NaN），回退 qz.rem；接线进 _emitBinOp 的 GUARD。修命名冲突：num 模式已有 emitRem，改名 emitTaggedRem 避免覆盖（否则 num % 崩）。10000 次含 % 的 tagged 循环跨界归零；num/tagged % 负数/NaN 全对。"
+  source: "src/qzvm/aot/{emitter.js,ASSESSMENT.md}"
   affects: [aot-experiment-verification]
