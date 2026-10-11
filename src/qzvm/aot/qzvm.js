@@ -67,6 +67,7 @@ function makeQzvm(strings) {
     object_get: (o, k) => tagHandle(handles[idxOf(o)][strings[k]]),
     string_new: (id) => tagHandle(strings[id]),
     string_concat: (a, b) => tagHandle(String(toJS(a)) + String(toJS(b))),
+    str_len: (a) => box(strRead(a).length),
     add:  (a, b) => box(toJS(a) + toJS(b)),
     sub:  (a, b) => box(toJS(a) - toJS(b)),
     mul:  (a, b) => box(toJS(a) * toJS(b)),

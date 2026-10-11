@@ -42,6 +42,7 @@ const QZ = {
   seq:  { params: ["i64", "i64"], results: ["i64"] },
   sne:  { params: ["i64", "i64"], results: ["i64"] },
   truthy: { params: ["i64"], results: ["i32"] },
+  str_len: { params: ["i64"], results: ["i64"] },
   log:  { params: ["i64"], results: [] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
@@ -64,13 +65,7 @@ class Emitter {
     // ---------- 函数 ----------
     emitFunc(f) {
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
-        // 模式：参数全 number 注解 → f64 快路径；否则 tagged（动态值）路径
-        // 模式：参数全 number 且返回 number/void/无标注 → f64 快路径；否则 tagged
-        // 关键：零参函数 .every() 恒 true，须额外看返回类型——返回 any → tagged
-        const rt = f.type;
-        const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
-        const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
-        this.mode = (allNum && rtOk && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
+        this.mode = funcMode(f);
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
         const locals = this._collectLocals(f.body);
@@ -353,6 +348,15 @@ function emitStringHelpers(m) {
     m.endBody();
 }
 
+// 函数编译模式：参数全 number 且返回 number/void/无标注 → "num"（f64 快路径）。
+// 必须同时看返回类型：零参函数 .every() 恒 true，返回 any 的函数须走 tagged。
+function funcMode(f) {
+    const rt = f.type;
+    const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
+    const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
+    return (allNum && rtOk && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
+}
+
 function compileTS(input, outWasm, opts = {}) {
     const program = ts.createProgram([input], { strict: true, target: ts.ScriptTarget.ES2020 });
     const sf = program.getSourceFile(input);
@@ -362,7 +366,7 @@ function compileTS(input, outWasm, opts = {}) {
     const em = new Emitter(m);
     const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
     // 阶段1：任一函数为 tagged → 注册全部 qz.* import + 字符串 helper；登记所有函数签名（支持前向/互递归）
-    const anyTagged = fns.some(f => !f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword));
+    const anyTagged = fns.some(f => funcMode(f) === "tagged");
     if (anyTagged) {
         registerQz(m);
         m.addMemory(32);                                 // 2 MiB：heap(<1MiB) + 字面量(STR_BASE 起)
@@ -371,7 +375,7 @@ function compileTS(input, outWasm, opts = {}) {
     }
     for (const st of fns) {
         const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
-        const isNum = st.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
+        const isNum = funcMode(st) === "num";
         const vt = isNum ? "f64" : "i64";   // num=f64；tagged=f64 NaN-box(i64)
         m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
     }
@@ -382,7 +386,7 @@ function compileTS(input, outWasm, opts = {}) {
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
     const funcMeta = fns.map(f => ({
         name: f.name.text,
-        mode: (() => { const rt=f.type; const rtOk=!rt||rt.kind===ts.SyntaxKind.NumberKeyword||rt.kind===ts.SyntaxKind.VoidKeyword; const allNum=f.parameters.every(p=>p.type&&p.type.kind===ts.SyntaxKind.NumberKeyword); return allNum&&rtOk&&(f.parameters.length>0||(rt&&rt.kind===ts.SyntaxKind.NumberKeyword))?"num":"tagged"; })(),
+        mode: funcMode(f),
         params: f.parameters.length,
     }));
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta };
@@ -557,6 +561,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.i64Store(3, i * 8);          // memory[off + i*8] = val
         }
         this.m.localGet(this.scratch); return;
+    }
+    if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
+        // s.length：运行时判别字符串句柄（高16位 0x7FFA）→ load [off](i32 len)；
+        // 非字符串回退 qz.str_len（跨界，罕见）。
+        this.emitTaggedExpr(e.expression);
+        this.m.localSet(this.scratch);
+        this.m.localGet(this.scratch); this.m.i64Const(48n); this.m.i64ShrU();
+        this.m.i64Const(0x7ffan); this.m.i64Eq();
+        this.m.ifBlock("i64");
+        this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Load(2, 0);
+        this.m.f64ConvertI32U(); this.m.i64ReinterpretF64();
+        this.m.else_();
+        this.m.localGet(this.scratch); this.m.call("qz.str_len");
+        this.m.end();
+        return;
     }
     if (ts.isPropertyAccessExpression(e)) {                                                 // obj.a（POJO：wasm load，零跨界）
         this.emitTaggedExpr(e.expression);
