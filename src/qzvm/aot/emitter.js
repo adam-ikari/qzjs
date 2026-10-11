@@ -721,21 +721,15 @@ Emitter.prototype.emitTaggedBinary = function (e) {
 //  && : truthy(a) ? b : a；|| : truthy(a) ? a : b
 Emitter.prototype.emitShortCircuit = function (isAnd, left, right) {
     const M = this.m;
+    M.block("i64");                                  // block (result i64)
     this.emitTaggedExpr(left);                       // [a]
-    M.localTee(this.scratch);                        // [a], scratch=a
-    M.call("qz.truthy");                             // [i32]
-    M.ifBlock("i64");                                // if (result i64)
-    if (isAnd) {
-        this.emitTaggedExpr(right);                  // && truthy → return b
-    } else {
-        M.localGet(this.scratch);                    // || truthy → return a
-    }
-    M.else_();
-    if (isAnd) {
-        M.localGet(this.scratch);                    // && falsy → return a
-    } else {
-        this.emitTaggedExpr(right);                  // || falsy → return b
-    }
+    M.localSet(this.scratch);                        // []
+    M.localGet(this.scratch);                        // [a]（跳转时作块结果）
+    M.localGet(this.scratch); M.call("qz.truthy");   // [a, i32 ]
+    if (isAnd) M.i32Eqz();                           // && : falsy(a) → 1
+    M.brIf(0);                                       // 条件真 → 跳出块，[a] 为结果
+    M.drop();                                        // 落下路径丢弃 a → []
+    this.emitTaggedExpr(right);                      // 真短路：仅此路径求值 right
     M.end();
 };
 // 操作数已在栈上 [a, b]；按 op 发射运算
