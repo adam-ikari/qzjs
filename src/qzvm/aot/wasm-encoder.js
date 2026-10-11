@@ -154,7 +154,7 @@ class Module {
     f64Neg() { this._emit(OP.f64_neg); } f64Max() { this._emit(OP.f64_max); } f64Trunc() { this._emit(OP.f64_trunc); } f64Floor() { this._emit(OP.f64_floor); }
     f64ConvertI32S() { this._emit(OP.f64_convert_i32_s); } f64ConvertI32U() { this._emit(OP.f64_convert_i32_u); }
     i32TruncF64S() { this._emit(OP.i32_trunc_f64_s); }
-    i32Shl() { this._emit(OP.i32_shl); } i32ShrU() { this._emit(OP.i32_shr_u); } i32Or() { this._emit(OP.i32_or); } i32And() { this._emit(OP.i32_and); }
+    i32Shl() { this._emit(OP.i32_shl); } i32ShrU() { this._emit(OP.i32_shr_u); } i32ShrS() { this._emit(OP.i32_shr_s); } i32Or() { this._emit(OP.i32_or); } i32And() { this._emit(OP.i32_and); }
     i32And() { this._emit(OP.i32_and); } i32Or() { this._emit(OP.i32_or); } i32Xor() { this._emit(OP.i32_xor); }
     // 控制流（label 用索引引用，wasm 相对深度）
     block(t) { this._emit(OP.block, t ? VAL[t] : VAL.void); }

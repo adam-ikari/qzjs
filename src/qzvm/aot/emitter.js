@@ -235,6 +235,14 @@ class Emitter {
             return;
         }
         if (ts.isBinaryExpression(e)) { this.emitBinary(e); return; }
+        if (ts.isConditionalExpression(e)) {
+            this.emitExpr(e.condition); this.emitCond();
+            this.m.ifBlock("f64"); this.depth++;
+            this.emitExpr(e.whenTrue);
+            this.m.else_(); this.emitExpr(e.whenFalse);
+            this.m.end(); this.depth--;
+            return;
+        }
         if (ts.isCallExpression(e)) {
             if (!ts.isIdentifier(e.expression)) throw new Error("不支持的调用目标");
             const fn = e.expression.text;
@@ -249,7 +257,7 @@ class Emitter {
     emitBinary(e) {
         const op = e.operatorToken.kind;
         // 赋值：x = rhs → localTee（保留值供表达式上下文）；x op= rhs → 读-算-写
-        const assignOps = { [ts.SyntaxKind.EqualsToken]: null, [ts.SyntaxKind.PlusEqualsToken]: ts.SyntaxKind.PlusToken, [ts.SyntaxKind.MinusEqualsToken]: ts.SyntaxKind.MinusToken, [ts.SyntaxKind.AsteriskEqualsToken]: ts.SyntaxKind.AsteriskToken, [ts.SyntaxKind.SlashEqualsToken]: ts.SyntaxKind.SlashToken, [ts.SyntaxKind.PercentEqualsToken]: ts.SyntaxKind.PercentToken };
+        const assignOps = { [ts.SyntaxKind.EqualsToken]: null, [ts.SyntaxKind.PlusEqualsToken]: ts.SyntaxKind.PlusToken, [ts.SyntaxKind.MinusEqualsToken]: ts.SyntaxKind.MinusToken, [ts.SyntaxKind.AsteriskEqualsToken]: ts.SyntaxKind.AsteriskToken, [ts.SyntaxKind.SlashEqualsToken]: ts.SyntaxKind.SlashToken, [ts.SyntaxKind.PercentEqualsToken]: ts.SyntaxKind.PercentToken, [ts.SyntaxKind.LessThanLessThanEqualsToken]: ts.SyntaxKind.LessThanLessThanToken, [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanToken, [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken, [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken, [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken, [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken };
         if (Object.prototype.hasOwnProperty.call(assignOps, op)) {
             if (!ts.isIdentifier(e.left)) throw new Error("赋值左值必须是标识符");
             const idx = this._local(e.left.text);
@@ -295,9 +303,27 @@ class Emitter {
             case ts.SyntaxKind.GreaterThanEqualsToken: this.m.f64Ge(); this.m.f64ConvertI32S(); break;
             case ts.SyntaxKind.EqualsEqualsToken: case ts.SyntaxKind.EqualsEqualsEqualsToken: this.m.f64Eq(); this.m.f64ConvertI32S(); break;
             case ts.SyntaxKind.ExclamationEqualsToken: case ts.SyntaxKind.ExclamationEqualsEqualsToken: this.m.f64Ne(); this.m.f64ConvertI32S(); break;
+            // 位运算：JS 语义 32 位整数 → i32 截断、运算、回 f64（>>> 无符号）
+            case ts.SyntaxKind.AmpersandToken: this.emitBitI32(() => this.m.i32And(), false); break;
+            case ts.SyntaxKind.BarToken: this.emitBitI32(() => this.m.i32Or(), false); break;
+            case ts.SyntaxKind.CaretToken: this.emitBitI32(() => this.m.i32Xor(), false); break;
+            case ts.SyntaxKind.LessThanLessThanToken: this.emitBitI32(() => this.m.i32Shl(), false); break;
+            case ts.SyntaxKind.GreaterThanGreaterThanToken: this.emitBitI32(() => this.m.i32ShrS(), false); break;
+            case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken: this.emitBitI32(() => this.m.i32ShrU(), true); break;
             default: throw new Error("不支持的二元运算符: " + ts.SyntaxKind[op]);
         }
     }
+    // 栈: a b（f64 f64）→ i32 op → f64。unsigned: >>> 结果按无符号回 f64。
+    emitBitI32(opFn, unsigned) {
+        // 栈: a b（f64 f64）→ 存 b、a（各自 trunc 到 i32 再存）→ 取 a、b → op → f64
+        this.m.i32TruncF64S(); this.m.f64ConvertI32S(); this.m.localSet(this.scratchB);
+        this.m.i32TruncF64S(); this.m.f64ConvertI32S(); this.m.localSet(this.scratchA);
+        this.m.localGet(this.scratchA); this.m.i32TruncF64S();
+        this.m.localGet(this.scratchB); this.m.i32TruncF64S();
+        opFn();
+        unsigned ? this.m.f64ConvertI32U() : this.m.f64ConvertI32S();
+    }
+
     // f64 取模：a - b * trunc(a / b)（wasm 无 f64.rem，语义对齐 JS %）
     emitRem() {
         // 栈: a b → 需 (a - b*trunc(a/b))；借用 scratch 保存 a、b
