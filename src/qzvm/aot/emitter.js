@@ -565,19 +565,32 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.call(e.expression.text); return;
     }
     if (ts.isPrefixUnaryExpression(e)) {
+        if (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken) {
+            // ++x / --x：x = x ± 1，返回新值
+            const idx = this._local(e.operand.text);
+            this.m.localGet(idx);
+            this.m.i64ConstBits(...f64Bits(1));
+            this.emitGuardedOp(e.operator === ts.SyntaxKind.PlusPlusToken ? "qz.add" : "qz.sub",
+                               e.operator === ts.SyntaxKind.PlusPlusToken ? this.m.f64Add : this.m.f64Sub);
+            this.m.localTee(idx);   // 新值留栈（表达式结果）
+            return;
+        }
         this.emitTaggedExpr(e.operand);
-        if (e.operator === ts.SyntaxKind.ExclamationToken) this.m.call("qz.truthy");
-        else if (e.operator === ts.SyntaxKind.MinusToken) {
+        if (e.operator === ts.SyntaxKind.ExclamationToken) {
+            // !x：truthy 产裸 i32 → i32Eqz 取反 → 装箱为 tagged bool（emitTaggedExpr 契约恒 i64）
+            this.m.call("qz.truthy"); this.m.i32Eqz(); this.emitBoxBool();
+        } else if (e.operator === ts.SyntaxKind.MinusToken) {
             this.m.f64ReinterpretI64(); this.m.f64Neg(); this.m.i64ReinterpretF64();
         }
         return;
     }
-    if (ts.isPostfixUnaryExpression(e)) {                                                    // x++（tagged +1，guard 命中走原生 f64）
+    if (ts.isPostfixUnaryExpression(e)) {                                                    // x++ / x--（guard 命中走原生 f64）
         const idx = this._local(e.operand.text);
         this.m.localGet(idx); this.m.localSet(this.scratch);    // scratch=旧值（表达式结果）
         this.m.localGet(idx);
         this.m.i64ConstBits(...f64Bits(1));
-        this.emitGuardedOp("qz.add", this.m.f64Add);
+        const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
+        this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
         this.m.localSet(idx);
         this.m.localGet(this.scratch);                          // 留旧值
         return;
@@ -585,9 +598,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isBinaryExpression(e)) { this.emitTaggedBinary(e); return; }
     throw new Error("[tagged] 不支持的表达式: " + ts.SyntaxKind[e.kind]);
 };
-// 栈顶裸 i32 布尔 → tagged 值（i64：extend_u 到 0/1 的 f64 位型）
+// 栈顶裸 i32 布尔 → tagged 值（i64）：f64 位型的 0.0/1.0。
+// 注意与整数 0/1 的 i64 不同——tagged number 1 是 0x3FF0...，不是 1。
 Emitter.prototype.emitBoxBool = function () {
-    this.m.i64ExtendI32U();
+    this.m.f64ConvertI32U(); this.m.i64ReinterpretF64();
 };
 // tagged 值 → 裸 i32 布尔（条件用）。比较二元表达式走 guard 特化：命中 number
 // 走原生 f64 谓词（零跨界）；回退才调 qz.<op>。其余表达式经 qz.truthy。
@@ -649,7 +663,8 @@ Emitter.prototype.emitGuardedOp = function (qzName, fastEmit, cmp) {
     this.m.localGet(this.scratchA); this.m.f64ReinterpretI64();
     this.m.localGet(this.scratchB); this.m.f64ReinterpretI64();
     fastEmit.call(this.m);
-    if (cmp) this.m.i64ExtendI32U(); else this.m.i64ReinterpretF64();
+    // cmp: 谓词产裸 i32 → tagged bool 位型（与 qz.lt 回退分支的 f64 0.0/1.0 对齐）
+    if (cmp) { this.m.f64ConvertI32U(); this.m.i64ReinterpretF64(); } else this.m.i64ReinterpretF64();
     this.m.end();
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
@@ -673,8 +688,9 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         this.m.localTee(idx); return;
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
-        // 简化：两边都求值（非真短路，与原实现一致）
-        this.emitTaggedExpr(e.left); this.m.call("qz.truthy"); this.m.i32Eqz();
+        // 简化：两边都求值（非真短路），结果为布尔 tagged 0/1（TS 值语义 a&&b→b 未实现）。
+        // 原实现左操作数误加 i32Eqz，等价 (!a)&b，条件语义错。
+        this.emitTaggedExpr(e.left); this.m.call("qz.truthy");
         this.emitTaggedExpr(e.right); this.m.call("qz.truthy");
         if (op === ts.SyntaxKind.AmpersandAmpersandToken) this.m.i32And(); else this.m.i32Or();
         this.emitBoxBool(); return;
