@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-09T01:51:01"
+updated: "2026-10-11T01:47:41"
 ---
 
 <!-- compiled_truth -->
@@ -204,4 +204,34 @@ string 拼接不支持，console.log 用多参数替代。
   kind: evidence
   summary: "混合负载实测（2026-10-08）：计算密集 ~70x，字符串拼接慢 14x。(1) mix.ts（数值 numWork fib 递归 + 对象 objWork 创建/属性/累加，逐函数自包含避免跨模式 ABI 不匹配，顶层交替调）：三档比例全 ~70x——数值主导 68.4x / 均衡 74.2x / 对象主导 74.4x。核心洞察：guard 特化让 tagged number 运算也走原生指令（objWork 的 r.id+r.sq guard 命中快路径），对象计算负载达 ~70x 而非此前 sumXY 的 1.06x（那是含旧 alloc 跨界的 3 步优化中间态；guard+POJO+alloc 内联全生效后对象计算同样原生）。(2) strwork.ts（字符串拼接 s=s+i，guard 回退 qz.add JS 语义）：AOT 14ms(8000) vs 解释器 1ms = 0.07x（慢 14x）——非 number 动态操作（字符串/方法）guard 回退跨界每轮跨界。完整画像：数值/对象计算 ~70x；字符串/方法等非 number 操作慢 14x；混合加速取决于 number 计算 vs 字符串操作比例。已知限制：objWork(3000) 结果溢出（AOT 410064408 vs 解释器 8999999000），tagged i32 仅 31 位有效，sum>2^30 溢出（性能不受影响，正确性受限——大数需 f64 tagged 或 handle 降级）。"
   source: "2026-10-08 混合负载实测（mix.ts + strwork.ts，qzjs 内 AOT vs 解释器）"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-10T13:25:42
+  kind: decision
+  summary: "f64 NaN-box tagged rep 落地（2026-10-10）：emitter tagged 路径原为 i32 位模型（31 位有效，`sum>2^30` 静默溢出）。新增 opts.tagged 选择：默认 f64 NaN-box（值=i64，数值=原始 f64 位型→原生 f64 指令零跨界 guard 快路径；句柄=高16位0x7FF9|低32 offset；POJO 字段 8 字节；精确 53 位），\"i32\" 保留 32 位宿主回退。新增 qzvm-f64.js 运行时（BigInt i64 跨界，truthy 返回裸 i32 0/1）；wasm-encoder 补 i64 指令集。build.js 按产物 meta.rep 自动选 runtime，--tagged i32 回退。test_aot.js 双 rep 回归：f64 bigAcc(3000)=3e12 精确 vs i32 溢出 2112827392——证明 rep 差异。全链 node WebAssembly + wamrc AOT 实测通过。"
+  source: "2026-10-10 f64 NaN-box rep 实现 + 双 rep 回归"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-10T14:31:39
+  kind: reversal
+  summary: "反转 2026-10-08 的 32 位裁决：用户约束「32 位机器也要能计算 64 位」直接否掉 i32 tagged（31 位上限）回退。改为单 f64 NaN-box 表示，32/64 位宿主共用——wasm f64 恒 IEEE-754 double、与宿主字长无关，32 位由 wamrc 降到软/硬浮点，数值语义（含 >2^31 大数）不变。删除 QZ i32 表/全部 rep 分支/qzvm-f64.js（改名回 qzvm.js，makeQzvmF64→makeQzvm），build.js 删 --tagged/parseRep/meta.rep。同时补上 PORTABILITY 记的唯一缺口：build.js 新增 --target/--target-abi 透传 wamrc，实测 wamrc --target=i386/riscv32 交叉编译成功、i386 产物运行 bigAcc(3000)=3e12 正确。代价：软浮点 32 位目标 f64 算术 10–30x + 对象字段内存翻倍（正确性换表示统一）。PORTABILITY_32BIT.md §5 裁决已改写为「单表示」。test_aot.js ALL PASS。"
+  source: "2026-10-10 用户裁决 32 位需算 64 位 → 单 f64 rep"
+  affects: [aot-experiment-verification, release-artifact-topology]
+
+- time: 2026-10-10T14:39:16
+  kind: evidence
+  summary: "32 位宿主端到端实测通过（2026-10-10）：-m32 编 WAMR libiwasm 2.4.5 + 最小 WAMR host（sizeof(void*)=4），加载 wamrc --target=i386 --target-abi=gnu 的 AOT 产物。解释器与 AOT 两路结果一致：big(3000)=3000000000000（3e12 > 2^32，证明 32 位 f64 NaN-box 精确表示 64 位量）、div(7,2)=3.5、mod/neg/循环均正确。这为『单 f64 表示，32/64 位共用』裁决提供真实 32 位证据（此前仅交叉编译成功）。未测 armv7/riscv32 真机。复现依赖：gcc-multilib + g++-multilib，编 WAMR 需 -DCMAKE_ASM_FLAGS=-m32（invokeNative_ia32.s）。"
+  source: "wamrc --target=i386 + 32位 libiwasm/iwasm 2.4.5"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-10T16:10:33
+  kind: note
+  summary: "AOT 路径不依赖 quickjs 字节码（第一性原理澄清）。链路：emitter.js(tsc AST)→自研 wasm-encoder→.wasm；wamrc→.aot(原生 ELF)；执行 = WebAssembly.instantiate(wasm,{qz},{aot}) 在 WAMR 引擎内，非 quickjs；边界 = qz.* import + glue.js/qzvm.js(纯 JS)。已 grep 验证 src/ 零 qz_aot/aot_lookup/JS_AddAot/JS_Call 残留——旧 ts2c『C 扩展嵌入 quickjs + console.log 经 JS_Call』耦合已全删（.py/.c/.sh 无）。quickjs 仅作宿主提供 qzjs.fs.readFileBinary 读字节 + 调 WebAssembly.instantiate；换 node/bun/浏览器同样可跑。唯一弱绑定 = glue 用 globalThis.qzjs.fs（便利约定，可换 fs）。结论：wasm/AOT 产物宿主无关。"
+  source: "grep src/ 无 aot-quickjs 绑定 + glue 加载路径"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-11T01:47:41
+  kind: evidence
+  summary: "字符串切片完成：wasm 内原生字符串表示（2026-10-11）。新表示：句柄高16位 0x7FFA（区分对象 0x7FF9），低32位=data段/堆 offset；内存 [len:i32 LE][utf8 字节]。字面量编译进 data 段（emitter 汇总 addData 一次性 emit，不逐条），_litOffset 去重。数字→十进制 qzs_numstr（i64 div/rem 循环 + 倒写）。拼接 s+x：qzs_append 判 buf 是否在 bump 顶（原地追加，零拷贝）否则新建拷贝——实测 strWork(200000) 80ms/1.08MB vs node V8 rope 10ms（真字节写入 vs 惰性 rope，符合预期）。guard 用 (v>>48)==0x7FFA 运行时判别；a 数 + b 串回退 qz.string_concat。qzvm._toJS 读内存解 0x7FFA 句柄；_utf8 手写解码 + DataView 位型（去掉 Buffer/TextDecoder，真 qzjs 运行时无这些全局）。glue 调 qz.bindMem(exports.memory)。修 3 个既有编码 bug：i64.shr_u 移位量误写 0x7FF9/0x7FFA（应为 48）、qzs_memcpy/qzs_numstr local.set on 空栈（应先 local.get 参数）、i64.trunc_f64_s 误用 0xAF（实为 0xB0）。test_aot.js 加字符串用例，全 22 检查 ALL PASS。"
+  source: "2026-10-11 自研 emitter 字符串表示 + node/qzjs 实测"
   affects: [aot-experiment-verification]

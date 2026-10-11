@@ -1,4 +1,5 @@
 # 字符串后端优化设计（独立实现计划）
+> **状态（2026-10-11）**：已实现。句柄定为高16位 `0x7FFA`（非下文 `offset<<1|1`），内存 `[len:i32 LE][utf8]`；字面量 data 段去重、`qzs_append` bump 顶原地追加、`qzs_numstr` 十进制、`_toJS` 解句柄。回归见 `test_aot.js`。
 
 ## 目标
 消除 tagged 路径字符串拼接的逐轮跨界（当前 `s = s + i` 每轮调 `qz.add` → JS 拼接 → 新 handle，慢 14x，strwork(8000) 14ms vs 解释器 1ms = 0.07x）。

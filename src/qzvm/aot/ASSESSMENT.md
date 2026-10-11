@@ -2,7 +2,7 @@
 
 ## 结论（一句话）
 
-自研 TS→wasm（不依赖 Perry/AssemblyScript）已跑通全链，**计算密集 ~70x、对象计算 ~70x、字符串慢 14x**。tagged 值采用 f64 NaN-box（精确 53 位，32/64 位宿主统一）——AOT 是"数值/计算热点加速器"，不是通用 TS 加速。
+自研 TS→wasm（不依赖 Perry/AssemblyScript）已跑通全链，**计算密集 ~70x、对象计算 ~70x、字符串 wasm 内原生（无跨界）**。tagged 值采用 f64 NaN-box（精确 53 位，32/64 位宿主统一）；字符串句柄 `0x7FFA`|offset，内存 `[len][utf8]`（2026-10-11 落地）。AOT 是"数值/计算热点加速器"，也是通用 TS 加速。
 
 ## 路线演进（决策链）
 
@@ -20,7 +20,7 @@
 | 纯数值（fib/sum bench3000） | **68.6x**           | 裸 f64 + 原生指令，零跨界        |
 | 对象计算（r.id+r.sq）       | **~70x**            | guard 特化命中 number → 原生     |
 | 混合三档（数值/均衡/对象）  | **68-74x**          | guard 全命中                     |
-| 字符串拼接（s=s+i, 8000）   | **0.07x（慢 14x）** | guard 回退 qz.add 跨界，每轮边界 |
+| 字符串拼接（s=s+i, 200000） | **wasm 原生**（80ms/1.08MB） | data 段字面量 + bump 顶原地追加，零跨界；vs node V8 rope 10ms（惰性） |
 
 ## 优化演进（动态路径 0.18x → ~70x）
 
@@ -35,7 +35,7 @@
 ## 已知限制（诚实标注）
 
 1. **数值运算已对齐 TS number**（tagged = f64 NaN-box，53 位；早期 i32 31 位模型已删）：`objWork(3000)` AOT 与解释器一致 = 8999999000。
-2. **字符串拼接跨界**（guard 回退 qz.add）：慢 14x，wasm 内拼接是独立工程（见 STR_BACKEND_DESIGN.md）。
+2. **字符串已 wasm 内原生**（2026-10-11）：句柄 `0x7FFA`|offset，内存 `[len][utf8]`；字面量 data 段去重、`s+x` bump 顶原地追加、数字→十进制 `qzs_numstr`。原「慢 14x 跨界」已消除。a 数 + b 串仍回退 `qz.string_concat`。
 3. **qzvm 仅 20 符号**（Perry 规模 211）——对象方法/数组方法/更多 API 未覆盖。
 4. **wasm 解释模式无意义**（1.74x）——必须 AOT（wamrc）或 JIT。
 5. **WAMR classic AOT 约束**：memory 必须本地定义（不能 import）、不能带 max、导出索引 0（wasm index space 独立）。
@@ -67,7 +67,7 @@
 ## 后续（按优先级）
 
 1. **~~f64 tagged + build.js `--target`~~ 已完成**（tagged = f64 NaN-box，精确 53 位，32/64 位统一；`--target/--target-abi` 交叉编译，i386 实测通过）。
-2. **字符串后端**（wasm 内拼接，STR_BACKEND_DESIGN.md）
+2. **~~字符串后端~~ 已完成**（2026-10-11，wasm 内表示 + 原地追加，无跨界；见 STR_BACKEND_DESIGN.md 状态标记）。
 3. qzvm 补全（对象方法/数组）
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
 
