@@ -650,6 +650,18 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isStringLiteral(e)) { this._emitStrLitHandle(e.text); return; }
+    if (ts.isNoSubstitutionTemplateLiteral(e)) { this._emitStrLitHandle(e.text); return; }
+    if (ts.isTemplateExpression(e)) {
+        // `head${e1}lit1${e2}lit2…`：逐段 _emitConcat（栈 [a,b]→句柄）。空段字面量为空串。
+        this._emitStrLitHandle(e.head.text);
+        for (const span of e.templateSpans) {
+            this.emitTaggedExpr(span.expression);
+            this._emitConcat();
+            this._emitStrLitHandle(span.literal ? span.literal.text : "");
+            this._emitConcat();
+        }
+        return;
+    }
     if (ts.isIdentifier(e)) { const idx = this._local(e.text); if (idx === undefined) throw new Error("未定义变量: " + e.text); this.m.localGet(idx); return; }
     if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
     if (ts.isObjectLiteralExpression(e)) {
