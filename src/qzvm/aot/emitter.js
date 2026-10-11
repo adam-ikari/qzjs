@@ -62,6 +62,14 @@ class Emitter {
         return names;
     }
 
+    // 统计函数体内 for-of 数量（按嵌套层各分配独立 local 对）
+    _countForOf(node) {
+        let n = 0;
+        const walk = (x) => { if (ts.isForOfStatement(x)) n++; ts.forEachChild(x, walk); };
+        walk(node);
+        return n;
+    }
+
     // ---------- 函数 ----------
     emitFunc(f) {
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
@@ -79,9 +87,14 @@ class Emitter {
         // 字符串逻辑临时（仅 tagged）：sT0..sT7 共 8 个 i32
         const sT = this.mode === "tagged" ? Array.from({ length: 8 }, () => "i32") : [];
         this.sT = this.mode === "tagged" ? Array.from({ length: 8 }, (_, i) => nLoc + 5 + i) : null;
-        // 尾部追加：sT(8×i32，tagged) + 1×i32（switch 入口索引）。
+        // 尾部追加：sT(8×i32，tagged) + swIdx(i32) + forOf 对×(vt,i32)（每嵌套层独立）。
         this.swIdx = nLoc + 3 + extra.length + sT.length;
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(["i32"]));
+        const nForOf = this._countForOf(f.body);
+        this.forOfBase = this.swIdx + 1;
+        this.forOfCount = 0;
+        const forOfLocals = [];
+        for (let i = 0; i < nForOf; i++) forOfLocals.push(vt, "i32");
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(["i32"]).concat(forOfLocals));
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -562,7 +575,6 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isIfStatement(s)) {
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         this.m.ifBlock(); this.depth++;          // 条件已归约为裸 i32 布尔
-        this.depth++;
         this.emitTaggedStmt(s.thenStatement);
         if (s.elseStatement) { this.m.else_(); this.emitTaggedStmt(s.elseStatement); }
         this.depth--; this.m.end(); return;
@@ -594,6 +606,39 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.m.br(0);
         this.depth--; this.m.end();                       // end loop
         this.depth--; this.m.end(); return;               // end brk block
+    }
+    if (ts.isForOfStatement(s)) {
+        // for (let x of arr) body：每嵌套层独立 local 对（arrL=i64 句柄, idxL=i32 索引）。
+        // 结构同 for：block(brk) loop block(cont) body end; i++; br 0 end end。
+        const M = this.m;
+        if (!ts.isVariableDeclarationList(s.initializer) || s.initializer.declarations.length !== 1
+            || !ts.isIdentifier(s.initializer.declarations[0].name))
+            throw new Error("[tagged] for-of 仅支持 let x of arr");
+        const varIdx = this._local(s.initializer.declarations[0].name.text);
+        if (varIdx === undefined) throw new Error("未定义 for-of 变量");
+        const arrL = this.forOfBase + this.forOfCount * 2;       // 本层数组句柄 local
+        const idxL = arrL + 1;                                   // 本层索引 local
+        this.forOfCount++;
+        this.emitTaggedExpr(s.expression); M.localSet(arrL);     // 数组句柄（i64）
+        M.i32Const(0); M.localSet(idxL);                         // i = 0
+        M.block(); this.depth++; M.loop(); this.depth++;
+        M.localGet(idxL);
+        M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 0);       // arr[off] = len
+        M.i32GeS(); M.brIf(1);                                   // i >= len → 退出
+        M.block(); this.depth++;
+        this.labels.push({ brk: this.depth - 2, cont: this.depth });
+        M.localGet(arrL); M.i32WrapI64();                        // off
+        M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // off + i*8
+        M.i64Load(3, 8); M.localSet(varIdx);                     // x = arr[i]
+        if (s.statement) this.emitTaggedStmt(s.statement);
+        this.labels.pop();
+        this.depth--; M.end();                                   // end cont
+        M.localGet(idxL); M.i32Const(1); M.i32Add(); M.localSet(idxL);   // i++
+        M.br(0);
+        this.depth--; M.end();                                   // end loop
+        this.depth--; M.end();                                   // end brk
+        this.forOfCount--;
+        return;
     }
     if (ts.isBlock(s)) { this.emitTaggedBlock(s); return; }
     if (ts.isExpressionStatement(s)) {
