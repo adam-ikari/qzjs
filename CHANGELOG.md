@@ -4,6 +4,8 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 
+- **feat(aot): 字符串 wasm 内原生表示 + 原地追加（AOT 编译器字符串后端落地）**。此前 tagged 路径的 `s = s + i` 每轮经 `qz.add` 跨 wasm↔JS 边界（JS 拼接 → 新 handle），实测慢解释器 14x（0.07x），跨界税盖过执行收益。改为 wasm 内原生字符串：句柄高 16 位 `0x7FFA`（区分对象 `0x7FF9`），低 32 位 = data 段/堆 offset，内存布局 `[len:i32 LE][utf8 字节]`。字符串字面量编译进 wasm data 段（去重，零跨界）；`s+x` 经 `qzs_append`——缓冲在 bump 顶则**原地追加**（零拷贝），否则新建拷贝；数字→十进制走 `qzs_numstr`（wasm 内 i64 div/rem 循环 + 反转）；`+` 运算运行时按 `(v>>48)==0x7FFA` 判别，a 数 + b 串回退 `qz.string_concat`。qzvm `_toJS` 读线性内存解 `0x7FFA` 句柄，UTF-8 手写解码 + `DataView` 位型（去 `Buffer`/`TextDecoder` 依赖，真 qzjs 运行时无这些全局）；glue 调 `qz.bindMem(exports.memory)`。顺带支持复合赋值 `+= -= *= /= %=`（原仅 `=`，`+=` 走字符串/数值拼接）。修 4 个既有编码缺陷：`i64.shr_u` 移位量误写 `0x7FF9`/`0x7FFA`（应 48）、`qzs_numstr` 返回值残留栈致 if 分支类型不匹配、`i64.trunc_f64_s` 误用 `0xAF`（实为 `0xB0`）、拼接数字操作数缺 f64→i64 转换。`test_aot.js` 加 4 条字符串断言，全 23 检查 ALL PASS；`strWork(200000)`=80ms/1.08MB（真字节写 vs node V8 rope 惰性 10ms）。
+
 ## [0.4.0] — 2026-10-06
 
 > 发版清积压：自 0.3.0（2026-10-02）以来 16 个 PR，无 breaking（ABI v1 未动）。

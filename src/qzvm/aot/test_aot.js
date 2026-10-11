@@ -68,6 +68,7 @@ async function runTagged() {
     const r = compileTS(src, wasm, {});
     const qz = makeQzvm(r.strings);
     const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasm), { qz });
+    qz.bindMem(instance.exports.memory);
     const e = instance.exports;
     const call = (n, a) => {
         const m = r.funcMeta.find(f => f.name === n);
@@ -80,6 +81,17 @@ async function runTagged() {
     check("mix.objWork(5)", call("objWork", [5]), 40);
     check("mix.bigAcc(3000)", call("bigAcc", [3000]), 3000000000000);   // 3e12 超 32 位：NaN-box 53 位精确
     check("除法(7/2)", qz._toJS(qz.div(qz._fromJS(7), qz._fromJS(2))), 3.5);
+    // 字符串：wasm 内表示（0x7FFA 句柄 + data 段字面量 + 原地 append）
+    const strs = path.join(os.tmpdir(), "qz_aot_str.wasm");
+    const rs = compileTS(path.join(__dirname, "strwork.ts"), strs, {});
+    const qzs = makeQzvm(rs.strings);
+    const { instance: instS } = await WebAssembly.instantiate(fs.readFileSync(strs), { qz: qzs });
+    qzs.bindMem(instS.exports.memory);
+    const callS = (n, a) => qzs._toJS(instS.exports[n](...a.map(x => qzs._fromJS(x))));
+    check("strWork(5)", callS("strWork", [5]), "001234");
+    check("strWork(0)", callS("strWork", [0]), "0");
+    { let ref = "0"; for (let i = 0; i < 2000; i++) ref += i; check("strWork(2000)", callS("strWork", [2000]), ref); }
+    check("strWorkEq(5)", callS("strWorkEq", [5]), "001234");
 }
 
 (async () => {

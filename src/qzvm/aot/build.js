@@ -75,6 +75,7 @@ Promise.all([
 ]).then(([bytes, aot]) =>
   WebAssembly.instantiate(bytes, { qz }, { aot }).then(({ instance }) => {
     const __ex = instance.exports;
+    qz.bindMem(__ex.memory);
     // __call(name, args)：按 funcMeta 自动转换 num(裸) vs tagged(_fromJS/_toJS)
     const __call = (name, args) => {
       const m = __meta.find(f => f.name === name);
@@ -86,7 +87,7 @@ Promise.all([
     // ── 主逻辑（--main）──
     ${mainBody}
   })
-).catch(e => { console.error("AOT load failed:", e); });
+).catch(e => { console.error("AOT load failed:", (e && e.message) || String(e)); });
 `;
     fs.writeFileSync(prefix + ".glue.js", glue);
     console.log(`glue ok: ${prefix}.glue.js（分离形态: ${basename}.wasm + ${basename}.aot 由 fs.readFileBinary 读取）`);

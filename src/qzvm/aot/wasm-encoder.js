@@ -56,7 +56,7 @@ const OP = {
     f64_neg: 0x9a, f64_floor: 0x9c, f64_trunc: 0x9d, f64_abs: 0x99,
     f64_add: 0xa0, f64_sub: 0xa1, f64_mul: 0xa2, f64_div: 0xa3, f64_min: 0xa4, f64_max: 0xa5,
     i32_wrap_i64: 0xa7, i32_trunc_f64_s: 0xaa, i32_trunc_f64_u: 0xab,
-    i64_extend_i32_s: 0xac, i64_extend_i32_u: 0xad,
+    i64_extend_i32_s: 0xac, i64_extend_i32_u: 0xad, i64_trunc_f64_s: 0xb0,
     f64_convert_i32_s: 0xb7, f64_convert_i32_u: 0xb8, f64_convert_i64_s: 0xb9, f64_convert_i64_u: 0xba,
     i64_reinterpret_f64: 0xbd, f64_reinterpret_i64: 0xbf,
     unreachable: 0x00,
@@ -144,6 +144,7 @@ class Module {
     i32WrapI64() { this._emit(OP.i32_wrap_i64); }
     i64ExtendI32S() { this._emit(OP.i64_extend_i32_s); } i64ExtendI32U() { this._emit(OP.i64_extend_i32_u); }
     f64ConvertI64S() { this._emit(OP.f64_convert_i64_s); }
+    i64TruncF64S() { this._emit(OP.i64_trunc_f64_s); }
     i64ReinterpretF64() { this._emit(OP.i64_reinterpret_f64); } f64ReinterpretI64() { this._emit(OP.f64_reinterpret_i64); }
     f64Add() { this._emit(OP.f64_add); } f64Sub() { this._emit(OP.f64_sub); } f64Mul() { this._emit(OP.f64_mul); } f64Div() { this._emit(OP.f64_div); }
     i32Eqz() { this._emit(OP.i32_eqz); }

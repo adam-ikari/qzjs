@@ -17,17 +17,41 @@
 
 const TAG = 0x7ff9_0000_0000_0000n;      // 句柄标记（高 16 位 0x7FF9）
 const TAG_HI = 0x7ff9n;                   // 高 16 位比较值
+const STR_HI = 0x7ffan;                   // 字符串句柄高 16 位
 const MASK32 = 0xffff_ffffn;
-const buf = Buffer.alloc(8);
+const _ab = new ArrayBuffer(8);
+const _dvw = new DataView(_ab);
+function _writeF64(n, le) { _dvw.setFloat64(0, n, le); return _dvw.getBigInt64(0, le); }
+function _readF64(b, le) { _dvw.setBigInt64(0, b, le); return _dvw.getFloat64(0, le); }
+// UTF-8 字节 → 字符串（无 TextDecoder 依赖；真 qzjs 运行时无 Buffer/TextDecoder）
+function _utf8(u8, s, e) {
+  let r = "", i = s;
+  while (i < e) {
+    const c = u8[i++];
+    if (c < 0x80) r += String.fromCharCode(c);
+    else if (c < 0xe0) r += String.fromCharCode(((c & 0x1f) << 6) | (u8[i++] & 0x3f));
+    else if (c < 0xf0) r += String.fromCharCode(((c & 0x0f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f));
+    else { const cp = ((c & 7) << 18) | ((u8[i++] & 0x3f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f);
+           const x = cp - 0x10000; r += String.fromCharCode(0xd800 + (x >> 10), 0xdc00 + (x & 0x3ff)); }
+  }
+  return r;
+}
 
 function makeQzvm(strings) {
   const handles = [undefined];            // index 0 保留（handle 0 无效）
 
-  const numToBits = (n) => { buf.writeDoubleLE(n); return buf.readBigInt64LE(); };
-  const bitsToNum = (b) => { buf.writeBigInt64LE(BigInt.asIntN(64, b)); return buf.readDoubleLE(); };
+  const numToBits = (n) => _writeF64(n, true);
+  const bitsToNum = (b) => _readF64(BigInt.asIntN(64, b), true);
   const isH = (b) => (BigInt(b) >> 48n) === TAG_HI;
+  const isStrH = (b) => (BigInt(b) >> 48n) === STR_HI;
   const idxOf = (b) => Number(BigInt(b) & MASK32);
-  const toJS = (b) => (isH(b) ? handles[idxOf(b)] : bitsToNum(b));
+  const strRead = (b) => {
+    const off = Number(BigInt(b) & MASK32);
+    const dv = new Uint8Array(mem.buffer);
+    const len = dv[off] | (dv[off+1] << 8) | (dv[off+2] << 16) | (dv[off+3] << 24);
+    return _utf8(dv, off + 4, off + 4 + len);
+  };
+  const toJS = (b) => (isStrH(b) ? strRead(b) : (isH(b) ? handles[idxOf(b)] : bitsToNum(b)));
   const tagHandle = (x) => TAG | BigInt(handles.push(x) - 1);
   const box = (n) => numToBits(n);
   const bool = (b) => numToBits(b ? 1 : 0);
