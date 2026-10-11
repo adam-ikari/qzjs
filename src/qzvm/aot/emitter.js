@@ -44,6 +44,12 @@ const QZ = {
   truthy: { params: ["i64"], results: ["i32"] },
   str_len: { params: ["i64"], results: ["i64"] },
   log:  { params: ["i64"], results: [] },
+  band: { params: ["i64", "i64"], results: ["i64"] },
+  bor:  { params: ["i64", "i64"], results: ["i64"] },
+  bxor: { params: ["i64", "i64"], results: ["i64"] },
+  shl:  { params: ["i64", "i64"], results: ["i64"] },
+  shr:  { params: ["i64", "i64"], results: ["i64"] },
+  ushr: { params: ["i64", "i64"], results: ["i64"] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
 
@@ -903,6 +909,25 @@ Emitter.prototype.emitGuardedOp = function (qzName, fastEmit, cmp) {
     this.m.end();
 };
 
+// 位运算 guard：命中双 number → f64→i32 截断 → 原生 i32 运算 → f64（JS 32 位语义）；
+// 任一为句柄 → 回退 qz.<op>（宿主 JS 位运算）。unsigned（>>>）结果按无符号回 f64。
+Emitter.prototype.emitGuardedBit = function (qzName, i32op, unsigned) {
+    const M = this.m;
+    M.localSet(this.scratchB); M.localSet(this.scratchA);
+    this._emitIsHandle(this.scratchA); this._emitIsHandle(this.scratchB); M.i32Or();
+    M.ifBlock("i64");
+    M.localGet(this.scratchA); M.localGet(this.scratchB); M.call(qzName);
+    M.else_();
+    M.localGet(this.scratchA); M.f64ReinterpretI64(); M.i32TruncF64S();
+    M.localSet(this.sT[0]);
+    M.localGet(this.scratchB); M.f64ReinterpretI64(); M.i32TruncF64S();
+    M.localSet(this.sT[1]);
+    M.localGet(this.sT[0]); M.localGet(this.sT[1]); i32op.call(M);
+    unsigned ? M.f64ConvertI32U() : M.f64ConvertI32S();
+    M.i64ReinterpretF64();
+    M.end();
+};
+
 // % 专用 guard：命中 number 走 wasm 内 a - trunc(a/b)*b（= JS 余数语义，含负数/除零 NaN），
 // 否则回退 qz.rem。f64 无原生 rem，故不复用 emitGuardedOp 的 fastEmit 模型。
 Emitter.prototype.emitTaggedRem = function () {
@@ -933,6 +958,12 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         [ts.SyntaxKind.AsteriskEqualsToken]: ts.SyntaxKind.AsteriskToken,
         [ts.SyntaxKind.SlashEqualsToken]: ts.SyntaxKind.SlashToken,
         [ts.SyntaxKind.PercentEqualsToken]: ts.SyntaxKind.PercentToken,
+        [ts.SyntaxKind.LessThanLessThanEqualsToken]: ts.SyntaxKind.LessThanLessThanToken,
+        [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanToken,
+        [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken,
+        [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken,
+        [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken,
+        [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken,
     };
     if (COMPOUND[op] !== undefined) {
         const idx = this._local(e.left.text);
@@ -979,6 +1010,12 @@ Emitter.prototype._emitBinOp = function (op) {
         [ts.SyntaxKind.EqualsEqualsEqualsToken]: G("qz.seq", this.m.f64Eq, true),
         [ts.SyntaxKind.ExclamationEqualsToken]: G("qz.sne", this.m.f64Ne, true),
         [ts.SyntaxKind.ExclamationEqualsEqualsToken]: G("qz.sne", this.m.f64Ne, true),
+        [ts.SyntaxKind.AmpersandToken]: () => this.emitGuardedBit("qz.band", this.m.i32And, false),
+        [ts.SyntaxKind.BarToken]: () => this.emitGuardedBit("qz.bor", this.m.i32Or, false),
+        [ts.SyntaxKind.CaretToken]: () => this.emitGuardedBit("qz.bxor", this.m.i32Xor, false),
+        [ts.SyntaxKind.LessThanLessThanToken]: () => this.emitGuardedBit("qz.shl", this.m.i32Shl, false),
+        [ts.SyntaxKind.GreaterThanGreaterThanToken]: () => this.emitGuardedBit("qz.shr", this.m.i32ShrS, false),
+        [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken]: () => this.emitGuardedBit("qz.ushr", this.m.i32ShrU, true),
     };
     if (GUARD[op]) { GUARD[op](); return; }
     const map = {
