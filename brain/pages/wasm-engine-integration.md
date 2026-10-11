@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [wasm, wamr, threading]
 created: "2026-08-15T01:32:50"
-updated: "2026-08-27T08:16:16"
+updated: "2026-10-11T02:16:51"
 ---
 
 <!-- compiled_truth -->
@@ -54,3 +54,9 @@ updated: "2026-08-27T08:16:16"
   summary: "wasm3 streaming 对等 + 引擎注册根因修复（C1）：ext_wasm3.c 补 compileStreaming/instantiateStreaming（镜像 WAMR 的 JS_Eval async IIFE，magic 0/1 区分）；修复 QZ_DEFAULT_EXTENSIONS 从不注册 wasm3 的 bug（wasm3 构建下 WebAssembly 全局缺失），新增 QZ_EXT_IF_WITH(WASM3) 槽位（CMake 已保证 WAMR/WASM3 互斥）；streaming 测试门控 WAMR OR WASM3。验证：wasm3 3/3 + WAMR 回归 3/3 + 真实 libuv CLI 端到端 instantiateStreaming add(20,22)=42。"
   source: "C1: wasm3 streaming parity + registration fix"
   affects: [wasm-engine-integration]
+
+- time: 2026-10-11T02:16:51
+  kind: evidence
+  summary: "WASM i64 导出桥接修复（2026-10-11）：导出函数 i64 参数/返回值此前经 JS_ToInt64/JS_NewInt64，导致①宿主传 BigInt（规范要求的 i64 表示）被 JS_ToInt64 拒收，报 'invalid i64 argument'；②返回值 >2^31 经 JS_NewInt64 转 float64，毁掉 NaN-box 位型。改为参数 JS_ToInt64Ext（接受 BigInt）+ 返回 JS_NewBigInt64（保 64 位整数）。修后真 qzjs 可跑 AOT tagged 负载：strWork(8)=001234567、objWork(5)=40、bigAcc(3000)=3e12（>2^32 精度保持）。import 侧（wasm→JS 传 BigInt / JS→wasm 用 JS_ToInt64Ext）原本已正确，无需改。加回归门 test_wasm_aot_gtest export_i64_bigint_roundtrip（wat2wasm fixture id64/add64/hi），反向验证旧代码必失败。"
+  source: "2026-10-11 ext_wamr.c i64 桥 + gtest 实测"
+  affects: [wasm-engine-integration, aot-experiment-verification]
