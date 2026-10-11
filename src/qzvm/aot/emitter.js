@@ -119,6 +119,7 @@ class Emitter {
             return;
         }
         if (ts.isBreakStatement(s)) { this.m.br(this._loopLabel().brkRel); return; }
+        if (ts.isDoStatement(s)) { this.emitDoWhile(s, false); return; }
         if (ts.isContinueStatement(s)) { this.m.br(this._loopLabel().contRel); return; }
         if (ts.isWhileStatement(s)) { this.emitWhile(s); return; }
         if (ts.isForStatement(s)) { this.emitFor(s); return; }
@@ -171,6 +172,24 @@ class Emitter {
         this.m.br(0);
         this.depth--; this.m.end();                       // end loop
         this.depth--; this.m.end();                       // end brk block
+    }
+
+    // do { body } while (cond)：continue 跳条件判断（不跳 body 顶）。
+    // 结构：block(brk) loop block(cont) body end; cond ? br 0 : 落 end end
+    emitDoWhile(s, tagged) {
+        const M = this.m;
+        M.block(); this.depth++;
+        M.loop(); this.depth++;
+        M.block(); this.depth++;
+        this.labels.push({ brk: this.depth - 2, cont: this.depth });
+        if (tagged) this.emitTaggedStmt(s.statement); else this.emitStmt(s.statement);
+        this.labels.pop();
+        this.depth--; M.end();                             // end cont block
+        if (tagged) this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
+        else { this.emitExpr(s.expression !== undefined ? s.expression : s.condition); this.emitCond(); }
+        M.brIf(0);                                         // 条件真 → 回 loop 顶
+        this.depth--; M.end();                             // end loop
+        this.depth--; M.end();                             // end brk block
     }
 
     // ---------- 表达式（number 域） ----------
@@ -504,6 +523,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
     if (ts.isBreakStatement(s)) { this.m.br(this._loopLabel().brkRel); return; }
     if (ts.isContinueStatement(s)) { this.m.br(this._loopLabel().contRel); return; }
+    if (ts.isDoStatement(s)) { this.emitDoWhile(s, true); return; }
     if (ts.isIfStatement(s)) {
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         this.m.ifBlock(); this.depth++;          // 条件已归约为裸 i32 布尔
