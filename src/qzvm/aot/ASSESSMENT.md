@@ -51,9 +51,10 @@
 2. **字符串已 wasm 内原生**（2026-10-11）：句柄 `0x7FFA`|offset，内存 `[len][utf8]`；字面量 data 段去重、`s+x` bump 顶原地追加、数字→十进制 `qzs_numstr`。原「慢 14x 跨界」已消除。a 数 + b 串仍回退 `qz.string_concat`。
    - 修复（2026-10-11）：guard 谓词原只识别对象句柄 `0x7FF9`，漏字符串 `0x7FFA` → `s == "..."` 等字符串比较回落 f64（两 NaN `f64.eq` 恒 false）。抽 `_emitIsHandle`（识别两种句柄）修 `emitGuardedOp` 与 `emitCmpI32`；`s=="..."` 命中/`!=` 现正确。
 3. **tagged 布尔/自增/逻辑语义**（2026-10-11 修复）：比较（`<`/`==`/…）、`!`、`&&`/`||` 产 tagged bool **f64 位型** 0.0/1.0（此前 `i64ExtendI32U` 产整数 1，与 `qz.lt` 回退分支不一致 → 当值用得 `5e-324`）；`if(!x)` 此前编译崩溃（prefix `!` 直调 `qz.truthy` 产 i32 违反 i64 契约）；`&&`/`||` 左操作数误加 `i32Eqz`（等价 `(!a)&b`）；postfix 不区分 `++`/`--`、prefix `++x` 不生效——均已修。`&&`/`||` 值语义（`a&&b→b`）仍简化为布尔 0/1（非 TS 精确），因两侧均求值、非真短路。
-4. **qzvm 仅 20 符号**（Perry 规模 211）——对象方法/数组方法/更多 API 未覆盖。
-5. **wasm 解释模式无意义**（1.74x）——必须 AOT（wamrc）或 JIT。
-6. **WAMR classic AOT 约束**：memory 必须本地定义（不能 import）、不能带 max、导出索引 0（wasm index space 独立）。
+4. **`%` 已 wasm 内原生**（2026-10-11）：tagged 模式 `emitTaggedRem` 命中 number 走 `a - trunc(a/b)*b`（= JS 余数语义，含负数/除零 NaN），回退 `qz.rem`。此前 `%` 无条件跨界，含 `%` 的 tagged 循环每轮一次 host 调用。10000 次含 `%` 循环跨界归零。
+5. **qzvm 仅 20 符号**（Perry 规模 211）——对象方法/数组方法/更多 API 未覆盖。
+6. **wasm 解释模式无意义**（1.74x）——必须 AOT（wamrc）或 JIT。
+7. **WAMR classic AOT 约束**：memory 必须本地定义（不能 import）、不能带 max、导出索引 0（wasm index space 独立）。
 
 ## 32 位可移植性（armv7 / riscv32 / i386）
 

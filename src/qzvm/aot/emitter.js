@@ -667,6 +667,24 @@ Emitter.prototype.emitGuardedOp = function (qzName, fastEmit, cmp) {
     if (cmp) { this.m.f64ConvertI32U(); this.m.i64ReinterpretF64(); } else this.m.i64ReinterpretF64();
     this.m.end();
 };
+
+// % 专用 guard：命中 number 走 wasm 内 a - trunc(a/b)*b（= JS 余数语义，含负数/除零 NaN），
+// 否则回退 qz.rem。f64 无原生 rem，故不复用 emitGuardedOp 的 fastEmit 模型。
+Emitter.prototype.emitTaggedRem = function () {
+    const M = this.m;
+    M.localSet(this.scratchB); M.localSet(this.scratchA);
+    this._emitIsHandle(this.scratchA); this._emitIsHandle(this.scratchB); M.i32Or();
+    M.ifBlock("i64");
+    M.localGet(this.scratchA); M.localGet(this.scratchB); M.call("qz.rem");
+    M.else_();
+    M.localGet(this.scratchA); M.f64ReinterpretI64(); M.localSet(this.scratchFA);
+    M.localGet(this.scratchB); M.f64ReinterpretI64(); M.localSet(this.scratchFB);
+    M.localGet(this.scratchFA); M.localGet(this.scratchFB); M.f64Div(); M.f64Trunc();   // trunc(a/b)
+    M.localGet(this.scratchFB); M.f64Mul(); M.localSet(this.scratchFB);                 // FB = trunc(a/b)*b
+    M.localGet(this.scratchFA); M.localGet(this.scratchFB); M.f64Sub();                 // a - FB
+    M.i64ReinterpretF64();
+    M.end();
+};
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
     if (op === ts.SyntaxKind.FirstAssignment) {
@@ -706,7 +724,7 @@ Emitter.prototype._emitBinOp = function (op) {
         [ts.SyntaxKind.MinusToken]: G("qz.sub", this.m.f64Sub),
         [ts.SyntaxKind.AsteriskToken]: G("qz.mul", this.m.f64Mul),
         [ts.SyntaxKind.SlashToken]: G("qz.div", this.m.f64Div),
-        // % 不在 GUARD：f64 无原生 rem，全走 map → qz.rem
+        [ts.SyntaxKind.PercentToken]: () => this.emitTaggedRem(),   // f64 无原生 rem → a - trunc(a/b)*b
         [ts.SyntaxKind.LessThanToken]: G("qz.lt", this.m.f64Lt, true),
         [ts.SyntaxKind.GreaterThanToken]: G("qz.gt", this.m.f64Gt, true),
         [ts.SyntaxKind.LessThanEqualsToken]: G("qz.le", this.m.f64Le, true),
