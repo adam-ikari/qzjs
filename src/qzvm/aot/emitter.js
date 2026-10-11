@@ -292,6 +292,17 @@ class Emitter {
             this.m.localTee(idx);
             return;
         }
+        // 逻辑复合赋值：a ||= b → a = a || b（truthy 判）；a &&= b 同理（数值域：非 0 即真）
+        if (op === ts.SyntaxKind.BarBarEqualsToken || op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) {
+            if (!ts.isIdentifier(e.left)) throw new Error("赋值左值必须是标识符");
+            const idx = this._local(e.left.text);
+            if (idx === undefined) throw new Error("未定义变量: " + e.left.text);
+            this.m.localGet(idx); this.emitCond();
+            this.emitBinaryOperandValue(e.right); this.emitCond();
+            if (op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) this.m.i32And(); else this.m.i32Or();
+            this.m.f64ConvertI32S(); this.m.localTee(idx);
+            return;
+        }
 
         // 短路逻辑（数值域：非 0 即真）
         if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
@@ -969,6 +980,12 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         const idx = this._local(e.left.text);
         this.m.localGet(idx); this.emitTaggedExpr(e.right);
         this._emitBinOp(COMPOUND[op]);
+        this.m.localTee(idx); return;
+    }
+    if (op === ts.SyntaxKind.BarBarEqualsToken || op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) {
+        // a ||= b → a = a || b（值语义短路，与 emitShortCircuit 一致）；a &&= b → a = a && b
+        const idx = this._local(e.left.text);
+        this.emitShortCircuit(op === ts.SyntaxKind.AmpersandAmpersandEqualsToken, e.left, e.right);
         this.m.localTee(idx); return;
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
