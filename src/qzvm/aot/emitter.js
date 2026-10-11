@@ -118,12 +118,23 @@ class Emitter {
             this.m.end();
             return;
         }
+        if (ts.isBreakStatement(s)) { this.m.br(this._loopLabel().brkRel); return; }
+        if (ts.isContinueStatement(s)) { this.m.br(this._loopLabel().contRel); return; }
         if (ts.isWhileStatement(s)) { this.emitWhile(s); return; }
         if (ts.isForStatement(s)) { this.emitFor(s); return; }
         if (ts.isBlock(s)) { this.emitBlock(s); return; }
         if (ts.isExpressionStatement(s)) { this.emitExpr(s.expression); this.m.drop(); return; }
         if (ts.isEmptyStatement(s)) return;
         throw new Error("不支持的语句: " + ts.SyntaxKind[s.kind]);
+    }
+
+    // break/continue → 最近的循环 label（cont != null），算 wasm 相对深度。
+    _loopLabel() {
+        for (let i = this.labels.length - 1; i >= 0; i--) {
+            const L = this.labels[i];
+            if (L.cont != null) return { brkRel: this.depth - L.brk, contRel: this.depth - L.cont };
+        }
+        throw new Error("break/continue 不在循环内");
     }
 
     emitWhile(s) {
@@ -146,16 +157,20 @@ class Emitter {
             if (ts.isVariableDeclarationList(s.initializer)) { for (const d of s.initializer.declarations) { if (d.initializer) { this.emitExpr(d.initializer); this.m.localSet(this._local(d.name.text)); } } }
             else { this.emitExpr(s.initializer); this.m.drop(); }
         }
+        // 结构：block(brk) loop block(cont) body end; incrementor; br 0 end end
+        // continue 跳到 incrementor 前（cont block 末尾），否则会跳过 incrementor → 死循环。
         this.m.block(); this.depth++;
         this.m.loop(); this.depth++;
-        this.labels.push({ brk: this.depth - 1, cont: this.depth });
         if (s.condition) { this.emitExpr(s.condition); this.emitCond(); this.m.i32Eqz(); this.m.brIf(1); }
+        this.m.block(); this.depth++;
+        this.labels.push({ brk: this.depth - 2, cont: this.depth });
         if (s.statement) this.emitStmt(s.statement);
+        this.labels.pop();
+        this.depth--; this.m.end();                       // end cont block
         if (s.incrementor) { this.emitExpr(s.incrementor); this.m.drop(); }
         this.m.br(0);
-        this.labels.pop();
-        this.depth--; this.m.end();
-        this.depth--; this.m.end();
+        this.depth--; this.m.end();                       // end loop
+        this.depth--; this.m.end();                       // end brk block
     }
 
     // ---------- 表达式（number 域） ----------
@@ -487,6 +502,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         return;
     }
     if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
+    if (ts.isBreakStatement(s)) { this.m.br(this._loopLabel().brkRel); return; }
+    if (ts.isContinueStatement(s)) { this.m.br(this._loopLabel().contRel); return; }
     if (ts.isIfStatement(s)) {
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         this.m.ifBlock(); this.depth++;          // 条件已归约为裸 i32 布尔
@@ -510,13 +527,18 @@ Emitter.prototype.emitTaggedStmt = function (s) {
                 for (const d of s.initializer.declarations) if (d.initializer) { this.emitTaggedExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
             } else { this.emitTaggedExpr(s.initializer); this.m.drop(); }
         }
+        // block(brk) loop block(cont) body end; incr; br 0 end end（continue 跳 incr 前）
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
-        this.labels.push({ brk: this.depth - 1, cont: this.depth });
         if (s.condition) { this.emitCondI32(s.condition); this.m.i32Eqz(); this.m.brIf(1); }
+        this.m.block(); this.depth++;
+        this.labels.push({ brk: this.depth - 2, cont: this.depth });
         if (s.statement) this.emitTaggedStmt(s.statement);
+        this.labels.pop();
+        this.depth--; this.m.end();                       // end cont block
         if (s.incrementor) { this.emitTaggedExpr(s.incrementor); this.m.drop(); }
         this.m.br(0);
-        this.labels.pop(); this.depth--; this.m.end(); this.depth--; this.m.end(); return;
+        this.depth--; this.m.end();                       // end loop
+        this.depth--; this.m.end(); return;               // end brk block
     }
     if (ts.isBlock(s)) { this.emitTaggedBlock(s); return; }
     if (ts.isExpressionStatement(s)) {
