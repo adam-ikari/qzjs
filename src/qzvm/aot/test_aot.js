@@ -88,11 +88,13 @@ async function runTagged() {
     const qzs = makeQzvm(rs.strings);
     const { instance: instS } = await WebAssembly.instantiate(fs.readFileSync(strs), { qz: qzs });
     qzs.bindMem(instS.exports.memory);
+    if (instS.exports.__bump) qzs.bindBump(instS.exports.__bump);
     const callS = (n, a) => qzs._toJS(instS.exports[n](...a.map(x => qzs._fromJS(x))));
     check("strWork(5)", callS("strWork", [5]), "001234");
     check("strWork(0)", callS("strWork", [0]), "0");
     { let ref = "0"; for (let i = 0; i < 2000; i++) ref += i; check("strWork(2000)", callS("strWork", [2000]), ref); }
     check("strWorkEq(5)", callS("strWorkEq", [5]), "001234");
+    check("strMethods()", callS("strMethods", []), "Hello|HELLO, WORLD|7|e|Hello, qz|ababab");
 }
 
 (async () => {

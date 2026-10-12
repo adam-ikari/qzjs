@@ -186,6 +186,8 @@ class Module {
     // export
     exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName], kind: 0x00 }); }
     exportMemory() { this.exports.push({ name: "memory", idx: this.memoryIdx(), kind: 0x02 }); }
+    exportGlobal(name, gidx) { this.exports.push({ name, idx: gidx, kind: 0x03 }); }   // mutable global 导出
+    globalIdx() { return 0; }   // 本地 global 索引空间：当前单 global（bump）
     memoryIdx() {   // memory 索引空间独立于 func：无 memory import 时本地 memory 索引 = 0
         let n = 0;
         for (const imp of this.imports) if (imp.memory) n++;

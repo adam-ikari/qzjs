@@ -56,8 +56,29 @@ function makeQzvm(strings) {
   const box = (n) => numToBits(n);
   const bool = (b) => numToBits(b ? 1 : 0);
 
-  let bump = 0, mem = null;
-  const bindMem = (m) => { mem = m; };
+  let bump = 0, mem = null, memU8 = null, bumpRef = null;
+  const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
+  const bindBump = (g) => { bumpRef = g; };
+  // JS 字符串 → wasm 堆（[len:i32 LE][utf8]），bump 分配，返回 0x7FFA 句柄。
+  const strWriteback = (str) => {
+    const bytes = [];
+    for (let i = 0; i < str.length; i++) {
+      let c = str.codePointAt(i);
+      if (c > 0xffff) i++;                            // 代理对
+      if (c < 0x80) bytes.push(c);
+      else if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+      else if (c < 0x10000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+      else bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    }
+    const off = bumpRef.value;
+    const total = 4 + bytes.length;
+    const aligned = (total + 7) & ~7;
+    bumpRef.value = off + aligned;
+    memU8[off] = bytes.length & 0xff; memU8[off+1] = (bytes.length >>> 8) & 0xff;
+    memU8[off+2] = (bytes.length >>> 16) & 0xff; memU8[off+3] = (bytes.length >>> 24) & 0xff;
+    for (let i = 0; i < bytes.length; i++) memU8[off + 4 + i] = bytes[i];
+    return (0x7ffan << 48n) | BigInt(off);
+  };
   return {
     // POJO 分配：返回 wasm 内存偏移（裸 i32），字段由 wasm i64.store 写入（零跨界）
     alloc: (nbytes) => { const off = bump; bump += nbytes; return off; },
@@ -87,6 +108,43 @@ function makeQzvm(strings) {
     sne:  (a, b) => bool(toJS(a) !== toJS(b)),
     truthy: (v) => (toJS(v) ? 1 : 0),        // 裸 i32 布尔（wasm 条件直接消费）
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
+    // 字符串方法：recv + 方法名 id + 2 参（undefined 句柄 = 缺省）→ 结果字符串句柄。
+    str_method: (recv, mid, a0, a1) => {
+      const s = toJS(recv);
+      const arg = (x) => { const v = toJS(x); return v; };
+      const name = strings[mid];
+      let r;
+      switch (name) {
+        case "charAt":   r = s.charAt(arg(a0)); break;
+        case "charCodeAt": r = s.charCodeAt(arg(a0)); break;
+        case "slice":    r = s.slice(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
+        case "substring":r = s.substring(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
+        case "substr":   r = s.substr(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
+        case "indexOf":  r = s.indexOf(arg(a0)); break;
+        case "lastIndexOf": r = s.lastIndexOf(arg(a0)); break;
+        case "includes": r = s.includes(arg(a0)); break;
+        case "startsWith": r = s.startsWith(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
+        case "endsWith": r = s.endsWith(arg(a0)); break;
+        case "toUpperCase": r = s.toUpperCase(); break;
+        case "toLowerCase": r = s.toLowerCase(); break;
+        case "trim":     r = s.trim(); break;
+        case "trimStart":r = s.trimStart(); break;
+        case "trimEnd":  r = s.trimEnd(); break;
+        case "repeat":   r = s.repeat(arg(a0)); break;
+        case "padStart": r = s.padStart(arg(a0), arg(a1)); break;
+        case "padEnd":   r = s.padEnd(arg(a0), arg(a1)); break;
+        case "replace":  r = s.replace(String(arg(a0)), String(arg(a1))); break;
+        case "split":    r = s.split(String(arg(a0))); break;   // 返回 JS 数组句柄（toJS = array）
+        case "concat":   r = s.concat(arg(a0)); break;
+        default: throw new Error("未知字符串方法: " + name);
+      }
+      // 字符串 → 写回 wasm 堆（[len][utf8]），返回 0x7FFA 句柄（与热路径内存布局一致）；
+      // 数字（charCodeAt/indexOf/lastIndexOf）→ box；其它（split 返回数组）→ JS 句柄。
+      if (typeof r === "string") return strWriteback(r);
+      if (typeof r === "number") return box(r);
+      return tagHandle(r);
+    },
+    bindBump,
     // 供宿主检查用（不在 wasm import 面）
     _toJS: toJS, _fromJS: (x) => (typeof x === "number" ? numToBits(x) : tagHandle(x)),
     _handles: handles, _TAG: TAG,

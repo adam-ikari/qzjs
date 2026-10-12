@@ -10,3 +10,14 @@ function strWorkEq(n: any): any {
   for (let i = 0; i < n; i++) s += i;
   return s;
 }
+// 字符串方法：slice/upper/indexOf/charAt/replace/repeat（经 qz.str_method 回退）
+function strMethods(): any {
+  let s = "Hello, World";
+  let a = s.slice(0, 5);
+  let b = s.toUpperCase();
+  let c = s.indexOf("World");
+  let d = s.charAt(1);
+  let e = s.replace("World", "qz");
+  let f = "ab".repeat(3);
+  return a + "|" + b + "|" + c + "|" + d + "|" + e + "|" + f;
+}

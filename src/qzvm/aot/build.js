@@ -86,6 +86,7 @@ Promise.all([
   WebAssembly.instantiate(bytes, { qz }, { aot }).then(({ instance }) => {
     const __ex = instance.exports;
     qz.bindMem(__ex.memory);
+    if (__ex.__bump) qz.bindBump(__ex.__bump);
     // __call(name, args)：按 funcMeta 自动转换 num(裸) vs tagged(_fromJS/_toJS)
     const __call = (name, args) => {
       const m = __meta.find(f => f.name === name);

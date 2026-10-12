@@ -50,6 +50,9 @@ const QZ = {
   shl:  { params: ["i64", "i64"], results: ["i64"] },
   shr:  { params: ["i64", "i64"], results: ["i64"] },
   ushr: { params: ["i64", "i64"], results: ["i64"] },
+  // 字符串方法：recv + 方法名 id + 2 参（缺省 = undefined 句柄）→ 结果字符串句柄（0x7FF9）。
+  // 走 JS 回退（正确处理 UTF-8/UTF-16 语义）；结果 join handles 表，toJS 还原为 JS string。
+  str_method: { params: ["i64", "i32", "i64", "i64"], results: ["i64"] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
 
@@ -491,7 +494,7 @@ function compileTS(input, outWasm, opts = {}) {
         const vt = isNum ? "f64" : "i64";   // num=f64；tagged=f64 NaN-box(i64)
         m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
     }
-    if (anyTagged) m.exportMemory();          // 导出本地 memory（qz.alloc 经 exports.memory 访问）
+    if (anyTagged) { m.exportMemory(); m.exportGlobal("__bump", 0); }   // 导出 memory + bump（JS 回退写回 wasm 堆）
     // 阶段2：逐个发射 body
     for (const st of fns) em.emitFunc(st);
     fs.writeFileSync(outWasm, m.build());
@@ -850,7 +853,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const rx = e.expression.expression, method = e.expression.name.text;
             if (method === "push" && e.arguments.length === 1) { this._emitArrayPush(rx, e.arguments[0]); return; }
             if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
-            throw new Error("[tagged] 不支持的方法: " + method);
+            this._emitStrMethod(rx, method, e.arguments); return;
         }
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
         for (const a of e.arguments) this.emitTaggedExpr(a);
@@ -1076,6 +1079,22 @@ Emitter.prototype._emitArrayPop = function (rx) {
       M.localGet(this.sT[4]); M.i32Const(8); M.i32Mul(); M.i32Add();
       M.i64Load(3,0);
     M.end();
+};
+// x.method(...)：字符串/通用方法经 qz.str_method(recv, nameId, a0, a1) 回退（正确处理 UTF-8）。
+// 结果 = 句柄（字符串 toJS 还原；数值方法如 charCodeAt/indexOf 结果亦 join handles 表 → toJS 为 number）。
+Emitter.prototype._emitStrMethod = function (rx, method, args) {
+    const M = this.m;
+    const argSlots = [this.scratchA, this.scratchB];                         // 两个 i64 暂存参
+    this.emitTaggedExpr(rx); M.localSet(this.scratch);                       // recv（i64）
+    for (let i = 0; i < 2; i++) {
+        if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        M.localSet(argSlots[i]);
+    }
+    M.localGet(this.scratch);
+    M.i32Const(this._strId(method));
+    M.localGet(argSlots[0]);
+    M.localGet(argSlots[1]);
+    M.call("qz.str_method");
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
