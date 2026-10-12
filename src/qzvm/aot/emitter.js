@@ -106,7 +106,11 @@ class Emitter {
         this.forOfCount = 0;
         const forOfLocals = [];
         for (let i = 0; i < nForOf; i++) forOfLocals.push(vt, "i32");
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals));
+        // debug：局部名数组（参数在前、局部在后，与 wasm local 序号一致）；仅命名可见变量，合成槽留空。
+        const localNames = this.m.debug
+            ? f.parameters.map(p => p.name.text).concat(locals)   // locals 是名字数组
+            : null;
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals), localNames);
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));

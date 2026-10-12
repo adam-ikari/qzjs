@@ -105,8 +105,8 @@ class Module {
         this.codes.push(null);
         return fidx;
     }
-    startBody(name, locals) { this._cur = { idx: (this._codeIdx || {})[name], locals: locals || [], body: [] }; }
-    endBody() { if (this._cur) { this._cur.body.push(OP.end); this.codes[this._cur.idx] = { locals: this._cur.locals, body: this._cur.body }; this._cur = null; } }
+    startBody(name, locals, names) { this._cur = { idx: (this._codeIdx || {})[name], locals: locals || [], names: names || null, body: [] }; }
+    endBody() { if (this._cur) { this._cur.body.push(OP.end); this.codes[this._cur.idx] = { locals: this._cur.locals, names: this._cur.names, body: this._cur.body }; this._cur = null; } }
     addFunc(name, params, results, locals) {
         const t = this.funcType(params, results);
         const fidx = this.funcs.length + this.imports.length; // funcs 索引 = imports + 本地函数序
@@ -259,18 +259,38 @@ class Module {
             const body = vec(this.data.map(d => [...uleb(0x00), OP.i32_const, ...sleb(d.offset), OP.end, ...uleb(d.bytes.length), ...d.bytes]));
             out.push(11, ...uleb(body.length), ...body);
         }
-        // name 段（custom section，id 0）：函数名子段（subsection 1）。
-        // 可选（debug）：让 wat/wasm 反汇编显示 $名而非编号，DAP 友好。不影响执行。
+        // name 段（custom section，id 0）：子段 1=函数名、子段 2=局部名。
+        // 可选（debug）：wat/wasm 反汇编显示 $名 / $局部名，DAP 友好。不影响执行。
         if (this.debug) {
-            const names = [];
+            const subs = [];
+            // 子段 1：函数名。funcidx → 名（含导入）。
+            const fnNames = [];
             for (let i = 0; i < this._fnNames.length; i++) {
                 const nm = this._fnNames[i];
                 if (nm === undefined) continue;
-                names.push([...uleb(i), ...uleb(Buffer.byteLength(nm)), ...[...Buffer.from(nm)]]);
+                fnNames.push([...uleb(i), ...uleb(Buffer.byteLength(nm)), ...[...Buffer.from(nm)]]);
             }
-            if (names.length) {
-                const fnSub = [1, ...uleb(vec(names).length), ...vec(names)];   // subsection id=1 + size + 内容
-                const sec = [...uleb(Buffer.byteLength("name")), ...[...Buffer.from("name")], ...fnSub];
+            if (fnNames.length) subs.push({ id: 1, content: vec(fnNames) });
+            // 子段 2：局部名。name = indrectnamemap: vec(funcidx → namemap)。
+            // namemap: vec(localidx → name)。local 0..n-1 = 参数 + 局部（与 wasm local 序号一致）。
+            const localMaps = [];
+            for (let ci = 0; ci < this.codes.length; ci++) {
+                const c = this.codes[ci];
+                if (!c || !c.names) continue;
+                const fidx = ci + this._importFuncCount();   // codes 索引 → funcidx
+                const entries = [];
+                for (let li = 0; li < c.names.length; li++) {
+                    const nm = c.names[li];
+                    if (nm === undefined) continue;
+                    entries.push([...uleb(li), ...uleb(Buffer.byteLength(nm)), ...[...Buffer.from(nm)]]);
+                }
+                if (entries.length) localMaps.push([...uleb(fidx), ...vec(entries)]);
+            }
+            if (localMaps.length) subs.push({ id: 2, content: vec(localMaps) });
+            if (subs.length) {
+                const body = [];
+                for (const { id, content } of subs) body.push(id, ...uleb(content.length), ...content);
+                const sec = [...uleb(Buffer.byteLength("name")), ...[...Buffer.from("name")], ...body];
                 out.push(0, ...uleb(sec.length), ...sec);   // custom section (id 0)
             }
         }
