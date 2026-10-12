@@ -19,7 +19,10 @@ qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→
 node src/qzvm/aot/build.js build src.ts [name] [--main "fn(a); fn2(b)"] [--target i386 --target-abi gnu]
 
 # 产物（统一到工程 build/aot/，AOT_OUT_DIR 可覆盖）
-build/aot/<name>.{wasm,aot,glue.js}   # 分离三文件（不 base64 内嵌）
+build/aot/<name>.{wasm,wat,aot,glue.js}   # wat = wasm2wat 反汇编的可读中间产物（审计/调试）
+
+# 仅编译（不经 wamrc）：产出 .wasm + .wat + .strings.json + .meta.json
+node src/qzvm/aot/build.js compile src.ts [name]
 
 # 运行（glue + wasm + aot 同目录；glue 经 fs.readFileBinary 异步读）
 cd build/aot && qzjs <name>.glue.js
@@ -31,15 +34,21 @@ cd build/aot && qzjs <name>.glue.js
 - **32 位设备交叉编译**：`.aot` 是绑宿主架构的原生 ELF；加 `--target <arch> --target-abi <abi>` 透传 wamrc（`armv7 + gnueabihf` / `riscv32 + ilp32d` / `i386 + gnu`）。表示层不变，f64 语义一致
 - wamrc 查找顺序：`WAMRC` 环境变量 > `PATH` 上的 wamrc > 旧 demo 固定路径；质量门 = wamrc 编译成功（隐含 wasm 有效）
 
-## 性能画像（qzjs 内 AOT vs 解释器，本机实测 2026-10-11）
+## 性能画像（三方对比：AOT vs 解释器 vs 原生 V8，本机实测 2026-10-12）
 
-基准：`node src/qzvm/aot/bench_mix.js`（负载同 `mixbench.ts`）。
+基准：`node src/qzvm/aot/bench_mix.js`（AOT 经 wamrc O3 编译，qzjs 宿主跑 wasm；
+解释器 = qzjs 跑纯 JS；原生 V8 = node v24 JIT 跑同语义 JS）。
+**倍速 = 对手耗时 / AOT 耗时**：>1 = AOT 更快，<1 = AOT 更慢。
 
-|负载|倍率|机制|
-|---|---|---|
-|纯数值 numWork(3000)|~130x|裸 f64 原生指令，零跨界|
-|对象计算 objWork(30000)|~50x|条件/`++` guard 命中 number → 原生，零跨界|
-|字符串拼接 strWork(8000)|wasm 内原生|data 段字面量 + bump 顶原地追加（零跨界）；V8 rope 惰性更快|
+|负载|AOT(qzjs)|解释器(qzjs)|原生 V8(node)|AOT 比解释器|AOT 比 V8|
+|---|---|---|---|---|---|
+|numWork(3000) 纯数值递归|366ms|49.3s|742ms|**快 ~135x**|**快 ~2.0x**|
+|objWork(30000) 对象循环|1.2ms|49ms|0.29ms|快 ~41x|慢 ~4.1x|
+|strWork(8000) 字符串拼接|30ms|5ms|0.12ms|慢 ~6x|慢 ~250x|
+
+- **numWork（数值热点）AOT 超 V8 ~2x**：wamrc LLVM O3 + 零 JIT 预热 + 裸 f64 原生指令。
+- **objWork/strWork AOT 慢于 V8**：V8 隐藏类（IC）+ rope 惰性拼接碾压 wasm bump 分配/逐字节写。
+- 解释器（QuickJS-ng 无 JIT）在数值负载最慢；AOT 比解释器快 ~135x。
 
 ## 已知限制
 - **tagged 数值精确 53 位**（f64 NaN-box），32/64 位一致；无 31 位上限（旧 i32 模型已删，`test_aot.js` bigAcc=3e12 守此）

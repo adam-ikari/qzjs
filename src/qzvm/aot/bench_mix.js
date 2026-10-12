@@ -39,12 +39,13 @@ function runQzjs(script, cwd) {
 }
 
 // 生成 main 钩子：单次调用 + 计时（warmup 会污染 bump；单次足矣，负载本身即循环）
+// performance.now() 毫秒浮点：Date.now 精度仅 1ms，objWork 等快负载会失真。
 function mainHook(name, arg) {
     return `
 globalThis.__main = function (__call) {
-  const t = Date.now();
+  const t = performance.now();
   const r = __call("${name}", [${arg}]);
-  console.log("${name} ms=", Date.now() - t, "check=", typeof r === "string" ? r.length : r);
+  console.log("${name} ms=", (performance.now() - t).toFixed(2), "check=", typeof r === "string" ? r.length : r);
 };
 `;
 }
@@ -86,8 +87,30 @@ for (const [name, fn, arg] of [["numWork",numWork,3000],["objWork",objWork,30000
     fs.unlinkSync(f);
     const out = {};
     for (const line of (r.stdout || "").trim().split("\n")) {
-        const m = line.match(/^(\w+) ms= (\d+) check= (\S+)/);
+        const m = line.match(/^(\w+) ms= ([\d.]+) check= (\S+)/);
         if (m) out[m[1]] = line.trim();
+    }
+    return out;
+}
+
+// 原生 V8 对照：同负载同语义，跑在 node（真实 JIT）——AOT 的上界参照。
+function benchNative() {
+    const js = `
+function fib(n){ if(n<2) return n; return fib(n-1)+fib(n-2); }
+function numWork(it){ let s=0; for(let i=0;i<it;i++) s=s+fib(20+(i%5)); return s; }
+function objWork(n){ let t=0; for(let i=0;i<n;i++){ const r={id:i,sq:i*i,tag:"r"}; t=t+r.id+r.sq; } return t; }
+function strWork(n){ let s="0"; for(let i=0;i<n;i++) s=s+i; return s; }
+function run(name,fn,arg){ fn(arg); fn(arg); const t=performance.now(); const r=fn(arg); console.log(name,"ms=",(performance.now()-t).toFixed(2),"check=",typeof r==="string"?r.length:r); }
+for (const [name,fn,arg] of [["numWork",numWork,3000],["objWork",objWork,30000],["strWork",strWork,8000]]) run(name,fn,arg);
+`;
+    const f = path.join(os.tmpdir(), "bench_mix_native.js");
+    fs.writeFileSync(f, js);
+    const r = spawnSync(process.execPath, [f], { encoding: "utf8", timeout: 600000 });
+    fs.unlinkSync(f);
+    const out = {};
+    for (const line of (r.stdout || "").trim().split("\n")) {
+        const m = line.match(/^(\w+) ms= ([\d.]+) check= (\S+)/);
+        if (m) out[m[1]] = m[2];
     }
     return out;
 }
@@ -102,8 +125,13 @@ for (const [name, fn, arg] of [["numWork",numWork,3000],["objWork",objWork,30000
     console.log("qzjs:", QZJS);
     const aot = benchAot();
     const interp = benchInterp();
-    console.log("\n负载          AOT                               解释器(纯 JS)");
+    const native = benchNative();
+    const ms = (s) => { const m = /ms= ([\d.]+)/.exec(s || ""); return m ? Number(m[1]) : NaN; };
+    console.log("\n负载          AOT(qzjs)    解释器(qzjs)  原生V8(node)  AOT:解释器  AOT:V8");
     for (const l of LOADS) {
-        console.log(`${l.name.padEnd(10)}  ${(aot[l.name] || "?").padEnd(34)} ${interp[l.name] || "?"}`);
+        const a = ms(aot[l.name]), i = ms(interp[l.name]), n = Number(native[l.name]);
+        // 倍速 = 对手耗时 / AOT 耗时：>1 = AOT 更快，<1 = AOT 更慢
+        const sp = (x) => { if (!(Number.isFinite(x) && Number.isFinite(a) && a > 0)) return "?"; const r = x / a; return r >= 1 ? r.toFixed(2) + "x快" : "1/" + (1 / r).toFixed(1) + "x慢"; };
+        console.log(`${l.name.padEnd(10)}  ${(a.toFixed(2) + "ms").padEnd(12)}  ${(i.toFixed(2) + "ms").padEnd(12)}  ${(n.toFixed(2) + "ms").padEnd(12)}  ${sp(i).padEnd(10)}  ${sp(n)}`);
     }
 })();

@@ -54,6 +54,16 @@ function parseMain(spec) {
 }
 
 
+// 从 .wasm 反汇编出可读 .wat 中间产物（审计/调试用；wasm2wat 缺失则跳过）。
+// 注意：这是 wamrc AOT 前的 wasm 文本，非 wamrc 的 AOT 产物。
+function emitWat(prefix) {
+    try {
+        execSync(`wasm2wat --enable-all "${prefix}.wasm" -o "${prefix}.wat"`, { stdio: "pipe" });
+        return true;
+    } catch {
+        return false;
+    }
+}
 
 function genGlue(prefix, mainCalls) {
     const strings = JSON.parse(fs.readFileSync(prefix + ".strings.json", "utf8"));
@@ -106,6 +116,7 @@ if (cmd === "build") {
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
     fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta }));
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}`);
+    if (emitWat(prefix)) console.log(`  wat: ${prefix}.wat`);
     // --target <arch> [--target-abi <abi>]：交叉编译 .aot 到 32 位设备（armv7/riscv32/i386 等）
     const tIdx = process.argv.indexOf("--target");
     const abiIdx = process.argv.indexOf("--target-abi");
@@ -127,11 +138,15 @@ if (cmd === "build") {
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
     fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta }));
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}`);
+    if (emitWat(prefix)) console.log(`  wat: ${prefix}.wat`);
 } else if (cmd === "glue") {
     const mainIdx = process.argv.indexOf("--main");
     const mainCalls = mainIdx >= 0 ? parseMain(process.argv[mainIdx + 1]) : [];
     genGlue(process.argv[3], mainCalls);
 } else {
     console.error("usage: build.js build|compile|glue ...");
+    console.error("  build  <src.ts> [prefix] [--main \"fn(a);fn2(b)\"] [--target <arch> --target-abi <abi>]");
+    console.error("  compile <src.ts> [prefix]   # 产出 .wasm/.wat/.strings.json/.meta.json（不经 wamrc）");
+    console.error("  glue <prefix> [--main \"fn(a)\"]");
     process.exit(2);
 }
