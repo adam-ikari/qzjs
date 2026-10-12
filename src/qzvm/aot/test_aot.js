@@ -80,6 +80,7 @@ async function runTagged() {
     check("mix.numWork(3000)", call("numWork", [3000]), 66268200);
     check("mix.objWork(5)", call("objWork", [5]), 40);
     check("mix.bigAcc(3000)", call("bigAcc", [3000]), 3000000000000);   // 3e12 超 32 位：NaN-box 53 位精确
+    check("mix.arrWork(3)", call("arrWork", [3]), 6);   // [1,2]+push0,1,2 → [1,2,0,1,2]; pop=2; s=4 → 6
     check("除法(7/2)", qz._toJS(qz.div(qz._fromJS(7), qz._fromJS(2))), 3.5);
     // 字符串：wasm 内表示（0x7FFA 句柄 + data 段字面量 + 原地 append）
     const strs = path.join(os.tmpdir(), "qz_aot_str.wasm");

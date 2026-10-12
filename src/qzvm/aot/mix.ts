@@ -23,3 +23,13 @@ function bigAcc(n: unknown): unknown {
   for (let i = 0; i < n; i++) total = total + 1000000000;
   return total;
 }
+
+// tagged 数组方法：push/pop/length/索引
+function arrWork(n: any): any {
+  let a = [1, 2];
+  for (let i = 0; i < n; i++) a.push(i);
+  const last = a.pop();
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s = s + a[i];
+  return s + last;
+}

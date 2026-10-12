@@ -653,13 +653,13 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         M.i32Const(0); M.localSet(idxL);                         // i = 0
         M.block(); this.depth++; M.loop(); this.depth++;
         M.localGet(idxL);
-        M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 0);       // arr[off] = len
+        M.localGet(arrL); M.i32WrapI64(); M.i32Const(0); M.i32Load(2, 0);   // header[0] = len
         M.i32GeS(); M.brIf(1);                                   // i >= len → 退出
         M.block(); this.depth++;
         this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
-        M.localGet(arrL); M.i32WrapI64();                        // off
-        M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // off + i*8
-        M.i64Load(3, 8); M.localSet(varIdx);                     // x = arr[i]
+        M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 8);       // dataOff
+        M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // dataOff + i*8
+        M.i64Load(3, 0); M.localSet(varIdx);                     // x = arr[i]
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
         this.depth--; M.end();                                   // end cont
@@ -792,31 +792,33 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isArrayLiteralExpression(e)) {
-        // 数组：bump 分配 [len:i32][pad:i32][elem:i64×N]（元素自 +8，8B 步进）。
-        // 句柄 = 高16位 0x7FF8 | offset(低32)。零跨界。
+        // 数组：稳定句柄布局 header(16B: len,cap,dataOff,pad) + data 块(elem i64×N)。
+        // 句柄 = 0x7FF8|headerOff；push 增长只换 data 块、句柄不变（支持别名/传参/属性）。
         const N = e.elements.length;
-        const bytes = 8 + N * 8;
-        this.m.globalGet(0); this.m.i32Const(bytes); this.m.i32Add(); this.m.globalSet(0);
-        this.m.globalGet(0); this.m.i32Const(bytes); this.m.i32Sub();          // → offset(i32)
-        this.m.localSet(this.sT[0]);                                           // sT0 = offset
-        this.m.localGet(this.sT[0]); this.m.i32Const(N); this.m.i32Store(2, 0); // [off] = len
+        const total = 16 + N * 8;
+        this.m.globalGet(0); this.m.i32Const(total); this.m.i32Add(); this.m.globalSet(0);
+        this.m.globalGet(0); this.m.i32Const(total); this.m.i32Sub();     // → headerOff(i32)
+        this.m.localSet(this.sT[0]);
+        this.m.localGet(this.sT[0]); this.m.i32Const(N); this.m.i32Store(2, 0);    // len
+        this.m.localGet(this.sT[0]); this.m.i32Const(N); this.m.i32Store(2, 4);    // cap
+        this.m.localGet(this.sT[0]); this.m.localGet(this.sT[0]); this.m.i32Const(16); this.m.i32Add(); this.m.i32Store(2, 8);   // dataOff = off+16
         for (let i = 0; i < N; i++) {
-            this.m.localGet(this.sT[0]);                                       // [off]
-            this.emitTaggedExpr(e.elements[i]);                                // [off, val:i64]
-            this.m.i64Store(3, 8 + i * 8);                                     // [off+8+i*8] = val
+            this.m.localGet(this.sT[0]); this.m.i32Load(2, 8);            // dataOff
+            this.emitTaggedExpr(e.elements[i]);
+            this.m.i64Store(3, i * 8);
         }
         this.m.localGet(this.sT[0]); this.m.i64ExtendI32U();
-        this.m.i64ConstBits(0, 0x7ff80000); this.m.i64Or();                    // 句柄
+        this.m.i64ConstBits(0, 0x7ff80000); this.m.i64Or();               // 句柄
         return;
     }
     if (ts.isElementAccessExpression(e)) {
-        // a[i]：数组句柄(0x7FF8) → load [off + 8 + i*8]；i 须 number（f64→i32）。
+        // a[i]：数组句柄(0x7FF8) → header[+8]=dataOff → load [dataOff + i*8]；i 须 number。
         this.emitTaggedExpr(e.expression); this.m.localSet(this.scratch);   // scratch = 数组值
         this.emitTaggedExpr(e.argumentExpression);                          // [i_value:i64]
         this.m.f64ReinterpretI64(); this.m.i32TruncF64S();                  // → i32 index
         this.m.i32Const(8); this.m.i32Mul();
-        this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Add(); // [off + 8 + i*8]
-        this.m.i64Load(3, 8);                                               // 元素自 off+8 起
+        this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Load(2, 8); this.m.i32Add();   // dataOff + i*8
+        this.m.i64Load(3, 0);
         return;
     }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
@@ -844,6 +846,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isCallExpression(e)) {
+        if (ts.isPropertyAccessExpression(e.expression)) {
+            const rx = e.expression.expression, method = e.expression.name.text;
+            if (method === "push" && e.arguments.length === 1) { this._emitArrayPush(rx, e.arguments[0]); return; }
+            if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
+            throw new Error("[tagged] 不支持的方法: " + method);
+        }
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
         for (const a of e.arguments) this.emitTaggedExpr(a);
         this.m.call(e.expression.text); return;
@@ -1011,13 +1019,63 @@ Emitter.prototype._emitStoreElem = function (left) {
     const M = this.m;
     M.localSet(this.scratch);                     // 值 → scratch（i64）
     this.emitTaggedExpr(left.expression);         // 数组句柄
-    M.i32WrapI64(); M.localSet(this.sT[0]);       // off
+    M.i32WrapI64(); M.localSet(this.sT[0]);       // headerOff
     this.emitTaggedExpr(left.argumentExpression); // i（number）
     M.f64ReinterpretI64(); M.i32TruncF64S();
     M.i32Const(8); M.i32Mul();
-    M.localGet(this.sT[0]); M.i32Add();
-    M.localGet(this.scratch); M.i64Store(3, 8);   // 元素自 off+8 起
+    M.localGet(this.sT[0]); M.i32Load(2, 8); M.i32Add();   // dataOff + i*8
+    M.localGet(this.scratch); M.i64Store(3, 0);
     M.localGet(this.scratch);                     // 返回所赋之值
+};
+// undefined = 句柄 0x7FF9|0（qzvm handles[0]=undefined）
+Emitter.prototype._emitUndefined = function () { this.m.i64ConstBits(0, 0x7ff90000); };
+// a.push(x)：header(16B)=[len,cap,dataOff,pad]；满则 bump 新 data 块 + memcpy（句柄不变）。
+Emitter.prototype._emitArrayPush = function (rx, arg) {
+    const M = this.m;
+    this.emitTaggedExpr(rx); M.localSet(this.scratch);        // 数组句柄
+    this.emitTaggedExpr(arg); M.localSet(this.scratchA);      // 待压值
+    M.localGet(this.scratch); M.i32WrapI64(); M.localSet(this.sT[3]);   // h
+    M.localGet(this.sT[3]); M.i32Load(2,0);                   // len
+    M.localGet(this.sT[3]); M.i32Load(2,4);                   // cap
+    M.i32GeS();
+    M.ifBlock();
+      M.localGet(this.sT[3]); M.i32Load(2,4); M.i32Eqz();     // cap==0
+      M.ifBlock("i32"); M.i32Const(4); M.else_();
+        M.localGet(this.sT[3]); M.i32Load(2,4); M.i32Const(2); M.i32Mul();
+      M.end();
+      M.localSet(this.sT[4]);                                 // newCap
+      M.globalGet(0); M.localSet(this.sT[5]);                 // newData = bump
+      M.globalGet(0); M.localGet(this.sT[4]); M.i32Const(8); M.i32Mul(); M.i32Add(); M.globalSet(0);
+      M.localGet(this.sT[5]);                                 // dest
+      M.localGet(this.sT[3]); M.i32Load(2,8);                 // src = oldData
+      M.localGet(this.sT[3]); M.i32Load(2,0); M.i32Const(8); M.i32Mul();   // n = len*8
+      M.call("qzs_memcpy");
+      M.localGet(this.sT[3]); M.localGet(this.sT[5]); M.i32Store(2,8);     // header.dataOff = newData
+      M.localGet(this.sT[3]); M.localGet(this.sT[4]); M.i32Store(2,4);     // header.cap = newCap
+    M.end();
+    M.localGet(this.sT[3]); M.i32Load(2,8);                   // dataOff
+    M.localGet(this.sT[3]); M.i32Load(2,0); M.i32Const(8); M.i32Mul(); M.i32Add();
+    M.localGet(this.scratchA); M.i64Store(3,0);               // data[len] = val
+    M.localGet(this.sT[3]);
+    M.localGet(this.sT[3]); M.i32Load(2,0); M.i32Const(1); M.i32Add(); M.i32Store(2,0);   // len++
+    M.localGet(this.sT[3]); M.i32Load(2,0);
+    M.f64ConvertI32U(); M.i64ReinterpretF64();                // 返回新长度（number）
+};
+// a.pop()：空 → undefined；否则取末元素 + len--。
+Emitter.prototype._emitArrayPop = function (rx) {
+    const M = this.m;
+    this.emitTaggedExpr(rx); M.localSet(this.scratch);
+    M.localGet(this.scratch); M.i32WrapI64(); M.localSet(this.sT[3]);   // h
+    M.localGet(this.sT[3]); M.i32Load(2,0); M.i32Eqz();
+    M.ifBlock("i64");
+      this._emitUndefined();
+    M.else_();
+      M.localGet(this.sT[3]); M.i32Load(2,0); M.i32Const(1); M.i32Sub(); M.localSet(this.sT[4]);   // i = len-1
+      M.localGet(this.sT[3]); M.localGet(this.sT[4]); M.i32Store(2,0);
+      M.localGet(this.sT[3]); M.i32Load(2,8);                 // dataOff
+      M.localGet(this.sT[4]); M.i32Const(8); M.i32Mul(); M.i32Add();
+      M.i64Load(3,0);
+    M.end();
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
