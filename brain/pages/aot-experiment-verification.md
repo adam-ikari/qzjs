@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-12T14:20:56"
+updated: "2026-10-12T18:28:19"
 ---
 
 <!-- compiled_truth -->
@@ -294,4 +294,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: decision
   summary: "AOT 类方法静态分派（faster dispatch）：识别静态精确接收者的方法调用，沿父链解析方法 owner 后直调导出 __m_<Owner>$<m>，跳过 qz.method_call 跨界。静态精确判据（保守，宁缺勿滥）：(1) 接收者标识符 xxx 由 `let/const x = new C(...)` 直赋，且 x 在全函数体内从未被赋值为其他值（含 for-of/in 绑定）也未出现在任何嵌套闭包内（闭包可延迟写）；(2) 叶类（无子类）方法体/构造器内的 this（new C 永不产 C 之外的实例，无跨类原型改写）。同名变量声明不同类型 → 整体不可判。仅直调「有返回值且非 setter」的普通方法；void/setter 语义与动态路径（动态恒返回 i64）不同，退回动态。实现：_computeStaticVars 按函数/方法体作用域计算，_mEnter/_mExit/emitFunc/_emitLambdaBody 全程保存恢复 _staticVars/_curClass；_staticRecvClass + _methodOwner + _classMethodMeta 解析。验证：cls.ts 回归全绿；探针 cls.ts 4 个调用点动态分派 4→2（子类未覆盖的虚方法仍动态，正确）；leaf.ts 叶类 this.sum() 静态解析到父类 0 次动态。收益：热点实例方法调用去 JS 跨界。"
   source: "src/qzvm/aot/emitter.js + test_aot.js"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T18:28:19
+  kind: note
+  summary: "字符串性能定位（2026-10-13）：修 qzs_numstr 负数 bug（无符号 div/rem → -42 产 '18446744073709551574'；改按符号取绝对值+i32 快路径）与 wasm-encoder OP 表缺 6 个 i64 比较 opcode（i64_gt_s/gt_u/le_s/le_u/ge_s/ge_u 0x55-0x5A；emit undefined → 0x00 unreachable 字节，静默地雷）。关键结论：字符串拼接热路径（s=s+x）在 WAMR AOT 下比同字节码在 node(V8) 慢 ~12x（400k 次 1 字节追加：WAMR ~75ms / V8 ~6.3ms / QuickJS 解释器 ~44ms）——非 emitter 结构问题。手写等价 wasm（原地 append）在 WAMR 下 ~3ns/次，故慢因在 WAMR AOT 对 emitter 产物（嵌套 block + 33 个 local + guarded 分支）的 codegen 质量。emitter 侧尝试均无实测收益：跳过运行时 isStr 检查（编译期类型追踪）、内联 append、memory.copy 替代 memcpy、精简 _emitIsHandle（11→7 指令）——A/B 多次取中位显示全在噪声内（o1 中位：HEAD 73.4ms vs 改后 75.4ms）。故回退编译期类型追踪（零收益的 ~90 行复杂度，YAGNI），仅保留真 bug 修复 + numstr i32 快路径 + memcpy 8 字节块。"
+  source: "src/qzvm/aot/{emitter.js,wasm-encoder.js,test_aot.js} + node/qzjs AOT 实测"
   affects: [aot-experiment-verification]

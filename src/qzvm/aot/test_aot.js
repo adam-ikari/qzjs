@@ -71,6 +71,7 @@ async function runTagged() {
     qz.bindMem(instance.exports.memory);
     if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
     const e = instance.exports;
+    qz.bindClosures(instance.exports, r.lamMeta);
     const call = (n, a) => {
         const m = r.funcMeta.find(f => f.name === n);
         const conv = m.mode === "num" ? a : a.map(x => qz._fromJS(x));
@@ -82,6 +83,13 @@ async function runTagged() {
     check("mix.objWork(5)", call("objWork", [5]), 40);
     check("mix.bigAcc(3000)", call("bigAcc", [3000]), 3000000000000);   // 3e12 超 32 位：NaN-box 53 位精确
     check("mix.arrWork(3)", call("arrWork", [3]), 6);   // [1,2]+push0,1,2 → [1,2,0,1,2]; pop=2; s=4 → 6
+    // 数组方法（宿主派发）：split/map/filter/reduce 经 closure_call；句柄别名保活
+    check("mix.arrMethods()", call("arrMethods", []), 25);
+    check("mix.arrAlias()", call("arrAlias", []), 303);
+    check("mix.splitIndex()", call("splitIndex", []), "z3");
+    check("mix.literals()", call("literals", []), 5);       // null/undefined/true/false 字面量
+    check("mix.arrLengthSet()", call("arrLengthSet", []), 112);  // a.length= 截断/扩容
+    check("mix.negNumStr()", call("negNumStr", []), "-42|-7|5000000000");  // numstr 负数/大数
     check("除法(7/2)", qz._toJS(qz.div(qz._fromJS(7), qz._fromJS(2))), 3.5);
     check("mix.tryWork()", call("tryWork", []), 1007);   // 0+1+2 +4(throw"stop".length) +1000
     // 字符串：wasm 内表示（0x7FFA 句柄 + data 段字面量 + 原地 append）

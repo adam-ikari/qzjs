@@ -46,6 +46,7 @@ const OP = {
     i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_s: 0x48, i32_lt_u: 0x49,
     i32_gt_s: 0x4a, i32_gt_u: 0x4b, i32_le_s: 0x4c, i32_le_u: 0x4d, i32_ge_s: 0x4e, i32_ge_u: 0x4f,
     i64_eqz: 0x50, i64_eq: 0x51, i64_ne: 0x52, i64_lt_s: 0x53, i64_lt_u: 0x54,
+    i64_gt_s: 0x55, i64_gt_u: 0x56, i64_le_s: 0x57, i64_le_u: 0x58, i64_ge_s: 0x59, i64_ge_u: 0x5a,
     i32_load: 0x28, i64_load: 0x29, f64_load: 0x2b, i32_load8_u: 0x2d,
     i32_store: 0x36, i64_store: 0x37, f64_store: 0x39, i32_store8: 0x3a, i64_store32: 0x3e,
     f64_eq: 0x61, f64_ne: 0x62, f64_lt: 0x63, f64_gt: 0x64, f64_le: 0x65, f64_ge: 0x66,
@@ -155,6 +156,7 @@ class Module {
     f64Add() { this._emit(OP.f64_add); } f64Sub() { this._emit(OP.f64_sub); } f64Mul() { this._emit(OP.f64_mul); } f64Div() { this._emit(OP.f64_div); }
     i32Eqz() { this._emit(OP.i32_eqz); }
     i32Eq() { this._emit(OP.i32_eq); } i32Ne() { this._emit(OP.i32_ne); } i32LtS() { this._emit(OP.i32_lt_s); } i32GtS() { this._emit(OP.i32_gt_s); } i32LeS() { this._emit(OP.i32_le_s); } i32GeS() { this._emit(OP.i32_ge_s); }
+    i32LtU() { this._emit(OP.i32_lt_u); } i32GtU() { this._emit(OP.i32_gt_u); } i32LeU() { this._emit(OP.i32_le_u); } i32GeU() { this._emit(OP.i32_ge_u); }
     f64Eq() { this._emit(OP.f64_eq); } f64Lt() { this._emit(OP.f64_lt); } f64Gt() { this._emit(OP.f64_gt); }
     f64Le() { this._emit(OP.f64_le); } f64Ge() { this._emit(OP.f64_ge); } f64Ne() { this._emit(OP.f64_ne); }
     f64Neg() { this._emit(OP.f64_neg); } f64Max() { this._emit(OP.f64_max); } f64Trunc() { this._emit(OP.f64_trunc); } f64Floor() { this._emit(OP.f64_floor); }

@@ -51,7 +51,18 @@ function makeQzvm(strings) {
     const len = dv[off] | (dv[off+1] << 8) | (dv[off+2] << 16) | (dv[off+3] << 24);
     return _utf8(dv, off + 4, off + 4 + len);
   };
-  const toJS = (b) => (isStrH(b) ? strRead(b) : (isH(b) ? handles[idxOf(b)] : bitsToNum(b)));
+  const isArrH = (b) => (BigInt(b) >> 48n) === 0x7ff8n;
+  // wasm 原生数组（0x7FF8）：header[0]=len，header[2]=dataOff，data = i64×len（元素解引用递归）。
+  const arrRead = (b) => {
+    const off = Number(BigInt(b) & MASK32);
+    const dv = new DataView(mem.buffer);
+    const len = dv.getInt32(off, true);
+    const dataOff = dv.getInt32(off + 8, true);
+    const out = new Array(len);
+    for (let i = 0; i < len; i++) out[i] = toJS(dv.getBigInt64(dataOff + i * 8, true));
+    return out;
+  };
+  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : bitsToNum(b));
   const tagHandle = (x) => TAG | BigInt(handles.push(x) - 1);
   const box = (n) => numToBits(n);
   const bool = (b) => numToBits(b ? 1 : 0);
@@ -78,6 +89,97 @@ function makeQzvm(strings) {
     memU8[off+2] = (bytes.length >>> 16) & 0xff; memU8[off+3] = (bytes.length >>> 24) & 0xff;
     for (let i = 0; i < bytes.length; i++) memU8[off + 4 + i] = bytes[i];
     return (0x7ffan << 48n) | BigInt(off);
+  };
+  // JS 值 → 句柄位型（i64）。string→0x7FFA；number→f64 位型；array→wasm 原生数组(0x7FF8)；
+  // 其它→JS 句柄(0x7FF9)。wasm 侧可直接 .length/索引/push/pop 的只有 0x7FFA/0x7FF8。
+  const bitsOf = (e) => typeof e === "string" ? strWriteback(e)
+                     : typeof e === "number" ? numToBits(e)
+                     : typeof e === "boolean" ? numToBits(e ? 1 : 0)
+                     : Array.isArray(e) ? arrWriteback(e)
+                     : tagHandle(e);
+  // JS 数组 → wasm 原生数组（0x7FF8 布局：header 16B [len,cap,dataOff,pad] + data i64×N），
+  // 与 emitter 数组字面量一致。关键：使 split(…)/数组方法产出的数组在 wasm 侧可直接
+  // .length/索引/push/pop（此前返回 JS 句柄 0x7FF9，wasm 侧 .length 落到 str_len 读垃圾 → 静默返回 0）。
+  const arrWriteback = (js) => {
+    const N = js.length;
+    const start = bumpRef.value;
+    const dataOff = start + 16;
+    bumpRef.value = start + ((16 + N * 8 + 7) & ~7);
+    const dv = new DataView(mem.buffer);
+    dv.setInt32(start, N, true);
+    dv.setInt32(start + 4, N, true);
+    dv.setInt32(start + 8, dataOff, true);
+    dv.setInt32(start + 12, 0, true);
+    for (let i = 0; i < N; i++) dv.setBigInt64(dataOff + i * 8, BigInt.asIntN(64, bitsOf(js[i])), true);
+    return (0x7ff8n << 48n) | BigInt(start);
+  };
+  // 原地改写既有数组（保持句柄不变，支持别名/传参）：容量不足则换 data 块（同 push 语义）。
+  const arrSetInPlace = (recv, js) => {
+    const off = Number(BigInt(recv) & MASK32);
+    const dv = new DataView(mem.buffer);
+    let dataOff = dv.getInt32(off + 8, true);
+    let cap = dv.getInt32(off + 4, true);
+    const N = js.length;
+    if (N > cap) {
+      dataOff = bumpRef.value;
+      cap = N < 4 ? 4 : N * 2;
+      bumpRef.value += cap * 8;
+      dv.setInt32(off + 8, dataOff, true);
+      dv.setInt32(off + 4, cap, true);
+    }
+    dv.setInt32(off, N, true);
+    for (let i = 0; i < N; i++) dv.setBigInt64(dataOff + i * 8, BigInt.asIntN(64, bitsOf(js[i])), true);
+    return recv;
+  };
+  // 闭包调用：handle → 堆对象 [funcidx:i32][nCaps:i32][cell×N i64]。
+  // blk = off+8（cell 起点），按 lamMeta[funcidx]={name,n} 调 wasm 导出 __lam_N。
+  const closureCall = (handle, a0, a1, a2, a3) => {
+    const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
+    const funcidx = new DataView(mem.buffer).getUint32(off, true);   // 免 4 对齐（bump 偏移可非 4 倍数）
+    const meta = lamMeta && lamMeta[funcidx];
+    if (!meta) throw new Error("closure_call: 未知 funcidx " + funcidx);
+    const fn = exportsRef[meta.name];
+    const args = [off + 8, a0, a1, a2, a3].slice(0, 1 + meta.n);
+    return fn(...args);
+  };
+  // 数组方法（recv=0x7FF8 原生数组）。回调（map/filter/reduce/…）为闭包句柄，
+  // 经 closure_call(handle, v, i, arr) 调用 wasm 侧箭头函数。返回：number/bool→box、
+  // string→strWriteback、array→arrWriteback、null/undefined/其它→JS 句柄。
+  const doArrMethod = (recv, mid, a0, a1) => {
+    const name = strings[mid];
+    const arr = () => arrRead(recv);
+    const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? box(r ? 1 : 0)
+                     : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
+                     : Array.isArray(r) ? arrWriteback(r) : tagHandle(r);
+    const cbv = (h, v, i, acc) => toJS(closureCall(h, bitsOf(v), box(i), acc === undefined ? recv : acc));
+    let r;
+    switch (name) {
+      case "indexOf":     r = arr().indexOf(toJS(a0)); break;
+      case "lastIndexOf": r = arr().lastIndexOf(toJS(a0)); break;
+      case "includes":    r = arr().some(x => x === toJS(a0)); break;
+      case "slice":       r = arr().slice(toJS(a0), a1 === undefined ? undefined : toJS(a1)); break;
+      case "concat":      r = arr().concat(a0 === undefined ? [] : toJS(a0)); break;
+      case "join":        r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(a0 === undefined ? "," : String(toJS(a0))); break;
+      case "reverse":     r = arrSetInPlace(recv, arr().reverse()); return recv;
+      case "shift":       { const a = arr(); r = a.length ? a.shift() : undefined; arrSetInPlace(recv, a); return ret(r); }
+      case "unshift":     { const a = arr(); a.unshift(toJS(a0)); arrSetInPlace(recv, a); return box(a.length); }
+      case "map":         r = arr().map((v, i) => cbv(a0, v, i)); break;
+      case "filter":      r = arr().filter((v, i) => !!cbv(a0, v, i)); break;
+      case "reduce":      { const a = arr();
+                            const rc = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
+                            r = a1 !== undefined ? a.reduce((acc, v, i) => rc(acc, v, i), toJS(a1))
+                                                 : a.reduce((acc, v, i) => rc(acc, v, i)); break; }
+      case "forEach":     arr().forEach((v, i) => cbv(a0, v, i)); r = undefined; break;
+      case "find":        r = arr().find((v, i) => !!cbv(a0, v, i)); break;
+      case "findIndex":   r = arr().findIndex((v, i) => !!cbv(a0, v, i)); break;
+      case "some":        r = arr().some((v, i) => !!cbv(a0, v, i)); break;
+      case "every":       r = arr().every((v, i) => !!cbv(a0, v, i)); break;
+      case "sort":        r = arrSetInPlace(recv, arr().sort((x, y) => (a0 !== undefined ? toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv)) : (x > y) - (x < y)))); return recv;
+      case "splice":      { const a = arr(); const del = a.splice(toJS(a0), a1 === undefined ? a.length : toJS(a1)); arrSetInPlace(recv, a); r = del; break; }
+      case "fill":        { const a = arr(); a.fill(toJS(a0)); arrSetInPlace(recv, a); return recv; }
+      default: throw new Error("method_call: 数组无方法 " + name);
+    }
+    return ret(r);
   };
   const doStrMethod = (recv, mid, a0, a1) => {
     const s = toJS(recv);
@@ -109,9 +211,11 @@ function makeQzvm(strings) {
       default: throw new Error("未知字符串方法: " + name);
     }
     // 字符串 → 写回 wasm 堆（[len][utf8]），返回 0x7FFA 句柄（与热路径内存布局一致）；
-    // 数字（charCodeAt/indexOf/lastIndexOf）→ box；其它（split 返回数组）→ JS 句柄。
+    // 数字（charCodeAt/indexOf/lastIndexOf）→ box；数组（split）→ wasm 原生数组（0x7FF8，
+    // 使 .length/索引/push/pop 在 wasm 侧可用）；其它 → JS 句柄。
     if (typeof r === "string") return strWriteback(r);
     if (typeof r === "number") return box(r);
+    if (Array.isArray(r)) return arrWriteback(r);
     return tagHandle(r);
   };
   return {
@@ -154,10 +258,11 @@ function makeQzvm(strings) {
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
     // 字符串方法：recv + 方法名 id + 2 参（undefined 句柄 = 缺省）→ 结果字符串句柄。
     str_method: (recv, mid, a0, a1) => doStrMethod(recv, mid, a0, a1),
-    // 通用方法调用：字符串 → 同上；类实例（内存 [0]=__cls id）→ 沿继承链查
-    // classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
+    // 通用方法调用：字符串 → doStrMethod；数组(0x7FF8) → doArrMethod；类实例（内存 [0]=__cls id）
+    // → 沿继承链查 classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
     method_call: (recv, mid, a0, a1, a2, a3) => {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1);
+      if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1);
       const off = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
       const clsId = new Int32Array(mem.buffer, off, 1)[0];
       const name = strings[mid];
@@ -172,23 +277,34 @@ function makeQzvm(strings) {
       }
       throw new Error("method_call: 类 " + clsId + " 无方法 " + name);
     },
+    // 数组 .length= 赋值：截断或扩容（扩容量不足换 data 块，新槽补 undefined 句柄 0x7FF9|0）。
+    arr_set_len: (recv, n) => {
+      const off = Number(BigInt.asUintN(64, recv) & MASK32);
+      const want = Math.max(0, Math.trunc(toJS(n)));
+      const dv = new DataView(mem.buffer);
+      let dataOff = dv.getInt32(off + 8, true);
+      let cap = dv.getInt32(off + 4, true);
+      const oldLen = dv.getInt32(off, true);
+      if (want > cap) {
+        const newData = bumpRef.value;
+        const newCap = want * 2;
+        bumpRef.value += newCap * 8;
+        for (let i = 0; i < oldLen; i++) dv.setBigInt64(newData + i * 8, dv.getBigInt64(dataOff + i * 8, true), true);
+        dataOff = newData;
+        dv.setInt32(off + 8, dataOff, true);
+        dv.setInt32(off + 4, cap = newCap, true);
+      }
+      const undef = BigInt.asIntN(64, TAG);
+      for (let i = oldLen; i < want; i++) dv.setBigInt64(dataOff + i * 8, undef, true);   // 扩容槽补 undefined
+      dv.setInt32(off, want, true);
+      return numToBits(want);
+    },
     bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; },
     bindBump,
     // 供宿主检查用（不在 wasm import 面）
     _toJS: toJS, _fromJS: (x) => (typeof x === "number" ? numToBits(x) : tagHandle(x)),
     _handles: handles, _TAG: TAG,
-    // 闭包调用：handle → 堆对象 [funcidx:i32][nCaps:i32][cell×N i64]。
-    // blk = off+8（cell 起点），按 lamMeta[funcidx]={name,n} 调 wasm 导出 __lam_N。
-    closure_call: (handle, a0, a1, a2, a3) => {
-      const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
-      const u32 = new Uint32Array(mem.buffer, off, 2);
-      const funcidx = u32[0];
-      const meta = lamMeta && lamMeta[funcidx];
-      if (!meta) throw new Error("closure_call: 未知 funcidx " + funcidx);
-      const fn = exportsRef[meta.name];
-      const args = [off + 8, a0, a1, a2, a3].slice(0, 1 + meta.n);
-      return fn(...args);
-    },
+    closure_call: (handle, a0, a1, a2, a3) => closureCall(handle, a0, a1, a2, a3),
     bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
   };
 }

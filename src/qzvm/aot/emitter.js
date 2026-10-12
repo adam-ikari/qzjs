@@ -62,6 +62,9 @@ const QZ = {
   // 最多 4 参（缺省 undefined 句柄）。wasm 侧仅在静态可判定 owner 时直调，否则走此回退。
   // 类实例分配在 wasm 内联（bump，见 _emitNewCall）——不经宿主，故无对应 import。
   method_call: { params: ["i64", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
+  // wasm 侧仅用于 0x7FF8 数组；字符串/其它不适用。
+  arr_set_len: { params: ["i64", "i64"], results: ["i64"] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
 
@@ -787,12 +790,22 @@ const STR_BUMP = 128;                            // bump 堆起始（跳过 scra
 
 // 字符串 helper 函数（每模块一份，emitter call 调用）
 function emitStringHelpers(m) {
-    // qzs_memcpy(dest, src, n) 逐字节拷贝
+    // qzs_memcpy(dest, src, n)：先 8 字节块（i64.load/store，wasm 允许非对齐），尾字节。
+    // 逐字节版对每次 append 的小 n 太慢（真实上下文 ~178ns/byte）。
     m.declareFunc("qzs_memcpy", ["i32", "i32", "i32"], []);
     m.startBody("qzs_memcpy", ["i32", "i32", "i32"]);
     m.localGet(0); m.localSet(5);                        // dest → 5
     m.localGet(1); m.localSet(4);                        // src → 4
     m.localGet(2); m.localSet(3);                        // n → 3
+    // 8 字节块
+    m.block("void"); m.loop("void");
+    m.localGet(3); m.i32Const(8); m.i32LtU(); m.brIf(1);
+    m.localGet(5); m.localGet(4); m.i64Load(0, 0); m.i64Store(0, 0);
+    m.localGet(5); m.i32Const(8); m.i32Add(); m.localSet(5);
+    m.localGet(4); m.i32Const(8); m.i32Add(); m.localSet(4);
+    m.localGet(3); m.i32Const(8); m.i32Sub(); m.localSet(3);
+    m.br(0); m.end(); m.end();
+    // 尾字节
     m.block("void"); m.loop("void");
     m.localGet(3); m.i32Eqz(); m.brIf(1);
     m.localGet(5); m.localGet(4); m.i32Load8U(0, 0); m.i32Store8(0, 0);
@@ -802,28 +815,66 @@ function emitStringHelpers(m) {
     m.br(0); m.end(); m.end();
     m.endBody();
 
-    // qzs_numstr(dest:i32, n:i64) -> i32（写 [dest]=len, digits@dest+4；返回 dest）
-    // locals: 2=pos(i32), 3=nn(i64), 4=count(i32), 5=n(i64)
+    // qzs_numstr(dest:i32, n:i64) -> i32（写 [dest]=len:i32, digits@dest+4；返回 dest）
+    // locals: 2=pos(i32), 3=count(i32), 4=neg(i32), 5=mag32(i32), 6=nn64(i64)
+    // 小值(≤0xFFFFFFFF)走 i32 除法（硬件），大值回退 i64（软件 libcall，慢）。
     m.declareFunc("qzs_numstr", ["i32", "i64"], ["i32"]);
-    m.startBody("qzs_numstr", ["i32", "i64", "i32", "i64"]);
-    m.localGet(1); m.localSet(5);                       // n
-    m.i32Const(0); m.localSet(4);                       // count
-    m.localGet(5); m.localSet(3);                       // nn
-    m.block("void"); m.loop("void");
-    m.localGet(4); m.i32Const(1); m.i32Add(); m.localSet(4);
-    m.localGet(3); m.i64Const(10n); m.i64DivU(); m.localSet(3);
-    m.localGet(3); m.i64Eqz(); m.brIf(1);
-    m.br(0); m.end(); m.end();
-    // pos = dest + 4 + count
-    m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(4); m.i32Add(); m.localSet(2);
-    m.localGet(5); m.localSet(3);                       // nn = n
-    m.block("void"); m.loop("void");
-    m.localGet(2); m.i32Const(1); m.i32Sub(); m.localSet(2);
-    m.localGet(2); m.localGet(3); m.i64Const(10n); m.i64RemU(); m.i32WrapI64(); m.i32Const(0x30); m.i32Add(); m.i32Store8(0, 0);
-    m.localGet(3); m.i64Const(10n); m.i64DivU(); m.localSet(3);
-    m.localGet(3); m.i64Eqz(); m.brIf(1);
-    m.br(0); m.end(); m.end();
-    m.localGet(0); m.localGet(4); m.i32Store(0, 0);       // [dest]=len
+    m.startBody("qzs_numstr", ["i32", "i32", "i32", "i32", "i64"]);
+    // 符号：neg=0；若 n<0 则 neg=1、n=-n
+    m.i32Const(0); m.localSet(4);
+    m.localGet(1); m.i64Const(0n); m.i64LtS();
+    m.ifBlock("void");
+      m.i32Const(1); m.localSet(4);
+      m.i64Const(0n); m.localGet(1); m.i64Sub(); m.localSet(1);
+    m.end();
+    m.localGet(1); m.i64Const(0xffff_ffffn); m.i64LeU();
+    m.ifBlock("void");
+      // ---- i32 路径（硬件 div/rem）----
+      m.localGet(1); m.i32WrapI64(); m.localSet(5);          // mag32
+      m.i32Const(0); m.localSet(3);                          // count=0
+      m.block("void"); m.loop("void");
+        m.localGet(3); m.i32Const(1); m.i32Add(); m.localSet(3);
+        m.localGet(5); m.i32Const(10); m.i32DivU(); m.localSet(5);
+        m.localGet(5); m.i32Eqz(); m.brIf(1);
+        m.br(0); m.end(); m.end();
+      m.localGet(4); m.ifBlock("void");
+        m.localGet(3); m.i32Const(1); m.i32Add(); m.localSet(3);   // 负号占 1 位
+      m.end();
+      m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(3); m.i32Add(); m.localSet(2);  // pos
+      m.localGet(1); m.i32WrapI64(); m.localSet(5);          // refill mag32
+      m.block("void"); m.loop("void");
+        m.localGet(2); m.i32Const(1); m.i32Sub(); m.localSet(2);
+        m.localGet(2); m.localGet(5); m.i32Const(10); m.i32RemU(); m.i32Const(0x30); m.i32Add(); m.i32Store8(0, 0);
+        m.localGet(5); m.i32Const(10); m.i32DivU(); m.localSet(5);
+        m.localGet(5); m.i32Eqz(); m.brIf(1);
+        m.br(0); m.end(); m.end();
+    m.else_();
+      // ---- i64 路径 ----
+      m.localGet(1); m.localSet(6);                          // nn64 = |n|
+      m.i32Const(0); m.localSet(3);
+      m.block("void"); m.loop("void");
+        m.localGet(3); m.i32Const(1); m.i32Add(); m.localSet(3);
+        m.localGet(6); m.i64Const(10n); m.i64DivU(); m.localSet(6);
+        m.localGet(6); m.i64Eqz(); m.brIf(1);
+        m.br(0); m.end(); m.end();
+      m.localGet(4); m.ifBlock("void");
+        m.localGet(3); m.i32Const(1); m.i32Add(); m.localSet(3);
+      m.end();
+      m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(3); m.i32Add(); m.localSet(2);
+      m.localGet(1); m.localSet(6);
+      m.block("void"); m.loop("void");
+        m.localGet(2); m.i32Const(1); m.i32Sub(); m.localSet(2);
+        m.localGet(2); m.localGet(6); m.i64Const(10n); m.i64RemU(); m.i32WrapI64(); m.i32Const(0x30); m.i32Add(); m.i32Store8(0, 0);
+        m.localGet(6); m.i64Const(10n); m.i64DivU(); m.localSet(6);
+        m.localGet(6); m.i64Eqz(); m.brIf(1);
+        m.br(0); m.end(); m.end();
+    m.end();
+    // 负号
+    m.localGet(4); m.ifBlock("void");
+      m.localGet(2); m.i32Const(1); m.i32Sub(); m.localSet(2);
+      m.localGet(2); m.i32Const(0x2d); m.i32Store8(0, 0);
+    m.end();
+    m.localGet(0); m.localGet(3); m.i32Store(0, 0);       // [dest]=len
     m.localGet(0);
     m.endBody();
 
@@ -1195,6 +1246,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isStringLiteral(e)) { this._emitStrLitHandle(e.text); return; }
     if (ts.isNoSubstitutionTemplateLiteral(e)) { this._emitStrLitHandle(e.text); return; }
+    if (e.kind === ts.SyntaxKind.TrueKeyword) { this.m.i64ConstBits(...f64Bits(1)); return; }
+    if (e.kind === ts.SyntaxKind.FalseKeyword) { this.m.i64ConstBits(...f64Bits(0)); return; }
+    if (e.kind === ts.SyntaxKind.NullKeyword || ts.isIdentifier(e) && e.text === "undefined") {
+        this._emitUndefined(); return;                              // 0x7FF9|0：truthy 判偏移 0 → 假
+    }
     if (ts.isTemplateExpression(e)) {
         // `head${e1}lit1${e2}lit2…`：逐段 _emitConcat（栈 [a,b]→句柄）。空段字面量为空串。
         this._emitStrLitHandle(e.head.text);
@@ -1546,6 +1602,23 @@ Emitter.prototype._emitStoreProp = function (left) {
     M.i64Store(3, this._fieldIndex(left.name.text));
     M.localGet(this.scratch);                     // 赋值表达式返回所赋之值
 };
+// `.length=` 赋值：数组(0x7FF8) → qz.arr_set_len（宿主截断/扩容）；其余 → 普通字段存储
+// （POJO 恰有 length 字段）。返回所赋之值（JS 语义）。scratch=值, scratchA=接收者（皆 i64）。
+Emitter.prototype._emitStoreLength = function (left) {
+    const M = this.m;
+    M.localSet(this.scratch);                       // 值 → scratch（i64）
+    this.emitTaggedExpr(left.expression);           // 接收者
+    M.localSet(this.scratchA);
+    M.localGet(this.scratchA); M.i64Const(48n); M.i64ShrU();
+    M.i64Const(0x7ff8n); M.i64Eq();
+    M.ifBlock("void");
+    M.localGet(this.scratchA); M.localGet(this.scratch); M.call("qz.arr_set_len"); M.drop();   // 数组：宿主处理
+    M.else_();
+    M.localGet(this.scratchA); M.i32WrapI64();
+    M.localGet(this.scratch); M.i64Store(3, this._fieldIndex("length"));             // 非数组：字段
+    M.end();
+    M.localGet(this.scratch);                       // 赋值表达式返回所赋之值
+};
 Emitter.prototype._emitStoreElem = function (left) {
     const M = this.m;
     M.localSet(this.scratch);                     // 值 → scratch（i64）
@@ -1719,7 +1792,10 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
     if (op === ts.SyntaxKind.FirstAssignment) {
-        if (ts.isPropertyAccessExpression(e.left)) { this.emitTaggedExpr(e.right); this._emitStoreProp(e.left); return; }
+        if (ts.isPropertyAccessExpression(e.left)) {
+            if (e.left.name.text === "length") { this.emitTaggedExpr(e.right); this._emitStoreLength(e.left); return; }
+            this.emitTaggedExpr(e.right); this._emitStoreProp(e.left); return;
+        }
         if (ts.isElementAccessExpression(e.left)) { this.emitTaggedExpr(e.right); this._emitStoreElem(e.left); return; }
         const idx = this._local(e.left.text);
         this.emitTaggedExpr(e.right);
