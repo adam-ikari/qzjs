@@ -130,6 +130,9 @@ async function runClasses() {
     check("类.字段默认值+遮蔽", call("fieldRun"), 43);
     check("类.方法多参", call("argRun"), 7);
     check("类.合成ctor转发参", call("fwdRun"), "bit/3");
+    check("类.实例真值", call("truthyRun"), 5);           // 类实例句柄 tag 同 JS 句柄表：truthy 须按 tag 判，勿经 toJS
+    check("类.逻辑赋值动态化", call("andAssignRun"), 300);  // x &&= d 使 x 动态化 → 静态直调须作废（Dog 300 ≠ Animal 400）
+    check("类.嵌套实参", call("nestedArgRun"), 3520);      // 实参含方法调用：须走值栈，勿用固定暂存槽（self 被覆盖）
 }
 
 (async () => {

@@ -60,7 +60,7 @@ wat 仅作按需旁路中间产物，不进编译链路。
 - 32 位设备：`build.js --target <arch> --target-abi <abi>` 交叉编译 `.aot`（i386 实测通过），表示层/f64 语义不变 — 详见 `PORTABILITY_32BIT.md`
 - **字符串原生表示**：句柄 `0x7FFA`|offset，内存 `[len][utf8]`。字面量编译进 data 段（去重）；`s+x` 经 `qzs_append`（在 bump 顶则原地追加，否则新建拷贝）；数字→十进制 `qzs_numstr`（i64 div/rem）。a 数 + b 串回退 `qz.string_concat`。实测 `strWork(200000)`=80ms/1.08MB（真字节写 vs node V8 rope 10ms）
 - `qzvm` 20 符号（数组方法未覆盖）
-- **类**（tagged 路径）：`class`/`extends`/`super()`/字段默认值/方法/继承遮蔽；方法走 `qz.method_call` 动态分派（内存 `[0]=__cls` → `classMeta` 沿父链调 wasm 导出方法）。ctor 与方法统一 `self+4` 固定实参签名，独立方法最多 4 参。合成派生 ctor 转发全部参数。POJO 字面量字段与类字段共用一个全局字段表（`fieldMap`），实例 size 取全表最大偏移。num 快路径不支持 `new`（`funcMode` 自动降级 tagged）。
+- **类**（tagged 路径）：`class`/`extends`/`super()`/字段默认值/方法/继承遮蔽；方法经 `qz.method_call` 动态分派（内存 `[0]=__cls` → `classMeta` 沿父链调 wasm 导出方法）。**静态分派优化**：接收者静态精确可判时（`let/const x = new C(...)` 且 x 全程未被写、未被闭包捕获；或叶类内 `this`）沿父链解析方法 owner 后直调 `__m_<Owner>$<m>`，跳过 `qz.method_call` 跨界——仅限有返回值、非 setter 的普通方法。ctor 与方法统一 `self+4` 固定实参签名，独立方法最多 4 参。合成派生 ctor 转发全部参数。POJO 字面量字段与类字段共用一个全局字段表（`fieldMap`），实例 size 取全表最大偏移。num 快路径不支持 `new`（`funcMode` 自动降级 tagged）。
 - wasm 解释模式无意义，必须 AOT（wamrc）或 JIT
 
 ## 历史路线（已被取代并删除，见 git 历史）

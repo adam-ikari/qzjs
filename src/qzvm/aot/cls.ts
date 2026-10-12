@@ -6,6 +6,8 @@ class Animal {
     speak(): string { return this.name; }
     greet(): string { return "hi " + this.speak(); }
     add(a: number, b: number): number { return a + b; }
+    nameLen(): number { return this.name.length; }              // 读 this → 暴露 self 槽被覆盖
+    w(a: number, b: number): number { return this.legs * 100 + a * 10 + b; }
 }
 class Dog extends Animal {
     legs: number = 3;                       // 遮蔽父字段
@@ -33,4 +35,23 @@ function argRun(): number {
 function fwdRun(): string {
     const p = new Puppy("bit");             // 合成 ctor 转发参数 → 父 ctor 收到 name
     return p.tag();
+}
+
+// 回归：类实例真值判断（句柄 tag 与 JS 句柄表同 tag，toJS 会误判 falsy）
+function truthyRun(): number {
+    const d = new Dog("z");
+    if (d) return 5; else return 9;
+}
+// 回归：逻辑复合赋值使变量动态化 → 静态直调必须作废（Dog.legs=3 vs Animal.legs=4）
+function andAssignRun(): number {
+    const d = new Dog("d");
+    let x: any = new Animal("b");
+    x &&= d;
+    return x.w(0, 0);                        // 动态→Dog: 3*100=300；误静态→Animal: 400
+}
+// 回归：嵌套方法调用作实参（固定暂存槽覆盖 self → 接收者取错）
+function nestedArgRun(): number {
+    const d = new Dog("r");
+    const a = new Animal("q");
+    return a.w(d.w(1, 2), 0);                // d.w(1,2)=312; a.w(312,0)=4*100+3120=3520
 }

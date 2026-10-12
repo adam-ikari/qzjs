@@ -149,7 +149,16 @@ function makeQzvm(strings) {
     ge:   (a, b) => bool(toJS(a) >= toJS(b)),
     seq:  (a, b) => bool(toJS(a) === toJS(b)),
     sne:  (a, b) => bool(toJS(a) !== toJS(b)),
-    truthy: (v) => (toJS(v) ? 1 : 0),        // 裸 i32 布尔（wasm 条件直接消费）
+    // 真值判定：不经 toJS——类实例/POJO 句柄（0x7FF9|内存偏移）不在 JS handles 表中，
+    // 经 toJS 会取到 undefined 而误判 falsy。按 tag 直接判：undefined/null=0x7FF9|0 → 假；
+    // 对象/数组/非空字符串 → 真；其余按 f64 数值。
+    truthy: (v) => {
+      const u = BigInt.asUintN(64, v), hi = u >> 48n;
+      if (hi === TAG_HI) return Number(u & MASK32) !== 0 ? 1 : 0;   // 0x7FF9：偏移 0 = undefined/null
+      if (hi === STR_HI) return strRead(v).length ? 1 : 0;          // 0x7FFA：字符串
+      if (hi === 0x7ff8n) return 1;                                 // 0x7FF8：数组
+      return bitsToNum(v) ? 1 : 0;
+    },
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
     // 字符串方法：recv + 方法名 id + 2 参（undefined 句柄 = 缺省）→ 结果字符串句柄。
     str_method: (recv, mid, a0, a1) => doStrMethod(recv, mid, a0, a1),

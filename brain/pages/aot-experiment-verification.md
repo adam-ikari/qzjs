@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-12T09:34:58"
+updated: "2026-10-12T14:20:56"
 ---
 
 <!-- compiled_truth -->
@@ -288,4 +288,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: decision
   summary: "tagged wasm emitter 类支持落地（继承/super/字段默认值/方法动态分派）。类实例 = bump 分配内存 [0]=__cls(int32)，字段 i64 偏移表 _fieldIndex 与 POJO 共用全局 fieldMap（实例 size 取全表最大偏移）。ctor/方法统一 self+4 固定 5 参签名——原按实参个数变化导致 super()/跨签名调用 wasm 校验失败（类型不匹配）；独立方法上限 4 参。super() 在构造器内调父 ctor 后回写本类字段默认值（模拟 JS 派生字段初始化序）。合成派生 ctor 转发全部 self+4 参数槽（否则 new Puppy('bit') 丢参）。方法调用统一 qz.method_call(recv,mid,a0..a3)：qz 侧按 recv 类型派发，字符串→str_method，类实例→classMeta[clsId] 沿 parent 链查方法名调导出 __m_C$m。funcMode 遇 new 自动降级 tagged。glue 注入 classMeta + bindClasses；导出 memory/__bump 供 bindMem/bindBump。修两处既有缺陷：_emitFieldDefaults 缺 i32.wrap_i64（self 句柄直当 i32 地址）、qz.newobj bump 偏移未 8 字节对齐（Int32Array 视图抛 offset 非 4 倍数）。回归门 test_aot.js runClasses + cls.ts，ALL PASS。"
   source: "2026-10-13 qzvm/aot 类支持实测"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T14:20:56
+  kind: decision
+  summary: "AOT 类方法静态分派（faster dispatch）：识别静态精确接收者的方法调用，沿父链解析方法 owner 后直调导出 __m_<Owner>$<m>，跳过 qz.method_call 跨界。静态精确判据（保守，宁缺勿滥）：(1) 接收者标识符 xxx 由 `let/const x = new C(...)` 直赋，且 x 在全函数体内从未被赋值为其他值（含 for-of/in 绑定）也未出现在任何嵌套闭包内（闭包可延迟写）；(2) 叶类（无子类）方法体/构造器内的 this（new C 永不产 C 之外的实例，无跨类原型改写）。同名变量声明不同类型 → 整体不可判。仅直调「有返回值且非 setter」的普通方法；void/setter 语义与动态路径（动态恒返回 i64）不同，退回动态。实现：_computeStaticVars 按函数/方法体作用域计算，_mEnter/_mExit/emitFunc/_emitLambdaBody 全程保存恢复 _staticVars/_curClass；_staticRecvClass + _methodOwner + _classMethodMeta 解析。验证：cls.ts 回归全绿；探针 cls.ts 4 个调用点动态分派 4→2（子类未覆盖的虚方法仍动态，正确）；leaf.ts 叶类 this.sum() 静态解析到父类 0 次动态。收益：热点实例方法调用去 JS 跨界。"
+  source: "src/qzvm/aot/emitter.js + test_aot.js"
   affects: [aot-experiment-verification]

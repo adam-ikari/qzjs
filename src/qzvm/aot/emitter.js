@@ -82,10 +82,11 @@ class Emitter {
         this._classList = [];         // 按声明序的类（发射顺序稳定）
         // 字段名 → 字节偏移。槽 0 保留给类实例的 `__cls` 标记（类 id），用户字段从 8 起。
         this.fieldMap = new Map([["__cls", 0]]);
-        this._thisLocal = null;       // 方法体内 `this` 的 local 索引（i64 实例句柄）
         this._curClass = null;        // 当前正在发射的方法所属类（this 字段读写用）
-        this._pendingMethods = [];    // 已登记待发射的方法体（emitClassMethods 消费）
-        this._pendingLambdas = [];    // 已登记待发射体
+        this._curClassObj = null;     // 当前类元数据
+        this._staticVars = new Map(); // 变量名 → 类名：静态精确接收者（当前函数/方法体有效）
+        this._leafClasses = new Set();// 无子类的类：其方法/构造器内 `this` 静态精确
+        this._pendingLambdas = [];    // 已登记待发射的 lambda 体
     }
     _local(name) { return this.varMap.get(name); }
     // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
@@ -133,6 +134,84 @@ class Emitter {
         walk(lam.body);
         return out;
     }
+    // 静态接收者分析：返回 Map(变量名 → 类名)，仅收录静态类精确可判的变量——
+    // `let/const x = new C(...)` 且 x 在全函数体内从未被写、也未被任何嵌套闭包引用（保守）。
+    // 依据：new C 只会产出类 C 的实例（本编译器无跨类原型改写），故 x 的动态类恒为 C。
+    _computeStaticVars(body, paramNames) {
+        const declaredClass = new Map();   // 名字 → 类名（仅直接 new C 初始化）
+        // 作用域安全：同名被多处绑定（内层遮蔽/重复声明/与参数重名）→ 名字整体不可判。
+        const bound = new Set(paramNames || []), dup = new Set();
+        const addBind = (nm) => { if (bound.has(nm)) dup.add(nm); else bound.add(nm); };
+        const collectBinding = (bn) => {
+            if (ts.isIdentifier(bn)) addBind(bn.text);
+            else if (ts.isObjectBindingPattern(bn) || ts.isArrayBindingPattern(bn))
+                for (const el of bn.elements) if (ts.isBindingElement(el)) collectBinding(el.name);
+        };
+        const isNewIdent = (n) => ts.isNewExpression(n) && ts.isIdentifier(n.expression);
+        const walkDecl = (n) => {
+            if (ts.isVariableDeclaration(n)) {
+                collectBinding(n.name);
+                if (ts.isIdentifier(n.name) && n.initializer
+                    && isNewIdent(n.initializer) && this.classes.has(n.initializer.expression.text)) {
+                    const name = n.name.text, cls = n.initializer.expression.text;
+                    if (declaredClass.has(name) && declaredClass.get(name) !== cls) declaredClass.set(name, null);
+                    else declaredClass.set(name, cls);
+                }
+            }
+            ts.forEachChild(n, walkDecl);
+        };
+        walkDecl(body);
+        if (!declaredClass.size) return new Map();
+        // 有潜在写/捕获的名字 → 取消追踪。注意：compileTS 的 TS transformer 会重建节点，
+        // 不能依赖 child.parent 回链，故在遍历到写节点（赋值/自增/for-of）时主动取其目标。
+        const mutated = new Set();
+        const markNamesIn = (t) => {   // 收集子树内所有与追踪同名的标识符（含解构目标；多标不误）
+            if (ts.isIdentifier(t)) { if (declaredClass.has(t.text)) mutated.add(t.text); return; }
+            ts.forEachChild(t, markNamesIn);
+        };
+        const ASSIGN_LO = ts.SyntaxKind.FirstAssignment, ASSIGN_HI = ts.SyntaxKind.LastAssignment;
+        const walkUse = (n, nest) => {
+            const deeper = nest || ts.isArrowFunction(n) || ts.isFunctionExpression(n);
+            if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ASSIGN_LO && n.operatorToken.kind <= ASSIGN_HI) {
+                markNamesIn(n.left);
+            } else if (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) {
+                markNamesIn(n.operand);
+            } else if ((ts.isForOfStatement(n) || ts.isForInStatement(n))) {
+                markNamesIn(n.initializer);
+            } else if (ts.isIdentifier(n) && deeper && declaredClass.has(n.text)) {
+                mutated.add(n.text);   // 出现在嵌套闭包内 → 保守作废
+            }
+            ts.forEachChild(n, (c) => walkUse(c, deeper));
+        };
+        walkUse(body, false);
+        const out = new Map();
+        for (const [name, cls] of declaredClass) if (cls && !mutated.has(name) && !dup.has(name)) out.set(name, cls);
+        return out;
+    }
+    // 沿继承链解析方法所属类：从 cname 起向上找第一个声明了 method 的类；无则 null。
+    _methodOwner(cname, method) {
+        let cur = cname;
+        while (cur) {
+            const c = this.classes.get(cur);
+            if (!c) return null;
+            for (const m of c.methods) if (m.name === method) return cur;
+            cur = c.parent && this.classes.has(c.parent) ? c.parent : null;
+        }
+        return null;
+    }
+    // 接收者静态类：标识符 → _staticVars；叶类方法体/构造器内的 `this` → _curClass。否则 null。
+    _staticRecvClass(rx) {
+        if (ts.isIdentifier(rx) && this._staticVars && this._staticVars.has(rx.text)) return this._staticVars.get(rx.text);
+        if (rx.kind === ts.SyntaxKind.ThisKeyword && this._curClass && this._leafClasses.has(this._curClass)) return this._curClass;
+        return null;
+    }
+    // owner 类声明的 method 元数据（含 accessor）；无则 null。
+    _classMethodMeta(cname, method) {
+        const c = this.classes.get(cname);
+        if (!c) return null;
+        for (const m of c.methods) if (m.name === method) return m;
+        return null;
+    }
     // 给定自由名，是否本函数可见（在 varMap / capMap 中）——决定闭包创建时是否真的捕获。
     _isCapturable(name) { return this.varMap.has(name) || this.capMap.has(name); }
     // 闭包体内的捕获读：name 在 capMap → [blk + slot*8]；否则本函数局部（经 varMap）。
@@ -156,7 +235,7 @@ class Emitter {
     }
 
     emitFunc(f) {
-        const savedCurClass = this._curClass, savedCapActive = this.capListActive;
+        const savedCurClass = this._curClass, savedCapActive = this.capListActive, savedStatic = this._staticVars;
         this._curClass = undefined; this.capListActive = false;
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this.mode = funcMode(f);
@@ -199,6 +278,7 @@ class Emitter {
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
         this.depth = 0; this.labels = [];
+        this._staticVars = this.mode === "tagged" ? this._computeStaticVars(f.body, f.parameters.map(p => p.name.text)) : new Map();
         if (this.mode === "tagged") this.emitTaggedBlock(f.body);
         else this.emitBlock(f.body);
         // 末尾非 return 且函数有返回值 → fallthrough 路径缺值（穷尽 switch/if-else 全 return）。
@@ -208,7 +288,7 @@ class Emitter {
         this.m.endBody();
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
-        this._curClass = savedCurClass; this.capListActive = savedCapActive;
+        this._curClass = savedCurClass; this.capListActive = savedCapActive; this._staticVars = savedStatic;
     }
 
 
@@ -233,7 +313,7 @@ class Emitter {
     _emitLambdaBody({ lam, fname, params, caps }) {
         const M = this.m;
         const savedMap = this.varMap, savedCap = this.capMap, savedBlk = this.blkLocal;
-        const savedMode = this.mode, savedDepth = this.depth;
+        const savedMode = this.mode, savedDepth = this.depth, savedStatic = this._staticVars;
         this.mode = "tagged";
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
         const locals = this._collectLocals(lam.body);
@@ -270,6 +350,7 @@ class Emitter {
         const localNames = this.m.debug ? ["blk"].concat(params).concat(locals) : null;
         M.startBody(fname, bodyLocals, localNames);
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
+        this._staticVars = this._computeStaticVars(lam.body, params);
         // 箭头表达式体：表达式即返回值；块体：语句
         if (ts.isExpression(lam.body)) { this.emitTaggedExpr(lam.body); M.return_(); }
         else this.emitTaggedBlock(lam.body);
@@ -277,7 +358,7 @@ class Emitter {
         if (!(last && ts.isReturnStatement(last))) M.unreachable();
         M.endBody();
         this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
-        this.mode = savedMode; this.depth = savedDepth;
+        this.mode = savedMode; this.depth = savedDepth; this._staticVars = savedStatic;
     }
     // ---------- 语句 ----------
     // ---------- 类（method lifting）----------
@@ -316,6 +397,12 @@ class Emitter {
         for (const cname of this._classList) {
             const c = this.classes.get(cname);
             for (const f of c.fields) this._fieldIndex(f.name);
+        }
+        // 叶类 = 无子类的类。其方法/构造器内 `this` 静态类精确（new C 永不产 C 之外的实例）。
+        this._leafClasses = new Set(this._classList);
+        for (const cname of this._classList) {
+            const c = this.classes.get(cname);
+            if (c.parent && this.classes.has(c.parent)) this._leafClasses.delete(c.parent);
         }
         for (const cname of this._classList) {
             const c = this.classes.get(cname);
@@ -383,7 +470,7 @@ class Emitter {
     _mEnter(fname, cname, params, body, isVoid) {
         this._mSaved = {
             mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
-            blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj,
+            blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars,
         };
         this.mode = "tagged";
         const nParams = 1 + params.length;
@@ -419,12 +506,14 @@ class Emitter {
         this.m.startBody(fname, bodyLocals, localNames);
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
         this._curClass = cname;
+        this._staticVars = this._computeStaticVars(body, params);
     }
     _mExit() {
         const s = this._mSaved;
         this.mode = s.mode; this.varMap = s.varMap; this.capMap = s.capMap; this.capList = s.capList; this.capListActive = s.capListActive;
         this.blkLocal = s.blkLocal; this.depth = s.depth; this.labels = s.labels;
         this._labelStack = s.labelStack; this._curClass = s.curClass; this._curClassObj = s.curClassObj;
+        this._staticVars = s.staticVars;
     }
     emitBlock(node) { for (const s of node.statements) this.emitStmt(s); }
 
@@ -1562,14 +1651,29 @@ Emitter.prototype._emitSuperCallForward = function (c) {
 Emitter.prototype._emitDynMethod = function (rx, method, args) {
     const M = this.m;
     if (args.length > 4) throw new Error("[tagged] 方法最多 4 参");
-    this.emitTaggedExpr(rx); M.localSet(this.scratch);      // recv
+    // 静态精确接收者：沿父链解析方法 owner 后直调导出 __m_<Owner>$<m>，跳过 qz.method_call。
+    const cls = this._staticRecvClass(rx);
+    if (cls) {
+        const owner = this._methodOwner(cls, method);
+        const meta = owner && this._classMethodMeta(owner, method);
+        // 仅直调有返回值、非 setter 的普通方法；void/setter 语义与动态路径不同（动态返回 i64），退回。
+        const voidRet = meta && !!meta.node.type && meta.node.type.kind === ts.SyntaxKind.VoidKeyword;
+        if (owner && meta && meta.accessor !== "set" && !voidRet) {
+            // 纯值栈：self + 4 参按形参序压栈（实参可为嵌套调用，天然按深度隔离，无需暂存槽）。
+            this.emitTaggedExpr(rx);                                // self
+            for (let i = 0; i < 4; i++) {
+                if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+            }
+            M.call(methName(owner, method));
+            return;
+        }
+    }
+    // 动态：压 recv + mid + 4 参入值栈（实参可为嵌套调用，无暂存槽覆盖问题）。
+    this.emitTaggedExpr(rx);
+    M.i32Const(this._strId(method));
     for (let i = 0; i < 4; i++) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
-        M.localSet(this.cloArgs[i]);
     }
-    M.localGet(this.scratch);
-    M.i32Const(this._strId(method));
-    for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);
     M.call("qz.method_call");
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
