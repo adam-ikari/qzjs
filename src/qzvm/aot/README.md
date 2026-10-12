@@ -42,9 +42,9 @@ cd build/aot && qzjs <name>.glue.js
 
 |负载|AOT(qzjs)|解释器(qzjs)|原生 V8(node)|AOT 比解释器|AOT 比 V8|
 |---|---|---|---|---|---|
-|numWork(3000) 纯数值递归|366ms|49.3s|742ms|**快 ~135x**|**快 ~2.0x**|
-|objWork(30000) 对象循环|1.2ms|49ms|0.29ms|快 ~41x|慢 ~4.1x|
-|strWork(8000) 字符串拼接|30ms|5ms|0.12ms|慢 ~6x|慢 ~250x|
+|numWork(3000) 纯数值递归|361ms|48.4s|758ms|**快 ~134x**|**快 ~2.1x**|
+|objWork(30000) 对象循环|1.3ms|50ms|0.11–0.36ms|快 ~38x|慢 ~4–12x|
+|strWork(8000) 字符串拼接|30ms|5ms|0.12ms|慢 ~6x|慢 ~248x|
 
 - **numWork（数值热点）AOT 超 V8 ~2x**：wamrc LLVM O3 + 零 JIT 预热 + 裸 f64 原生指令。
 - **objWork/strWork AOT 慢于 V8**：V8 隐藏类（IC）+ rope 惰性拼接碾压 wasm bump 分配/逐字节写。
