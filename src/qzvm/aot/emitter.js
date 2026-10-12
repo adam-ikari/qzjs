@@ -732,6 +732,26 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isIdentifier(e)) { const idx = this._local(e.text); if (idx === undefined) throw new Error("未定义变量: " + e.text); this.m.localGet(idx); return; }
     if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
+    if (ts.isTypeOfExpression(e)) {
+        // 内联分类：字符串句柄(hi16=0x7FFA)→"string"；数组/对象(0x7FF8/0x7FF9)→"object"；其余→"number"。
+        const M = this.m;
+        this.emitTaggedExpr(e.expression); M.localSet(this.scratch);
+        M.block("i64");
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+        M.ifBlock("i64");
+        this._emitStrLitHandle("string");
+        M.else_();
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff8n); M.i64Eq();
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
+        M.i32Or();
+        M.ifBlock("i64");
+        this._emitStrLitHandle("object");
+        M.else_();
+        this._emitStrLitHandle("number");
+        M.end(); M.end();
+        M.end();
+        return;
+    }
     if (ts.isObjectLiteralExpression(e)) {
         // POJO：字段驻留 wasm 线性内存（零跨界读写）。句柄 = box(高16位0x7FF9 | offset)。字段宽 8 字节（i64）。
         if (e.properties.some(p => !ts.isPropertyAssignment(p))) {
