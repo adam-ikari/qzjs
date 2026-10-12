@@ -60,8 +60,7 @@ const QZ = {
   // qz 侧按 recv 类型派发：字符串 → str_method 逻辑；类实例（内存 [0]=__cls≠0）→
   // 按 classMeta[clsId].methods[mid]（含继承链）调 wasm 导出 __m_<C>$<m>(recv, a0..a3)。
   // 最多 4 参（缺省 undefined 句柄）。wasm 侧仅在静态可判定 owner 时直调，否则走此回退。
-  // 类实例分配：newobj(sizeBytes:i32, clsId:i32) → 实例句柄(i64)。bump 分配，写 [0]=clsId。
-  newobj: { params: ["i32", "i32"], results: ["i64"] },
+  // 类实例分配在 wasm 内联（bump，见 _emitNewCall）——不经宿主，故无对应 import。
   method_call: { params: ["i64", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
@@ -268,12 +267,13 @@ class Emitter {
         this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
+        this.scratchObj = this.cloArgs[3] + 1;                 // ++/-- 成员接收者句柄临时（i64）
         this.cloSlotsLen = cloSlots.length;
         // debug：局部名数组（参数在前、局部在后，与 wasm local 序号一致）；仅命名可见变量，合成槽留空。
         const localNames = this.m.debug
             ? f.parameters.map(p => p.name.text).concat(locals)   // locals 是名字数组
             : null;
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots), localNames);
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]), localNames);
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -345,8 +345,9 @@ class Emitter {
         this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
+        this.scratchObj = this.cloArgs[3] + 1;
         this.cloSlotsLen = cloSlots.length;
-        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots);
+        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]);
         const localNames = this.m.debug ? ["blk"].concat(params).concat(locals) : null;
         M.startBody(fname, bodyLocals, localNames);
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
@@ -422,7 +423,7 @@ class Emitter {
             for (const mth of c.methods) this._emitMethodBody(cname, mth);
         }
     }
-    // 构造器 __m_<C>$ctor(self:i64, a0..a3:i64) → 无返回：self 由调用方 _emitNew 经 qz.newobj
+    // 构造器 __m_<C>$ctor(self:i64, a0..a3:i64) → 无返回：self 由调用方 _emitNewCall 内联 bump 分配后传入
     _emitCtorBody(c, ctor) {
         const M = this.m;
         const realParams = ctor ? ctor.parameters.map(p => p.name.text) : [];
@@ -499,9 +500,10 @@ class Emitter {
         this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
+        this.scratchObj = this.cloArgs[3] + 1;
         this.cloSlotsLen = cloSlots.length;
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
-            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots);
+            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]);
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
@@ -1363,6 +1365,22 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isPrefixUnaryExpression(e)) {
         if (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken) {
+            const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
+            if (ts.isPropertyAccessExpression(e.operand)) {
+                // ++this.n / --obj.a：接收者求值一次 → 读字段 ± 1 → 写回；结果=新值
+                const off = this._fieldIndex(e.operand.name.text);
+                this.emitTaggedExpr(e.operand.expression);
+                this.m.localSet(this.scratchObj);
+                this.m.localGet(this.scratchObj); this.m.i32WrapI64(); this.m.i64Load(3, off);
+                this.m.i64ConstBits(...f64Bits(1));
+                this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
+                this.m.localSet(this.scratch);
+                this.m.localGet(this.scratchObj); this.m.i32WrapI64();
+                this.m.localGet(this.scratch);
+                this.m.i64Store(3, off);
+                this.m.localGet(this.scratch);   // 表达式结果=新值
+                return;
+            }
             // ++x / --x：x = x ± 1，返回新值
             const idx = this._local(e.operand.text);
             this.m.localGet(idx);
@@ -1382,11 +1400,28 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isPostfixUnaryExpression(e)) {                                                    // x++ / x--（guard 命中走原生 f64）
+        const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
+        if (ts.isPropertyAccessExpression(e.operand)) {
+            // this.n++ / obj.a--：接收者求值一次 → 旧值留栈为结果，字段写回 ±1
+            const off = this._fieldIndex(e.operand.name.text);
+            this.emitTaggedExpr(e.operand.expression);
+            this.m.localSet(this.scratchObj);
+            this.m.localGet(this.scratchObj); this.m.i32WrapI64(); this.m.i64Load(3, off);
+            this.m.localSet(this.scratch);          // scratch=旧值（表达式结果）
+            this.m.localGet(this.scratch);
+            this.m.i64ConstBits(...f64Bits(1));
+            this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
+            this.m.localSet(this.scratchB);         // scratchB=新值
+            this.m.localGet(this.scratchObj); this.m.i32WrapI64();
+            this.m.localGet(this.scratchB);
+            this.m.i64Store(3, off);
+            this.m.localGet(this.scratch);          // 留旧值
+            return;
+        }
         const idx = this._local(e.operand.text);
         this.m.localGet(idx); this.m.localSet(this.scratch);    // scratch=旧值（表达式结果）
         this.m.localGet(idx);
         this.m.i64ConstBits(...f64Bits(1));
-        const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
         this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
         this.m.localSet(idx);
         this.m.localGet(this.scratch);                          // 留旧值
@@ -1615,10 +1650,15 @@ Emitter.prototype._emitNewCall = function (e) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
         M.localSet(this.cloArgs[i]);
     }
-    M.i32Const(this._instSize());
-    M.i32Const(c.id);
-    M.call("qz.newobj");                                    // → self 句柄(i64)
-    M.localSet(this.scratch);
+    // 内联 bump 分配（与 POJO/数组同款）：避免 qz.newobj 跨界 + BigInt 装箱（构造热路径）。
+    // 布局：offset 8 对齐，[off]=clsId(i32)，字段槽由 ctor 写。
+    M.globalGet(0); M.i32Const(7); M.i32Add(); M.i32Const(-8); M.i32And();   // off=(bump+7)&~7
+    M.localSet(this.sT[0]);
+    M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Add(); M.globalSet(0);   // bump=off+size
+    M.localGet(this.sT[0]);
+    M.i32Const(c.id); M.i32Store(2, 0);                     // [off]=clsId
+    M.localGet(this.sT[0]); M.i64ExtendI32U(); M.i64ConstBits(0, 0x7ff9); M.i64Or();
+    M.localSet(this.scratch);                               // self 句柄
     M.localGet(this.scratch);
     for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);
     M.call(ctorName(cname));                                // 写 __cls、字段、执行体

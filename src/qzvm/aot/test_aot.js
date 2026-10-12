@@ -133,6 +133,11 @@ async function runClasses() {
     check("类.实例真值", call("truthyRun"), 5);           // 类实例句柄 tag 同 JS 句柄表：truthy 须按 tag 判，勿经 toJS
     check("类.逻辑赋值动态化", call("andAssignRun"), 300);  // x &&= d 使 x 动态化 → 静态直调须作废（Dog 300 ≠ Animal 400）
     check("类.嵌套实参", call("nestedArgRun"), 3520);      // 实参含方法调用：须走值栈，勿用固定暂存槽（self 被覆盖）
+    check("类.前置自增字段", call("preFieldInc"), 4043);   // ++d.legs：结果=新值，字段更新
+    check("类.后置自增字段", call("postFieldInc"), 3004);  // d.legs++：结果=旧值，字段更新
+    check("类.前置自减字段", call("preFieldDec"), 202);
+    check("类.后置自减字段", call("postFieldDec"), 302);
+    check("类.字段自增循环", call("fieldIncLoop"), 2508);
 }
 
 (async () => {

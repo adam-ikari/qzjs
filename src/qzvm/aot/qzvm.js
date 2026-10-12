@@ -79,13 +79,6 @@ function makeQzvm(strings) {
     for (let i = 0; i < bytes.length; i++) memU8[off + 4 + i] = bytes[i];
     return (0x7ffan << 48n) | BigInt(off);
   };
-  // 类实例分配：bump 分配 sizeBytes 并写 [0]=clsId（wasm 构造器随后写字段）。
-  const newobj = (sizeBytes, clsId) => {
-    const off = (bumpRef.value + 7) & ~7;
-    bumpRef.value = off + ((sizeBytes + 7) & ~7);
-    new Int32Array(mem.buffer, off, 1)[0] = clsId;
-    return (0x7ff9n << 48n) | BigInt(off);
-  };
   const doStrMethod = (recv, mid, a0, a1) => {
     const s = toJS(recv);
     const arg = (x) => toJS(x);
@@ -124,7 +117,6 @@ function makeQzvm(strings) {
   return {
     // POJO 分配：返回 wasm 内存偏移（裸 i32），字段由 wasm i64.store 写入（零跨界）
     alloc: (nbytes) => { const off = bump; bump += nbytes; return off; },
-    newobj,
     bindMem,
     object_new: () => tagHandle({}),
     object_set: (o, k, v) => { handles[idxOf(o)][strings[k]] = toJS(v); },

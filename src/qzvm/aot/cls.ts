@@ -55,3 +55,32 @@ function nestedArgRun(): number {
     const a = new Animal("q");
     return a.w(d.w(1, 2), 0);                // d.w(1,2)=312; a.w(312,0)=4*100+3120=3520
 }
+
+// 回归：成员自增/自减（++this.n / this.n--）——原只认标识符操作数 → NaN/undefined
+function preFieldInc(): number {
+    const d = new Dog("p");
+    const before = d.legs;                   // 3
+    const a = ++d.legs;                      // 4
+    return a * 1000 + d.legs * 10 + before;  // 4*1000 + 4*10 + 3 = 4043
+}
+function postFieldInc(): number {
+    const d = new Dog("q");
+    const a = d.legs++;                      // 旧值 3
+    return a * 1000 + d.legs;                // 3*1000 + 4 = 3004
+}
+function preFieldDec(): number {
+    const d = new Dog("r");
+    const a = --d.legs;                      // 2
+    return a * 100 + d.legs;                 // 2*100 + 2 = 202
+}
+function postFieldDec(): number {
+    const d = new Dog("s");
+    const a = d.legs--;                      // 旧值 3
+    return a * 100 + d.legs;                 // 3*100 + 2 = 302
+}
+function fieldIncLoop(): number {
+    const d = new Dog("t");                  // legs=3
+    let s = 0;
+    for (let i = 0; i < 5; i++) s += d.legs++;  // 3+4+5+6+7=25 → legs=8
+    return s * 100 + d.legs;                 // 2508
+}
