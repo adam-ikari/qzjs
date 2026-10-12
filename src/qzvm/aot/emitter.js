@@ -758,13 +758,16 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             throw new Error("[tagged] 对象字面量只支持 { x: v } 形式");
         }
         const NF = e.properties.length;
-        // 内联 bump：global0 += NF*8; offset = new_bump - NF*8（零跨界）
+        // 字段偏移用全局 fieldMap（名→固定偏移，POJO 隐式形状）：与读取端 _fieldIndex 一致。
+        // 分配 size 按本对象用到的最大字段索引 +1（跨字面量共享字段名 → 同偏移；各对象独立 bump 区）。
+        const fIdx = e.properties.map(p => this._fieldIndex(p.name.text));
+        const size = (Math.max(...fIdx) + 1) * 8;
         this.m.globalGet(0);
-        this.m.i32Const(NF * 8);
+        this.m.i32Const(size);
         this.m.i32Add();
         this.m.globalSet(0);
         this.m.globalGet(0);
-        this.m.i32Const(NF * 8);
+        this.m.i32Const(size);
         this.m.i32Sub();                            // → offset(i32)
         this.m.i64ExtendI32U(); this.m.i64ConstBits(0, 0x7ff9); this.m.i64Or();   // 句柄 = 高16位0x7FF9 | offset(低32)
         this.m.localSet(this.scratch);              // scratch 保存句柄（i64）
@@ -772,7 +775,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.localGet(this.scratch);          // [h]
             this.m.i32WrapI64();                                            // 低32位=offset
             this.emitTaggedExpr(e.properties[i].initializer);              // [off(i32), val(i64)]
-            this.m.i64Store(3, i * 8);          // memory[off + i*8] = val
+            this.m.i64Store(3, fIdx[i]);            // memory[off + idx] = val（fIdx 已是字节偏移）
         }
         this.m.localGet(this.scratch); return;
     }
@@ -982,9 +985,33 @@ Emitter.prototype.emitTaggedRem = function () {
     M.i64ReinterpretF64();
     M.end();
 };
+// 属性/索引赋值：值已在栈（i64）。注意会重新求值 receiver（读+写各一次；无副作用表达式安全）。
+Emitter.prototype._emitStoreProp = function (left) {
+    const M = this.m;
+    M.localSet(this.scratch);                     // 值 → scratch（i64）
+    this.emitTaggedExpr(left.expression);         // obj 句柄
+    M.i32WrapI64();                               // 低32位 = offset
+    M.localGet(this.scratch);
+    M.i64Store(3, this._fieldIndex(left.name.text));
+    M.localGet(this.scratch);                     // 赋值表达式返回所赋之值
+};
+Emitter.prototype._emitStoreElem = function (left) {
+    const M = this.m;
+    M.localSet(this.scratch);                     // 值 → scratch（i64）
+    this.emitTaggedExpr(left.expression);         // 数组句柄
+    M.i32WrapI64(); M.localSet(this.sT[0]);       // off
+    this.emitTaggedExpr(left.argumentExpression); // i（number）
+    M.f64ReinterpretI64(); M.i32TruncF64S();
+    M.i32Const(8); M.i32Mul();
+    M.localGet(this.sT[0]); M.i32Add();
+    M.localGet(this.scratch); M.i64Store(3, 8);   // 元素自 off+8 起
+    M.localGet(this.scratch);                     // 返回所赋之值
+};
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
     if (op === ts.SyntaxKind.FirstAssignment) {
+        if (ts.isPropertyAccessExpression(e.left)) { this.emitTaggedExpr(e.right); this._emitStoreProp(e.left); return; }
+        if (ts.isElementAccessExpression(e.left)) { this.emitTaggedExpr(e.right); this._emitStoreElem(e.left); return; }
         const idx = this._local(e.left.text);
         this.emitTaggedExpr(e.right);
         this.m.localTee(idx); return;
@@ -1003,6 +1030,14 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken,
     };
     if (COMPOUND[op] !== undefined) {
+        if (ts.isPropertyAccessExpression(e.left)) {
+            this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this._emitBinOp(COMPOUND[op]);
+            this._emitStoreProp(e.left); return;
+        }
+        if (ts.isElementAccessExpression(e.left)) {
+            this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this._emitBinOp(COMPOUND[op]);
+            this._emitStoreElem(e.left); return;
+        }
         const idx = this._local(e.left.text);
         this.m.localGet(idx); this.emitTaggedExpr(e.right);
         this._emitBinOp(COMPOUND[op]);
