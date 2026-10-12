@@ -56,8 +56,20 @@ const QZ = {
   // 闭包调用：closure_call(句柄, a0, a1, a2, a3) → i64。JS 侧按句柄内 funcidx
   // 跳 __lam_N（wasm 导出），最多 4 参（缺省 undefined 句柄）。返回 tagged 值。
   closure_call: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  // 通用方法调用回退：method_call(recv, mid, a0, a1, a2, a3) → i64。
+  // qz 侧按 recv 类型派发：字符串 → str_method 逻辑；类实例（内存 [0]=__cls≠0）→
+  // 按 classMeta[clsId].methods[mid]（含继承链）调 wasm 导出 __m_<C>$<m>(recv, a0..a3)。
+  // 最多 4 参（缺省 undefined 句柄）。wasm 侧仅在静态可判定 owner 时直调，否则走此回退。
+  // 类实例分配：newobj(sizeBytes:i32, clsId:i32) → 实例句柄(i64)。bump 分配，写 [0]=clsId。
+  newobj: { params: ["i32", "i32"], results: ["i64"] },
+  method_call: { params: ["i64", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
+
+// 类方法/构造器在函数名中的编码（内部前缀，避免与用户函数名冲突）。
+const MTH_PREFIX = "__m_";
+function ctorName(cls) { return MTH_PREFIX + cls + "$ctor"; }
+function methName(cls, m) { return MTH_PREFIX + cls + "$" + m; }
 class Emitter {
     constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this._tryStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set();
         this.capMap = new Map();      // 捕获变量名 → blk 内偏移（i64 槽序号），闭包体内有效
@@ -66,8 +78,13 @@ class Emitter {
         this.fnNames = new Set();     // 顶层函数名（闭包捕获分析排除）
         this.lambdas = [];            // 全部 lambda（箭头/函数表达式）：{id,node,captures}
         this._lamById = new Map();    // lambda node → {id,fname,caps}
-        this.classes = new Map();     // class name → {name, ctor, methods:Map(name→__m_ fn), fields:Map(name→slot), parent}
-        this._thisLocal = null;       // local index of `this` inside a method body
+        this.classes = new Map();     // class name → {id, parent, fields:Map, methods:Map(name→meta)}
+        this._classList = [];         // 按声明序的类（发射顺序稳定）
+        // 字段名 → 字节偏移。槽 0 保留给类实例的 `__cls` 标记（类 id），用户字段从 8 起。
+        this.fieldMap = new Map([["__cls", 0]]);
+        this._thisLocal = null;       // 方法体内 `this` 的 local 索引（i64 实例句柄）
+        this._curClass = null;        // 当前正在发射的方法所属类（this 字段读写用）
+        this._pendingMethods = [];    // 已登记待发射的方法体（emitClassMethods 消费）
         this._pendingLambdas = [];    // 已登记待发射体
     }
     _local(name) { return this.varMap.get(name); }
@@ -138,8 +155,9 @@ class Emitter {
         return n;
     }
 
-    // ---------- 函数 ----------
     emitFunc(f) {
+        const savedCurClass = this._curClass, savedCapActive = this.capListActive;
+        this._curClass = undefined; this.capListActive = false;
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this.mode = funcMode(f);
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
@@ -190,6 +208,7 @@ class Emitter {
         this.m.endBody();
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
+        this._curClass = savedCurClass; this.capListActive = savedCapActive;
     }
 
 
@@ -261,6 +280,152 @@ class Emitter {
         this.mode = savedMode; this.depth = savedDepth;
     }
     // ---------- 语句 ----------
+    // ---------- 类（method lifting）----------
+    // 类方法/构造器提升为独立 wasm 函数 __m_<C>$<m>(self:i64, a0..a3:i64) → i64。
+    // self = 实例句柄（i64 tagged）；实例字段驻 wasm 内存（与 POJO 同 _fieldIndex 布局），
+    // `this` 映射 local 0（self），`this.x` 复用 POJO 字段 load/store（零跨界）。
+    // 静态分派：receiver 静态类型已知 → 沿父链直调导出 __m_<C>$<m>；动态 → qz.method_call。
+    collectClasses(sf) {
+        for (const st of sf.statements) {
+            if (!ts.isClassDeclaration(st)) continue;
+            if (!st.name) throw new Error("[tagged] 匿名类不支持");
+            const cname = st.name.text;
+            const parent = st.heritageClauses && st.heritageClauses.length
+                ? st.heritageClauses[0].types[0] : null;
+            const parentName = parent ? parent.expression.text : null;
+            const fields = [], methods = [];
+            let ctor = null;
+            for (const mem of st.members) {
+                if (ts.isPropertyDeclaration(mem) && ts.isIdentifier(mem.name)) {
+                    fields.push({ name: mem.name.text, init: mem.initializer || null });
+                } else if (ts.isConstructorDeclaration(mem)) {
+                    ctor = mem;
+                } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
+                    methods.push({ name: mem.name.text, node: mem });
+                } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isIdentifier(mem.name)) {
+                    methods.push({ name: mem.name.text, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" });
+                } else {
+                    throw new Error("[tagged] 不支持的类成员: " + ts.SyntaxKind[mem.kind]);
+                }
+            }
+            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, ctor });
+            this._classList.push(cname);
+        }
+        // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
+        // POJO 字面量字段在其自身发射时登记，可能后于类字段 → 仅使实例 size 偏大，无害。
+        for (const cname of this._classList) {
+            const c = this.classes.get(cname);
+            for (const f of c.fields) this._fieldIndex(f.name);
+        }
+        for (const cname of this._classList) {
+            const c = this.classes.get(cname);
+            for (const mth of c.methods) {
+                const voidRet = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
+                this.m.declareFunc(methName(cname, mth.name), ["i64", "i64", "i64", "i64", "i64"],
+                                   mth.accessor === "set" || voidRet ? [] : ["i64"]);
+            }
+            this.m.declareFunc(ctorName(cname), ["i64", "i64", "i64", "i64", "i64"], []);
+        }
+    }
+    emitClassBodies() {
+        for (const cname of this._classList) {
+            const c = this.classes.get(cname);
+            if (!c.ctor && c.fields.some(f => !f.init)) throw new Error(`[tagged] 类 ${cname} 字段需初值或显式 constructor`);
+            this._emitCtorBody(c, c.ctor);
+            for (const mth of c.methods) this._emitMethodBody(cname, mth);
+        }
+    }
+    // 构造器 __m_<C>$ctor(self:i64, a0..a3:i64) → 无返回：self 由调用方 _emitNew 经 qz.newobj
+    _emitCtorBody(c, ctor) {
+        const M = this.m;
+        const realParams = ctor ? ctor.parameters.map(p => p.name.text) : [];
+        const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
+        const body = ctor ? ctor.body : { statements: [] };
+        this._mEnter(ctorName(c.name), c.name, params, body, true);
+        this._curClassObj = c;
+        // 派生类：字段默认值须在 super(...) 之后写（同名遮蔽字段父写后子覆写）；
+        // super 语句处 _emitSuperCall 负责调用父 ctor 后回写本类默认值。基类：此处直接写。
+        if (!c.parent) this._emitFieldDefaults(c);
+        if (ctor) this.emitTaggedBlock(ctor.body);
+        else if (c.parent) this._emitSuperCallForward(c);   // 合成 ctor：constructor(...a){ super(...a) }
+        this._curClassObj = null;
+        M.endBody();
+        this._mExit();
+    }
+    // 写本类字段默认初值（now: 当前 self=local0 在栈/无；用局部 self 直接存）。
+    // 若 ctor 首句为 `super(...)`，则字段默认值改在 super 调用点写（子类字段不得覆写父类构造设置的字段）。
+    _emitFieldDefaults(c) {
+        const M = this.m;
+        for (const f of c.fields) {
+            M.localGet(0); M.i32WrapI64();
+            if (f.init) this.emitTaggedExpr(f.init);
+            else this._emitUndefined();
+            M.i64Store(3, this._fieldIndex(f.name));
+        }
+    }
+    _emitMethodBody(cname, mth) {
+        const M = this.m;
+        const isVoid = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
+        const realParams = mth.node.parameters.map(p => p.name.text);
+        const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
+        this._mEnter(methName(cname, mth.name), cname, params, mth.node.body, isVoid);
+        this.emitTaggedBlock(mth.node.body);
+        if (!isVoid) {
+            const stmts = mth.node.body.statements;
+            const last = stmts[stmts.length - 1];
+            if (!(last && ts.isReturnStatement(last))) M.unreachable();
+        }
+        M.endBody();
+        this._mExit();
+    }
+    // 方法/构造器发射作用域：this=local0，参数 1..，完整 scratch/sT/obj/forOf/clo 槽布局。
+    // 与 emitFunc(tagged) 同构；额外 _curClass 供静态方法分派解析继承链。
+    _mEnter(fname, cname, params, body, isVoid) {
+        this._mSaved = {
+            mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
+            blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj,
+        };
+        this.mode = "tagged";
+        const nParams = 1 + params.length;
+        const locals = this._collectLocals(body);
+        const nLoc = nParams + locals.length;
+        this.varMap = new Map();
+        this.varMap.set("this", 0);
+        params.forEach((p, i) => this.varMap.set(p, 1 + i));
+        locals.forEach((n, i) => this.varMap.set(n, nParams + i));
+        this.capMap = new Map(); this.blkLocal = null;
+        this.scratch = nLoc; this.scratchA = nLoc + 1; this.scratchB = nLoc + 2;
+        const extra = ["f64", "f64"];
+        this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
+        const sT = Array.from({ length: 8 }, () => "i32");
+        this.sT = Array.from({ length: 8 }, (_, i) => nLoc + 5 + i);
+        const objPool = Array.from({ length: 8 }, () => "i64");
+        this.objBase = nLoc + 3 + extra.length + sT.length;
+        this._objDepth = 0;
+        this.swIdx = this.objBase + objPool.length;
+        const nForOf = this._countForOf(body);
+        this.forOfBase = this.swIdx + 1;
+        this.forOfCount = 0;
+        const forOfLocals = [];
+        for (let i = 0; i < nForOf; i++) forOfLocals.push("i64", "i32");
+        const cloSlots = ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"];
+        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
+        this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
+        this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
+        this.cloSlotsLen = cloSlots.length;
+        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
+            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots);
+        const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
+        this.m.startBody(fname, bodyLocals, localNames);
+        this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
+        this._curClass = cname;
+    }
+    _mExit() {
+        const s = this._mSaved;
+        this.mode = s.mode; this.varMap = s.varMap; this.capMap = s.capMap; this.capList = s.capList; this.capListActive = s.capListActive;
+        this.blkLocal = s.blkLocal; this.depth = s.depth; this.labels = s.labels;
+        this._labelStack = s.labelStack; this._curClass = s.curClass; this._curClassObj = s.curClassObj;
+    }
     emitBlock(node) { for (const s of node.statements) this.emitStmt(s); }
 
     emitStmt(s) {
@@ -600,9 +765,13 @@ function funcMode(f) {
     const rt = f.type;
     const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
     const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
-    // 含箭头/函数表达式的函数走 tagged（闭包是 tagged 特性，num 快路径不支持）
+    // 含箭头/函数表达式/`new` 的函数走 tagged（闭包与类实例是 tagged 特性，num 快路径不支持）
     let hasLam = false;
-    const walk = (n) => { if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && n !== f) hasLam = true; ts.forEachChild(n, walk); };
+    const walk = (n) => {
+        if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && n !== f) hasLam = true;
+        if (ts.isNewExpression(n)) hasLam = true;
+        ts.forEachChild(n, walk);
+    };
     if (f.body) walk(f.body);
     return (allNum && rtOk && !hasLam && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
 }
@@ -614,8 +783,10 @@ function compileTS(input, outWasm, opts = {}) {
     const em = new Emitter(m);
     const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
     for (const st of fns) em.fnNames.add(st.name.text);
-    // 阶段1：任一函数为 tagged → 注册全部 qz.* import + 字符串 helper；登记所有函数签名（支持前向/互递归）
-    const anyTagged = fns.some(f => funcMode(f) === "tagged");
+    const clsStmts = sf.statements.filter(st => ts.isClassDeclaration(st));
+    const hasClasses = clsStmts.length > 0;
+    // 阶段1：任一函数为 tagged 或存在类 → 注册全部 qz.* import + 字符串 helper；登记顶层函数签名
+    const anyTagged = fns.some(f => funcMode(f) === "tagged") || hasClasses;
     if (anyTagged) {
         registerQz(m);
         m.addMemory(32);                                 // 2 MiB：heap(<1MiB) + 字面量(STR_BASE 起)
@@ -629,15 +800,30 @@ function compileTS(input, outWasm, opts = {}) {
         const vt = isNum ? "f64" : "i64";   // num=f64；tagged=i64（NaN-box）
         m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
     }
-    // 阶段1.5：扫描全部函数体的 lambda（箭头/函数表达式），登记 __lam_N 签名
+    // 阶段1.5：收集类（登记方法/构造器签名）——须在发射体前
+    if (hasClasses) em.collectClasses(sf);
+    // 阶段1.5b：扫描 lambda（顶层函数体 + 类方法/构造器体 + 字段初值），登记 __lam_N 签名
     let lamSeq = 0;
     for (const st of fns) {
         for (const lam of em._collectLambdas(st.body)) em.emitLambda(lam, lamSeq++);
     }
-    if (anyTagged) { m.exportMemory(); m.exportGlobal("__bump", 0); }   // 导出 memory + bump（JS 回退写回 wasm 堆）
-    // 阶段2：逐个发射 body
+    for (const cname of em._classList) {
+        const c = em.classes.get(cname);
+        if (c.ctor) for (const lam of em._collectLambdas(c.ctor.body)) em.emitLambda(lam, lamSeq++);
+        for (const mth of c.methods) for (const lam of em._collectLambdas(mth.node.body)) em.emitLambda(lam, lamSeq++);
+        for (const f of c.fields) if (f.init) for (const lam of em._collectLambdas(f.init)) em.emitLambda(lam, lamSeq++);
+    }
+    // 阶段2：逐个发射 body（顶层函数 + lambda + 类方法/构造器）
     for (const st of fns) em.emitFunc(st);
     em.emitLambdaBodies();
+    if (hasClasses) em.emitClassBodies();
+    for (const cname of em._classList) {
+        const c = em.classes.get(cname);
+        for (const mth of c.methods) m.exportFn(methName(cname, mth.name), methName(cname, mth.name));
+        m.exportFn(ctorName(cname), ctorName(cname));
+    }
+    if (m.memory !== null) m.exportMemory();
+    if (anyTagged) m.exportGlobal("__bump", m.globalIdx());
     for (const meta of em._lamById.values()) m.exportFn(meta.fname, meta.fname);
     fs.writeFileSync(outWasm, m.build());
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
@@ -648,7 +834,17 @@ function compileTS(input, outWasm, opts = {}) {
     }));
     const lamMeta = {};
     for (const meta of em._lamById.values()) lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n };
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta };
+    // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
+    const classMeta = em._classList.map(cname => {
+        const c = em.classes.get(cname);
+        const methods = {};
+        for (const mth of c.methods) {
+            methods[mth.name] = { name: methName(cname, mth.name), n: mth.node.parameters.length };
+        }
+        const p = c.parent ? em.classes.get(c.parent) : null;
+        return { id: c.id, parent: p ? p.id : null, methods };
+    });
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta };
 }
 
 
@@ -661,7 +857,7 @@ Emitter.prototype._fieldIndex = function (name) {
     if (!this.fieldMap) this.fieldMap = new Map();
     let i = this.fieldMap.get(name);
     if (i === undefined) { i = this.fieldMap.size; this.fieldMap.set(name, i); }
-    return i * 8;   // 字节偏移（字段 8 字节，存 i64）
+    return (i + 1) * 8;   // 字节偏移；偏移 0 保留给实例 __cls 头（类实例），字段从 8 起
 };
 Emitter.prototype._strId = function (text) {
     let i = this.strings.indexOf(text);
@@ -834,6 +1030,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
             for (const a of ex.arguments) { this.emitTaggedExpr(a); this.m.call("qz.log"); }
             return;
         }
+        if (ts.isCallExpression(ex) && ts.isSuperKeyword(ex.expression)) { this.emitTaggedExpr(ex); return; }
         this.emitTaggedExpr(ex); this.m.drop(); return;
     }
     if (ts.isEmptyStatement(s)) return;
@@ -918,6 +1115,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         return;
     }
+    if (ts.isThis(e)) {
+        const idx = this._local("this");
+        if (idx === undefined) throw new Error("[tagged] this 仅在类方法/构造器内可用");
+        this.m.localGet(idx); return;
+    }
     if (ts.isIdentifier(e)) {
         const idx = this._local(e.text);
         if (idx !== undefined) { this.m.localGet(idx); return; }
@@ -952,9 +1154,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         const NF = e.properties.length;
         // 字段偏移用全局 fieldMap（名→固定偏移，POJO 隐式形状）：与读取端 _fieldIndex 一致。
-        // 分配 size 按本对象用到的最大字段索引 +1（跨字面量共享字段名 → 同偏移；各对象独立 bump 区）。
+        // 分配 size = 最大字段字节偏移 + 8（偏移 0 保留给 __cls 头，POJO 留 0 亦无害）。
         const fIdx = e.properties.map(p => this._fieldIndex(p.name.text));
-        const size = (Math.max(...fIdx) + 1) * 8;
+        const size = Math.max(...fIdx) + 8;
         this.m.globalGet(0);
         this.m.i32Const(size);
         this.m.i32Add();
@@ -1030,12 +1232,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.i64Load(3, this._fieldIndex(e.name.text));                               // 字段 +8 字节步进
         return;
     }
+    if (ts.isNewExpression(e)) { this._emitNewCall(e); return; }
+    if (ts.isCallExpression(e) && ts.isSuperKeyword(e.expression)) {
+        if (!this._curClassObj) throw new Error("[tagged] super() 仅在构造器内可用");
+        this._emitSuperCall(this._curClassObj, e.arguments || []); return;
+    }
     if (ts.isCallExpression(e)) {
         if (ts.isPropertyAccessExpression(e.expression)) {
             const rx = e.expression.expression, method = e.expression.name.text;
             if (method === "push" && e.arguments.length === 1) { this._emitArrayPush(rx, e.arguments[0]); return; }
             if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
-            this._emitStrMethod(rx, method, e.arguments); return;
+            this._emitDynMethod(rx, method, e.arguments); return;
         }
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
         const fn = e.expression.text;
@@ -1303,19 +1510,67 @@ Emitter.prototype._emitLambdaNew = function (lam) {
     M.localGet(this.cloOff); M.i64ExtendI32U();
     M.i64ConstBits(0, 0x7ff9); M.i64Or();
 };
-Emitter.prototype._emitStrMethod = function (rx, method, args) {
+// 类实例分配：size 覆盖全局字段表最大偏移（+8 头），clsId 写 [0]；返回 self 句柄。
+Emitter.prototype._instSize = function () {
+    return ((this.fieldMap ? this.fieldMap.size : 0) + 1) * 8;
+};
+Emitter.prototype._emitNewCall = function (e) {
     const M = this.m;
-    const argSlots = [this.scratchA, this.scratchB];                         // 两个 i64 暂存参
-    this.emitTaggedExpr(rx); M.localSet(this.scratch);                       // recv（i64）
-    for (let i = 0; i < 2; i++) {
+    if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] new 目标必须是标识符");
+    const cname = e.expression.text;
+    if (!this.classes.has(cname)) throw new Error("[tagged] new 未知类: " + cname);
+    const c = this.classes.get(cname);
+    const args = e.arguments;
+    if (args.length > 4) throw new Error("[tagged] new 最多 4 参");
+    for (let i = 0; i < 4; i++) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
-        M.localSet(argSlots[i]);
+        M.localSet(this.cloArgs[i]);
+    }
+    M.i32Const(this._instSize());
+    M.i32Const(c.id);
+    M.call("qz.newobj");                                    // → self 句柄(i64)
+    M.localSet(this.scratch);
+    M.localGet(this.scratch);
+    for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);
+    M.call(ctorName(cname));                                // 写 __cls、字段、执行体
+    M.localGet(this.scratch);                               // 表达式值 = 实例
+};
+// super(...)：在构造器内，self=local0。调父 ctor 后回写本类字段默认值（JS 派生字段初始化序）。
+Emitter.prototype._emitSuperCall = function (c, args) {
+    const M = this.m;
+    if (!c.parent) throw new Error("[tagged] " + c.name + " 无父类，super() 非法");
+    if (args.length > 4) throw new Error("[tagged] super 最多 4 参");
+    for (let i = 0; i < 4; i++) {
+        if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        M.localSet(this.cloArgs[i]);
+    }
+    M.localGet(0);
+    for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);
+    M.call(ctorName(c.parent));
+    this._emitFieldDefaults(c);                             // 子类字段默认值在 super 之后
+};
+// 合成派生 ctor：local1..4 = 补齐后的参数槽，原样转发给父 ctor。
+Emitter.prototype._emitSuperCallForward = function (c) {
+    const M = this.m;
+    M.localGet(0);
+    for (let i = 1; i <= 4; i++) M.localGet(i);
+    M.call(ctorName(c.parent));
+    this._emitFieldDefaults(c);
+};
+// 动态方法分派：method_call(recv, mid, a0..a3) → i64（qz 侧按 recv 类型派发：字符串→str_method；
+// 类实例（内存[0]=__cls）→ classMeta 沿继承链调 wasm 导出方法）。未知类型/无方法 → 宿主抛错。
+Emitter.prototype._emitDynMethod = function (rx, method, args) {
+    const M = this.m;
+    if (args.length > 4) throw new Error("[tagged] 方法最多 4 参");
+    this.emitTaggedExpr(rx); M.localSet(this.scratch);      // recv
+    for (let i = 0; i < 4; i++) {
+        if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        M.localSet(this.cloArgs[i]);
     }
     M.localGet(this.scratch);
     M.i32Const(this._strId(method));
-    M.localGet(argSlots[0]);
-    M.localGet(argSlots[1]);
-    M.call("qz.str_method");
+    for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);
+    M.call("qz.method_call");
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;

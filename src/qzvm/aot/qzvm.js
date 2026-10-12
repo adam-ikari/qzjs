@@ -56,7 +56,7 @@ function makeQzvm(strings) {
   const box = (n) => numToBits(n);
   const bool = (b) => numToBits(b ? 1 : 0);
 
-  let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null;
+  let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null, classMeta = null;
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   const bindBump = (g) => { bumpRef = g; };
   // JS 字符串 → wasm 堆（[len:i32 LE][utf8]），bump 分配，返回 0x7FFA 句柄。
@@ -79,9 +79,52 @@ function makeQzvm(strings) {
     for (let i = 0; i < bytes.length; i++) memU8[off + 4 + i] = bytes[i];
     return (0x7ffan << 48n) | BigInt(off);
   };
+  // 类实例分配：bump 分配 sizeBytes 并写 [0]=clsId（wasm 构造器随后写字段）。
+  const newobj = (sizeBytes, clsId) => {
+    const off = (bumpRef.value + 7) & ~7;
+    bumpRef.value = off + ((sizeBytes + 7) & ~7);
+    new Int32Array(mem.buffer, off, 1)[0] = clsId;
+    return (0x7ff9n << 48n) | BigInt(off);
+  };
+  const doStrMethod = (recv, mid, a0, a1) => {
+    const s = toJS(recv);
+    const arg = (x) => toJS(x);
+    const name = strings[mid];
+    let r;
+    switch (name) {
+      case "charAt":       r = s.charAt(arg(a0)); break;
+      case "charCodeAt":   r = s.charCodeAt(arg(a0)); break;
+      case "indexOf":      r = s.indexOf(String(arg(a0))); break;
+      case "lastIndexOf":  r = s.lastIndexOf(String(arg(a0))); break;
+      case "slice":        r = s.slice(arg(a0), a1 === undefined ? undefined : arg(a1)); break;
+      case "substring":    r = s.substring(arg(a0), a1 === undefined ? undefined : arg(a1)); break;
+      case "substr":       r = s.substr(arg(a0), a1 === undefined ? undefined : arg(a1)); break;
+      case "toUpperCase":  r = s.toUpperCase(); break;
+      case "toLowerCase":  r = s.toLowerCase(); break;
+      case "trim":         r = s.trim(); break;
+      case "trimStart":    r = s.trimStart(); break;
+      case "trimEnd":      r = s.trimEnd(); break;
+      case "repeat":       r = s.repeat(arg(a0)); break;
+      case "startsWith":   r = s.startsWith(String(arg(a0))); break;
+      case "endsWith":     r = s.endsWith(String(arg(a0))); break;
+      case "includes":     r = s.includes(String(arg(a0))); break;
+      case "padStart":     r = s.padStart(arg(a0), arg(a1)); break;
+      case "padEnd":       r = s.padEnd(arg(a0), arg(a1)); break;
+      case "replace":      r = s.replace(String(arg(a0)), String(arg(a1))); break;
+      case "split":        r = s.split(String(arg(a0))); break;   // 返回 JS 数组句柄（toJS = array）
+      case "concat":       r = s.concat(arg(a0)); break;
+      default: throw new Error("未知字符串方法: " + name);
+    }
+    // 字符串 → 写回 wasm 堆（[len][utf8]），返回 0x7FFA 句柄（与热路径内存布局一致）；
+    // 数字（charCodeAt/indexOf/lastIndexOf）→ box；其它（split 返回数组）→ JS 句柄。
+    if (typeof r === "string") return strWriteback(r);
+    if (typeof r === "number") return box(r);
+    return tagHandle(r);
+  };
   return {
     // POJO 分配：返回 wasm 内存偏移（裸 i32），字段由 wasm i64.store 写入（零跨界）
     alloc: (nbytes) => { const off = bump; bump += nbytes; return off; },
+    newobj,
     bindMem,
     object_new: () => tagHandle({}),
     object_set: (o, k, v) => { handles[idxOf(o)][strings[k]] = toJS(v); },
@@ -109,41 +152,26 @@ function makeQzvm(strings) {
     truthy: (v) => (toJS(v) ? 1 : 0),        // 裸 i32 布尔（wasm 条件直接消费）
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
     // 字符串方法：recv + 方法名 id + 2 参（undefined 句柄 = 缺省）→ 结果字符串句柄。
-    str_method: (recv, mid, a0, a1) => {
-      const s = toJS(recv);
-      const arg = (x) => { const v = toJS(x); return v; };
+    str_method: (recv, mid, a0, a1) => doStrMethod(recv, mid, a0, a1),
+    // 通用方法调用：字符串 → 同上；类实例（内存 [0]=__cls id）→ 沿继承链查
+    // classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
+    method_call: (recv, mid, a0, a1, a2, a3) => {
+      if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1);
+      const off = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
+      const clsId = new Int32Array(mem.buffer, off, 1)[0];
       const name = strings[mid];
-      let r;
-      switch (name) {
-        case "charAt":   r = s.charAt(arg(a0)); break;
-        case "charCodeAt": r = s.charCodeAt(arg(a0)); break;
-        case "slice":    r = s.slice(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
-        case "substring":r = s.substring(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
-        case "substr":   r = s.substr(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
-        case "indexOf":  r = s.indexOf(arg(a0)); break;
-        case "lastIndexOf": r = s.lastIndexOf(arg(a0)); break;
-        case "includes": r = s.includes(arg(a0)); break;
-        case "startsWith": r = s.startsWith(arg(a0), a1 === 0x7ff9000000000000n ? undefined : arg(a1)); break;
-        case "endsWith": r = s.endsWith(arg(a0)); break;
-        case "toUpperCase": r = s.toUpperCase(); break;
-        case "toLowerCase": r = s.toLowerCase(); break;
-        case "trim":     r = s.trim(); break;
-        case "trimStart":r = s.trimStart(); break;
-        case "trimEnd":  r = s.trimEnd(); break;
-        case "repeat":   r = s.repeat(arg(a0)); break;
-        case "padStart": r = s.padStart(arg(a0), arg(a1)); break;
-        case "padEnd":   r = s.padEnd(arg(a0), arg(a1)); break;
-        case "replace":  r = s.replace(String(arg(a0)), String(arg(a1))); break;
-        case "split":    r = s.split(String(arg(a0))); break;   // 返回 JS 数组句柄（toJS = array）
-        case "concat":   r = s.concat(arg(a0)); break;
-        default: throw new Error("未知字符串方法: " + name);
+      let c = classMeta && classMeta[clsId];
+      while (c) {
+        const m = c.methods[name];
+        if (m) {
+          const fn = exportsRef[m.name];
+          return fn(recv, a0, a1, a2, a3);
+        }
+        c = c.parent != null ? classMeta[c.parent] : null;
       }
-      // 字符串 → 写回 wasm 堆（[len][utf8]），返回 0x7FFA 句柄（与热路径内存布局一致）；
-      // 数字（charCodeAt/indexOf/lastIndexOf）→ box；其它（split 返回数组）→ JS 句柄。
-      if (typeof r === "string") return strWriteback(r);
-      if (typeof r === "number") return box(r);
-      return tagHandle(r);
+      throw new Error("method_call: 类 " + clsId + " 无方法 " + name);
     },
+    bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; },
     bindBump,
     // 供宿主检查用（不在 wasm import 面）
     _toJS: toJS, _fromJS: (x) => (typeof x === "number" ? numToBits(x) : tagHandle(x)),

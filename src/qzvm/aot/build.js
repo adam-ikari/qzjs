@@ -70,6 +70,7 @@ function genGlue(prefix, mainCalls) {
     const metaObj = JSON.parse(fs.readFileSync(prefix + ".meta.json", "utf8"));
     const meta = metaObj.funcs;
     const lams = metaObj.lams || {};
+    const classes = metaObj.classes || [];
     const makeQzvm = extractMakeQzvm();
     const basename = path.basename(prefix);   // glue 读同目录外部文件（不内嵌）
     // 主逻辑体：--main 生成逐调用行；否则 __main 钩子（用户追加）
@@ -81,6 +82,7 @@ function genGlue(prefix, mainCalls) {
 const qz = makeQzvm(${JSON.stringify(strings)});
 const __meta = ${JSON.stringify(meta)};
 const __lams = ${JSON.stringify(lams)};
+const __classes = ${JSON.stringify(classes)};
 const __fs = globalThis.qzjs && globalThis.qzjs.fs;
 Promise.all([
   __fs.readFileBinary("${basename}.wasm"),
@@ -91,6 +93,7 @@ Promise.all([
     qz.bindMem(__ex.memory);
     if (__ex.__bump) qz.bindBump(__ex.__bump);
     qz.bindClosures(__ex, __lams);
+    qz.bindClasses(__ex, __classes);
     // __call(name, args)：按 funcMeta 自动转换 num(裸) vs tagged(_fromJS/_toJS)
     const __call = (name, args) => {
       const m = __meta.find(f => f.name === name);
@@ -119,7 +122,7 @@ if (cmd === "build") {
     fs.mkdirSync(outDir(), { recursive: true });
     const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug") });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {} }));
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [] }));
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}`);
     if (emitWat(prefix)) console.log(`  wat: ${prefix}.wat`);
     // --target <arch> [--target-abi <abi>]：交叉编译 .aot 到 32 位设备（armv7/riscv32/i386 等）

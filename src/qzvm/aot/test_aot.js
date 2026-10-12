@@ -117,9 +117,25 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("闭包.closure()", callC("closure", []), 105);
 }
 
+async function runClasses() {
+    const wasm = path.join(os.tmpdir(), "qz_aot_cls.wasm");
+    const r = compileTS(path.join(__dirname, "cls.ts"), wasm, {});
+    const qz = makeQzvm(r.strings);
+    const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasm), { qz });
+    qz.bindMem(instance.exports.memory);
+    if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
+    qz.bindClasses(instance.exports, r.classMeta);
+    const call = (n) => { const m = r.funcMeta.find(f => f.name === n); const res = instance.exports[n](); return m.mode === "num" ? res : qz._toJS(res); };
+    check("类.继承+super", call("dogRun"), "hi woof/woof!");
+    check("类.字段默认值+遮蔽", call("fieldRun"), 43);
+    check("类.方法多参", call("argRun"), 7);
+    check("类.合成ctor转发参", call("fwdRun"), "bit/3");
+}
+
 (async () => {
     await runNum();
     await runTagged();
+    await runClasses();
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
     process.exit(failures === 0 ? 0 : 1);
 })().catch(e => { console.error("ERR:", e.message); process.exit(1); });

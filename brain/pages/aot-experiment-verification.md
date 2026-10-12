@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-12T06:36:47"
+updated: "2026-10-12T09:34:58"
 ---
 
 <!-- compiled_truth -->
@@ -282,4 +282,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: note
   summary: "闭包/箭头函数（2026-10-12）：箭头/函数表达式提升为 __lam_N wasm 函数（签名 (blk:i32, 参数…i64)->i64），捕获变量存 bump 堆 cell 块（blk=[i64×captures]），闭包对象=[funcidx:i32][nCaps:i32][cells]。emitLambda 阶段1.5 扫描登记签名，emitLambdaBodies 阶段末发射。读经 capMap（blk+slot*8），调用走 qz.closure_call(handle,a0..a3)→JS 按 lamMeta{funcidx:{name,n}} 派发导出 __lam_N（无 wasm table——JS 分派，避免 function-table 接线）。凡函数体含 lambda 强制 tagged（num 快路径不含闭包）。build.js: .meta.json 增 lams 字段，glue 调 qz.bindClosures。test_aot 加闭包用例全绿。"
   source: "src/qzvm/aot/{emitter.js,qzvm.js,build.js,test_aot.js}"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T09:34:58
+  kind: decision
+  summary: "tagged wasm emitter 类支持落地（继承/super/字段默认值/方法动态分派）。类实例 = bump 分配内存 [0]=__cls(int32)，字段 i64 偏移表 _fieldIndex 与 POJO 共用全局 fieldMap（实例 size 取全表最大偏移）。ctor/方法统一 self+4 固定 5 参签名——原按实参个数变化导致 super()/跨签名调用 wasm 校验失败（类型不匹配）；独立方法上限 4 参。super() 在构造器内调父 ctor 后回写本类字段默认值（模拟 JS 派生字段初始化序）。合成派生 ctor 转发全部 self+4 参数槽（否则 new Puppy('bit') 丢参）。方法调用统一 qz.method_call(recv,mid,a0..a3)：qz 侧按 recv 类型派发，字符串→str_method，类实例→classMeta[clsId] 沿 parent 链查方法名调导出 __m_C$m。funcMode 遇 new 自动降级 tagged。glue 注入 classMeta + bindClasses；导出 memory/__bump 供 bindMem/bindBump。修两处既有缺陷：_emitFieldDefaults 缺 i32.wrap_i64（self 句柄直当 i32 地址）、qz.newobj bump 偏移未 8 字节对齐（Int32Array 视图抛 offset 非 4 倍数）。回归门 test_aot.js runClasses + cls.ts，ALL PASS。"
+  source: "2026-10-13 qzvm/aot 类支持实测"
   affects: [aot-experiment-verification]
