@@ -1492,7 +1492,12 @@ static JSValue wamr_instance_constructor(JSContext *ctx, JSValueConst new_target
 
             uint64_t num_pages = wasm_memory_get_cur_page_count(mem);
             uint64_t max_pages = wasm_memory_get_max_page_count(mem);
-            size_t byte_len = (size_t)num_pages * 65536;
+            uint64_t bytes_per_page = wasm_memory_get_bytes_per_page(mem);
+            /* WAMR's SHRUNK_MEMORY optimization folds the declared page count
+             * into num_bytes_per_page (init_page_count collapses to 1). Derive
+             * the byte length from the real page size, not the 64 KiB spec
+             * constant, or the exposed buffer undershoots by the shrink factor. */
+            size_t byte_len = (size_t)(num_pages * bytes_per_page);
             uint8_t *base = (uint8_t *)wasm_memory_get_base_address(mem);
 
             JSValue mem_obj = JS_NewObject(ctx);

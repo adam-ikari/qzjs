@@ -48,6 +48,21 @@ static const unsigned char kBadAotModule[] = {
     0x00, 0x00, 0x00, 0x00
 };
 
+// shrink.wasm — declares (memory 32) and exports it, but has no memory.size/
+// memory.grow. WAMR's SHRUNK_MEMORY loader path folds the declared page count
+// into num_bytes_per_page and collapses init_page_count to 1; the export shim
+// must derive the buffer length from the real page size, not a hardcoded
+// 64 KiB spec constant, or the ArrayBuffer undershoots the live memory.
+static const unsigned char kShrinkMemModule[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x02, 0x60,
+    0x02, 0x7f, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02,
+    0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x20, 0x07, 0x18, 0x03, 0x06, 0x6d,
+    0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x6f, 0x6b, 0x65,
+    0x00, 0x00, 0x04, 0x70, 0x65, 0x65, 0x6b, 0x00, 0x01, 0x0a, 0x13, 0x02,
+    0x09, 0x00, 0x20, 0x00, 0x20, 0x01, 0x36, 0x02, 0x00, 0x0b, 0x07, 0x00,
+    0x20, 0x00, 0x28, 0x02, 0x00, 0x0b
+};
+
 // JS fixtures: _wasmBytes (ArrayBuffer), _badAot (ArrayBuffer), _src (a
 // streaming source whose arrayBuffer() resolves to the wasm bytes).
 static const std::string kFixtures = [] {
@@ -67,6 +82,12 @@ static const std::string kFixtures = [] {
     for (size_t i = 0; i < sizeof(kI64Module); i++) {
         if (i) s += ",";
         s += std::to_string(kI64Module[i]);
+    }
+    s += "]).buffer;\n";
+    s += "var _shrinkBytes = new Uint8Array([";
+    for (size_t i = 0; i < sizeof(kShrinkMemModule); i++) {
+        if (i) s += ",";
+        s += std::to_string(kShrinkMemModule[i]);
     }
     s += "]).buffer;\n";
     s += "var _src = { arrayBuffer: function(){ return Promise.resolve(_wasmBytes); } };";
@@ -255,5 +276,30 @@ TEST(wasm_aot, export_i64_bigint_roundtrip) {
     ASSERT_TRUE(host_poll_until_value(h, "String(_r)",
         "bigint|14|9221401712017801217", &v))
         << "i64 export bridge wrong (expected bigint args + bigint result), got: " << v;
+    host_destroy(h);
+}
+
+// SHRUNK_MEMORY regression: exporting (memory 32) with no memory.size must
+// still expose a buffer covering 32 pages (32 * 64 KiB = 2097152). Before the
+// page-size fix the shim used num_pages * 65536 against WAMR's folded page
+// size, exposing only 64 KiB — writes past that silently no-op.
+TEST(wasm_aot, shrunk_memory_export_length) {
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    std::string out;
+    ASSERT_TRUE(host_eval(h, (kFixtures +
+        "\nvar _r = null;\n"
+        "WebAssembly.instantiate(_shrinkBytes).then(function(res){\n"
+        "  var mem = res.instance.exports.memory;\n"
+        "  var n = mem.buffer.byteLength;\n"
+        "  mem.__probe = new Uint8Array(mem.buffer);\n"
+        "  _r = (n >= 2097152 && mem.__probe.length === n) ? 'ok' : ('bad:' + n);\n"
+        "}).catch(function(e){ _r = 'ERR:' + e.message; });\n"
+        "0").c_str(), &out));
+
+    std::string v;
+    ASSERT_TRUE(host_poll_until_value(h, "String(_r)", "ok", &v))
+        << "shrunk-memory export exposed a short buffer, got: " << v;
     host_destroy(h);
 }
