@@ -95,14 +95,18 @@ class Emitter {
         // 字符串逻辑临时（仅 tagged）：sT0..sT7 共 8 个 i32
         const sT = this.mode === "tagged" ? Array.from({ length: 8 }, () => "i32") : [];
         this.sT = this.mode === "tagged" ? Array.from({ length: 8 }, (_, i) => nLoc + 5 + i) : null;
+        // 嵌套对象字面量的句柄临时槽（i64）：每层独立，避免内层覆盖外层句柄。
+        const objPool = this.mode === "tagged" ? Array.from({ length: 8 }, () => "i64") : [];
+        this.objBase = nLoc + 3 + extra.length + sT.length;
+        this._objDepth = 0;
         // 尾部追加：sT(8×i32，tagged) + swIdx(i32) + forOf 对×(vt,i32)（每嵌套层独立）。
-        this.swIdx = nLoc + 3 + extra.length + sT.length;
+        this.swIdx = this.objBase + objPool.length;
         const nForOf = this._countForOf(f.body);
         this.forOfBase = this.swIdx + 1;
         this.forOfCount = 0;
         const forOfLocals = [];
         for (let i = 0; i < nForOf; i++) forOfLocals.push(vt, "i32");
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(["i32"]).concat(forOfLocals));
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals));
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -770,14 +774,18 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.i32Const(size);
         this.m.i32Sub();                            // → offset(i32)
         this.m.i64ExtendI32U(); this.m.i64ConstBits(0, 0x7ff9); this.m.i64Or();   // 句柄 = 高16位0x7FF9 | offset(低32)
-        this.m.localSet(this.scratch);              // scratch 保存句柄（i64）
+        const slot = this.objBase + this._objDepth;   // 本层句柄槽（嵌套各占一层，避免内层覆盖）
+        this._objDepth++;
+        this.m.localSet(slot);                        // 句柄 → slot（i64）
         for (let i = 0; i < NF; i++) {
-            this.m.localGet(this.scratch);          // [h]
-            this.m.i32WrapI64();                                            // 低32位=offset
-            this.emitTaggedExpr(e.properties[i].initializer);              // [off(i32), val(i64)]
-            this.m.i64Store(3, fIdx[i]);            // memory[off + idx] = val（fIdx 已是字节偏移）
+            this.m.localGet(slot);                    // [h]
+            this.m.i32WrapI64();                      // 低32位=offset
+            this.emitTaggedExpr(e.properties[i].initializer);   // [off(i32), val(i64)]
+            this.m.i64Store(3, fIdx[i]);              // memory[off + idx] = val（fIdx 已是字节偏移）
         }
-        this.m.localGet(this.scratch); return;
+        this.m.localGet(slot);
+        this._objDepth--;
+        return;
     }
     if (ts.isArrayLiteralExpression(e)) {
         // 数组：bump 分配 [len:i32][pad:i32][elem:i64×N]（元素自 +8，8B 步进）。
