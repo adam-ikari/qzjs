@@ -97,6 +97,24 @@ async function runTagged() {
     { let ref = "0"; for (let i = 0; i < 2000; i++) ref += i; check("strWork(2000)", callS("strWork", [2000]), ref); }
     check("strWorkEq(5)", callS("strWorkEq", [5]), "001234");
     check("strMethods()", callS("strMethods", []), "Hello|HELLO, WORLD|7|e|Hello, qz|ababab");
+    // 闭包：箭头提升为 __lam_N，捕获 cell 块 + qz.closure_call 派发
+    const closSrc = `
+function adder(n: number): number { const f = (x: number) => x + n; return f(10); }
+function apply(fn: any, v: number): number { return fn(v); }
+function closure(): number { const base = 100; const g = (x: any) => x + base; return apply(g, 5); }
+`;
+    const ct = path.join(os.tmpdir(), "qz_aot_clos.ts");
+    const cw = path.join(os.tmpdir(), "qz_aot_clos.wasm");
+    fs.writeFileSync(ct, closSrc);
+    const rcl = compileTS(ct, cw, {});
+    const qzc = makeQzvm(rcl.strings);
+    const { instance: instCl } = await WebAssembly.instantiate(fs.readFileSync(cw), { qz: qzc });
+    qzc.bindMem(instCl.exports.memory);
+    if (instCl.exports.__bump) qzc.bindBump(instCl.exports.__bump);
+    qzc.bindClosures(instCl.exports, rcl.lamMeta);
+    const callC = (n, a) => { const m = rcl.funcMeta.find(f => f.name === n); const r = instCl.exports[n](...a.map(x => qzc._fromJS(x))); return m.mode === "num" ? r : qzc._toJS(r); };
+    check("闭包.adder(5)", callC("adder", [5]), 15);
+    check("闭包.closure()", callC("closure", []), 105);
 }
 
 (async () => {

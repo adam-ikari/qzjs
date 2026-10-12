@@ -53,10 +53,23 @@ const QZ = {
   // 字符串方法：recv + 方法名 id + 2 参（缺省 = undefined 句柄）→ 结果字符串句柄（0x7FF9）。
   // 走 JS 回退（正确处理 UTF-8/UTF-16 语义）；结果 join handles 表，toJS 还原为 JS string。
   str_method: { params: ["i64", "i32", "i64", "i64"], results: ["i64"] },
+  // 闭包调用：closure_call(句柄, a0, a1, a2, a3) → i64。JS 侧按句柄内 funcidx
+  // 跳 __lam_N（wasm 导出），最多 4 参（缺省 undefined 句柄）。返回 tagged 值。
+  closure_call: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
 class Emitter {
-    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this._tryStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set(); }
+    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this._tryStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set();
+        this.capMap = new Map();      // 捕获变量名 → blk 内偏移（i64 槽序号），闭包体内有效
+        this.capList = [];            // 当前闭包的捕获名列表（顺序 = 槽序）
+        this.blkLocal = null;         // 当前闭包体的 blk 指针 local（i32）
+        this.fnNames = new Set();     // 顶层函数名（闭包捕获分析排除）
+        this.lambdas = [];            // 全部 lambda（箭头/函数表达式）：{id,node,captures}
+        this._lamById = new Map();    // lambda node → {id,fname,caps}
+        this.classes = new Map();     // class name → {name, ctor, methods:Map(name→__m_ fn), fields:Map(name→slot), parent}
+        this._thisLocal = null;       // local index of `this` inside a method body
+        this._pendingLambdas = [];    // 已登记待发射体
+    }
     _local(name) { return this.varMap.get(name); }
     // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
     _curLabel() { return this._labelStack.length ? this._labelStack.pop() : null; }
@@ -70,6 +83,51 @@ class Emitter {
         };
         walk(node);
         return names;
+    }
+
+    // 收集函数体内所有箭头函数/函数表达式（含嵌套），按源序。返回节点列表。
+    _collectLambdas(node, out = []) {
+        const walk = (n) => {
+            if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) { out.push(n); }
+            ts.forEachChild(n, walk);
+        };
+        walk(node);
+        return out;
+    }
+    // 闭包捕获分析：找 lambda 体内的自由标识符（非其参数/局部、非字符串/数字/对象属性名）。
+    // 捕获的变量来自创建处（外层函数局部）。返回有序捕获名列表。
+    _capturesOf(lam) {
+        const local = new Set(lam.parameters.map(p => p.name.text));
+        this._collectLocals(lam.body).forEach(n => local.add(n));
+        const out = [];
+        const seen = new Set();
+        const walk = (n) => {
+            if (ts.isIdentifier(n)) {
+                // 跳过成员表达式右侧（obj.prop 的 prop 不是变量）
+                if (n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) return;
+                if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
+                const name = n.text;
+                if (!local.has(name) && !seen.has(name) && !this.fnNames.has(name)
+                    && !/^(undefined|null|NaN|Infinity)$/.test(name)) { seen.add(name); out.push(name); }
+                return;
+            }
+            ts.forEachChild(n, walk);
+        };
+        walk(lam.body);
+        return out;
+    }
+    // 给定自由名，是否本函数可见（在 varMap / capMap 中）——决定闭包创建时是否真的捕获。
+    _isCapturable(name) { return this.varMap.has(name) || this.capMap.has(name); }
+    // 闭包体内的捕获读：name 在 capMap → [blk + slot*8]；否则本函数局部（经 varMap）。
+    _emitCapturedRead(name) {
+        const M = this.m;
+        if (this.capMap.has(name)) {
+            M.localGet(this.blkLocal); M.i64Load(3, this.capMap.get(name) * 8);
+            return;
+        }
+        const idx = this._local(name);
+        if (idx === undefined) throw new Error("未定义捕获变量: " + name);
+        M.localGet(idx);
     }
 
     // 统计函数体内 for-of 数量（按嵌套层各分配独立 local 对）
@@ -108,11 +166,17 @@ class Emitter {
         this.forOfCount = 0;
         const forOfLocals = [];
         for (let i = 0; i < nForOf; i++) forOfLocals.push(vt, "i32");
+        // 闭包保留槽（仅 tagged）：cloHandle(i64 存闭包句柄) + cloOff/cloBlk/cloFn(3×i32)。
+        const cloSlots = this.mode === "tagged" ? ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"] : [];
+        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
+        this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
+        this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
+        this.cloSlotsLen = cloSlots.length;
         // debug：局部名数组（参数在前、局部在后，与 wasm local 序号一致）；仅命名可见变量，合成槽留空。
         const localNames = this.m.debug
             ? f.parameters.map(p => p.name.text).concat(locals)   // locals 是名字数组
             : null;
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals), localNames);
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots), localNames);
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -128,6 +192,74 @@ class Emitter {
         this.varMap.clear();
     }
 
+
+    // ---------- 闭包（lambda 提升 + 捕获 cell）----------
+    // 每个箭头/函数表达式提升为一个 wasm 函数 __lam_N。签名 = (blk:i32, 参数…i64) -> i64。
+    // 捕获变量存在堆 cell 块（blk 指向 [i64 × captures]，对象布局），读经 capMap、写回 store。
+    emitLambda(lam, id) {
+        const fname = "__lam_" + id;
+        const params = lam.parameters.map(p => p.name.text);
+        // 捕获名先分析并记录（emitLambdaBody 内 identifier 读写用 capMap 路由）
+        const caps = this._capturesOf(lam);
+        this._lamById.set(lam, { id, fname, caps, n: params.length });
+        this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
+        this._pendingLambdas.push({ lam, fname, params, caps });
+        return { fname, caps };
+    }
+    // 发射已登记的 lambda 体（阶段2，在所有顶层函数之后；签名已登记）
+    emitLambdaBodies() {
+        for (const p of this._pendingLambdas) this._emitLambdaBody(p);
+        this._pendingLambdas = [];
+    }
+    _emitLambdaBody({ lam, fname, params, caps }) {
+        const M = this.m;
+        const savedMap = this.varMap, savedCap = this.capMap, savedBlk = this.blkLocal;
+        const savedMode = this.mode, savedDepth = this.depth;
+        this.mode = "tagged";
+        // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
+        const locals = this._collectLocals(lam.body);
+        const nParams = 1 + params.length;                 // blk + 参数
+        const nLoc = nParams + locals.length;
+        this.varMap = new Map();
+        lam.parameters.forEach((p, i) => this.varMap.set(p.name.text, 1 + i));
+        locals.forEach((n, i) => this.varMap.set(n, nParams + i));
+        this.capMap = new Map();
+        caps.forEach((n, i) => this.capMap.set(n, i));     // 捕获名 → blk 内 i64 槽序
+        this.blkLocal = 0;                                 // local 0 = blk 指针
+        this.scratch = nLoc;
+        this.scratchA = nLoc + 1;
+        this.scratchB = nLoc + 2;
+        const extra = ["f64", "f64"];
+        this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
+        const sT = Array.from({ length: 8 }, () => "i32");
+        this.sT = Array.from({ length: 8 }, (_, i) => nLoc + 5 + i);
+        const objPool = Array.from({ length: 8 }, () => "i64");
+        this.objBase = nLoc + 3 + extra.length + sT.length;
+        this._objDepth = 0;
+        this.swIdx = this.objBase + objPool.length;
+        const nForOf = this._countForOf(lam.body);
+        this.forOfBase = this.swIdx + 1;
+        this.forOfCount = 0;
+        const forOfLocals = [];
+        for (let i = 0; i < nForOf; i++) forOfLocals.push("i64", "i32");
+        const cloSlots = ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"];
+        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
+        this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
+        this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
+        this.cloSlotsLen = cloSlots.length;
+        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots);
+        const localNames = this.m.debug ? ["blk"].concat(params).concat(locals) : null;
+        M.startBody(fname, bodyLocals, localNames);
+        this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
+        // 箭头表达式体：表达式即返回值；块体：语句
+        if (ts.isExpression(lam.body)) { this.emitTaggedExpr(lam.body); M.return_(); }
+        else this.emitTaggedBlock(lam.body);
+        const last = ts.isBlock(lam.body) ? lam.body.statements[lam.body.statements.length - 1] : null;
+        if (!(last && ts.isReturnStatement(last))) M.unreachable();
+        M.endBody();
+        this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
+        this.mode = savedMode; this.depth = savedDepth;
+    }
     // ---------- 语句 ----------
     emitBlock(node) { for (const s of node.statements) this.emitStmt(s); }
 
@@ -468,17 +600,20 @@ function funcMode(f) {
     const rt = f.type;
     const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
     const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
-    return (allNum && rtOk && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
+    // 含箭头/函数表达式的函数走 tagged（闭包是 tagged 特性，num 快路径不支持）
+    let hasLam = false;
+    const walk = (n) => { if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && n !== f) hasLam = true; ts.forEachChild(n, walk); };
+    if (f.body) walk(f.body);
+    return (allNum && rtOk && !hasLam && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
 }
-
 function compileTS(input, outWasm, opts = {}) {
     const program = ts.createProgram([input], { strict: true, target: ts.ScriptTarget.ES2020 });
     const sf = program.getSourceFile(input);
     const m = new Module({ debug: !!opts.debug });   // opts.debug → name 段（函数名，调试/反汇编）
-    // 预注册 import（qz.math_floor 等）
     if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
     const em = new Emitter(m);
     const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
+    for (const st of fns) em.fnNames.add(st.name.text);
     // 阶段1：任一函数为 tagged → 注册全部 qz.* import + 字符串 helper；登记所有函数签名（支持前向/互递归）
     const anyTagged = fns.some(f => funcMode(f) === "tagged");
     if (anyTagged) {
@@ -491,12 +626,19 @@ function compileTS(input, outWasm, opts = {}) {
     for (const st of fns) {
         const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
         const isNum = funcMode(st) === "num";
-        const vt = isNum ? "f64" : "i64";   // num=f64；tagged=f64 NaN-box(i64)
+        const vt = isNum ? "f64" : "i64";   // num=f64；tagged=i64（NaN-box）
         m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
+    }
+    // 阶段1.5：扫描全部函数体的 lambda（箭头/函数表达式），登记 __lam_N 签名
+    let lamSeq = 0;
+    for (const st of fns) {
+        for (const lam of em._collectLambdas(st.body)) em.emitLambda(lam, lamSeq++);
     }
     if (anyTagged) { m.exportMemory(); m.exportGlobal("__bump", 0); }   // 导出 memory + bump（JS 回退写回 wasm 堆）
     // 阶段2：逐个发射 body
     for (const st of fns) em.emitFunc(st);
+    em.emitLambdaBodies();
+    for (const meta of em._lamById.values()) m.exportFn(meta.fname, meta.fname);
     fs.writeFileSync(outWasm, m.build());
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
     const funcMeta = fns.map(f => ({
@@ -504,7 +646,9 @@ function compileTS(input, outWasm, opts = {}) {
         mode: funcMode(f),
         params: f.parameters.length,
     }));
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta };
+    const lamMeta = {};
+    for (const meta of em._lamById.values()) lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n };
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta };
 }
 
 
@@ -774,7 +918,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         return;
     }
-    if (ts.isIdentifier(e)) { const idx = this._local(e.text); if (idx === undefined) throw new Error("未定义变量: " + e.text); this.m.localGet(idx); return; }
+    if (ts.isIdentifier(e)) {
+        const idx = this._local(e.text);
+        if (idx !== undefined) { this.m.localGet(idx); return; }
+        this._emitCapturedRead(e.text); return;
+    }
+    if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) { this._emitLambdaNew(e); return; }
     if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
     if (ts.isTypeOfExpression(e)) {
         // 内联分类：字符串句柄(hi16=0x7FFA)→"string"；数组/对象(0x7FF8/0x7FF9)→"object"；其余→"number"。
@@ -889,6 +1038,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitStrMethod(rx, method, e.arguments); return;
         }
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
+        const fn = e.expression.text;
+        if (this.m._funcIdx[fn] === undefined && !this.fnNames.has(fn)) {
+            // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)
+            const hIdx = this._local(fn);
+            if (hIdx === undefined) throw new Error("未定义函数: " + fn);
+            for (let i = 0; i < 4; i++) {
+                if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]);
+                else this._emitUndefined();
+                this.m.localSet(this.cloArgs[i]);
+            }
+            this.m.localGet(hIdx);
+            for (let i = 0; i < 4; i++) this.m.localGet(this.cloArgs[i]);
+            this.m.call("qz.closure_call");
+            return;
+        }
         for (const a of e.arguments) this.emitTaggedExpr(a);
         this.m.call(e.expression.text); return;
     }
@@ -1115,6 +1279,30 @@ Emitter.prototype._emitArrayPop = function (rx) {
 };
 // x.method(...)：字符串/通用方法经 qz.str_method(recv, nameId, a0, a1) 回退（正确处理 UTF-8）。
 // 结果 = 句柄（字符串 toJS 还原；数值方法如 charCodeAt/indexOf 结果亦 join handles 表 → toJS 为 number）。
+// 箭头/函数表达式求值：bump 分配 [funcidx:i32][nCaps:i32][cell×N]，
+// 捕获变量逐个求值存入 cell，返回句柄 0x7FF9|off。
+Emitter.prototype._emitLambdaNew = function (lam) {
+    const M = this.m;
+    const meta = this._lamById.get(lam);
+    if (!meta) throw new Error("未登记的 lambda");
+    const fidx = this.m._funcIdx[meta.fname];
+    const caps = meta.caps.filter(n => this.varMap.has(n) || this.capMap.has(n));
+    const total = 8 + caps.length * 8;
+    M.globalGet(0); M.i32Const(total); M.i32Add(); M.globalSet(0);
+    M.globalGet(0); M.i32Const(total); M.i32Sub();
+    M.localSet(this.cloOff);                          // cloOff = off
+    M.localGet(this.cloOff); M.i32Const(fidx); M.i32Store(2, 0);    // [off]=funcidx
+    M.localGet(this.cloOff); M.i32Const(caps.length); M.i32Store(2, 4);  // [off+4]=nCaps
+    for (let i = 0; i < caps.length; i++) {
+        this._emitCapturedRead(caps[i]);              // [val]
+        M.localSet(this.cloArgs[0]);                  // 暂存
+        M.localGet(this.cloOff); M.i32Const(8 + i * 8); M.i32Add();   // [addr]
+        M.localGet(this.cloArgs[0]);                  // [addr, val]
+        M.i64Store(3, 0);
+    }
+    M.localGet(this.cloOff); M.i64ExtendI32U();
+    M.i64ConstBits(0, 0x7ff9); M.i64Or();
+};
 Emitter.prototype._emitStrMethod = function (rx, method, args) {
     const M = this.m;
     const argSlots = [this.scratchA, this.scratchB];                         // 两个 i64 暂存参

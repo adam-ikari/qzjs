@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-11T05:11:44"
+updated: "2026-10-12T06:36:47"
 ---
 
 <!-- compiled_truth -->
@@ -252,4 +252,34 @@ string 拼接不支持，console.log 用多参数替代。
   kind: note
   summary: "% 运算符 wasm 内原生（2026-10-11）：tagged 新增 emitTaggedRem，命中 number 走 a - trunc(a/b)*b（= JS 余数，含负数/除零 NaN），回退 qz.rem；接线进 _emitBinOp 的 GUARD。修命名冲突：num 模式已有 emitRem，改名 emitTaggedRem 避免覆盖（否则 num % 崩）。10000 次含 % 的 tagged 循环跨界归零；num/tagged % 负数/NaN 全对。"
   source: "src/qzvm/aot/{emitter.js,ASSESSMENT.md}"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T00:58:29
+  kind: note
+  summary: "M2 语法补齐（2026-10-12，experiment/aot-v2）：switch/do-while/break+continue/三元/数组字面量+索引+length/num 位运算/模板字符串/for-of/tagged 位运算/||=&&=/标签语句/typeof/属性+索引赋值+复合赋值/嵌套对象字面量槽覆盖修复。test_aot 全绿。剩余大项：箭头/函数表达式（需闭包/lambda lifting）、数组方法 push/pop（需容量/增长）、字符串方法（需运行时支持）、try-catch/throw、类。属运行时设施而非语法补齐，超出 M2 范畴。"
+  source: "src/qzvm/aot/emitter.js + test_aot.js"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T02:26:20
+  kind: note
+  summary: "三方性能对比（2026-10-12，AOT vs qzjs解释器 vs 原生V8，bench_mix.js 含 node 原生列 + performance.now 高精度）：numWork AOT 361ms = 比解释器快134x、比 V8 快2.1x（数值热点 AOT 超 V8 是核心结论：LLVM O3 + 零 JIT 预热 + 裸 f64）；objWork 1.3ms 比解释器快38x、比 V8 慢4-12x（V8 隐藏类）；strWork 30ms 比解释器慢6x、比 V8 慢248x（V8 rope 惰性拼接）。WAT 中间产物：build.js build/compile 经 wasm2wat 出 <prefix>.wat（审计/调试），工具缺失则跳过。"
+  source: src/qzvm/aot/bench_mix.js build.js README.md
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T02:46:38
+  kind: decision
+  summary: "TS→wasm 输出格式决策（第一性原理）：直出二进制 wasm，wat 仅按需旁路。理由：(1) wat 与 wasm 是同一 IR 的两种序列化——wasm2wat|wat2wasm 往返字节完全一致、幂等，wat 是 wasm 的 pretty-print；(2) 唯一下游 wamrc 只吃二进制（实测 wamrc mix.wat → Invalid magic header），直出 wat 每产物多一次 wat2wasm 文本转换纯开销 + 增外部依赖；(3) 可读性来自 name section 非 wat 格式——两者都因此可读；(4) 程序化生成二进制（固定 section + LEB128 长度前缀）比嵌套 S-expr 文本 bug 面小；(5) wat 丢字节级确定性（wat2wasm 规范化）+ 体积 9x。改进=给编码器加 name 段，非换格式。已实现：wasm-encoder Module({debug}) + build.js --debug → custom section id=0 函数名子段，反汇编 call 29→call $fib，不影响执行（test_aot ALL PASS）。"
+  source: src/qzvm/aot/wasm-encoder.js build.js README.md
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T02:49:33
+  kind: note
+  summary: "AOT --debug 调试信息完整：name 段子段1（函数名）+ 子段2（局部名，indrectnamemap vec(funcidx→namemap)）。--debug 下反汇编 param $n/local $i/local.get $i 全可读，合成槽匿名。默认关，不影响执行（test_aot ALL PASS）。build.js build/compile --debug 开关。"
+  source: src/qzvm/aot/wasm-encoder.js emitter.js build.js
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-12T06:36:47
+  kind: note
+  summary: "闭包/箭头函数（2026-10-12）：箭头/函数表达式提升为 __lam_N wasm 函数（签名 (blk:i32, 参数…i64)->i64），捕获变量存 bump 堆 cell 块（blk=[i64×captures]），闭包对象=[funcidx:i32][nCaps:i32][cells]。emitLambda 阶段1.5 扫描登记签名，emitLambdaBodies 阶段末发射。读经 capMap（blk+slot*8），调用走 qz.closure_call(handle,a0..a3)→JS 按 lamMeta{funcidx:{name,n}} 派发导出 __lam_N（无 wasm table——JS 分派，避免 function-table 接线）。凡函数体含 lambda 强制 tagged（num 快路径不含闭包）。build.js: .meta.json 增 lams 字段，glue 调 qz.bindClosures。test_aot 加闭包用例全绿。"
+  source: "src/qzvm/aot/{emitter.js,qzvm.js,build.js,test_aot.js}"
   affects: [aot-experiment-verification]

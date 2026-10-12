@@ -56,7 +56,7 @@ function makeQzvm(strings) {
   const box = (n) => numToBits(n);
   const bool = (b) => numToBits(b ? 1 : 0);
 
-  let bump = 0, mem = null, memU8 = null, bumpRef = null;
+  let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null;
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   const bindBump = (g) => { bumpRef = g; };
   // JS 字符串 → wasm 堆（[len:i32 LE][utf8]），bump 分配，返回 0x7FFA 句柄。
@@ -148,13 +148,24 @@ function makeQzvm(strings) {
     // 供宿主检查用（不在 wasm import 面）
     _toJS: toJS, _fromJS: (x) => (typeof x === "number" ? numToBits(x) : tagHandle(x)),
     _handles: handles, _TAG: TAG,
+    // 闭包调用：handle → 堆对象 [funcidx:i32][nCaps:i32][cell×N i64]。
+    // blk = off+8（cell 起点），按 lamMeta[funcidx]={name,n} 调 wasm 导出 __lam_N。
+    closure_call: (handle, a0, a1, a2, a3) => {
+      const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
+      const u32 = new Uint32Array(mem.buffer, off, 2);
+      const funcidx = u32[0];
+      const meta = lamMeta && lamMeta[funcidx];
+      if (!meta) throw new Error("closure_call: 未知 funcidx " + funcidx);
+      const fn = exportsRef[meta.name];
+      const args = [off + 8, a0, a1, a2, a3].slice(0, 1 + meta.n);
+      return fn(...args);
+    },
+    bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
   };
 }
-
 module.exports = { makeQzvm };
 
 if (require.main === module) {
-  // 自检：往返 + 大数精度 + 句柄判定
   const qz = makeQzvm(["a"]);
   console.assert(qz._toJS(qz._fromJS(42)) === 42, "number 往返");
   console.assert(qz._toJS(qz._fromJS(8999999000)) === 8999999000, "大数 53 位");
