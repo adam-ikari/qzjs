@@ -54,8 +54,10 @@ const QZ = {
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
 
 class Emitter {
-    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set(); }
+    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set(); }
     _local(name) { return this.varMap.get(name); }
+    // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
+    _curLabel() { return this._labelStack.length ? this._labelStack.pop() : null; }
 
     // 收集函数体里的 let/const（分配 local 索引）
     _collectLocals(node) {
@@ -141,34 +143,37 @@ class Emitter {
             this.m.end();
             return;
         }
-        if (ts.isBreakStatement(s)) { this.m.br(this._breakRel()); return; }
+        if (ts.isBreakStatement(s)) { this.m.br(this._breakRel(s.label && s.label.text)); return; }
         if (ts.isDoStatement(s)) { this.emitDoWhile(s, false); return; }
-        if (ts.isContinueStatement(s)) { this.m.br(this._contRel()); return; }
+        if (ts.isContinueStatement(s)) { this.m.br(this._contRel(s.label && s.label.text)); return; }
         if (ts.isWhileStatement(s)) { this.emitWhile(s); return; }
         if (ts.isForStatement(s)) { this.emitFor(s); return; }
         if (ts.isSwitchStatement(s)) { this.emitSwitch(s, false); return; }
+        if (ts.isLabeledStatement(s)) { if (ts.isIterationStatement(s.statement, false)) this._labelStack.push(s.label.text); this.emitStmt(s.statement); return; }
         if (ts.isBlock(s)) { this.emitBlock(s); return; }
         if (ts.isExpressionStatement(s)) { this.emitExpr(s.expression); this.m.drop(); return; }
         if (ts.isEmptyStatement(s)) return;
         throw new Error("不支持的语句: " + ts.SyntaxKind[s.kind]);
     }
 
-    // break → 最近可 break 的 label（循环或 switch）；continue → 最近的循环 label。
-    _breakRel() {
+    // break → 最近可 break 的 label（循环或 switch；带 label 名则精确匹配）；continue → 最近的循环 label。
+    _breakRel(label) {
         for (let i = this.labels.length - 1; i >= 0; i--)
-            if (this.labels[i].brk != null) return this.depth - this.labels[i].brk;
+            if (label ? (this.labels[i].label === label && this.labels[i].brk != null) : this.labels[i].brk != null)
+                return this.depth - this.labels[i].brk;
         throw new Error("break 不在循环/switch 内");
     }
-    _contRel() {
+    _contRel(label) {
         for (let i = this.labels.length - 1; i >= 0; i--)
-            if (this.labels[i].cont != null) return this.depth - this.labels[i].cont;
+            if (label ? (this.labels[i].label === label && this.labels[i].cont != null) : this.labels[i].cont != null)
+                return this.depth - this.labels[i].cont;
         throw new Error("continue 不在循环内");
     }
 
     emitWhile(s) {
         this.m.block(); this.depth++;
         this.m.loop(); this.depth++;
-        this.labels.push({ brk: this.depth - 1, cont: this.depth });
+        this.labels.push({ brk: this.depth - 1, cont: this.depth, label: this._curLabel() });
         this.emitExpr(s.expression !== undefined ? s.expression : s.condition);
         this.emitCond();
         this.m.i32Eqz();
@@ -191,7 +196,7 @@ class Emitter {
         this.m.loop(); this.depth++;
         if (s.condition) { this.emitExpr(s.condition); this.emitCond(); this.m.i32Eqz(); this.m.brIf(1); }
         this.m.block(); this.depth++;
-        this.labels.push({ brk: this.depth - 2, cont: this.depth });
+        this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
         if (s.statement) this.emitStmt(s.statement);
         this.labels.pop();
         this.depth--; this.m.end();                       // end cont block
@@ -208,7 +213,7 @@ class Emitter {
         M.block(); this.depth++;
         M.loop(); this.depth++;
         M.block(); this.depth++;
-        this.labels.push({ brk: this.depth - 2, cont: this.depth });
+        this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
         if (tagged) this.emitTaggedStmt(s.statement); else this.emitStmt(s.statement);
         this.labels.pop();
         this.depth--; M.end();                             // end cont block
@@ -585,8 +590,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         return;
     }
     if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
-    if (ts.isBreakStatement(s)) { this.m.br(this._breakRel()); return; }
-    if (ts.isContinueStatement(s)) { this.m.br(this._contRel()); return; }
+    if (ts.isBreakStatement(s)) { this.m.br(this._breakRel(s.label && s.label.text)); return; }
+    if (ts.isContinueStatement(s)) { this.m.br(this._contRel(s.label && s.label.text)); return; }
     if (ts.isDoStatement(s)) { this.emitDoWhile(s, true); return; }
     if (ts.isSwitchStatement(s)) { this.emitSwitch(s, true); return; }
     if (ts.isIfStatement(s)) {
@@ -598,7 +603,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     }
     if (ts.isWhileStatement(s)) {
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
-        this.labels.push({ brk: this.depth - 1, cont: this.depth });
+        this.labels.push({ brk: this.depth - 1, cont: this.depth, label: this._curLabel() });
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         this.m.i32Eqz(); this.m.brIf(1);
         this.emitTaggedStmt(s.statement);
@@ -615,7 +620,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
         if (s.condition) { this.emitCondI32(s.condition); this.m.i32Eqz(); this.m.brIf(1); }
         this.m.block(); this.depth++;
-        this.labels.push({ brk: this.depth - 2, cont: this.depth });
+        this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
         this.depth--; this.m.end();                       // end cont block
@@ -643,7 +648,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 0);       // arr[off] = len
         M.i32GeS(); M.brIf(1);                                   // i >= len → 退出
         M.block(); this.depth++;
-        this.labels.push({ brk: this.depth - 2, cont: this.depth });
+        this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
         M.localGet(arrL); M.i32WrapI64();                        // off
         M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // off + i*8
         M.i64Load(3, 8); M.localSet(varIdx);                     // x = arr[i]
@@ -657,6 +662,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.forOfCount--;
         return;
     }
+    if (ts.isLabeledStatement(s)) { if (ts.isIterationStatement(s.statement, false)) this._labelStack.push(s.label.text); this.emitTaggedStmt(s.statement); return; }
     if (ts.isBlock(s)) { this.emitTaggedBlock(s); return; }
     if (ts.isExpressionStatement(s)) {
         // console.log(x) → qz.log（边界输出）
@@ -679,7 +685,7 @@ Emitter.prototype.emitSwitch = function (s, tagged) {
     let defaultIdx = clauses.findIndex(c => ts.isDefaultClause(c));
     if (defaultIdx < 0) defaultIdx = clauses.length;
     M.block(); this.depth++;
-    this.labels.push({ brk: this.depth, cont: null });
+    this.labels.push({ brk: this.depth, cont: null, label: this._curLabel() });
     if (tagged) this.emitTaggedExpr(s.expression); else this.emitExpr(s.expression);
     M.localSet(this.scratch);
     M.i32Const(defaultIdx); M.localSet(this.swIdx);
