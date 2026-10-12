@@ -55,9 +55,8 @@ const QZ = {
   str_method: { params: ["i64", "i32", "i64", "i64"], results: ["i64"] },
 };
 function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
-
 class Emitter {
-    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set(); }
+    constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this._tryStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set(); }
     _local(name) { return this.varMap.get(name); }
     // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
     _curLabel() { return this._labelStack.length ? this._labelStack.pop() : null; }
@@ -486,6 +485,7 @@ function compileTS(input, outWasm, opts = {}) {
         registerQz(m);
         m.addMemory(32);                                 // 2 MiB：heap(<1MiB) + 字面量(STR_BASE 起)
         m.addGlobal("i32", STR_BUMP);                    // global0 = bump 堆（字符串/对象）
+        m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
         emitStringHelpers(m);
     }
     for (const st of fns) {
@@ -605,6 +605,14 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isContinueStatement(s)) { this.m.br(this._contRel(s.label && s.label.text)); return; }
     if (ts.isDoStatement(s)) { this.emitDoWhile(s, true); return; }
     if (ts.isSwitchStatement(s)) { this.emitSwitch(s, true); return; }
+    if (ts.isThrowStatement(s)) {
+        if (this.mode !== "tagged") throw new Error("[num] throw 不支持（仅 tagged）");
+        this.emitTaggedExpr(s.expression); this.m.globalSet(1);   // __err = 值
+        if (!this._tryStack.length) throw new Error("throw 不在 try 内（跨函数 throw 不支持）");
+        this.m.br(this.depth - this._tryStack[this._tryStack.length - 1].errBrk);
+        return;
+    }
+    if (ts.isTryStatement(s)) { this.emitTry(s, true); return; }
     if (ts.isIfStatement(s)) {
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         this.m.ifBlock(); this.depth++;          // 条件已归约为裸 i32 布尔
@@ -686,6 +694,31 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     }
     if (ts.isEmptyStatement(s)) return;
     throw new Error("[tagged] 不支持的语句: " + ts.SyntaxKind[s.kind]);
+};
+// try/catch/finally：__err(global1) + 结构化 br。
+//   block $done → block $err → <try> → br $done | end $err → <catch> → end $done → <finally>
+// throw 跳 $err 后（catch）；正常跳 $done 后（跳过 catch）。finally 两路都会执行。
+Emitter.prototype.emitTry = function (s, tagged) {
+    const M = this.m;
+    M.block(); this.depth++;                       // $done
+    M.block(); this.depth++;                       // $err
+    this._tryStack.push({ errBrk: this.depth });   // 记录 $err 相对深度（throw 用）
+    if (tagged) this.emitTaggedBlock(s.tryBlock); else this.emitBlock(s.tryBlock);
+    M.br(this.depth - (this.depth - 1));           // 正常 → 跳 $done 后（跳过 catch）
+    this._tryStack.pop();
+    this.depth--; M.end();                         // end $err → catch 入口
+    const c = s.catchClause;
+    if (c) {
+        if (c.variableDeclaration && ts.isIdentifier(c.variableDeclaration.name)) {
+            const idx = this._local(c.variableDeclaration.name.text);
+            if (idx !== undefined) { M.globalGet(1); M.localSet(idx); }   // catch 变量 = __err
+        }
+        if (tagged) this.emitTaggedBlock(c.block); else this.emitBlock(c.block);
+    }
+    this.depth--; M.end();                         // end $done
+    if (s.finallyBlock) {
+        if (tagged) this.emitTaggedBlock(s.finallyBlock); else this.emitBlock(s.finallyBlock);
+    }
 };
 
 // switch：entry-index 方案。先算入口 clause 序号（无匹配→default，无 default→len），

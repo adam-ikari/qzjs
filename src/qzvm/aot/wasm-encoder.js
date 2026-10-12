@@ -229,9 +229,10 @@ class Module {
             const body = [0x01, 0x00, ...uleb(this.memory)];   // count=1 + limits{flags=0x00(min only), min} —— WAMR classic AOT 不支持 max
             out.push(5, ...uleb(body.length), ...body);
         }
-        // global 段：mutable i32（wasm 内 bump 分配器）
+        // global 段：mutable（bump i32 / __err i64）；init 按类型选 const opcode（0x41=i32 0x42=i64）
         if (this.globals && this.globals.length) {
-            const body = vec(this.globals.map(g => [VAL[g.type], 0x01, 0x41, ...sleb(g.init || 0), OP.end]));
+            const body = vec(this.globals.map(g => [VAL[g.type], 0x01,
+                ...(g.type === "i64" ? [0x42, ...sleb(g.init || 0)] : [0x41, ...sleb(g.init || 0)]), OP.end]));
             out.push(6, ...uleb(body.length), ...body);
         }
         // export 段

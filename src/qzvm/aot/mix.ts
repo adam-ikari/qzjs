@@ -33,3 +33,19 @@ function arrWork(n: any): any {
   for (let i = 0; i < a.length; i++) s = s + a[i];
   return s + last;
 }
+
+// try/catch/finally + throw（同函数结构化跳转）
+function tryWork(): any {
+  let out = 0;
+  try {
+    for (let i = 0; i < 10; i++) {
+      if (i === 3) throw "stop";
+      out = out + i;
+    }
+  } catch (e) {
+    out = out + e.length;
+  } finally {
+    out = out + 1000;
+  }
+  return out;
+}
