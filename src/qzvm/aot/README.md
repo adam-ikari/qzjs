@@ -29,8 +29,9 @@ cd build/aot && qzjs <name>.glue.js
 ```
 **主链路直出二进制 wasm**：wamrc 只消费 wasm（不吃 wat），且 wasm↔wat 往返字节一致——
 wat 仅作按需旁路中间产物，不进编译链路。
-**`--debug`（可选）**：生成 name 段（函数名）→ wat/wasm 反汇编显示 `$fib` / `call $fib`
-而非编号 `(;29;)` / `call 29`；不影响执行，默认关闭。
+**`--debug`（可选）**：生成 name 段（函数名 + 局部变量名）→ wat/wasm 反汇编显示
+`func $fib` / `call $fib` / `param $n` / `local $i` / `local.get $i`，而非编号
+`(;29;)` / `call 29` / `local.get 3`；不影响执行，默认关闭。
 
 - **JS 技术栈**：`build.js` 是唯一主入口（node 编排 compile→wamrc→glue），全部 JS（wamrc 是唯一外部后端）
 - **值模型**：tagged 值 = i64 f64 NaN-box（数值=原始 f64 位型，精确 53 位；句柄=高16位 `0x7FF9`|低32 offset；字段 8 字节）。wasm f64 恒为 IEEE-754 double，32 位宿主由 wamrc 降到软/硬浮点，**数值语义含 >2^31 的整数不变**，故 32/64 位设备共用同一表示——不按目标位宽切换
