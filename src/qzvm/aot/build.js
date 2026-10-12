@@ -112,7 +112,7 @@ if (cmd === "build") {
     const prefix = path.join(outDir(), name);
     const wamrc = resolveWamrc();
     fs.mkdirSync(outDir(), { recursive: true });
-    const r = compileTS(src, prefix + ".wasm", {});
+    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug") });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
     fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta }));
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}`);
@@ -134,7 +134,7 @@ if (cmd === "build") {
     const name = (nameArg && !nameArg.startsWith("--")) ? nameArg : path.basename(src).replace(/\.ts$/, "");
     const prefix = path.join(outDir(), name);
     fs.mkdirSync(outDir(), { recursive: true });
-    const r = compileTS(src, prefix + ".wasm", {});
+    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug") });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
     fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta }));
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}`);
@@ -145,8 +145,9 @@ if (cmd === "build") {
     genGlue(process.argv[3], mainCalls);
 } else {
     console.error("usage: build.js build|compile|glue ...");
-    console.error("  build  <src.ts> [prefix] [--main \"fn(a);fn2(b)\"] [--target <arch> --target-abi <abi>]");
-    console.error("  compile <src.ts> [prefix]   # 产出 .wasm/.wat/.strings.json/.meta.json（不经 wamrc）");
+    console.error("  build  <src.ts> [prefix] [--main \"fn(a);fn2(b)\"] [--target <arch> --target-abi <abi>] [--debug]");
+    console.error("  compile <src.ts> [prefix] [--debug]   # 产出 .wasm/.wat/.strings.json/.meta.json（不经 wamrc）");
+    console.error("  --debug: 生成 name 段（函数名），wat/wasm 反汇编可读（不影响执行）");
     console.error("  glue <prefix> [--main \"fn(a)\"]");
     process.exit(2);
 }

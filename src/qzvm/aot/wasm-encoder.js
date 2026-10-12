@@ -63,7 +63,10 @@ const OP = {
 };
 
 class Module {
-    constructor() { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null; }
+    constructor(opts) { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null;
+        this.debug = !!(opts && opts.debug);   // 生成 name 段（函数名）→ wat/wasm 可读，DAP 友好
+        this._fnNames = [];                    // funcidx(全局) → 名（导入在前，本地函数在后）
+    }
     // type: {name, params:[valtype], results:[valtype]}（results 空 = void）
     funcType(params, results) {
         const key = JSON.stringify([params, results]);
@@ -73,6 +76,7 @@ class Module {
         this._typeIdx[key] = idx;
         return idx;
     }
+    _importFuncCount() { let n = 0; for (const imp of this.imports) if (imp.type !== undefined) n++; return n; }
     importMemory(module, field, min, max) {     // memory import（WAMR AOT 要求内存来自宿主）
         const idx = this.imports.length;
         this.imports.push({ module, field, memory: { min, max } });
@@ -84,6 +88,7 @@ class Module {
         if (this._importIdx[key] !== undefined) return this._importIdx[key];
         const t = this.funcType(params, results);
         const idx = this.imports.length;
+        if (this.debug) this._fnNames[this._importFuncCount()] = field;   // funcidx = push 前已登记函数导入数
         this.imports.push({ module, field, type: t });
         this._importIdx[key] = idx;
         return idx;
@@ -94,6 +99,7 @@ class Module {
         const fidx = codeIdx + this.imports.length;           // call 指令用（函数区全局索引）
         this.funcs.push(t);
         this._funcIdx[name] = fidx;
+        if (this.debug) this._fnNames[fidx] = name;
         this._codeIdx = this._codeIdx || {};
         this._codeIdx[name] = codeIdx;
         this.codes.push(null);
@@ -252,6 +258,21 @@ class Module {
         if (this.data.length) {
             const body = vec(this.data.map(d => [...uleb(0x00), OP.i32_const, ...sleb(d.offset), OP.end, ...uleb(d.bytes.length), ...d.bytes]));
             out.push(11, ...uleb(body.length), ...body);
+        }
+        // name 段（custom section，id 0）：函数名子段（subsection 1）。
+        // 可选（debug）：让 wat/wasm 反汇编显示 $名而非编号，DAP 友好。不影响执行。
+        if (this.debug) {
+            const names = [];
+            for (let i = 0; i < this._fnNames.length; i++) {
+                const nm = this._fnNames[i];
+                if (nm === undefined) continue;
+                names.push([...uleb(i), ...uleb(Buffer.byteLength(nm)), ...[...Buffer.from(nm)]]);
+            }
+            if (names.length) {
+                const fnSub = [1, ...uleb(vec(names).length), ...vec(names)];   // subsection id=1 + size + 内容
+                const sec = [...uleb(Buffer.byteLength("name")), ...[...Buffer.from("name")], ...fnSub];
+                out.push(0, ...uleb(sec.length), ...sec);   // custom section (id 0)
+            }
         }
         return Buffer.from(out.flat());
     }

@@ -468,7 +468,7 @@ function funcMode(f) {
 function compileTS(input, outWasm, opts = {}) {
     const program = ts.createProgram([input], { strict: true, target: ts.ScriptTarget.ES2020 });
     const sf = program.getSourceFile(input);
-    const m = new Module();
+    const m = new Module({ debug: !!opts.debug });   // opts.debug → name 段（函数名，调试/反汇编）
     // 预注册 import（qz.math_floor 等）
     if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
     const em = new Emitter(m);
