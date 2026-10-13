@@ -48,8 +48,10 @@ void qz_thread_teardown(qz_t *rt);
 void qz_dap_service(qz_t *rt);
 #endif
 
-/* thread.c — flush pending JS microtasks (worker.c calls this on its loop) */
-int qz_flush_microtasks(qz_t *rt);
+/* vm_core.c — tick 原语：排空 JS 微任务/待执行 job（原 host/thread.c 的
+ * qz_flush_microtasks 上移，M3）。纯 quickjs、零 libuv，宿主每轮 uv_run 后
+ * 调它拉模块推进（§5.4 tick 拉模型）。 */
+int qz_tick(qz_t *rt);
 #ifndef QZ_VM_GUEST
 /* worker.c — worker-runtime inbound dispatch: raw cloned bytes →
  * __qz_dispatch__(bytes, 0, kind). Used by the worker thread loop AND by the

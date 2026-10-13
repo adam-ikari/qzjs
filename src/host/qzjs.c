@@ -638,9 +638,7 @@ void qz_thread_teardown(qz_t *rt)
      * JS_FreeRuntime 会在非空 gc_obj_list 上断言（Promise 反应引用着
      * 尚未执行的闭包/值）。 */
     if (rt->jsrt) {
-        JSContext *job_ctx = NULL;
-        int ret;
-        while ((ret = JS_ExecutePendingJob(rt->jsrt, &job_ctx)) > 0) {}
+        qz_tick(rt);
     }
     /* 2.5) 排空 libuv 已排队但未处理的 request 完成（work_done）。
      * 必须在销毁 contexts / 释放 JSRuntime 之前：完成回调（bridge_io_done）
@@ -650,10 +648,7 @@ void qz_thread_teardown(qz_t *rt)
      * 导致 busy-spin（UV_RUN_NOWAIT 的返回值是 loop-alive，不是"处理数"）。 */
     for (int i = 0; i < 16; i++) {
         if (uv_run(&rt->loop, UV_RUN_NOWAIT) == 0) break;
-        if (rt->jsrt) {
-            JSContext *job_ctx = NULL;
-            while (JS_ExecutePendingJob(rt->jsrt, &job_ctx) > 0) {}
-        }
+        if (rt->jsrt) qz_tick(rt);
     }
 
     /* 3) DAP detach 必须先于 contexts/JSRuntime 释放：qz_debug_detach 会调

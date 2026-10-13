@@ -177,7 +177,7 @@ static void qz_worker_thread_main(void *arg)
         uv_run(&rt->loop, UV_RUN_ONCE);  /* 阻塞等事件；wake_cb 派发消息 */
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE) ||
             __atomic_load_n(&w->shutting_down, __ATOMIC_ACQUIRE)) break;
-        qz_flush_microtasks(rt);
+        qz_tick(rt);
         /* 发布「本 worker 仍有在途异步工作」给父的 idle 判定。
          * 在本线程上算（qz_loop_idle 对 w->self 是安全的），父只读这个位。 */
         int busy_now = qz_loop_idle(rt) ? 0 : 1;

@@ -247,6 +247,7 @@ int qz_ctx_spawn(qz_t *rt, const char *init_script)
     if (init_script && init_script[0]) {
         char *err = NULL;
         if (qz_eval_internal(rt, init_script, &err) != 0) {
+            free(err);
             qz_ctx_destroy_host(rt, cctx);
             if (rt->contexts[0]) rt->active_ctx_id = 0;
             return QZ_ERR_GENERIC;
@@ -332,6 +333,7 @@ int qz_ctx_rebuild(qz_t *rt, int ctx_id, const char *script_ref, const char *sta
     if (rt->contexts[0]) rt->active_ctx_id = 0;
     if (rc != QZ_OK) {
         qz_ctx_destroy_host(rt, cctx);
+        return rc;
     }
     return ctx_id;
 }

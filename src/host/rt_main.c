@@ -80,7 +80,7 @@ static void child_wake_cb(uv_async_t *a)
             qz_control_dispatch(rt, m);
         } else if (g_server_mode) {
             qz_dispatch_message(rt, m);
-            qz_flush_microtasks(rt);
+            qz_tick(rt);
         } else {
             qz_worker_dispatch(rt, m);
         }
@@ -988,7 +988,7 @@ int rt_main_entry(int argc, char **argv)
         if (is_server) qz_ctl_reap_timeouts(rt);
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE) ||
             (w && __atomic_load_n(&w->shutting_down, __ATOMIC_ACQUIRE))) break;
-        qz_flush_microtasks(rt);
+        qz_tick(rt);
         if (is_server &&
             __atomic_load_n(&rt->wait_idle, __ATOMIC_ACQUIRE) &&
             qz_loop_idle(rt)) {
