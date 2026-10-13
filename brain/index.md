@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-13T01:47:06.848Z._
+_Auto-generated. Last updated 2026-10-13T03:49:40.241Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
@@ -35,6 +35,7 @@ _Auto-generated. Last updated 2026-10-13T01:47:06.848Z._
 - [httpserver-streaming-body](pages/httpserver-streaming-body.md) — category: decision | tags: [http-server, streaming, serve] | D2 请求体流式（破坏性 API 变更）：serve() 的 req.body 从同步字符串改为 ReadableStream（Web 标准语义），新增 req.text()/req.arrayBuffer() 异步读取。
 - [httpserver-ws-fixes](pages/httpserver-ws-fixes.md) — category: decision | tags: [http-server, websocket, uvhttp, llhttp] | uvhttp 在 qzjs 中的底层修复（均改 deps/uvhttp 源码）：1) HPE_PAUSED_UPGRADE 时 llhttp 暂停未恢复——分发前显式 llhttp_resume；2) WS 握手 101 后 uvhttp 仍尝试 HTTP 解析导致状态错乱——升
 - [httpserver-ws-protocol](pages/httpserver-ws-protocol.md) — category: decision | tags: [http-server, websocket, protocol] | polyfill/src/http-server.js（纯 JS 层 WS 协议）：
+- [in-module-design](pages/in-module-design.md) — category: decision | tags: [decision, build, wasm, in-module, aot] | ## 结论
 - [interrupt-teardown-fixed](pages/interrupt-teardown-fixed.md) — category: project | status: archived | ## 本页说明
 - [interrupt-teardown-leak](pages/interrupt-teardown-leak.md) — category: project | status: archived | tags: [quickjs-ng, ctl, interrupt, teardown, leak] | ## 结论（2026-10-03 根因定案并根治：qzjs 侧漏释放 JS_GetException 的返回值）
 - [libuv-io-uring-workaround](pages/libuv-io-uring-workaround.md) — category: decision | tags: [libuv, io-uring, linux, workaround] | ## 现状（2026-09-20 更新）
