@@ -1,12 +1,12 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-13T08:24:44.717Z._
+_Auto-generated. Last updated 2026-10-13T08:35:24.567Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
 - [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
 - [aot-wasm-tagged-backend](pages/aot-wasm-tagged-backend.md) — category: decision | tags: [aot, wasm, emitter, qzvm, perf] | # AOT tagged 后端（emitter.js → wasm）
-- [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | <!-- compiled_truth -->
+- [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
 - [branch-management](pages/branch-management.md) — category: decision | tags: [git, workflow, branch, protection] | ## 分支命名（7 前缀）
 - [brand-display-name](pages/brand-display-name.md) — category: decision | tags: [brand, docs] | Qz.js 品牌显示名 = **Qz.js**（内部标识 qzjs）。
 - [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | ## 结论
@@ -15,7 +15,7 @@ _Auto-generated. Last updated 2026-10-13T08:24:44.717Z._
 - [code-quality-requirements](pages/code-quality-requirements.md) — category: decision | tags: [code-quality, readability, dry, review] | ## 代码质量硬性要求（项目级，用户 2026-09-13 追加，对全部产出生效）
 - [commit-workflow](pages/commit-workflow.md) — category: decision | tags: [git, workflow, commit] | ## 规则
 - [console-output-routing](pages/console-output-routing.md) — category: decision | tags: [console, cli, behavior] | ## compiled_truth
-- [cross-process-config-audit](pages/cross-process-config-audit.md) — category: decision | tags: [audit, cross-process, ipc, methodology] | <!-- compiled_truth -->
+- [cross-process-config-audit](pages/cross-process-config-audit.md) — category: decision | tags: [audit, cross-process, ipc, methodology] | ## 背景
 - [crypto-subtle-gtest](pages/crypto-subtle-gtest.md) — category: decision | tags: [crypto, gtest, webcrypto] | ## 决策
 - [crypto-subtle-wrapkey](pages/crypto-subtle-wrapkey.md) — category: decision | tags: [crypto, webcrypto, wrapkey] | - **背景**：crypto.subtle 此前缺 `wrapKey`/`unwrapKey`（WebCrypto 标准方法）。
 - [dap-feature-completion](pages/dap-feature-completion.md) — category: decision | tags: [dap, vscode, debugger] | ## Phase 1（已完成，e2e + ctest 绿）
@@ -44,9 +44,9 @@ _Auto-generated. Last updated 2026-10-13T08:24:44.717Z._
 - [multi-process-model](pages/multi-process-model.md) — category: decision | ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MODEL=THREAD 回退）：宿主进程 ⇄ 独立主RT 进程（qzjs-rt）经单条 socketpair uv_pipe 通信，JS/loop/微任务全在主RT 进程内；worker 进程
 - [oss-library-policy](pages/oss-library-policy.md) — category: decision | tags: [deps, policy, oss] | # 开源库引入与替换原则
 - [plain-language](pages/plain-language.md) — category: decision | tags: [communication, style] | ## 结论
-- [platform-support](pages/platform-support.md) — category: decision | tags: [platform, linux, scope] | <!-- compiled_truth -->
+- [platform-support](pages/platform-support.md) — category: decision | tags: [platform, linux, scope] | ## 结论
 - [polyfill-bundling-policy](pages/polyfill-bundling-policy.md) — category: decision | tags: [polyfill, bundling, memory] | ## 启动加速决策链（2026-09-10 用户拍板）
-- [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | <!-- compiled_truth -->
+- [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## quickjs-ng 上游同步与改动分层策略
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
 - [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑（2026-10-07/08 用户拍板）
@@ -59,7 +59,7 @@ _Auto-generated. Last updated 2026-10-13T08:24:44.717Z._
 - [streams-b3-semantics](pages/streams-b3-semantics.md) — category: decision | tags: [streams, wintertc, ecma-429] | - **背景**：ROADMAP B3（streams 覆盖）对照 WHATWG Streams 语义审计 polyfill/src/streams.js，发现 pipeTo/tee/pipeThrough/releaseLock 四处真实缺口。
 - [strict-mode-sandbox](pages/strict-mode-sandbox.md) — category: decision | tags: [security, sandbox, P2] | ## 定位裁决
 - [test262-ctest-fix](pages/test262-ctest-fix.md) — category: decision | tags: [test262, ctest, cmake] | ## 现象
-- [tls-ca-trust-store](pages/tls-ca-trust-store.md) — category: decision | tags: [tls, security, api, mbedtls] | <!-- compiled_truth -->
+- [tls-ca-trust-store](pages/tls-ca-trust-store.md) — category: decision | tags: [tls, security, api, mbedtls] | ## 是什么
 - [urlpattern-modifier-fix](pages/urlpattern-modifier-fix.md) — category: decision | tags: [urlpattern, wintertc, ecma429, polyfill] | ## 问题
 - [wamr-init-lazy](pages/wamr-init-lazy.md) — category: decision | tags: [wamr, startup, lazy-init] | ## 决策
 - [wasm-engine-integration](pages/wasm-engine-integration.md) — category: decision | tags: [wasm, wamr, threading] | # WAMR 线程环境（关键坑）

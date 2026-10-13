@@ -5,10 +5,9 @@ category: decision
 status: active
 tags: [audit, cross-process, ipc, methodology]
 created: "2026-10-06T10:04:34"
-updated: "2026-10-06T10:04:50"
+updated: "2026-10-13T08:35:24"
 ---
 
-<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 背景
 
@@ -80,4 +79,10 @@ IPC 控制帧只有 READY/IDLE/SHUTDOWN/CLOSING/PING/PONG/PFAIL，**IDLE 仅存�
   kind: decision
   summary: "跨进程配置传递审计：可复用的四条扫描判据 + 2026-10 全库扫描结论（含否定项）"
   source: "2026-10 以 #9~#16 沉淀的失效模式扫全库"
+  affects: [cross-process-config-audit]
+
+- time: 2026-10-13T08:35:24
+  kind: decision
+  summary: "规范化存储标记：compiled_truth 区块开头重复的 <!-- compiled_truth --> 标记（CLI extractSection 会把它当正文首行）已去掉；正文无实质改动。"
+  source: "brain CLI 重复 marker 自愈"
   affects: [cross-process-config-audit]

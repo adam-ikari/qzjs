@@ -5,10 +5,9 @@ category: decision
 status: active
 tags: [fuzz, quickjs, bytecode, security]
 created: "2026-09-19T14:33:30"
-updated: "2026-10-13T08:06:28"
+updated: "2026-10-13T08:35:23"
 ---
 
-<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 字节码读取器加固（untrusted stream 防御）
 
@@ -110,4 +109,10 @@ NULL 数组 = 一致的空模块）。合法输入永不进校验抛错路径，
   kind: reversal
   summary: "修正 2026-09-29 条目「真实字节码在 tracked 的 src/polyfill_default.c 与 src/worker_boot_default.c 里」：tracked 部分已作废（bytecode-build-artifact 2026-09-30 推翻 rodata tracked 基线）。现状两文件全部 untracked，生成于 build/generated/polyfill/。该条目的核心判据（「样本/快照/基线」须有机械可验等式绑住来源，否则漂移永不被发现——缺陷长期存在不是因难，而是没有东西会为它变红）仍成立且更有力。"
   source: ".gitignore:13-31 + bytecode-build-artifact 页"
+  affects: [bc-reader-hardening]
+
+- time: 2026-10-13T08:35:23
+  kind: decision
+  summary: "规范化存储标记：compiled_truth 区块开头重复的 <!-- compiled_truth --> 标记（CLI extractSection 会把它当正文首行）已去掉；正文无实质改动。"
+  source: "brain CLI 重复 marker 自愈"
   affects: [bc-reader-hardening]
