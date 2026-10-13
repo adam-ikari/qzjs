@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T05:33:37"
+updated: "2026-10-13T05:55:32"
 ---
 
 <!-- compiled_truth -->
@@ -105,4 +105,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: evidence
   summary: "§10.4 异步回流原型实测通过（inmod-abi-proto/ B 段）。guest_async.wat import qz_host.fs_read(ptr,len)->op_id + qz_host.drain(ptr,max)->n；host_async.c pthread 延迟读文件→队列；guest drain 自旋取回（~76k 轮，24 字节负载）。确认'import 拉'模型成立：host 无 JSValue，事件纯字节，resolve 由 guest 内完成。§10 现验同步/写回/异步三条。未覆盖：guest 侧 JSValue 生命周期/memory.grow/AOT 变体/多 op 并发/drain 去自旋。"
   source: "inmod-abi-proto/build.sh B 段"
+  affects: [in-module-design]
+
+- time: 2026-10-13T05:55:32
+  kind: evidence
+  summary: "§10 跨界税 bench 实测（inmod-abi-proto/ C 段）。WAMR 经典解释器：guest→host 空 import ~45 ns/次、带 32B 负载 ~66 ns/次；基线 wasm 纯循环 ~5.6、C 直调空 ~0.3。含义：跨界税 ~2200 万次/秒，pal 面每 tick 几十次=纳秒级非瓶颈；仍把跨界降到最低但不必为省跨界牺牲结构。对比 AOT 的 qz.* import（JS 函数 ~4.9µs/次）→ in-module qz_host.* 直落 native C 快 ~100x，是 in-module 关键性能优势。踩坑：i64 返回值经 wasm_runtime_call_wasm 卡死（argv slot 约定），bench 改 i32 返回+宿主侧计时。"
+  source: "inmod-abi-proto/build.sh C 段"
   affects: [in-module-design]
