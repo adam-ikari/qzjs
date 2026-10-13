@@ -226,11 +226,13 @@ VM:  qz_ctx_create()                guest: qz_ctx_create()
 
 ## 6. 构建形态
 
-`QZ_PROFILE=in-module`（已落地 `d365171e`）职责 = **选标志**（引擎 OFF、扩展 OFF 等）。新增职责 = **选源集 + 定 artifact**：
+`QZ_PROFILE=in-module`（已落地 `d365171e`）职责 = **选标志**（引擎 OFF、扩展 OFF 等）。新增职责 = **选源集 + 定 artifact**（M4 ✅ 已落地）：
 
-- 新增 CMake target `qzvm-guest`，源集 = 内核源（`context.c` 内核部 + `vm_core.c` + `ext_lifecycle.c` 内核部）+ quickjs-ng +（可选）纯计算扩展。
-- 输出 `libqzvm.wasm`（导出 `qz_create`/`qz_eval*`/`qz_tick`/`qz_destroy`），**非** `libqzjs.so`。
-- 宏 `QZ_VM_GUEST` 由该 target 下发，驱动 5.1 的条件编译。
+- 新增 CMake target `qzvm-guest`（`src/qzvm/CMakeLists.txt` 内 `if(QZ_IN_MODULE)`），源集 = 内核三源（`context.c` / `vm_core.c` / `ext_lifecycle.c`）+ `guest_entry.c` + quickjs-ng（`qjs` target）；宿主源/扩展/polyfill 一律不进。
+- 输出 `libqzvm.wasm`（导出 `qz_create`/`qz_eval`/`qz_tick`/`qz_destroy` + `memory`/`malloc`/`free`），**非** `libqzjs.so`。`guest_entry.c` 用 `__attribute__((export_name))` 把 `qz_guest_*` C 符号映射到设计导出名（避免与宿主侧 `qz_create`/`qz_destroy` 同名）。
+- 宏 `QZ_VM_GUEST` 由该 target 下发（`target_compile_definitions`），驱动 5.1 的条件编译。`QZ_WITH_*` 全 0 → `qz_default_exts` 全 NULL 槽，不引未编入的扩展符号。
+- 工具链 `cmake/wasm32.cmake`：clang `-target wasm32-wasi --sysroot`（Debian wasi-libc 或 wasi-sdk），`-nodefaultlibs -lc -lm`（绕 Debian 缺 libgcc），reactor（`-mexec-model=reactor`，无 main）。
+- **合并形态裁决（M4 定）**：M4 产出**独立 guest `.wasm`**（`libqzvm.wasm`）。与 AOT emitter 发射的静态 wasm 合并成单模块（wasm-merge / wasm-ld 链接）延后——等 M5 guest 跑通真 JS 后，静态/动态两面同存才可验。M4 的独立产物已满足「同 isolate 同内存」前提（宿主加载单一模块，内存导出共享）。
 
 ```mermaid
 flowchart TB
@@ -256,7 +258,7 @@ flowchart TB
 | M1 | qz_t/qz_ctx_t 能力切分 | `qz_core.h` 加 `#ifndef QZ_VM_GUEST` 块；`qz_types.h` uv include 条件化 | **native 全回归绿**（切分不改宿主行为）；`-DQZ_VM_GUEST -fsyntax-only` 内核源 uv 不可达 |
 | M2 ✅ | context.c 拆分（含边界接线移出） | §5.2 已落地：`context.c` 只留 realm 内核（`qz_ctx_create/_at/_destroy`）；边界接线 + 编排 → `host/ctx_orchestrate.c`（`qz_ctx_wire_up`/`qz_ctx_create_host`/`qz_ctx_destroy_host`/`qz_ctx_cleanup_resources`/`spawn`/`serialize`/`rebuild`/`destroy_id`）；死码 `qz_inject_polyfill_ctx` 已删 | native 回归绿（context/suspend/composition gtest 全过）；`context.c` 无 pal/polyfill/ext-init 调用 |
 | M3 ✅ | tick 上移 | `qz_tick` 已入 qzvm（`vm_core.c`，原 `host/thread.c` 的 `qz_flush_microtasks`）；宿主全部调用点（thread/worker/rt_main 主循环 + qzjs.c teardown 两处内联排空循环）统一改调 `qz_tick` | native 回归绿（32/32 ctest，tick 语义不变）；`qz_tick` 零 libuv，`QZ_VM_GUEST` 下内核三源照编 |
-| M4 | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target | `libqzvm.wasm` 链接成功，导出符号齐；import 段含 `qz_host.*` |
+| M4 ✅ | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target（`src/qzvm/CMakeLists.txt` if QZ_IN_MODULE）+ `src/qzvm/guest_entry.c`（导出面 + qz_host.drain import） | `libqzvm.wasm` 链接成功，导出 `qz_create`/`qz_eval`/`qz_tick`/`qz_destroy` + `memory`/`malloc`/`free`；import 段含 `qz_host.drain`；native 全回归绿（32/32 ctest）；`-DQZ_VM_GUEST -fsyntax-only` 内核源+guest_entry 零 error |
 | M5 | guest 跑通（真 JS + 异步） | §10.3 import 面 + §10.4 回流 | 原型已验同步/写回/异步；M5 接真 QuickJS（resolve 持 JSValue）+ tick 驱动（去自旋）|
 | M6 | 宿主去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 guest；tcp_io/control/worker 去 JSValue；host 不链 QuickJS | host 目标零 `JS_NewRuntime`；AOT/standard 档不受影响 |
 
