@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T05:30:26"
+updated: "2026-10-13T05:33:37"
 ---
 
 <!-- compiled_truth -->
@@ -99,4 +99,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: evidence
   summary: "§10 跨界 ABI 原型实测通过（inmod-abi-proto/）。4 条主张验证：(1) import module 名 qz_host.* 隔离；(2) guest 同步跨界调宿主 qz_host.log；(3) 内存 ptr+len 传字节无 JSValue；(4) 回流形态 宿主 now()→i64.store→宿主读回。工具链 wat2wasm+clang(wasm32)+vendored WAMR(libiwasm.a)。结论：§10 骨架成立，M5 起点明确。未覆盖：异步 promise 回流/内存增长/AOT 变体。"
   source: "inmod-abi-proto/build.sh 实测"
+  affects: [in-module-design]
+
+- time: 2026-10-13T05:33:37
+  kind: evidence
+  summary: "§10.4 异步回流原型实测通过（inmod-abi-proto/ B 段）。guest_async.wat import qz_host.fs_read(ptr,len)->op_id + qz_host.drain(ptr,max)->n；host_async.c pthread 延迟读文件→队列；guest drain 自旋取回（~76k 轮，24 字节负载）。确认'import 拉'模型成立：host 无 JSValue，事件纯字节，resolve 由 guest 内完成。§10 现验同步/写回/异步三条。未覆盖：guest 侧 JSValue 生命周期/memory.grow/AOT 变体/多 op 并发/drain 去自旋。"
+  source: "inmod-abi-proto/build.sh B 段"
   affects: [in-module-design]
