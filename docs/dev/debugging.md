@@ -13,10 +13,10 @@ call stack, locals, evaluate).
 ## How it works
 
 The debugger is a **library capability**, not a separate process. It lives in
-`src/debugger.c` (debug core) and `src/debugger_dap.c` (DAP protocol layer),
-compiled into `libqzjs.a` when `QZ_BUILD_DEBUGGER=ON`. A small patch to the
-QuickJS-ng engine (`deps/quickjs-ng-debugger.patch`) adds the breakpoint/step
-introspection primitives the core uses.
+`src/qzvm/debugger.c` (debug core) and `src/qzvm/debugger_dap.c` (DAP protocol
+layer), compiled into `libqzjs.a` when `QZ_BUILD_DEBUGGER=ON`. A small patch to
+the QuickJS-ng engine (`src/qzvm/patches/engine-dap-debugger.patch`) adds the
+breakpoint/step introspection primitives the core uses.
 
 Activation is **automatic via config or env** — your host code does not
 change. `qz_create` checks for debugging and, if enabled, attaches the DAP
@@ -25,13 +25,15 @@ attaches.
 
 ### Two-layer disable (zero overhead when off)
 
-- `QZ_BUILD_DEBUGGER=OFF` (default): the engine patch is **not** applied,
-  `src/debugger.c`/`src/debugger_dap.c` are **not** compiled, and `qz_create`
-  has no debug code path. Debugging does not exist; `libqzjs.a` is unchanged.
-- `QZ_BUILD_DEBUGGER=ON`: the patch is applied and the sources compile in,
-  but the engine's per-opcode `DEBUGGER_CHECK` is a no-op (one never-taken
-  branch) **unless a debugger is attached at runtime**. Non-debugged runs pay
-  essentially nothing.
+- The engine patch (`src/qzvm/patches/engine-dap-debugger.patch`) is applied
+  **unconditionally at configure time** — it is not gated by
+  `QZ_BUILD_DEBUGGER`. What the option gates is the qzjs-side debug sources.
+- `QZ_BUILD_DEBUGGER=OFF` (default): `src/qzvm/debugger.c` /
+  `src/qzvm/debugger_dap.c` are **not** compiled and `QZ_DEBUG_SUPPORT` is not
+  defined, so `qz_create` has no debug code path. Debugging does not exist.
+- `QZ_BUILD_DEBUGGER=ON`: the sources compile in, but the engine's per-opcode
+  `DEBUGGER_CHECK` is a no-op (one never-taken branch) **unless a debugger is
+  attached at runtime**. Non-debugged runs pay essentially nothing.
 
 ## Build
 
@@ -40,9 +42,10 @@ cmake -B build -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 ```
 
-This applies `deps/quickjs-ng-debugger.patch` to the QuickJS-ng submodule
-working tree at configure time (the submodule stays clean in git — the patch
-is the source of truth). `cmake -DQZ_BUILD_DEBUGGER=OFF` restores pristine.
+This applies `src/qzvm/patches/engine-dap-debugger.patch` to the QuickJS-ng
+submodule working tree at configure time (the submodule stays clean in git —
+the patch is the source of truth). This step runs for **every** build; the
+`QZ_BUILD_DEBUGGER` option does not gate it.
 
 ## Enable debugging in your program
 
@@ -330,13 +333,13 @@ e2e tests (`QZJS_RUNTIME` points it at that job's `build/qzjs`).
 
 The engine's per-opcode breakpoint check is gated by a compile-time macro.
 If the macro the CMake passes to the engine differs from the one in
-`deps/quickjs-ng-debugger.patch`, `DEBUGGER_CHECK` compiles to a no-op and
+`src/qzvm/patches/engine-dap-debugger.patch`, `DEBUGGER_CHECK` compiles to a no-op and
 debugging silently does nothing — no error, breakpoints just never fire.
 
 1. Verify the macro matches in both places:
 
    ```bash
-   grep -n DEBUG_SUPPORT deps/quickjs-ng-debugger.patch | head -4
+   grep -n DEBUG_SUPPORT src/qzvm/patches/engine-dap-debugger.patch | head -4
    grep -n "QZ_DEBUG_SUPPORT_DEFINE" CMakeLists.txt
    ```
 
