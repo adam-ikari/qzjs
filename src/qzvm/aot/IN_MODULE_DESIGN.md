@@ -103,7 +103,7 @@
 
 | 步骤 | 属核心？ |
 | --- | --- |
-| 建 pal object | ❌ 纯宿主（48 个宿主函数） |
+| 建 pal object | ❌ 纯宿主（42 个宿主函数） |
 | set `__native_inject__` 全局 | ⚠️ 通用机制，但服务于 pal |
 | eval bytecode | ✅ 已有 `qz_eval_bytecode_internal`（重复实现） |
 | `__native_inject__`→`__native__` 改名 | ❌ 是 polyfill build 约定（`build.js`），非引擎 |
@@ -206,15 +206,18 @@ struct qz_t {
 | 推 microtask | `qz_tick`（← `qz_flush_microtasks` 上移） |
 | eval/compile | `qz_eval_internal` / `qz_compile` |
 
-**边界接线不在此接口内**（§3.1）：建 pal、装 polyfill、`qz_ext_init_*` 由**宿主**在 VM 建完 realm 后调。即初始化序列从 `qz_ctx_create` 单体变为：
+**边界接线不在此接口内**（§3.1）：建 pal、装 polyfill、`qz_ext_init_*` 在 VM 建完 realm 后运行。**native 形态**下由宿主源调（C 直调）；**in-module 形态**下同属 guest（`js_pal_*` 包装留 guest 内，仅其下层 `uv_io_*` 穿 wasm 边界，见 §10.2）。即初始化序列：
 
 ```
-VM:  qz_ctx_create()         → realm 建好、已注册
-宿主: build_pal(ctx)         → 装 pal 面
-宿主: inject_polyfill(ctx)   → eval bundle
-宿主: qz_ext_init_all(ctx)   → 扩展登记（依赖前两步）
-宿主: qz_tick()              → 每轮拉
+【native】                          【in-module】
+VM:  qz_ctx_create()                guest: qz_ctx_create()
+宿主: build_pal(ctx)                guest: build_pal(ctx)
+宿主: inject_polyfill(ctx)          guest: inject_polyfill(ctx)
+宿主: qz_ext_init_all(ctx)          guest: qz_ext_init_all(ctx)
+宿主: qz_tick()                     host : 每轮 libuv iteration 后调 guest qz_tick()
 ```
+
+分界线的**实质**不是"哪一段在宿主"，是「**收 JSValue 的包装**（§10.2 的 `js_pal_*`）必须在 guest 内——因为 JSValue 只存在于 guest 的 QuickJS 堆」。native 下 guest==宿主进程，故看起来"宿主调"；in-module 下二者分属 wasm 内外，`js_pal_*` 必须随 QuickJS 留在 wasm 内。
 
 因是**单一 wasm 产物的内部实现**，此接口无 ABI 承诺（宿主 native 形态直接 C 调；guest 形态是模块内部调用）——brain 结论成立，且正因为无承诺，把它**设计紧**是零代价的。
 
@@ -254,12 +257,13 @@ flowchart TB
 | M1 | qz_t/qz_ctx_t 能力切分 | `qz_core.h` 加 `#ifndef QZ_VM_GUEST` 块；`qz_types.h` uv include 条件化 | **native 全回归绿**（切分不改宿主行为）；`-DQZ_VM_GUEST -fsyntax-only` 内核源 uv 不可达 |
 | M2 | context.c 拆分（含边界接线移出） | §5.2：pal/polyfill/ext 登记移出内核；宿主编排移新文件；删死码 `qz_inject_polyfill_ctx` | native 回归绿；`qz_ctx_create/destroy` 内核部零 uv、零 `bridge.c` 调用 |
 | M3 | tick 上移 | `qz_tick` 入 qzvm；宿主改调 | native 回归绿（tick 语义不变） |
-| M4 | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target | `libqzvm.wasm` 链接成功，导出符号齐 |
-| M5 | guest 跑通 | import 面 + 最小 host 驱动 | 模块内 `eval("1+1")` 返回 2；一次 tick 推进 promise |
+| M4 | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target | `libqzvm.wasm` 链接成功，导出符号齐；import 段含 `qz_host.*` |
+| M5 | guest 跑通（单原语跨界） | §10.3 最小 import 面（先 `qz_host_log` + `qz_host_now`）+ §10.4 回流（先 fs 读）| 模块内 `eval("1+1")` 返回 2；`console.log` 跨界输出；一次 `fsRead` promise 经 tick 回流 resolve |
+| M6 | 宿主去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 guest；tcp_io/control/worker 去 JSValue；host 不链 QuickJS | host 目标零 `JS_NewRuntime`；AOT/standard 档不受影响 |
 
-**M1–M3 全部在 native 上验证**（切分是纯重构，宿主行为不变）→ 风险最低、最先做。M4–M5 才引入 wasm 工具链不确定性。
+**M1–M3 全部在 native 上验证**（切分是纯重构，宿主行为不变）→ 风险最低、最先做。M4–M5 引入 wasm 工具链 + 跨界 ABI 不确定性。M6 是 in-module 真正落地（前 5 步可先跑通 guest 自包含 + 单原语）。
 
-**相比初版**：删除了「stub uv 头」（负债）；把「native 回归」作为每一步的护栏（而非一次 configure）；最小可验证提前到 M1。
+**相比初版**：删除了「stub uv 头」（负债）；把「native 回归」作为每一步的护栏（而非一次 configure）；最小可验证提前到 M1；**新增 M6**——初版没意识到 pal 面跨界问题（§10）。
 
 ## 8. 最小配置
 
@@ -284,11 +288,116 @@ cmake --build build-inmod --target qzvm-guest
 | 工具链选型 | wasi-sdk vs emscripten | 倾向 wasi-sdk（freestanding，贴合自包含）；M4 定 |
 | `qz_ext_suspend/resume_all` 无调用者 | 是死码还是待接 | 单独裁决：无消费者则删（奥卡姆）或随 suspend 归宿主 |
 | 扩展内容取舍 | 全 OFF 最小，但 guest 的标准面（如 console/URL）依赖 polyfill 非 C 扩展 | M5 定 polyfill 注入的最小集 |
+| 跨界 ABI 未经实测（★） | §10 的 import 面 / 回流方案（import 拉 vs 共享内存 vs host 调导出）全是**设计推断**，无原型 | M5 先做**最小验证**：1 个 `qz_host_log`（同步）+ 1 个 fs 读（异步回流）跑通，再铺开 |
+| host 去 JS 化面大（M6） | `bridge.c` 463 / `tcp_io.c` 229 / `control.c` 72 处 JS_ 调用需处置 | M6 独立，前 5 步不依赖；先判定"移 guest vs 去 JS 化"再动 |
+| import 面与 AOT `qz.*` 命名冲突 | 两套 import（`qz.*` 值原语 vs `qz_host.*` 宿主能力） | 不同 import module 名隔离（§10.6） |
 
-## 10. 参考
+## 10. 跨界 ABI（★本轮核心：pal 面如何跨 wasm）
+
+前 10 节只解决了「guest 编什么」，**没解决 guest 怎么调宿主**。in-module 下 guest 在 wasm 内、宿主在 wasm 外——native 里 `context.c:164` 直调 `qz_create_pal_object_ctx` 的 C 调用**不存在了**。pal 面（实测 **42 个唯一属性 / 43 个唯一 `js_pal_*` 函数**，`qz_create_pal_object_ctx` 内按条件编译分段注册）必须是 **wasm imports**。
+
+### 10.1 天然边界已存在：`uv_io_*`
+
+实测 `src/io/uv_io.c`（4061 行）**零 `JSValue`**（全文件仅 3 处提及，**全在注释**），接口签名纯原语：
+
+```c
+void uv_io_http_request(qz_t *rt, const char *url, const char *method,
+                        const char *headers, const char *body, size_t body_len,
+                        qz_io_done_t cb, void *cb_data);
+```
+
+同理 `uv_io_fs_read/write/remove/exists/list`、`uv_io_storage_*`、`qz_proc_*`、`qz_ipc_child_*`。**这就是跨界线**——不在 bridge.c 的 pal 函数（那些收 `JSValue argv`），而在 pal 之下的 `uv_io_*`（纯原语 + 回调）。
+
+### 10.2 三层重排
+
+现状（native）：
+
+```
+JS → polyfill.js → pal.log(level, msg)  [bridge.c js_pal_*，收 JSValue]
+                        ↓ JS_ToCString / JS_ToInt32
+                   uv_io_* / qz_proc_*  [纯原语]
+                        ↓ done_cb(cb_data, err, data, len)
+                   JS_Call(resolve)      [回 guest JS]
+```
+
+in-module 后 **`js_pal_*` 层留在 guest 内**（它只做 argv→原语 marshalling + Promise 装卸），只有 `uv_io_*` 调用穿过边界：
+
+```
+guest (wasm):  JS → polyfill.js → js_pal_log (收 JSValue)
+                     ↓ 转原语
+               __qz_host_log(level: i32, msg_ptr: i32, msg_len: i32)   ← wasm import
+════════════════ wasm 边界 ════════════════
+host:          __qz_host_log → fprintf / uv_now / uv_hrtime
+```
+
+**关键**：`js_pal_*` 的 43 个包装**不跨界**（纯 JS↔原语转换，guest 内做）；跨界的是其下层原语。**连带**：`js_pal_*` 引用的 `JS_NewPromiseCapability`（建 Promise）——Promise 属 guest (QuickJS)，也在 guest 内。故跨界 import 面 **≈ 12 个 `uv_io_*` 原语**，而非 42。
+
+### 10.3 import 面清单（按 uv_io 原语聚类）
+
+| 类 | import | 签名（原语） |
+| --- | --- | --- |
+| 时间 | `qz_host_now` / `qz_host_hrtime` | `() -> i64` |
+| 日志 | `qz_host_log` | `(i32 level, i32 ptr, i32 len)` |
+| 随机 | `qz_host_random` | `(i32 ptr, i32 len)` |
+| timer | `qz_host_timer_start` / `qz_host_timer_stop` | `(i32 delay_ms, i32 repeat) -> i32 handle` |
+| fs | `qz_host_fs_read/write/remove/exists/list` | `(ptr, len…) -> op_id` |
+| http | `qz_host_http_request/stream/abort` | `(ptr…, i32 op_id)` |
+| storage | `qz_host_storage_get/set/del` | `(ptr…) -> op_id` |
+| proc | `qz_host_proc_spawn/post/terminate/ping` | `(ptr…) -> i32` |
+| ipc | `qz_host_ipc_*` | `(ptr…)` |
+| 边界消息 | `qz_host_post_message` | `(ptr, len)` |
+
+**内存传递**：wasm 内存按 ptr+len 传字节；不放 JSValue（wasm 外无 JS 堆概念）。`qz_str_len`/`0x7FFA` 句柄（AOT 已有）可复用为 guest 内字符串表示。
+
+### 10.4 异步回流（host → guest）
+
+现状：host 的 `done_cb` 直接 `JS_Call(resolve)`（同线程）。in-module 下 host **无 JSContext**，不能建/调 JSValue。改为**拉模型 + 队列**：
+
+```
+host:  uv_io_http_request(..., op_id=N) 完成
+       → 写入 host 侧 pending 队列 {op_id, err, ptr, len}
+guest: qz_tick()  ← 宿主每轮 libuv iteration 后调
+       → __qz_drain__()  [guest import，反向：拉 host 队列]
+       → 按 op_id 找到 guest 内持有的 resolve(JSValue) → JS_Call
+```
+
+即 §5.4 的 tick 拉模型**一并解决异步回流**：tick = 排空 microtask + 拉 host 完成队列。**无需 host 侧持 JSValue**（这是 in-module 硬约束的必然结论）。
+
+**回流的实现选型**（M4 定）：
+
+| 方案 | 机制 | 取舍 |
+| --- | --- | --- |
+| **import 拉**（倾向） | guest 调 `qz_host_drain(buf, max)` 取回完成事件 | 无共享内存要求，单向好推理；每 tick 一次跨界 |
+| 共享内存环 | host 写环，guest 读 | 零跨界；需 `shared-memory` + 原子，复杂度高 |
+| host 调 guest 导出 | host 直接 `qz_guest_dispatch(op_id, …)` | host 需持 wasm instance 调用句柄；WAMR 支持 |
+
+倾向 **import 拉**：契合已有 tick、最易验证（M5 只需一个 fs 读跑通）。
+
+### 10.5 对宿主源的影响
+
+in-module 下 host **不再链 QuickJS**（`qzjs.c:489` 的 `JS_NewRuntime` 是 guest 的活）。故 host 侧需去 JS 化的源：
+
+| 源 | JS_ 用量 | 处置 |
+| --- | --- | --- |
+| `bridge.c` | 463 | `js_pal_*` 43 个（收 JSValue）→ **移 guest**；`qz_create_pal_object_ctx` 同理 |
+| `io/tcp_io.c` | 229 | 判定：建 JS 值/回调 → 去 JS 化或移 guest |
+| `control/control.c` | 72 | CTL 是宿主能力，去 JS 化 |
+| `host/worker.c` | 48 | worker 编排，去 JS 化 |
+| `host/qzjs.c` | 10 | lifecycle+tick → 改调 guest 导出 |
+| `host/thread.c` | 2 | tick → 上移 guest |
+| `io/uv_io.c` | **0** | **不动**（已是纯原语层） |
+
+**这不是本轮范围**——记录为 M6，因为 in-module 真正落地才需要；先做 M1–M5（guest 自包含 + 一个 fs 原语跨界跑通）。
+
+### 10.6 与 AOT 的关系（复用点）
+
+AOT（`qzvm.js` + emitter）已有 `qz.*` import 机制（`qz.add`/`qz.str_len`… NaN-box i64）。in-module 的 host import 是**另一套**（`qz_host_*`，host 能力），但**共享 wasm 工具链 + WAMR 加载**。命名区分：`qz.*` = AOT 值原语（guest 内 AOT 代码用）；`qz_host.*` = host 能力（in-module guest 用）。二者不冲突（不同 import module 名）。
+
+## 11. 参考
 
 - 决策原则：brain `decision-principles`（苏格拉底式提问 / 第一性原理 / 奥卡姆剃刀 + 极简哲学）
 - 决策链：brain `aot-experiment-verification`（2026-10-13 全部条目）
 - 相关设计：`STR_BACKEND_DESIGN.md`、`ASSESSMENT.md`、`PORTABILITY_32BIT.md`
 - 已落地：提交 `d365171e`（profile 档 + gate 逃逸）
+- 证据点位（§10 跨界 ABI）：`uv_io.c`（4061 行，**0 处 `JS_` 调用**——天然边界）、`qz_rt.h:129-149`（`uv_io_*` 原语签名）、`bridge.c`（463 处 JS_，43 个 `js_pal_*`）、`tcp_io.c`（229）、`control.c`（72）、`worker.c`（48）、`qzjs.c:489`（`JS_NewRuntime`——in-module 后属 guest job）
 - 证据点位：`qz_core.h:79-311`（qz_t）、`:17-33`（qz_ctx_t）、`qz_types.h:26-30`、`context.c:101-240`（`qz_ctx_create_at` 混装）、`bridge.c:2117-2172`（编排）、`bridge.c:2226`（pal 面）、`bridge.c:2334`（死码注入）、`src/host/polyfill_load.c`、`textcodec_ext.c:225`（ext 依赖 `__native__`）、`thread.c:22`（tick）
