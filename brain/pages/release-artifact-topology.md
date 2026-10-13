@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [bytecode, release, artifact, wasm, wintertc, abi]
 created: "2026-10-07T15:07:14"
-updated: "2026-10-13T08:22:49"
+updated: "2026-10-13T12:11:34"
 ---
 
 <!-- compiled_truth -->
@@ -370,3 +370,9 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
   summary: "在「术语澄清」显式标注 frontmatter title 的历史表述「唯一稳定 API = WinterTC」已过时（brain CLI 无改 title 命令），以正文约束 2 为准：稳定面不限于 WinterTC。"
   source: "一致性修正：title vs 约束 2"
   affects: [release-artifact-topology]
+
+- time: 2026-10-13T12:11:34
+  kind: reversal
+  summary: "推翻本页 2026-10-07T15:12:35 决策条目里的「JS 稳定 API 仅 WinterTC」表述：唯一稳定面 = qzjs 对外公开 API 集合，WinterTC 是其核心组成但非唯一（用户 2026-10-08 口径，见本页约束 2 与 standard-source-policy）。条目其余部分（永不保证二进制 ABI 兼容 / wasm 独立形态仅保证 WASI / 字节码必须绑定引擎）不变。"
+  source: "用户口径确认：唯一稳定的是 qzjs 公开 API"
+  affects: [release-artifact-topology, standard-source-policy]
