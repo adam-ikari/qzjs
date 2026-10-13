@@ -56,7 +56,7 @@
 
 ### 2.4 tick 原语已存在
 
-`src/host/thread.c:22` 的 `qz_flush_microtasks` = `while (JS_ExecutePendingJob(...))` 的薄封装，**零 libuv**。tick() 即此物，仅位置在宿主层。
+`qz_tick` = `while (JS_ExecutePendingJob(...)) > 0` 的薄封装，**零 libuv**。原定义在 `src/host/thread.c:22`（名 `qz_flush_microtasks`），**M3 已上移 qzvm（`vm_core.c`）**——位置与职责一致。
 
 ### 2.5 分层现状
 
@@ -202,7 +202,7 @@ struct qz_t {
 | --- | --- |
 | 建/拆 realm | `qz_ctx_create` / `qz_ctx_destroy`（**内核**：建 JSContext + 注册；不含边界接线） |
 | 取活动 ctx | `qz_get_active_*` |
-| 推 microtask | `qz_tick`（← `qz_flush_microtasks` 上移） |
+| 推 microtask | `qz_tick`（M3 ✅ 已从 `qz_flush_microtasks` 上移入 `vm_core.c`） |
 | eval/compile | `qz_eval_internal` / `qz_compile` |
 
 **边界接线不在此接口内**（§3.1）：建 pal、装 polyfill、`qz_ext_init_*` 在 VM 建完 realm 后运行。**native 形态**下由宿主源调（C 直调）；**in-module 形态**下同属 guest（`js_pal_*` 包装留 guest 内，仅其下层 `uv_io_*` 穿 wasm 边界，见 §10.2）。即初始化序列：
@@ -222,7 +222,7 @@ VM:  qz_ctx_create()                guest: qz_ctx_create()
 
 ### 5.4 tick 拉模型
 
-`qz_tick(qz_t *)` = `while (JS_ExecutePendingJob) > 0`，从 `src/host/thread.c:22` 上移到 qzvm。宿主每轮 libuv iteration 调它拉模块推进。模块 reactive，不自带 timer/loop/阻塞。复用点 `qzjs.c:643/655`、`thread.c:22` 统一改调 `qz_tick`。
+`qz_tick(qz_t *)` = `while (JS_ExecutePendingJob) > 0`，**已上移到 qzvm（`vm_core.c`，M3 ✅）**，原 `host/thread.c` 的 `qz_flush_microtasks` 删除。宿主每轮 libuv iteration 调它拉模块推进。模块 reactive，不自带 timer/loop/阻塞。调用点已统一：`qzjs.c` teardown（两处内联排空循环）、`thread.c`（`qz_loop_idle` + 消息派发 + 主循环）、`worker.c` 主循环、`rt_main.c` 主循环。
 
 ## 6. 构建形态
 
@@ -255,7 +255,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | M1 | qz_t/qz_ctx_t 能力切分 | `qz_core.h` 加 `#ifndef QZ_VM_GUEST` 块；`qz_types.h` uv include 条件化 | **native 全回归绿**（切分不改宿主行为）；`-DQZ_VM_GUEST -fsyntax-only` 内核源 uv 不可达 |
 | M2 ✅ | context.c 拆分（含边界接线移出） | §5.2 已落地：`context.c` 只留 realm 内核（`qz_ctx_create/_at/_destroy`）；边界接线 + 编排 → `host/ctx_orchestrate.c`（`qz_ctx_wire_up`/`qz_ctx_create_host`/`qz_ctx_destroy_host`/`qz_ctx_cleanup_resources`/`spawn`/`serialize`/`rebuild`/`destroy_id`）；死码 `qz_inject_polyfill_ctx` 已删 | native 回归绿（context/suspend/composition gtest 全过）；`context.c` 无 pal/polyfill/ext-init 调用 |
-| M3 | tick 上移 | `qz_tick` 入 qzvm；宿主改调 | native 回归绿（tick 语义不变） |
+| M3 ✅ | tick 上移 | `qz_tick` 已入 qzvm（`vm_core.c`，原 `host/thread.c` 的 `qz_flush_microtasks`）；宿主全部调用点（thread/worker/rt_main 主循环 + qzjs.c teardown 两处内联排空循环）统一改调 `qz_tick` | native 回归绿（32/32 ctest，tick 语义不变）；`qz_tick` 零 libuv，`QZ_VM_GUEST` 下内核三源照编 |
 | M4 | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target | `libqzvm.wasm` 链接成功，导出符号齐；import 段含 `qz_host.*` |
 | M5 | guest 跑通（真 JS + 异步） | §10.3 import 面 + §10.4 回流 | 原型已验同步/写回/异步；M5 接真 QuickJS（resolve 持 JSValue）+ tick 驱动（去自旋）|
 | M6 | 宿主去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 guest；tcp_io/control/worker 去 JSValue；host 不链 QuickJS | host 目标零 `JS_NewRuntime`；AOT/standard 档不受影响 |

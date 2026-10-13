@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T13:33:03"
+updated: "2026-10-13T13:52:30"
 ---
 
 <!-- compiled_truth -->
@@ -154,3 +154,9 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   summary: "M2 落地：context.c 拆分完成。内核只留 realm（qz_ctx_create/_at/_destroy，导出 _at 供宿主恢复指定槽位）；边界接线 + 编排移入新文件 src/host/ctx_orchestrate.c（qz_ctx_wire_up / qz_ctx_create_host / qz_ctx_destroy_host / qz_ctx_cleanup_resources / spawn/serialize/rebuild/destroy_id）。死码 qz_inject_polyfill_ctx（bridge.c + qz_rt.h 声明）已删。qzjs.c 建/拆改用 host 包装。qtz 内核 destroy 只做 job 排水 + JS_FreeContext + 注销，扩展钩子/句柄清理由 destroy_host 先跑。CMake core 源加 ctx_orchestrate.c。验证：全 32 ctest 绿（含 context/suspend/composition gtest）。"
   source: "IN_MODULE_DESIGN.md §5.2 + git diff"
   affects: [in-module-design, c-js-layering]
+
+- time: 2026-10-13T13:52:30
+  kind: decision
+  summary: "M3 落地：tick 原语上移内核。qz_flush_microtasks（原 src/host/thread.c）→ qz_tick（src/qzvm/vm_core.c），纯 quickjs 零 libuv，属 guest 最小内核集。旧名/旧定义删除，声明移入 qz_rt.h 内核段（QZ_VM_GUEST 可见）。全部调用点统一：thread.c（qz_loop_idle/消息派发/主循环）、worker.c 主循环、rt_main.c 主循环、qzjs.c teardown 两处内联 JS_ExecutePendingJob 循环（§5.4 文档所指复用点）。验证：32/32 ctest 绿 + 微任务冒烟 + QZ_VM_GUEST 内核三源照编。"
+  source: "IN_MODULE_DESIGN.md §2.4/§5.3/§5.4/§7 M3 + git diff"
+  affects: [in-module-design]
