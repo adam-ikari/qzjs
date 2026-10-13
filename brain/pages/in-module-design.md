@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T15:30:34"
+updated: "2026-10-13T15:33:38"
 ---
 
 <!-- compiled_truth -->
@@ -171,4 +171,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: decision
   summary: "M4 落地：wasm32-wasi guest target。新增 cmake/wasm32.cmake（clang -target wasm32-wasi --sysroot，Debian wasi-libc/wasi-sdk；-nodefaultlibs -lc -lm 绕 Debian 缺 libgcc；reactor -mexec-model=reactor 无 main）+ qzvm-guest CMake target（src/qzvm/CMakeLists.txt if QZ_IN_MODULE）。源集=内核三源（context.c/vm_core.c/ext_lifecycle.c）+ 新增 guest_entry.c + quickjs-ng qjs target，宿主源/扩展/polyfill 不进；QZ_VM_GUEST + QZ_WITH_*=0 由 target 下发，uv 类型对 guest 不可达，qz_default_exts 全 NULL 槽不引扩展符号。产物 libqzvm.wasm 导出 qz_create/qz_eval/qz_tick/qz_destroy（export_name 映射 qz_guest_* C 符号，避免与宿主侧 qz_create/qz_destroy 同名）+ memory/malloc/free；import 段含 qz_host.drain——guest_entry 的 qz_tick = 内核 qz_tick + qz_host_drain（§10.4 tick 拉模型真实引用非占位）。pal/polyfill/扩展接线留 M5/M6。裁决（M4 定）：M4 产独立 guest .wasm；与 AOT 静态 wasm 合并成单模块延后（等 M5 真跑通）。验证：cmake --build build-inmod --target qzvm-guest → libqzvm.wasm 链接成功（wasm-objdump 验导出/导入段）；native 32/32 ctest 绿；-DQZ_VM_GUEST -fsyntax-only 内核源+guest_entry 零 error。"
   source: "cmake/wasm32.cmake + src/qzvm/{CMakeLists.txt,guest_entry.c} + IN_MODULE_DESIGN.md §6/§7 M4 + git 1dba005c"
+  affects: [in-module-design]
+
+- time: 2026-10-13T15:33:38
+  kind: evidence
+  summary: "M4 运行验证（超出链接验收）：用 node v24 WASI preview1 + qz_host.drain shim 实例化 libqzvm.wasm（reactor）并驱动导出——qz_create→rt 句柄、qz_eval(\"1+2*3…\")→0、qz_tick→0 且 drain 被调 1 次、qz_eval(\"throw…\")→-1、qz_destroy ok。证明 guest 真在 wasm 内跑 QuickJS（非仅可链接），qz_host.* import 生效。脚本为一次性 /tmp 冒烟，未入仓（M5 接 C 宿主驱动）。"
+  source: "node runqz.mjs + libqzvm.wasm（27542529）"
   affects: [in-module-design]
