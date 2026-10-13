@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-13T06:31:42.831Z._
+_Auto-generated. Last updated 2026-10-13T08:24:44.717Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
@@ -9,7 +9,7 @@ _Auto-generated. Last updated 2026-10-13T06:31:42.831Z._
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | <!-- compiled_truth -->
 - [branch-management](pages/branch-management.md) — category: decision | tags: [git, workflow, branch, protection] | ## 分支命名（7 前缀）
 - [brand-display-name](pages/brand-display-name.md) — category: decision | tags: [brand, docs] | Qz.js 品牌显示名 = **Qz.js**（内部标识 qzjs）。
-- [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | <current best understanding — replace this with the real content>
+- [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | ## 结论
 - [c-js-layering](pages/c-js-layering.md) — category: decision | tags: [arch, layering, policy] | # C/JS 分层原则与标准（判据摘要）
 - [ci-nightly-repair](pages/ci-nightly-repair.md) — category: decision | status: completed | tags: [ci, nightly, scheduling] | ## 完结状态（2026-09-09/10）
 - [code-quality-requirements](pages/code-quality-requirements.md) — category: decision | tags: [code-quality, readability, dry, review] | ## 代码质量硬性要求（项目级，用户 2026-09-13 追加，对全部产出生效）
@@ -30,7 +30,7 @@ _Auto-generated. Last updated 2026-10-13T06:31:42.831Z._
 - [fetch-request-body-bytes](pages/fetch-request-body-bytes.md) — category: decision | tags: [fetch, wintertc, http, polyfill] | - **背景**：`fetch(url, {body})` 请求体此前在 JS 层被 `String()` 强转，二进制（Uint8Array/ArrayBuffer）与流式 body（ReadableStream）语义丢失；C 桥接层 `http_request_stream`
 - [full-project-review-2026-09](pages/full-project-review-2026-09.md) — category: project | tags: [review, quality, security, ci, docs] | 六维全量评审（2026-09-23，静态核查 + 关键项亲自复现验证）。
 - [hit-conditional-breakpoints](pages/hit-conditional-breakpoints.md) — category: decision | tags: [dap, debugger, breakpoints] | ## 现状（已实现，合入 d0a94fed）
-- [host-bytecode-api](pages/host-bytecode-api.md) — category: decision | tags: [bytecode, host-api, compatibility] | **DAP CI 连败根因（2026-09-26 已修）**：8ac7ed7c 项目改名（am_→qz_）漏改
+- [host-bytecode-api](pages/host-bytecode-api.md) — category: decision | tags: [bytecode, host-api, compatibility] | ## 结论
 - [httpserver-perf-baseline](pages/httpserver-perf-baseline.md) — category: decision | tags: [httpserver, perf, serve] | M2-D3 连接生命周期完成：
 - [httpserver-perf-benchmark](pages/httpserver-perf-benchmark.md) — category: decision | ### Phase 4 优化（2026-08-19，分支 phase4-httpserver-perf）
 - [httpserver-streaming-body](pages/httpserver-streaming-body.md) — category: decision | tags: [http-server, streaming, serve] | D2 请求体流式（破坏性 API 变更）：serve() 的 req.body 从同步字符串改为 ReadableStream（Web 标准语义），新增 req.text()/req.arrayBuffer() 异步读取。
@@ -40,7 +40,7 @@ _Auto-generated. Last updated 2026-10-13T06:31:42.831Z._
 - [interrupt-teardown-fixed](pages/interrupt-teardown-fixed.md) — category: project | status: archived | ## 本页说明
 - [interrupt-teardown-leak](pages/interrupt-teardown-leak.md) — category: project | status: archived | tags: [quickjs-ng, ctl, interrupt, teardown, leak] | ## 结论（2026-10-03 根因定案并根治：qzjs 侧漏释放 JS_GetException 的返回值）
 - [libuv-io-uring-workaround](pages/libuv-io-uring-workaround.md) — category: decision | tags: [libuv, io-uring, linux, workaround] | ## 现状（2026-09-20 更新）
-- [liveness-ping](pages/liveness-ping.md) — category: decision | tags: [liveness, ping, pong, host, worker] | <current best understanding — replace this with the real content>
+- [liveness-ping](pages/liveness-ping.md) — category: decision | tags: [liveness, ping, pong, host, worker] | ## 结论
 - [multi-process-model](pages/multi-process-model.md) — category: decision | ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MODEL=THREAD 回退）：宿主进程 ⇄ 独立主RT 进程（qzjs-rt）经单条 socketpair uv_pipe 通信，JS/loop/微任务全在主RT 进程内；worker 进程
 - [oss-library-policy](pages/oss-library-policy.md) — category: decision | tags: [deps, policy, oss] | # 开源库引入与替换原则
 - [plain-language](pages/plain-language.md) — category: decision | tags: [communication, style] | ## 结论
@@ -51,7 +51,7 @@ _Auto-generated. Last updated 2026-10-13T06:31:42.831Z._
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
 - [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑（2026-10-07/08 用户拍板）
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论
-- [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | <current best understanding — replace this with the real content>
+- [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | ## 结论
 - [runtime-perf-baseline](pages/runtime-perf-baseline.md) — category: reference | tags: [perf, worker, runtime, baseline] | > **测试策略（2026-09-09 用户拍板）：性能基准一律在 CI 环境（GitHub Actions ubuntu-latest）执行，不使用本机。
 - [service-worker-stack](pages/service-worker-stack.md) — category: decision | # Service Worker 栈（SW-0/1/2/3）
 - [standard-source-policy](pages/standard-source-policy.md) — category: decision | tags: [standard, policy, wintertc, webrtc, w3c] | # qzjs 标准来源策略（用户拍板 2026-09-09）

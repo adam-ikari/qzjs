@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, aot, performance, f64, wasm, numeric]
 created: "2026-10-13T06:22:46"
-updated: "2026-10-13T06:31:11"
+updated: "2026-10-13T08:24:44"
 ---
 
 <!-- compiled_truth -->
@@ -28,7 +28,7 @@ updated: "2026-10-13T06:31:11"
 
 in-module 档关掉 wasm 引擎（`_prof_wamr`/`_prof_wasm3` OFF）⇒ **模块内 qzvm 源集 = context.c + vm_core.c + ext_lifecycle.c**，不含 wasm 引擎、不含 debugger、不含宿主 I/O。QuickJS-ng 是其底层引擎（外部依赖），二者不等同。
 
-- **性能天花板架构性、已实测**：纯数值 ~130x 解释器 / 快 V8 ~2.1x；对象循环 ~38–50x 解释器 / 慢 V8 4–12x；字符串慢 V8 ~248x（唯一系统性劣势）。
+- **性能天花板架构性、已实测**：纯数值 ~134x 解释器（numWork(3000)：AOT 361ms vs 解释器 48.4s，见下表）/ 快 V8 ~2.1x；对象循环 ~38–50x 解释器 / 慢 V8 4–12x；字符串慢 V8 ~248x（唯一系统性劣势）。
 - **「整体实现」收益 = 覆盖率，非峰值**（qzvm.js 现 20–33 符号）。
 - **最大性能杠杆 = `qz.*` 跨界税 4.9µs → 45–66ns（~100x）**：把 `qz.*` import 从 JS 函数改为 WAMR raw native（`ext_wamr.c:1071` `wasm_runtime_register_natives_raw`）。
 - **数值表示裁决：维持 f64 NaN-box；num 快路径已是裸 f64**。原生整数 i32/i64 实测仅快 12–18%，被三约束否决。
@@ -136,4 +136,10 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
   kind: decision
   summary: "补 qzvm 准确边界（用户纠正）：模块内跑的是 qzvm（纯 VM 构建单元），非单纯 QuickJS-ng。in-module 档 qzvm 源集 = context.c + vm_core.c + ext_lifecycle.c（不含 wasm 引擎/debugger/宿主 I/O），底层引擎是 QuickJS-ng。其余（性能画像、f64 裁决、单模块形态、双 import 面）不变。"
   source: "用户纠正 + src/qzvm/CMakeLists.txt:35-44 + CMakeLists.txt:41-45"
+  affects: [aot-performance-model]
+
+- time: 2026-10-13T08:24:44
+  kind: decision
+  summary: "消解页内数字矛盾：结论段「纯数值 ~130x」与同页实测表「~134x」不一致，统一为 ~134x 并标注负载/规模（numWork(3000)：AOT 361ms vs 解释器 48.4s）。"
+  source: "48.4s/361ms=134.1 核算 + 同页表格"
   affects: [aot-performance-model]

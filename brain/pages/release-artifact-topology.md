@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [bytecode, release, artifact, wasm, wintertc, abi]
 created: "2026-10-07T15:07:14"
-updated: "2026-10-09T06:07:42"
+updated: "2026-10-13T08:22:49"
 ---
 
 <!-- compiled_truth -->
@@ -168,38 +168,6 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
 函数即证据），故真实 AS 化率可能被低估；但被识别的 241 个函数全部因类型不兼容被拒，
 方向性结论成立。
 
-
-### 对象负载对比（2026-10-08 实测，修正"持平"结论）
-
-负载：`objbench(10000)` = 10000 次 `new_object + set a/b + get a`（对象操作走 quickjs
-JS_NewObject/SetPropertyStr/GetPropertyStr）。
-
-| 模式 | per objbench(10000) | vs 手写 C | vs 解释器 |
-|------|---------------------|-----------|----------|
-| 手写 C -O3（直接调 quickjs C API） | 2.29ms | 1.0x | 1.22x |
-| qzjs 解释器（JS 对象循环） | 1.875ms | 0.82x | 1.0x |
-| **wasm→wasm2c→so -O3** | 3.17ms | **1.38x** | 1.69x |
-| AS wasm AOT（iwasm + qzrt native-lib） | ~17ms | **7.4x** | 9.1x |
-| AS wasm 解释（iwasm） | ~21ms | 9.2x | 11.2x |
-
-**关键修正（推翻"so 与 wasm AOT 持平"结论）**：
-
-1. **wasm2c so 抽象税在对象负载下 1.38x（小于数值 1.76x）**——对象操作主开销在
-   quickjs C API（JS_NewObject/SetPropertyStr），wasm2c 的 tagged 值转换 + 函数指针
-   间接相对小。
-2. **wasm AOT 抽象税在对象负载下 7.4x（远大于数值 1.78x）**——每次对象操作都跨
-   wasm↔host 边界（import 调用），边界切换开销巨大。对象操作密集时 wasm AOT
-   劣势显现。
-3. **对象负载下 wasm2c so 远优于 wasm AOT**（1.38x vs 7.4x 税）。此前"so 与 wasm
-   AOT 性能持平"仅对数值负载成立，对象负载 so 显著优。
-4. **解释器对象负载接近手写 C**（0.82x）——对象操作主开销在引擎 C 实现
-   （JS_NewObject/SetPropertyStr），解释器循环开销相对小；且解释器避免
-   JSValue↔int 转换（JS 直接 o.a=i），C 版的 JS_NewInt32/JS_ToInt32 是额外开销。
-
-**对发行路线的含义**：ELF 形态（含 so 打包）在对象密集负载下远优于独立 wasm
-形态（含 wasm 模块）——so 直接调 quickjs C API，wasm 要跨 import 边界。
-数值密集负载两者持平。混合负载的性能取决于数值/对象比例。
-
 ## 真正 AOT 的定义（2026-10-07 用户澄清）
 
 **qzjs 实现真正 AOT 的方式 = 编译 TS 代码为 JS + wasm/so**（链路 A）。
@@ -254,6 +222,7 @@ JS_NewObject/SetPropertyStr/GetPropertyStr）。
   WinterTC 是其核心组成但非全部。
 - 「字节码」= 链路 B 的 JS 引擎内部字节码；链路 A 的 TS→wasm 产物不含字节码。
 - 「AOT」= 链路 A 的实现（TS 双编译 + wasm/so）；字节码 native 翻译不叫 AOT。
+- **frontmatter title 的历史表述「唯一稳定 API = WinterTC」已过时**（`brain` CLI 无改 title 命令）：以本页正文为准——稳定面**不限于** WinterTC，WinterTC 只是其核心组成（见约束 2）。
 
 
 ## Timeline
@@ -388,4 +357,16 @@ JS_NewObject/SetPropertyStr/GetPropertyStr）。
   kind: decision
   summary: "qzvm 独立 CMake（2026-10-09 用户裁决）：src/qzvm/CMakeLists.txt 独立构建单元，含 wasm 引擎选择 + debug 选项。wasm 引擎选择：QZ_WITH_WAMR（默认）/QZ_WITH_WASM3（替代），互斥。**wasm 引擎不允许关闭（AOT 关键）**——NOT WAMR AND NOT WASM3 时 FATAL_ERROR；minimal profile 不再关闭 QZ_WITH_WAMR（原顶层 174 行 set OFF 改为保留 ON）。debug 选项：QZ_BUILD_DEBUGGER 控制编译 debugger.c/debugger_dap.c + QZ_DEBUG_SUPPORT。源通过 QZVM_SOURCES（PARENT_SCOPE 绝对路径）交回顶层并入 libqzjs——避免 qzvm 与宿主扩展符号（ext_compress/ext_crypto/ext_textcodec 在 context.c 的 qz_default_exts[] 引用）的静态库循环链接（初试独立 qzvm STATIC 库 + qzjs 链接失败：undefined reference qz_compress_ext/qz_crypto_ext/qz_textcodec_ext + cli 的 qz_compile undefined）。顶层接线：add_subdirectory(src/qzvm) 移至 wasm deps 前（option 定义供 deps 消费），_qz_core_sources 加 ${QZVM_SOURCES}，删原 qzvm 源，恢复 debugger QZ_DEBUG_SUPPORT 段。验证：default 构建 + CLI eval + WAMR 真启用（wasm_runtime_init 2 符号）+ qzc 编译全过；minimal QZ_WITH_WAMR=ON；QZ_BUILD_DEBUGGER=ON 构建 debugger 编入（qz_dap_attach 2 符号）；全关 FATAL 逻辑就位（注：standard/minimal profile FORCE WAMR=ON，故显式全关被 profile 覆盖——wasm 恒开由 profile FORCE + qzvm FATAL 双层保证）。"
   source: "2026-10-09 qzvm 独立 CMake 实施 + 验证"
+  affects: [release-artifact-topology]
+
+- time: 2026-10-13T08:21:12
+  kind: decision
+  summary: "删除 compiled_truth 中重复的「对象负载对比」子节（原 110-139 与 172-202 近逐字重复，仅 qzvm/qzrt 一词差）；保留 qzvm 版本。修正术语不一致。"
+  source: "本页 compiled_truth 去重"
+  affects: [release-artifact-topology]
+
+- time: 2026-10-13T08:22:49
+  kind: decision
+  summary: "在「术语澄清」显式标注 frontmatter title 的历史表述「唯一稳定 API = WinterTC」已过时（brain CLI 无改 title 命令），以正文约束 2 为准：稳定面不限于 WinterTC。"
+  source: "一致性修正：title vs 约束 2"
   affects: [release-artifact-topology]

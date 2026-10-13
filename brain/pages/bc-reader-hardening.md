@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [fuzz, quickjs, bytecode, security]
 created: "2026-09-19T14:33:30"
-updated: "2026-10-06T14:25:58"
+updated: "2026-10-13T08:06:28"
 ---
 
 <!-- compiled_truth -->
@@ -104,4 +104,10 @@ NULL 数组 = 一致的空模块）。合法输入永不进校验抛错路径，
   kind: decision
   summary: "定位 CI 崩溃根因（GC 在 count 校验抛错时遍历半初始化模块）+ 源码级补丁；诚实标注本地验证不可靠，并记录 20 个精选种子在 GC 压力下 ~25% 崩溃的预存问题"
   source: "2026-10-06 v0.4.0 发版后深挖；四轮本地复现尝试"
+  affects: [bc-reader-hardening]
+
+- time: 2026-10-13T08:06:28
+  kind: reversal
+  summary: "修正 2026-09-29 条目「真实字节码在 tracked 的 src/polyfill_default.c 与 src/worker_boot_default.c 里」：tracked 部分已作废（bytecode-build-artifact 2026-09-30 推翻 rodata tracked 基线）。现状两文件全部 untracked，生成于 build/generated/polyfill/。该条目的核心判据（「样本/快照/基线」须有机械可验等式绑住来源，否则漂移永不被发现——缺陷长期存在不是因难，而是没有东西会为它变红）仍成立且更有力。"
+  source: ".gitignore:13-31 + bytecode-build-artifact 页"
   affects: [bc-reader-hardening]

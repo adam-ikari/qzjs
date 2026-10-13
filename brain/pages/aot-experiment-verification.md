@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-13T06:31:42"
+updated: "2026-10-13T08:05:33"
 ---
 
 <!-- compiled_truth -->
@@ -432,4 +432,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: note
   summary: "术语精确化（用户纠正 + 源码核实）：02:25 条「qzvm = 引擎（QuickJS-ng + wasm 引擎 + qz.* 原语）」有三处不准。①qzvm 是构建单元（src/qzvm/CMakeLists.txt:35-44），源集 = context.c + vm_core.c + ext_lifecycle.c +【可选】ext_wamr/ext_wasm3 +【可选】debugger；不是「引擎」这个抽象层。②wasm 引擎在 in-module 档是【关掉】的（_prof_wamr/_prof_wasm3 OFF，CMakeLists:41-45），故 in-module 下 qzvm 源集只有前三者。③qz.* 前缀在 C 侧 grep 为空（不存在）——它是 AOT 工具链自带 JS shim（build.js:36/82/91 读 qzvm.js），跑在任意 JS 引擎，不属 qzvm。正确分层：qzvm = VM 构建单元（引擎核心语义 + 扩展生命周期）；QuickJS-ng = 其底层引擎（外部依赖）；qz.* = AOT 工具链 JS shim（02:36 已定性）。"
   source: "用户纠正 + src/qzvm/CMakeLists.txt:35-44 + grep qz.* in C 为空 + CMakeLists:41-45"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-13T08:05:33
+  kind: note
+  summary: "AOT 调试路径（本机实测，2026-10-13）：四层，中间能看两头断。①wasm 中间产物：node src/qzvm/aot/build.js compile src.ts <prefix> --debug → build/aot/<prefix>.{wat,strings.json,meta.json}；--debug 生成 name 段（wasm-encoder.js:92/103/269），wat 显示 $函数名，不影响执行。②TS→wasm 语义验证：node src/qzvm/aot/test_aot.js（node WebAssembly 直跑 emitter 产物，不依赖 wamrc，改 emitter 后第一道门）。③AOT codegen 审查：wamrc --format=llvmir-opt/-unopt 出 LLVM IR（看 qz.* guard 是否被优化成裸 f64）、--format=object 出原生 ELF（gdb/perf/objdump）；实测 cls.wasm → 503KB IR / ELF x86-64。④运行时 trace：qzjs build/aot/<prefix>.glue.js 运行（glue 经 globalThis.qzjs.fs.readFileBinary 读同目录 .wasm/.aot），在 qzvm.js 的 qz.* 方法包计数/打印抓 guard 未命中类 bug。【缺口】无 sourcemap/DWARF linetable → gdb 无 TS 行号仅有函数边界；WAMR 未编 --enable-dump-call-stack（CMakeLists:571-582）→ wasm trap 无栈回溯；无 qz.* 调用 trace 开关。"
+  source: "build.js:57-70/123-158 + wasm-encoder.js:68/92/103/269 + test_aot.js:1-14 + wamrc --help 实测 (llvmir-opt/object)"
   affects: [aot-experiment-verification]
