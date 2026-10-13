@@ -50,6 +50,7 @@ void qz_dap_service(qz_t *rt);
 
 /* thread.c — flush pending JS microtasks (worker.c calls this on its loop) */
 int qz_flush_microtasks(qz_t *rt);
+#ifndef QZ_VM_GUEST
 /* worker.c — worker-runtime inbound dispatch: raw cloned bytes →
  * __qz_dispatch__(bytes, 0, kind). Used by the worker thread loop AND by the
  * process-backend child (rt_main.c) — same shim semantics. kind is projected
@@ -71,6 +72,7 @@ void qz_worker_free(qz_worker_t *w);
  * 移除的 qz_worker_is_proc_handle（C 层进程 worker 分流, Phase C）。
  * ipc_process.c 定义，thread.c 在 wait_idle 豁免这些恒活动 pipe。 */
 int qz_proc_handle_is_pipe(qz_t *rt, uv_handle_t *h);
+#endif /* !QZ_VM_GUEST */
 
 /* context.c — context lifecycle helpers */
 qz_ctx_t *qz_get_active_ctx(qz_t *rt);
@@ -111,7 +113,9 @@ int qz_inject_polyfill_ctx(qz_t *rt, qz_ctx_t *ctx, const uint8_t *code, size_t 
 
 /* bridge.c — dispatch an inbound message to the main context's
  * __qz_dispatch__ (source 0 = host JSON, parsed; >0 = worker bytes). */
+#ifndef QZ_VM_GUEST
 void qz_dispatch_message(qz_t *rt, qz_msg_t *m);
+#endif /* !QZ_VM_GUEST */
 
 /* bridge.c — free a qz_cb_data_t: releases resolve/reject JSValues and
  * calls js_free on the allocation.  Safe to call with NULL. */
@@ -190,7 +194,9 @@ int qz_control(qz_t *rt, const char *bytes, size_t len);
  * WAKE_SAFEPOINT 类就地执行（eval/inspect/metrics/interrupt/events.subscribe）。
  * IDLE_SAFEPOINT 类（ctx.suspend/ctx.destroy/worker.terminate/runtime.shutdown）
  * 转 wait_idle 通道——CTL-0 仅执行 WAKE 类四命令，IDLE 类返回 NOT_SUPPORTED。 */
+#ifndef QZ_VM_GUEST
 void qz_control_dispatch(qz_t *rt, qz_msg_t *m);
+#endif /* !QZ_VM_GUEST */
 /* 主循环每轮调用：扫描过期回执条目，发 TIMEOUT 回执并回收（qzjs 线程独占）。 */
 void qz_ctl_reap_timeouts(qz_t *rt);
 /* teardown 时回收所有未完成回执条目（无回执发出，发起方靠 timeout 侧超时）。 */

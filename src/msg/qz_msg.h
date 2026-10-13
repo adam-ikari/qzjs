@@ -3,6 +3,10 @@
 #ifndef QZ_MSG_H
 #define QZ_MSG_H
 
+/* 消息队列 = 宿主 IPC（uv__queue 节点 + 邮箱 + eventfd 唤醒）。in-module
+ * guest 内核无宿主消息通道 → 整文件在 QZ_VM_GUEST 下不编入。 */
+#ifndef QZ_VM_GUEST
+
 #include "base/qz_types.h"
 
 #ifdef __cplusplus
@@ -70,5 +74,7 @@ void qz_mailbox_teardown(qz_t *rt); /* 排干邮箱+关 out_efd（幂等；qzjs.
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* !QZ_VM_GUEST */
 
 #endif /* QZ_MSG_H */

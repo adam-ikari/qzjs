@@ -80,13 +80,19 @@ struct qz_t {
     uint32_t magic;      /* QZ_MAGIC — set in qz_create, validates opaque ptr */
     JSRuntime *jsrt;
 
+    /* ── 以下全部宿主专属：uv 线程/loop + 消息队列 + 进程/控制面。guest 内核
+     * 无这些能力（M1：uv 类型在 guest 编译期不可达）。见 IN_MODULE_DESIGN.md
+     * §5.1。核心字段（magic/jsrt/config/contexts）在块外。 */
+#ifndef QZ_VM_GUEST
     /* thread + loop (execution model A: qzjs owns a thread running the libuv
      * loop)。ISOLATED 宿主 rt 同样自带线程与 loop——该线程即库宿主侧线程
      * （M-P7 主权裁决：库自管一切线程/loop，宿主零注入零回调）。 */
     uv_loop_t loop;
     uv_thread_t thread;
     uv_async_t wake;         /* host post_message wakeup; data = rt */
+#endif
 
+#ifndef QZ_VM_GUEST
     /* inbound FIFO (lock-free MPSC: many producers push, the qzjs thread
      * exclusively consumes). msg_tail is the atomic tail (producers exchange),
      * msg_head is consumer-only. msg_stub is the resident sentinel: after
@@ -117,6 +123,7 @@ struct qz_t {
     int thread_ready;    /* atomic: ready handshake: thread init complete */
     int ready_err;       /* init failure code (0 ok; non-zero -> qz_create returns NULL) */
     int thread_joined;   /* atomic: 拆除已完成（线程后端 = uv_thread_join 已做，双 join 是 UB；ISOLATED 宿主 = 库宿主侧线程已收尸，幂等门） */
+#endif
 
     /* config copy (initial_script strdup'd by qz_create, freed by destroy) */
     qz_config_t config;
@@ -178,6 +185,7 @@ struct qz_t {
      * back to its qz_worker_t, non-NULL → this runtime is a worker); the
      * parent runtime keeps its workers table (worker id = slot index). Both
      * are only touched by the owning qzjs thread. */
+#ifndef QZ_VM_GUEST
     void *worker_self;
     qz_worker_t *workers[QZ_MAX_WORKERS];
 
@@ -308,6 +316,7 @@ struct qz_t {
     struct qz_ctl_conn_s *ctl_conns;
     char     *ctl_pipe_path;
 #endif
+#endif /* !QZ_VM_GUEST */
 };
 
 /* Monotonic clock in milliseconds. Ignores clock_gettime failure (same
@@ -321,6 +330,7 @@ static inline int64_t qz_now_ms(void)
 }
 /* ── Cross-file small helpers (shared, header-inline in C99) ── */
 
+#ifndef QZ_VM_GUEST
 /* 关 loop，并把返回值说出来。uv_loop_close 非 0 = EBUSY，还有 handle 没关
  * （stop 过但没 close、或 close 回调没跑完）——此时 loop 内部结构仍被这些
  * handle 引用，绝不能 free 回收，泄漏是唯一安全选择。静默忽略返回值等于把
@@ -352,6 +362,7 @@ static inline int qz_close_loop(uv_loop_t *loop)
     }
     return rc;
 }
+#endif /* !QZ_VM_GUEST */
 
 /* Little-endian accessors live in le_bytes.h (dependency-free; ipc_envelope.c
  * must stay buildable without libuv/quickjs), pulled in below. */

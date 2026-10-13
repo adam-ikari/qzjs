@@ -22,16 +22,16 @@ typedef struct qz_ctx_s qz_ctx_t;   /* 前置声明：qz_proc_handle_t 用指针
  * qz_t, so the compiled struct layout must match the uv implementation
  * that the host links against. Test builds compile against mock_libuv.h
  * (deterministic offline scheduler); production builds use real libuv's
- * uv.h. The public qzjs.h stays uv-free — this switch is internal only. */
+ * uv.h. The public qzjs.h stays uv-free — this switch is internal only.
+ *
+ * QZ_VM_GUEST（in-module 内核编译集）下 qz_t 的 uv 字段被 QZ_VM_GUEST 块
+ * 剔除（见 qz_core.h），故本头**不**拉入任何 uv/mock 头——内核源编译期
+ * uv 不可达，是 M1 的验收条件。 */
 #ifdef QZ_USE_MOCK_LIBUV
 #include "mock_libuv.h"
-#else
+#elif !defined(QZ_VM_GUEST)
 #include <uv.h>
 #endif
-
-/* 句柄统一挂 rt 内嵌自持 loop（M-P7 主权裁决：库自管全部线程与 loop，
- * 宿主不注入任何东西，qzjs.h 保持 uv-free）。 */
-#define RT_LOOP(rt) (&(rt)->loop)
 
 /* C 层 JSON 一律用 vendored cJSON（<cjson.h>，deps/cjson/）——使用方
  * （control.c / ipc_process.c / debugger_dap.c）各自 include。 */
@@ -42,8 +42,17 @@ typedef struct qz_ctx_s qz_ctx_t;   /* 前置声明：qz_proc_handle_t 用指针
 #include <stdio.h>   /* qz_close_loop 的诊断输出 */
 
 /* libuv's intrusive queue primitives (uv__queue). Used by msgq.c as the
- * lock-free MPSC container; also needed for the qz_msg_t layout above. */
+ * lock-free MPSC container; also needed for the qz_msg_t layout above.
+ * guest 无消息队列 → 不拉入。 */
+#ifndef QZ_VM_GUEST
 #include "queue.h"
+#endif
+
+/* 句柄统一挂 rt 内嵌自持 loop（M-P7 主权裁决：库自管全部线程与 loop，
+ * 宿主不注入任何东西，qzjs.h 保持 uv-free）。guest 无 loop。 */
+#ifndef QZ_VM_GUEST
+#define RT_LOOP(rt) (&(rt)->loop)
+#endif
 
 /* Maximum concurrent timer/PAL-async handles. 256 slots balances memory
  * (qz_t grows by ~8 KB per 128 slots) against the rare case of
@@ -123,6 +132,8 @@ typedef struct qz_io_stream_ops_s {
 /* Forward declarations */
 struct qz_ext_t;
 
+#ifndef QZ_VM_GUEST
+/* guest 无 worker 线程后端（uv_thread_t）/进程句柄 → 整块不编入。 */
 /* Web Worker (Task 4): worker = 独立 qz_t（自己的线程 + JSRuntime + loop）。
  * id = 槽位索引 + 1（0 保留给宿主 source，source>0 恒为 worker），所以
  * 入站消息用 source 标签即可区分宿主 / worker，无需额外字段。定义放这里：
@@ -150,8 +161,9 @@ typedef struct qz_worker_s {
      * 分层化移除（Phase C）——PROCESS worker 由 JS 层经 pal.processSpawn 封装，
      * C 层 qz_worker_t 仅服务线程后端。 */
 } qz_worker_t;
+#endif
 
-#ifndef QZ_USE_MOCK_LIBUV
+#if !defined(QZ_USE_MOCK_LIBUV) && !defined(QZ_VM_GUEST)
 /* pal.processSpawn 句柄注册表（spawn 分层化, Phase B）。processSpawn 返回
  * 整数 handle id，JS 侧用它驱动 processPost / processOnMessage /
  * processTerminate；显式生命周期（terminate 释放），无需 GC finalizer。
