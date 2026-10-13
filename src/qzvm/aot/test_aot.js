@@ -90,6 +90,8 @@ async function runTagged() {
     check("mix.literals()", call("literals", []), 5);       // null/undefined/true/false 字面量
     check("mix.arrLengthSet()", call("arrLengthSet", []), 112);  // a.length= 截断/扩容
     check("mix.negNumStr()", call("negNumStr", []), "-42|-7|5000000000");  // numstr 负数/大数
+    check("mix.utf8Str()", call("utf8Str", []), "héllo 世界😀");       // wasm→JS UTF-8 解码
+    check("mix.bigAscii()", call("bigAscii", []), 700001);            // >65535B → _utf8 分块路径
     check("除法(7/2)", qz._toJS(qz.div(qz._fromJS(7), qz._fromJS(2))), 3.5);
     check("mix.tryWork()", call("tryWork", []), 1007);   // 0+1+2 +4(throw"stop".length) +1000
     // 字符串：wasm 内表示（0x7FFA 句柄 + data 段字面量 + 原地 append）

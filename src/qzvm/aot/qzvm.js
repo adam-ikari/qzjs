@@ -23,18 +23,56 @@ const _ab = new ArrayBuffer(8);
 const _dvw = new DataView(_ab);
 function _writeF64(n, le) { _dvw.setFloat64(0, n, le); return _dvw.getBigInt64(0, le); }
 function _readF64(b, le) { _dvw.setBigInt64(0, b, le); return _dvw.getFloat64(0, le); }
-// UTF-8 字节 → 字符串（无 TextDecoder 依赖；真 qzjs 运行时无 Buffer/TextDecoder）
+// UTF-8 字节 → 字符串（wasm 字符串句柄低 32 位 = offset，字节在 offset+4 起；u8 = 线性内存视图）。
+// QuickJS 无原生 TextDecoder（qzjs 的 TextDecoder 是 JS polyfill，反而更慢），故两条路径：
+//   ① ASCII 快路径（绝大多数场景）：Uint32Array 批量测高位（4 字节/次），命中则直接
+//      String.fromCharCode.apply(null, u8.subarray(...))——免 JS 逐字节解码。1MB ≈ 27ms。
+//   ② 非 ASCII：逐字节解 UTF-8 → UTF-16 code unit 到定长缓冲，每 65535（apply 参数上限）
+//      一次 fromCharCode.apply。1MB ≈ 85ms。
+//   旧实现逐字节 r += fromCharCode：每字符一次 JS_ConcatString，1MB ≈ 100ms+。
 function _utf8(u8, s, e) {
-  let r = "", i = s;
-  while (i < e) {
-    const c = u8[i++];
-    if (c < 0x80) r += String.fromCharCode(c);
-    else if (c < 0xe0) r += String.fromCharCode(((c & 0x1f) << 6) | (u8[i++] & 0x3f));
-    else if (c < 0xf0) r += String.fromCharCode(((c & 0x0f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f));
-    else { const cp = ((c & 7) << 18) | ((u8[i++] & 0x3f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f);
-           const x = cp - 0x10000; r += String.fromCharCode(0xd800 + (x >> 10), 0xdc00 + (x & 0x3ff)); }
-  }
-  return r;
+    const CH = 65535;
+    // ── ① ASCII 检测 + 快路径 ──
+    if (u8.byteOffset === 0) {
+        let ascii = true, i = s;
+        const aStart = (s + 3) & ~3;
+        for (; i < aStart && i < e; i++) if (u8[i] >= 0x80) { ascii = false; break; }
+        if (ascii && e - aStart >= 4) {
+            const u32 = new Uint32Array(u8.buffer, aStart, (e - aStart) >> 2);
+            const n32 = u32.length;
+            for (let k = 0; k < n32; k++) if (u32[k] & 0x80808080) { ascii = false; break; }
+            i = aStart + (n32 << 2);
+        }
+        if (ascii) for (; i < e; i++) if (u8[i] >= 0x80) { ascii = false; break; }
+        if (ascii) {
+            if (e - s <= CH) return String.fromCharCode.apply(null, u8.subarray(s, e));
+            const chunks = [];
+            for (let k = s; k < e; k += CH) chunks.push(String.fromCharCode.apply(null, u8.subarray(k, k + CH < e ? k + CH : e)));
+            return chunks.join("");
+        }
+    }
+    // ── ② 非 ASCII：UTF-8 解码 ──
+    const buf = new Array(CH);
+    let r = "", i = s, pending = -1;
+    while (i < e || pending >= 0) {
+        let n = 0;
+        while (n < CH && (i < e || pending >= 0)) {
+            if (pending >= 0) { buf[n++] = pending; pending = -1; continue; }
+            const c = u8[i++];
+            if (c < 0x80) buf[n++] = c;
+            else if (c < 0xe0) buf[n++] = ((c & 0x1f) << 6) | (u8[i++] & 0x3f);
+            else if (c < 0xf0) buf[n++] = ((c & 0x0f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f);
+            else {
+                const cp = ((c & 7) << 18) | ((u8[i++] & 0x3f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f);
+                const x = cp - 0x10000;
+                buf[n++] = 0xd800 + (x >> 10);
+                const lo = 0xdc00 + (x & 0x3ff);
+                if (n < CH) buf[n++] = lo; else pending = lo;
+            }
+        }
+        r += n === CH ? String.fromCharCode.apply(null, buf) : String.fromCharCode.apply(null, buf.slice(0, n));
+    }
+    return r;
 }
 
 function makeQzvm(strings) {

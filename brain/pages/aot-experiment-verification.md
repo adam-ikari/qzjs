@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-12T18:28:19"
+updated: "2026-10-13T01:47:06"
 ---
 
 <!-- compiled_truth -->
@@ -300,4 +300,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: note
   summary: "字符串性能定位（2026-10-13）：修 qzs_numstr 负数 bug（无符号 div/rem → -42 产 '18446744073709551574'；改按符号取绝对值+i32 快路径）与 wasm-encoder OP 表缺 6 个 i64 比较 opcode（i64_gt_s/gt_u/le_s/le_u/ge_s/ge_u 0x55-0x5A；emit undefined → 0x00 unreachable 字节，静默地雷）。关键结论：字符串拼接热路径（s=s+x）在 WAMR AOT 下比同字节码在 node(V8) 慢 ~12x（400k 次 1 字节追加：WAMR ~75ms / V8 ~6.3ms / QuickJS 解释器 ~44ms）——非 emitter 结构问题。手写等价 wasm（原地 append）在 WAMR 下 ~3ns/次，故慢因在 WAMR AOT 对 emitter 产物（嵌套 block + 33 个 local + guarded 分支）的 codegen 质量。emitter 侧尝试均无实测收益：跳过运行时 isStr 检查（编译期类型追踪）、内联 append、memory.copy 替代 memcpy、精简 _emitIsHandle（11→7 指令）——A/B 多次取中位显示全在噪声内（o1 中位：HEAD 73.4ms vs 改后 75.4ms）。故回退编译期类型追踪（零收益的 ~90 行复杂度，YAGNI），仅保留真 bug 修复 + numstr i32 快路径 + memcpy 8 字节块。"
   source: "src/qzvm/aot/{emitter.js,wasm-encoder.js,test_aot.js} + node/qzjs AOT 实测"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-13T01:47:06
+  kind: reversal
+  summary: "推翻上一条（2026-10-13 晚）：字符串性能根因不是 WAMR AOT codegen，而是 wasm串→JS串转换 qzvm._utf8。决定性证据：strWork(200000) 的 wasm 循环本体（o1len 型，返回长度不返串）仅 4.7ms，返回串则 ~93ms——差异全在 _utf8。node(V8) 跑同一 wasm 快，只因 V8 的 += 有 rope 优化，非 WAMR 慢。旧 _utf8 逐字节 r += fromCharCode（每字符一次 JS_ConcatString，QuickJS 无 rope）= 1MB ~100ms。修复：ASCII 快路径（Uint32Array 每 4 字节批量测高位，命中则 String.fromCharCode.apply(null, u8.subarray(...)) 直接构造，免逐字节解码）+ 非 ASCII 分块解码（65535 apply 上限）。实测 o1(400k/400KB) 73→12.5ms，strWork(200k/1.09MB) 93→30ms。教训：老代码诊断先分离「计算」与「返回值穿越转换」，后者常是宿主语言（QuickJS）的字符串拼接常数成本，而非 wasm 执行。qzjs 的 TextDecoder 是 JS polyfill（比手写分块还慢），勿用。"
+  source: "src/qzvm/aot/qzvm.js _utf8 + qzjs AOT 实测 (RETSTR vs RETLEN)"
   affects: [aot-experiment-verification]

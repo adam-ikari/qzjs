@@ -106,3 +106,17 @@ function negNumStr(): any {
   s = s + "|" + 5000000000;
   return s;                                  // "-42|-7|5000000000"
 }
+
+// 回归：wasm 串 → JS 串转换（qzvm._utf8）。非 ASCII 走 UTF-8 解码路径。
+function utf8Str(): any {
+  let s = "héllo ";
+  s = s + "世界";
+  s = s + "😀";                             // 4 字节序列（代理对）
+  return s;                                 // "héllo 世界😀"
+}
+// 大 ASCII 串：>65535 字节 → 走 _utf8 ASCII 快路径的分块 String.fromCharCode.apply。
+function bigAscii(): any {
+  let s = "";
+  for (let i = 0; i < 70000; i++) s = s + "a";
+  return s.length * 10 + (s.charAt(0) === "a" ? 1 : 0);  // 700001
+}
