@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-13T03:14:28"
+updated: "2026-10-13T06:25:43"
 ---
 
 <!-- compiled_truth -->
@@ -420,4 +420,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: reversal
   summary: "更正上一条（混淆 qzjs/qzvm）：tick 是【qzvm 的原语】（engine microtask pump，context.c:262 JS_ExecutePendingJob），不是 qzjs 的。qzjs（运行时/宿主）不需要 tick 抽象——native 形态直接调 qzvm 的 C pump；in-module 形态 qzvm 把 pump 导出为 wasm export tick()，host 调 instance.exports.tick()。归属：libuv=qzjs，tick=qzvm。host 驱动 guest，guest 不驱动任何东西。"
   source: "用户纠正 + context.c:262"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-13T06:25:43
+  kind: decision
+  summary: "用户重申并细化形态（本次）：TS 编译为 wasm ⇒ 模块内【静态部分是 wasm，动态部分在 wasm 内的 qzvm 中运行】（同模块、同 isolate、非嵌套宿主引擎）；与系统交互走两条 import 面——(1) qzjs 的 JS import（宿主 qzjs 运行时兑现，即 qz.* 阻抗匹配绑定），(2) WASI 的 import（wasm 运行时自己兑现，宿主 qzjs 不介入）。=> 校正与既有条目的关系：本声明与 02:41/02:42/02:46【模块内嵌 qzvm、动态 JS 同模块跑、qz.* 为引擎↔宿主阻抗匹配】一致；新增量 = 明确【两条可选 import 面】，其中 WASI 面此前在 02:33 被记为『非 qzjs 运行时接受的形态』——本轮校正为：WASI 是工具链 lowering target 之一（供『wasm 运行时』自己兑现的形态），与 qzjs 面并列而非被拒。"
+  source: "用户本次架构声明 + build.js:128 --target(CPU) vs emitter.js QZ import 表"
   affects: [aot-experiment-verification]

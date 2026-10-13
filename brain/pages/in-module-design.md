@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T06:23:06"
+updated: "2026-10-13T06:28:09"
 ---
 
 <!-- compiled_truth -->
@@ -123,4 +123,22 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: note
   summary: "交叉引用：AOT 整体性能预估 + f64 vs 原生整数数值表示裁决已记入新页 aot-performance-model。要点：in-module 与 AOT 是两条并行路线非嵌套；AOT 最大杠杆是 qz.* 跨界税 4.9µs→45ns（raw native 注册，ext_wamr.c:105 已具备路径）。"
   source: "讨论 2026-13"
+  affects: [in-module-design]
+
+- time: 2026-10-13T06:27:11
+  kind: note
+  summary: "形态校正（重要）：in-module 与 AOT **不是两条并行路线**——是同一 wasm 模块的静态/动态两面。TS→wasm 编译后，静态部分已是 wasm，动态部分在同模块内 qzvm（QuickJS-ng 编 wasm32）运行，同 isolate。in-module 档（QZ_PROFILE=in-module, CMakeLists:41-45 关 _prof_wamr/_prof_wasm3）= 该形态构建设置，因模块内不套第二层 wasm 引擎 ⇒ 无 wasm 嵌套。对外两条 import 面：qzjs 的 JS import（宿主兑现，qz.*）+ WASI（wasm 运行时兑现；qzjs 当前 WAMR_BUILD_LIBC_WASI=0 不解）。性能模型见 aot-performance-model。"
+  source: "用户本轮架构声明 + CMakeLists 证据"
+  affects: [in-module-design]
+
+- time: 2026-10-13T06:27:58
+  kind: note
+  summary: "待决点（本轮暴露）：用户形态 = 单一 wasm 模块（静态 wasm + 模块内 qzvm 动态）。但本设计 §6(行233/238) 只说产独立 （guest 产物），未写【如何与 AOT emitter 发射的静态 wasm 合并为单一模块】。行222 已隐含『单一 wasm 产物的内部实现』措辞。补问：最终 artifact = wasm-merge/wasm-ld 链接成单模块？还是 qzvm.wasm 与静态 wasm 并列加载（导入/导出对接）？前者才契合用户『同 isolate 同内存、零 marshalling』。M4 定。"
+  source: "用户单模块声明 vs IN_MODULE_DESIGN.md:233/238/222"
+  affects: [in-module-design]
+
+- time: 2026-10-13T06:28:09
+  kind: reversal
+  summary: "更正上一条（shell 反引号吞词）：待决点 = 用户形态是单一 wasm 模块（静态 wasm + 模块内 qzvm 动态），但设计 §6 只说产独立 guest 产物（qzvm 编出的 .wasm），未写【如何与 AOT emitter 发射的静态 wasm 合并为单一模块】。补问：最终 artifact 是 wasm-merge/wasm-ld 链接成单模块？还是 guest .wasm 与静态 wasm 并列加载（导入导出对接）？前者才契合用户「同 isolate 同内存、零 marshalling」。M4 定。"
+  source: "用户单模块声明 vs IN_MODULE_DESIGN.md §6"
   affects: [in-module-design]
