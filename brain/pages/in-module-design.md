@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T05:55:32"
+updated: "2026-10-13T06:11:13"
 ---
 
 <!-- compiled_truth -->
@@ -111,4 +111,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: evidence
   summary: "§10 跨界税 bench 实测（inmod-abi-proto/ C 段）。WAMR 经典解释器：guest→host 空 import ~45 ns/次、带 32B 负载 ~66 ns/次；基线 wasm 纯循环 ~5.6、C 直调空 ~0.3。含义：跨界税 ~2200 万次/秒，pal 面每 tick 几十次=纳秒级非瓶颈；仍把跨界降到最低但不必为省跨界牺牲结构。对比 AOT 的 qz.* import（JS 函数 ~4.9µs/次）→ in-module qz_host.* 直落 native C 快 ~100x，是 in-module 关键性能优势。踩坑：i64 返回值经 wasm_runtime_call_wasm 卡死（argv slot 约定），bench 改 i32 返回+宿主侧计时。"
   source: "inmod-abi-proto/build.sh C 段"
+  affects: [in-module-design]
+
+- time: 2026-10-13T06:11:13
+  kind: decision
+  summary: "M1 完成：qz_t/qz_ctx_t 能力切分，QZ_VM_GUEST 编译期 uv 隔离。`#ifndef QZ_VM_GUEST` 守卫全部 uv-typed 字段/原型（native 布局零改变，同 QZ_USE_MOCK_LIBUV 先例）。改 4 头：qz_types.h（uv include 条件化 + RT_LOOP/queue.h/qz_worker_t/qz_proc_handle_t 守卫）、qz_core.h（loop/thread/wake+消息队列+线程标志+worker/self_path+store/http_ops/proc/ipc/dap/ctl+qz_close_loop 入守卫）、qz_msg.h（整文件 guest 不编）、qz_rt.h（qz_msg_t/qz_worker_t/uv_handle_t 原型簇守卫）。验收：native ninja qzjs 17/17 链接通过 + ctest 31/31 全绿；guest -DQZ_VM_GUEST -fsyntax-only 内核三源全 OK，探针证 uv_loop_t/uv_thread_t/uv__queue 编译期不可达（3 错 vs native 0）。关键：切分**不重排**字段（逐簇加 guard），native 零波及。commit 59091ff1。"
+  source: "src/base/{qz_types,qz_core,qz_rt}.h + src/msg/qz_msg.h"
   affects: [in-module-design]
