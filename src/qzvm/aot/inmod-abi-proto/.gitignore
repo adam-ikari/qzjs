@@ -3,3 +3,8 @@ guest.wasm
 host_async
 guest_async.wasm
 guest.txt
+host_bench
+host_bench3
+bench.wasm
+bench2.wasm
+bench3.wasm

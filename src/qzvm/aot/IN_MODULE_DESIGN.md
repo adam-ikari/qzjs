@@ -294,7 +294,7 @@ cmake --build build-inmod --target qzvm-guest
 
 ## 10. 跨界 ABI（★本轮核心：pal 面如何跨 wasm）
 
-> **实测状态**：核心骨架已由原型验证（`inmod-abi-proto/`，`sh build.sh` 一键复现）——guest 经 import 调宿主：**同步**（log）、**回流写回**（宿主值→wasm 内存）、**异步**（宿主线程完成→队列→guest drain）。无 JSValue 跨界。未覆盖：guest 侧 JSValue 生命周期 / 内存增长 / AOT 变体 / 多 op 并发（留 M5+）。
+> **实测状态**：核心骨架已由原型验证（`inmod-abi-proto/`，`sh build.sh` 一键复现）——guest 经 import 调宿主：**同步**（log）、**回流写回**（宿主值→wasm 内存）、**异步**（宿主线程完成→队列→guest drain）。无 JSValue 跨界。**跨界税实测 ~45 ns/次（空）/ ~66 ns/次（32B 负载）**，比 AOT 的 JS-import 快 ~100x。未覆盖：guest 侧 JSValue 生命周期 / 内存增长 / AOT 变体 / 多 op 并发（留 M5+）。
 
 前 10 节只解决了「guest 编什么」，**没解决 guest 怎么调宿主**。in-module 下 guest 在 wasm 内、宿主在 wasm 外——native 里 `context.c:164` 直调 `qz_create_pal_object_ctx` 的 C 调用**不存在了**。pal 面（实测 **42 个唯一属性 / 43 个唯一 `js_pal_*` 函数**，`qz_create_pal_object_ctx` 内按条件编译分段注册）必须是 **wasm imports**。
 
@@ -374,6 +374,22 @@ guest: qz_tick()  ← 宿主每轮 libuv iteration 后调
 | host 调 guest 导出 | host 直接 `qz_guest_dispatch(op_id, …)` | host 需持 wasm instance 调用句柄；WAMR 支持 |
 
 倾向 **import 拉**：契合已有 tick、最易验证（M5 只需一个 fs 读跑通）。
+
+**原型实测**（`inmod-abi-proto/` B 段）：`fs_read`→`drain` 全链跑通——guest 发起、宿主 pthread 完成、guest drain 取回。**选型「import 拉」已验证可行**（共享内存环的复杂度可省）。
+
+**跨界税实测**（`inmod-abi-proto/` C 段，WAMR 经典解释器，宿主侧计时多轮取 min）：
+
+| 路径 | ns/次 |
+| --- | --- |
+| guest→host 空 import | **~45** |
+| guest→host 带 32B 负载 import | **~66** |
+| wasm 纯循环（基线） | ~5.6 |
+| C 直调空函数（基线） | ~0.3 |
+
+**含义**：
+- 跨界税绝对值极低——**~2200 万次/秒**。pal 面每轮 tick 的几十次调用 = 纳秒级，**非瓶颈**。
+- 对比 AOT 的 `qz.*` import（**JS 函数**，`ASSESSMENT.md` 记 ~4.9µs/次）：in-module 的 `qz_host.*` 直落 **native C**，**快 ~100x**。这是 in-module 相对 node-hosted AOT 的关键优势。
+- 设计取舍：仍应把跨界降到最低（§10.2 分层），但**不必**为省跨界牺牲结构——税便宜。
 
 ### 10.5 对宿主源的影响
 
