@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T13:52:30"
+updated: "2026-10-13T14:02:11"
 ---
 
 <!-- compiled_truth -->
@@ -159,4 +159,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: decision
   summary: "M3 落地：tick 原语上移内核。qz_flush_microtasks（原 src/host/thread.c）→ qz_tick（src/qzvm/vm_core.c），纯 quickjs 零 libuv，属 guest 最小内核集。旧名/旧定义删除，声明移入 qz_rt.h 内核段（QZ_VM_GUEST 可见）。全部调用点统一：thread.c（qz_loop_idle/消息派发/主循环）、worker.c 主循环、rt_main.c 主循环、qzjs.c teardown 两处内联 JS_ExecutePendingJob 循环（§5.4 文档所指复用点）。验证：32/32 ctest 绿 + 微任务冒烟 + QZ_VM_GUEST 内核三源照编。"
   source: "IN_MODULE_DESIGN.md §2.4/§5.3/§5.4/§7 M3 + git diff"
+  affects: [in-module-design]
+
+- time: 2026-10-13T14:02:11
+  kind: reversal
+  summary: "M2 回归修复：M2 搬迁 qz_ctx_rebuild 到 ctx_orchestrate.c 时漏掉失败路径 return rc，致 resume 读盘失败静默成功（test_suspend_gtest.resume_bad_state_path 红）；同批 qz_ctx_spawn 漏 free(err) 泄漏。已在 M3 提交一并补回。教训：搬函数时用「返回语句/清理路径」逐条比对旧实现，别只比 happy path。"
+  source: "git a11cf35c 对比 e62b9324:src/qzvm/context.c；ctest 32/32"
   affects: [in-module-design]
