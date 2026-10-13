@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-13T08:35:24.567Z._
+_Auto-generated. Last updated 2026-10-13T08:37:26.077Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）

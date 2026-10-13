@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-13T08:05:33"
+updated: "2026-10-13T08:37:26"
 ---
 
 <!-- compiled_truth -->
@@ -28,6 +28,12 @@ updated: "2026-10-13T08:05:33"
 
 **number → int64_t**（非 int32）：JS number 是 double（53 位整数精度），int64 覆盖；
 64 位平台 int32/int64 同速。实测 int32 溢出（sum(1e6)=5e11 截断错值）。
+
+## frontmatter title 数字的说明
+
+title 里的「fib 性能 8.97x」是**首次测量**值（fib_only 零导入原型）；
+最小编译器 ts2c 落地后同负载实测 25.22x（见下表）。以正文为准——CLI 无改 title 命令，
+故此处记录漂移。
 
 ## 编译产物验证（同 n 同 runtime）
 
@@ -438,4 +444,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: note
   summary: "AOT 调试路径（本机实测，2026-10-13）：四层，中间能看两头断。①wasm 中间产物：node src/qzvm/aot/build.js compile src.ts <prefix> --debug → build/aot/<prefix>.{wat,strings.json,meta.json}；--debug 生成 name 段（wasm-encoder.js:92/103/269），wat 显示 $函数名，不影响执行。②TS→wasm 语义验证：node src/qzvm/aot/test_aot.js（node WebAssembly 直跑 emitter 产物，不依赖 wamrc，改 emitter 后第一道门）。③AOT codegen 审查：wamrc --format=llvmir-opt/-unopt 出 LLVM IR（看 qz.* guard 是否被优化成裸 f64）、--format=object 出原生 ELF（gdb/perf/objdump）；实测 cls.wasm → 503KB IR / ELF x86-64。④运行时 trace：qzjs build/aot/<prefix>.glue.js 运行（glue 经 globalThis.qzjs.fs.readFileBinary 读同目录 .wasm/.aot），在 qzvm.js 的 qz.* 方法包计数/打印抓 guard 未命中类 bug。【缺口】无 sourcemap/DWARF linetable → gdb 无 TS 行号仅有函数边界；WAMR 未编 --enable-dump-call-stack（CMakeLists:571-582）→ wasm trap 无栈回溯；无 qz.* 调用 trace 开关。"
   source: "build.js:57-70/123-158 + wasm-encoder.js:68/92/103/269 + test_aot.js:1-14 + wamrc --help 实测 (llvmir-opt/object)"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-13T08:37:26
+  kind: decision
+  summary: "标注 frontmatter title 数字漂移：title「fib 8.97x」是 fib_only 原型首次测量值，ts2c 落地后同负载实测 25.22x。CLI 无改 title 命令，故在正文记录，以正文为准。"
+  source: "页内 fib 表实测值对照"
   affects: [aot-experiment-verification]
