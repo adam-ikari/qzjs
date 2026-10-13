@@ -1,2 +1,5 @@
 host
 guest.wasm
+host_async
+guest_async.wasm
+guest.txt

@@ -258,7 +258,7 @@ flowchart TB
 | M2 | context.c 拆分（含边界接线移出） | §5.2：pal/polyfill/ext 登记移出内核；宿主编排移新文件；删死码 `qz_inject_polyfill_ctx` | native 回归绿；`qz_ctx_create/destroy` 内核部零 uv、零 `bridge.c` 调用 |
 | M3 | tick 上移 | `qz_tick` 入 qzvm；宿主改调 | native 回归绿（tick 语义不变） |
 | M4 | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target | `libqzvm.wasm` 链接成功，导出符号齐；import 段含 `qz_host.*` |
-| M5 | guest 跑通（单原语跨界） | §10.3 最小 import 面（先 `qz_host_log` + `qz_host_now`）+ §10.4 回流（先 fs 读）| 原型 `inmod-abi-proto/` 已验同步+写回；M5 补**异步**（fsRead promise 经 tick 回流 resolve）|
+| M5 | guest 跑通（真 JS + 异步） | §10.3 import 面 + §10.4 回流 | 原型已验同步/写回/异步；M5 接真 QuickJS（resolve 持 JSValue）+ tick 驱动（去自旋）|
 | M6 | 宿主去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 guest；tcp_io/control/worker 去 JSValue；host 不链 QuickJS | host 目标零 `JS_NewRuntime`；AOT/standard 档不受影响 |
 
 **M1–M3 全部在 native 上验证**（切分是纯重构，宿主行为不变）→ 风险最低、最先做。M4–M5 引入 wasm 工具链 + 跨界 ABI 不确定性。M6 是 in-module 真正落地（前 5 步可先跑通 guest 自包含 + 单原语）。
@@ -288,13 +288,13 @@ cmake --build build-inmod --target qzvm-guest
 | 工具链选型 | wasi-sdk vs emscripten | 倾向 wasi-sdk（freestanding，贴合自包含）；M4 定 |
 | `qz_ext_suspend/resume_all` 无调用者 | 是死码还是待接 | 单独裁决：无消费者则删（奥卡姆）或随 suspend 归宿主 |
 | 扩展内容取舍 | 全 OFF 最小，但 guest 的标准面（如 console/URL）依赖 polyfill 非 C 扩展 | M5 定 polyfill 注入的最小集 |
-| 跨界 ABI 核心已验、异步未验 | §10 骨架由原型验证（`inmod-abi-proto/`）；**异步 promise 回流 / 内存增长 / AOT 变体**未验 | M5 扩原型：tick 驱动的 fs 读 promise 回流 |
+| 跨界 ABI 已验、深化未验 | §10 骨架（同步/写回/异步）由原型验证（`inmod-abi-proto/`）；**guest 侧 JSValue 生命周期 / 内存增长 / AOT 变体 / 多 op 并发**未验 | M5 扩原型：真实 resolve 持 JSValue、memory.grow、wamrc 路径 |
 | host 去 JS 化面大（M6） | `bridge.c` 463 / `tcp_io.c` 229 / `control.c` 72 处 JS_ 调用需处置 | M6 独立，前 5 步不依赖；先判定"移 guest vs 去 JS 化"再动 |
 | import 面与 AOT `qz.*` 命名冲突 | 两套 import（`qz.*` 值原语 vs `qz_host.*` 宿主能力） | 不同 import module 名隔离（§10.6） |
 
 ## 10. 跨界 ABI（★本轮核心：pal 面如何跨 wasm）
 
-> **实测状态**：核心骨架已由原型验证（`inmod-abi-proto/`，`sh build.sh` 一键复现）——guest 经 import 调宿主（同步 log + 回流写回），无 JSValue 跨界。异步/内存增长/AOT 变体留 M5。
+> **实测状态**：核心骨架已由原型验证（`inmod-abi-proto/`，`sh build.sh` 一键复现）——guest 经 import 调宿主：**同步**（log）、**回流写回**（宿主值→wasm 内存）、**异步**（宿主线程完成→队列→guest drain）。无 JSValue 跨界。未覆盖：guest 侧 JSValue 生命周期 / 内存增长 / AOT 变体 / 多 op 并发（留 M5+）。
 
 前 10 节只解决了「guest 编什么」，**没解决 guest 怎么调宿主**。in-module 下 guest 在 wasm 内、宿主在 wasm 外——native 里 `context.c:164` 直调 `qz_create_pal_object_ctx` 的 C 调用**不存在了**。pal 面（实测 **42 个唯一属性 / 43 个唯一 `js_pal_*` 函数**，`qz_create_pal_object_ctx` 内按条件编译分段注册）必须是 **wasm imports**。
 
