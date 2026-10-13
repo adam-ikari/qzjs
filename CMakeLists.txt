@@ -20,14 +20,14 @@ set(CMAKE_C_EXTENSIONS OFF)   # pure -std=c99, no GNU extensions (deps use their
 # Explicit -DQZ_WITH_X=... always wins over the profile preset.
 # ============================================================================
 set(QZ_PROFILE "" CACHE STRING
-    "Build profile: minimal | standard (empty = individual QZ_WITH_* options)")
+    "Build profile: minimal | standard | in-module (empty = individual QZ_WITH_* options)")
 string(TOLOWER "${QZ_PROFILE}" _qz_profile)
-if(_qz_profile AND NOT _qz_profile MATCHES "^(minimal|standard)$")
-    message(FATAL_ERROR "QZ_PROFILE must be minimal|standard or empty (got '${QZ_PROFILE}')")
+if(_qz_profile AND NOT _qz_profile MATCHES "^(minimal|standard|in-module)$")
+    message(FATAL_ERROR "QZ_PROFILE must be minimal|standard|in-module or empty (got '${QZ_PROFILE}')")
 endif()
 # Profile preset defaults, resolved BEFORE option() so an explicit
 # -DQZ_WITH_X on the command line is already in the cache and wins.
-if(_qz_profile STREQUAL "minimal" OR _qz_profile STREQUAL "standard")
+if(_qz_profile STREQUAL "minimal" OR _qz_profile STREQUAL "standard" OR _qz_profile STREQUAL "in-module")
     set(_prof_wamr ON)
     set(_prof_tls ON)
     set(_prof_compress ON)
@@ -36,6 +36,13 @@ if(_qz_profile STREQUAL "minimal" OR _qz_profile STREQUAL "standard")
 endif()
 if(_qz_profile STREQUAL "minimal")
     set(_prof_tls OFF)   # only cut vs standard; ECMA-429 has no HTTPS requirement
+endif()
+if(_qz_profile STREQUAL "in-module")
+    # qzvm compiled TO wasm32 (guest). Host supplies libuv + the wasm runtime;
+    # the guest embeds neither. Engine exposes tick() export + qz.* imports.
+    set(_prof_wamr OFF)
+    set(_prof_wasm3 OFF)
+    set(QZ_IN_MODULE ON)
 endif()
 if(NOT _qz_profile)
     # Empty profile: preserve the historical per-option defaults bit-for-bit.
@@ -170,7 +177,14 @@ endif()
 # ----------------------------------------------------------------------------
 if(NOT QZ_PROFILE_LAST STREQUAL _qz_profile)
     message(STATUS "QZ_PROFILE changed: '${QZ_PROFILE_LAST}' -> '${_qz_profile}' — recalculating QZ_WITH_* cache defaults")
-    if(_qz_profile STREQUAL "minimal")
+    if(_qz_profile STREQUAL "in-module")
+        # qzvm IS the wasm guest: no engine linked, host supplies the runtime.
+        set(QZ_WITH_WAMR       OFF CACHE BOOL "" FORCE)
+        set(QZ_WITH_TLS        ON  CACHE BOOL "" FORCE)
+        set(QZ_WITH_COMPRESS   ON  CACHE BOOL "" FORCE)
+        set(QZ_WITH_CRYPTO_EXT ON  CACHE BOOL "" FORCE)
+        set(QZ_WITH_TEXTCODEC  ON  CACHE BOOL "" FORCE)
+    elseif(_qz_profile STREQUAL "minimal")
         # WebAssembly 是 AOT 关键（不允许关闭，src/qzvm/CMakeLists.txt 强制）：
         # minimal 不再关闭 QZ_WITH_WAMR，保留默认 ON
         set(QZ_WITH_TLS        OFF CACHE BOOL "" FORCE)

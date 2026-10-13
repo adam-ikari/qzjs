@@ -14,13 +14,15 @@
 # ── wasm 引擎选择（AOT 关键，不允许关闭）──────────────────────────────
 option(QZ_WITH_WAMR "Link WAMR WASM engine (default; AOT key, cannot be off)" ON)
 option(QZ_WITH_WASM3 "Link wasm3 WASM engine (alternative; AOT key, cannot be off)" OFF)
-if(NOT QZ_WITH_WAMR AND NOT QZ_WITH_WASM3)
+if(NOT QZ_WITH_WAMR AND NOT QZ_WITH_WASM3 AND NOT QZ_IN_MODULE)
     message(FATAL_ERROR
         "wasm engine required (AOT key): QZ_WITH_WAMR or QZ_WITH_WASM3 must be ON. "
         "WebAssembly runtime is the execution backend for the AOT toolchain — "
         "it cannot be disabled. Enable exactly one:\n"
         "  wamr  (default): -DQZ_WITH_WAMR=ON\n"
-        "  wasm3:            -DQZ_WITH_WASM3=ON -DQZ_WITH_WAMR=OFF")
+        "  wasm3:            -DQZ_WITH_WASM3=ON -DQZ_WITH_WAMR=OFF\n"
+        "(in-module: qzvm IS the wasm guest; host runtime supplies the engine — "
+        "both OFF is correct under -DQZ_PROFILE=in-module)")
 endif()
 if(QZ_WITH_WAMR AND QZ_WITH_WASM3)
     message(FATAL_ERROR
