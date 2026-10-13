@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-12T15:51:58"
+updated: "2026-10-13T06:23:06"
 ---
 
 <!-- compiled_truth -->
@@ -51,4 +51,10 @@ updated: "2026-10-12T15:51:58"
   kind: decision
   summary: "AOT tagged 后端：热路径零宿主跨界（分配/分派内联 wasm）"
   source: "会话 2026-10-12"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-13T06:23:06
+  kind: note
+  summary: "交叉引用：数值表示维持 f64 NaN-box（num 快路径已是裸 f64，非 NaN-box）；原生整数 i32/i64 实测仅快 12-18%，被精度/语义/32位三约束否决。性能模型记入 aot-performance-model。最大杠杆 = qz.* import 从 JS 函数改 WAMR raw native（跨界税 4.9µs→45ns）。"
+  source: "讨论 2026-13"
   affects: [aot-wasm-tagged-backend]

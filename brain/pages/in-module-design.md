@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T06:11:13"
+updated: "2026-10-13T06:23:06"
 ---
 
 <!-- compiled_truth -->
@@ -117,4 +117,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: decision
   summary: "M1 完成：qz_t/qz_ctx_t 能力切分，QZ_VM_GUEST 编译期 uv 隔离。`#ifndef QZ_VM_GUEST` 守卫全部 uv-typed 字段/原型（native 布局零改变，同 QZ_USE_MOCK_LIBUV 先例）。改 4 头：qz_types.h（uv include 条件化 + RT_LOOP/queue.h/qz_worker_t/qz_proc_handle_t 守卫）、qz_core.h（loop/thread/wake+消息队列+线程标志+worker/self_path+store/http_ops/proc/ipc/dap/ctl+qz_close_loop 入守卫）、qz_msg.h（整文件 guest 不编）、qz_rt.h（qz_msg_t/qz_worker_t/uv_handle_t 原型簇守卫）。验收：native ninja qzjs 17/17 链接通过 + ctest 31/31 全绿；guest -DQZ_VM_GUEST -fsyntax-only 内核三源全 OK，探针证 uv_loop_t/uv_thread_t/uv__queue 编译期不可达（3 错 vs native 0）。关键：切分**不重排**字段（逐簇加 guard），native 零波及。commit 59091ff1。"
   source: "src/base/{qz_types,qz_core,qz_rt}.h + src/msg/qz_msg.h"
+  affects: [in-module-design]
+
+- time: 2026-10-13T06:23:06
+  kind: note
+  summary: "交叉引用：AOT 整体性能预估 + f64 vs 原生整数数值表示裁决已记入新页 aot-performance-model。要点：in-module 与 AOT 是两条并行路线非嵌套；AOT 最大杠杆是 qz.* 跨界税 4.9µs→45ns（raw native 注册，ext_wamr.c:105 已具备路径）。"
+  source: "讨论 2026-13"
   affects: [in-module-design]
