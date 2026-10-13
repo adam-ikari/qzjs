@@ -12,24 +12,27 @@ extern "C" {
 
 
 
-/* Per-context state — holds JSContext*, handle tables, timer data,
- * extensions, and polyfill config for reset re-injection. */
+/* Per-context state. 内核字段 = realm（JSContext + 槽位 id + 扩展机制表）；
+ * 宿主字段（timer 句柄表 / polyfill 缓存）= 边界接线，guest 编译期不可达
+ * （M2：见 IN_MODULE_DESIGN.md §5.1）。 */
 struct qz_ctx_s {
     JSContext *jsctx;
     int context_id;
-    int suspended;       /* vestigial：G1 后 suspend 即销毁 ctx（槽位 NULL 即挂起态），字段保留 ABI 兼容，恒为 0 */
 
+    const qz_ext_t * const *extensions;  /* compile-time table (QZ_EXTENSIONS), read-only */
+    int extensions_count;                    /* table length; iterate by count, skip NULL slots */
+
+#ifndef QZ_VM_GUEST
     void *handles[QZ_MAX_HANDLES];
     JSValue timer_resolves[QZ_MAX_HANDLES];
     void *timer_cbds[QZ_MAX_HANDLES];  /* qz_cb_data_t* for cleanup on timerStop */
     int handle_count;
 
-    const qz_ext_t * const *extensions;  /* compile-time table (QZ_EXTENSIONS), read-only */
-    int extensions_count;                    /* table length; iterate by count, skip NULL slots */
-
-    /* Polyfill config saved for reset re-injection */
+    /* Polyfill 字节码缓存（边界：内容属宿主，§3.1）；宿主接线时装载并暂存，
+     * 供 polyfill 注入使用。 */
     const uint8_t *polyfill;
     size_t polyfill_len;
+#endif
 };
 
 /* Callback data shared between bridge.c and qzjs.c for async operations.
@@ -174,12 +177,15 @@ struct qz_t {
     int context_count;
     int active_ctx_id;   /* -1 if no active context */
 
-    /* Polyfill bytecode cache: loaded once (lazily at first context creation),
-     * shared by all contexts, unloaded at runtime teardown. polyfill_owner is
-     * the opaque handle to free (NULL in mode C; heap ptr in modes A/B). */
+    /* Polyfill bytecode cache（边界：内容属宿主，§3.1）：loaded once (lazily
+     * at first context creation), shared by all contexts, unloaded at runtime
+     * teardown. polyfill_owner is the opaque handle to free (NULL in mode C;
+     * heap ptr in modes A/B). */
+#ifndef QZ_VM_GUEST
     const uint8_t *polyfill;
     size_t polyfill_len;
     void *polyfill_owner;
+#endif
 
     /* Web Worker (Task 4): worker_self is set on a worker's own qz_t (points
      * back to its qz_worker_t, non-NULL → this runtime is a worker); the

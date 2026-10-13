@@ -640,6 +640,7 @@ endif()
 set(_qz_core_sources
     src/host/qzjs.c
     src/host/bridge.c
+    src/host/ctx_orchestrate.c
     ${QZVM_SOURCES}
     ${_polyfill_gen_c}
     src/host/polyfill_load.c

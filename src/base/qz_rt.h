@@ -78,13 +78,21 @@ int qz_proc_handle_is_pipe(qz_t *rt, uv_handle_t *h);
 qz_ctx_t *qz_get_active_ctx(qz_t *rt);
 JSContext *qz_get_active_jsctx(qz_t *rt);
 qz_ctx_t *qz_get_ctx_by_id(qz_t *rt, int context_id);
+/* context.c（VM 内核）— realm 生命周期：只建/拆 JSContext + 登记 rt->contexts。
+ * 边界接线（pal / polyfill / 扩展 init）在 host/ctx_orchestrate.c，见
+ * IN_MODULE_DESIGN.md §5.2/§5.3。 */
 qz_ctx_t *qz_ctx_create(qz_t *rt, const qz_config_t *config);
+qz_ctx_t *qz_ctx_create_at(qz_t *rt, int slot);   /* 指定槽位建 realm（宿主恢复用） */
 void qz_ctx_destroy(qz_t *rt, qz_ctx_t *ctx);
 
-/* context.c — multi-context + soft suspend/resume (Task 5). 全部由父（主
- * context）线程调用；宿主只见主 context，spawn/suspend/resume/destroy 由
- * polyfill 的 qzContext 经 bridge 驱动。目标 ctx_id 若 == active（正在执行
- * JS 的 ctx）返回 QZ_ERR_BUSY——不能挂起/销毁/重建自己正在运行的 context。 */
+/* ctx_orchestrate.c（宿主）— 边界接线 + 多 context + soft suspend/resume
+ * (Task 5)。全部由父（主 context）线程调用；宿主只见主 context，
+ * spawn/suspend/resume/destroy 由 polyfill 的 qzContext 经 bridge 驱动。目标
+ * ctx_id 若 == active（正在执行 JS 的 ctx）返回 QZ_ERR_BUSY——不能挂起/销毁/
+ * 重建自己正在运行的 context。 */
+qz_ctx_t *qz_ctx_create_host(qz_t *rt, const qz_config_t *config);  /* create + wire_up */
+void qz_ctx_destroy_host(qz_t *rt, qz_ctx_t *ctx); /* 扩展 destroy + 资源清理 + qz_ctx_destroy */
+int qz_ctx_wire_up(qz_t *rt, qz_ctx_t *ctx);       /* realm 建成后边界接线；失败回滚返回 -1 */
 int qz_ctx_spawn(qz_t *rt, const char *init_script);   /* 返回 ctx id 或 <0 */
 int qz_ctx_serialize(qz_t *rt, int ctx_id, const char *state_path);
 int qz_ctx_rebuild(qz_t *rt, int ctx_id, const char *script_ref, const char *state_path);
@@ -108,8 +116,6 @@ int qz_ext_resume_all(qz_t *rt, qz_ctx_t *ctx);
 /* bridge.c — creates the internal pal JS object (per-context version) */
 JSValue qz_create_pal_object_ctx(qz_t *rt, qz_ctx_t *ctx);
 
-/* bridge.c — inject polyfill via __native_inject__ temp global (per-context version) */
-int qz_inject_polyfill_ctx(qz_t *rt, qz_ctx_t *ctx, const uint8_t *code, size_t code_len);
 
 /* bridge.c — dispatch an inbound message to the main context's
  * __qz_dispatch__ (source 0 = host JSON, parsed; >0 = worker bytes). */

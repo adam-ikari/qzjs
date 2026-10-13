@@ -505,8 +505,8 @@ int qz_runtime_init(qz_t *rt)
     rt->active_ctx_id = -1;
     for (int i = 0; i < QZ_MAX_CONTEXTS; i++) rt->contexts[i] = NULL;
 
-    /* Create initial context (ext init / polyfill 注入在 qz_ctx_create 内) */
-    qz_ctx_t *ctx = qz_ctx_create(rt, &rt->config);
+    /* Create initial context: 内核建 realm + 宿主接线（polyfill / ext init） */
+    qz_ctx_t *ctx = qz_ctx_create_host(rt, &rt->config);
     if (!ctx) {
         JS_FreeRuntime(rt->jsrt);
         rt->jsrt = NULL;
@@ -669,9 +669,9 @@ void qz_thread_teardown(qz_t *rt)
      * 条目/锁不依赖 loop/JSRuntime。 */
     qz_ctl_teardown(rt);
 
-    /* 4) 销毁所有 contexts（内含扩展 destroy） */
+    /* 4) 销毁所有 contexts（宿主接线：扩展 destroy + 资源清理） */
     for (int i = 0; i < QZ_MAX_CONTEXTS; i++) {
-        if (rt->contexts[i]) qz_ctx_destroy(rt, rt->contexts[i]);
+        if (rt->contexts[i]) qz_ctx_destroy_host(rt, rt->contexts[i]);
     }
 
     /* 5) 释放 JSRuntime（gc_obj_list 已空） */
@@ -700,7 +700,7 @@ void qz_thread_teardown(qz_t *rt)
     rt->ca_pem_len = 0;
     rt->ca_pem_cap = 0;
 
-    /* 6.7) 释放 polyfill 字节码缓存（qz_ctx_create_at 惰性加载，各 context
+    /* 6.7) 释放 polyfill 字节码缓存（qz_ctx_wire_up 惰性加载，各 context
      * 共享同一份）。C mode 无堆分配（unload 是 no-op）；A/B/D 释放堆缓冲。 */
     qz_polyfill_unload(rt->polyfill_owner);
     rt->polyfill_owner = NULL;
