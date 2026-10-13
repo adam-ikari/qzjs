@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T06:31:22"
+updated: "2026-10-13T13:33:03"
 ---
 
 <!-- compiled_truth -->
@@ -148,3 +148,9 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   summary: "术语修正（用户纠正）：前条「动态部分在同模块内 qzvm（QuickJS-ng 编 wasm32）运行」中括号缩窄了 qzvm。准确：模块内跑的是 qzvm = 纯 VM 构建单元，in-module 档源集 = context.c（realm 生命周期）+ vm_core.c（eval/字节码编译/rt 查询）+ ext_lifecycle.c（扩展生命周期），不含 wasm 引擎（档内 _prof_wamr/_prof_wasm3 OFF）、不含 debugger、不含宿主 I/O。QuickJS-ng 只是其底层引擎（外部依赖），qzvm ≠ QuickJS-ng。"
   source: "用户纠正 + src/qzvm/CMakeLists.txt:35-44"
   affects: [in-module-design]
+
+- time: 2026-10-13T13:33:03
+  kind: decision
+  summary: "M2 落地：context.c 拆分完成。内核只留 realm（qz_ctx_create/_at/_destroy，导出 _at 供宿主恢复指定槽位）；边界接线 + 编排移入新文件 src/host/ctx_orchestrate.c（qz_ctx_wire_up / qz_ctx_create_host / qz_ctx_destroy_host / qz_ctx_cleanup_resources / spawn/serialize/rebuild/destroy_id）。死码 qz_inject_polyfill_ctx（bridge.c + qz_rt.h 声明）已删。qzjs.c 建/拆改用 host 包装。qtz 内核 destroy 只做 job 排水 + JS_FreeContext + 注销，扩展钩子/句柄清理由 destroy_host 先跑。CMake core 源加 ctx_orchestrate.c。验证：全 32 ctest 绿（含 context/suspend/composition gtest）。"
+  source: "IN_MODULE_DESIGN.md §5.2 + git diff"
+  affects: [in-module-design, c-js-layering]

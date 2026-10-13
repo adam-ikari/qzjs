@@ -20,15 +20,14 @@
 
 ### 2.1 三源职责拆解
 
-`context.c`（455 行）各函数归属：
+`context.c`（拆分后 149 行；拆前 455 行）各函数归属：
 
 | 函数 | 真实职责 | guest 需要？ |
 | --- | --- | --- |
 | `qz_get_active_ctx/_jsctx/_by_id` | 查询活动 realm | ✅ 内核 |
-| `qz_ctx_create` / `qz_ctx_create_at` | 建 realm（JSContext + 注册进 `rt->contexts`）；**内含** pal 构建 / polyfill 装载+注入 / ext 登记（边界接线，见 §3.1） | ⚠️ 内核骨架 + 混入边界 |
-| `qz_ctx_destroy` | 拆 realm | ✅ 内核 |
-| `qz_ctx_cleanup_resources` | 循环 `qz_timer_cancel`（见 2.3） | ⚠️ timer 归宿主 |
-| `qz_ctx_spawn` | 建**子 context** | ❌ 宿主编排（仅 `bridge.c:2117` 调） |
+| `qz_ctx_create` / `qz_ctx_create_at` | 建 realm（JSContext + 注册进 `rt->contexts`）——**纯内核**（边界接线已移出，见下） | ✅ 内核 |
+| `qz_ctx_destroy` | 拆 realm（job 排水 + JS_FreeContext + 注销） | ✅ 内核 |
+| `qz_ctx_cleanup_resources`（timer 句柄表循环；**已移 `host/ctx_orchestrate.c`**） | 宿主侧 timer 清理 | ❌ 宿主 |
 | `qz_ctx_serialize` | realm 状态**写盘** | ❌ 宿主（`bridge.c:2135`） |
 | `qz_ctx_rebuild` | 从盘**重建** realm | ❌ 宿主（`bridge.c:2155`） |
 | `qz_ctx_destroy_id` | 按 id 拆 | ❌ 宿主（`bridge.c:2172`） |
@@ -255,7 +254,7 @@ flowchart TB
 | # | 里程碑 | 产物 | 验证 |
 | --- | --- | --- | --- |
 | M1 | qz_t/qz_ctx_t 能力切分 | `qz_core.h` 加 `#ifndef QZ_VM_GUEST` 块；`qz_types.h` uv include 条件化 | **native 全回归绿**（切分不改宿主行为）；`-DQZ_VM_GUEST -fsyntax-only` 内核源 uv 不可达 |
-| M2 | context.c 拆分（含边界接线移出） | §5.2：pal/polyfill/ext 登记移出内核；宿主编排移新文件；删死码 `qz_inject_polyfill_ctx` | native 回归绿；`qz_ctx_create/destroy` 内核部零 uv、零 `bridge.c` 调用 |
+| M2 ✅ | context.c 拆分（含边界接线移出） | §5.2 已落地：`context.c` 只留 realm 内核（`qz_ctx_create/_at/_destroy`）；边界接线 + 编排 → `host/ctx_orchestrate.c`（`qz_ctx_wire_up`/`qz_ctx_create_host`/`qz_ctx_destroy_host`/`qz_ctx_cleanup_resources`/`spawn`/`serialize`/`rebuild`/`destroy_id`）；死码 `qz_inject_polyfill_ctx` 已删 | native 回归绿（context/suspend/composition gtest 全过）；`context.c` 无 pal/polyfill/ext-init 调用 |
 | M3 | tick 上移 | `qz_tick` 入 qzvm；宿主改调 | native 回归绿（tick 语义不变） |
 | M4 | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target | `libqzvm.wasm` 链接成功，导出符号齐；import 段含 `qz_host.*` |
 | M5 | guest 跑通（真 JS + 异步） | §10.3 import 面 + §10.4 回流 | 原型已验同步/写回/异步；M5 接真 QuickJS（resolve 持 JSValue）+ tick 驱动（去自旋）|
