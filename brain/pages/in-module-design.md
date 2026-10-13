@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T03:49:40"
+updated: "2026-10-13T05:18:29"
 ---
 
 <!-- compiled_truth -->
@@ -73,3 +73,15 @@ M1 qz_t/qz_ctx_t 切分（native 回归绿 + guest 语法 uv 不可达）→ M2 
   summary: "设计定稿：按能力切分 qz_t（非 stub uv）。内核三源零 uv 调用实测确认；qz_t 字段交错须逐字段归类。终态即起点，不设两阶段。文档 src/qzvm/aot/IN_MODULE_DESIGN.md。"
   source: "IN_MODULE_DESIGN.md + grep 内核三源"
   affects: [aot-experiment-verification]
+
+- time: 2026-10-13T05:18:28
+  kind: reversal
+  summary: "修正 §3：polyfill 注入与扩展登记不属 qzvm 核心，是宿主边界接线。第一性追问「polyfill 注入是 qzvm 需要的吗」→ 答案否。注入动作虽在 context.c:160-215，但输入全在宿主：qz_create_pal_object_ctx(bridge.c:2226, 48 个 pal.* 全宿主 I/O)、qz_polyfill_load(src/host/polyfill_load.c)、polyfill bundle(src/polyfill/src/*.js，pal 之上的宿主 glue)。且 context.c:164 直接调 bridge.c 函数 = 分层违规。textcodec_ext_init(ext_textcodec.c:225) 依赖注入产生的 __native__ → ext 登记硬依赖注入，两者同属边界接线。连带发现 qz_inject_polyfill_ctx(bridge.c:2334) 零调用者死码。内核体量修正 ~337 行。guest 最小集 = 引擎 + realm 生命周期(含注册) + eval/compile + tick。"
+  source: "IN_MODULE_DESIGN.md §3.1 + grep 核实行号"
+  affects: [in-module-design]
+
+- time: 2026-10-13T05:18:29
+  kind: decision
+  summary: "初始化序列重排：qz_ctx_create 单体 → VM 建 realm + 宿主接线(build_pal → inject_polyfill → qz_ext_init_all) + qz_tick 拉。边界接线不属 VM↔宿主内部接口。"
+  source: "IN_MODULE_DESIGN.md §5.3"
+  affects: [in-module-design]

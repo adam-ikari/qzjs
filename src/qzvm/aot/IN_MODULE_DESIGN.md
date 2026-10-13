@@ -25,7 +25,7 @@
 | 函数 | 真实职责 | guest 需要？ |
 | --- | --- | --- |
 | `qz_get_active_ctx/_jsctx/_by_id` | 查询活动 realm | ✅ 内核 |
-| `qz_ctx_create` / `qz_ctx_create_at` | 建 realm（JSRuntime 下建 JSContext + 注扩展 + 注 polyfill） | ✅ 内核 |
+| `qz_ctx_create` / `qz_ctx_create_at` | 建 realm（JSContext + 注册进 `rt->contexts`）；**内含** pal 构建 / polyfill 装载+注入 / ext 登记（边界接线，见 §3.1） | ⚠️ 内核骨架 + 混入边界 |
 | `qz_ctx_destroy` | 拆 realm | ✅ 内核 |
 | `qz_ctx_cleanup_resources` | 循环 `qz_timer_cancel`（见 2.3） | ⚠️ timer 归宿主 |
 | `qz_ctx_spawn` | 建**子 context** | ❌ 宿主编排（仅 `bridge.c:2117` 调） |
@@ -36,7 +36,7 @@
 
 `vm_core.c`（182 行）：`qz_eval_internal` / `qz_eval_bytecode_internal` / `qz_get_rt_from_ctx` / `qz_get_rt_from_jsrt` / `qz_compile` —— **全部内核**，guest 全要。
 
-`ext_lifecycle.c`（104 行）：`qz_ext_init/destroy_all`（内核）+ `qz_ext_suspend/resume_all`（仅 suspend/resume 用 = 宿主编排，**零外部调用者**）。
+`ext_lifecycle.c`（104 行）：`qz_ext_init/destroy_all`（机制内核，调用时点归边界）+ `qz_ext_suspend/resume_all`（仅 suspend/resume 用 = 宿主编排，**零外部调用者**）。
 
 ### 2.2 扩展源可无痛进 guest
 
@@ -73,18 +73,44 @@
 | --- | --- | --- |
 | 引擎（QuickJS-ng JSRuntime） | **必须** | 无引擎无 JS |
 | realm（JSContext + 全局） | **必须** | 脚本要有全局环境 |
-| 字节码加载 / eval | **必须** | 执行入口 |
+| realm 注册（ctx 进 `rt->contexts`） | **必须** | 跑任何 JS 前，闭包需经 `get_ctx_from_jsctx` 反查（`context.c:152-154`） |
+| 字节码加载 / eval | **必须** | 执行入口（已有 `qz_eval_bytecode_internal`） |
 | microtask pump（tick） | **必须** | promise/microtask 推进 |
-| 扩展登记（ext init/destroy） | **必须**（机制），内容可选 | 标准 API 面 = 扩展 + polyfill |
-| polyfill 注入 | **必须** | 标准面载体 |
 | **宿主线程 / loop** | **不要** | libuv 属宿主（已定约束） |
 | **消息队列 / IPC** | **不要** | 宿主边界机制，非引擎能力 |
 | **进程编排**（spawn/serialize/rebuild/destroy_id） | **不要** | 仅经 pal/bridge 从宿主到达 |
 | **文件 I/O** | **不要** | OS 能力，属宿主 |
-| **timer 实现** | **不要** | 同 IO，走 qz.\* 回流宿主 |
+| **timer 实现** | **不要** | 同 IO，走 pal 回流宿主 |
 | **控制面 / DAP / storage** | **不要** | 宿主基础设施 |
+| **polyfill 注入** | **不要**（★修正） | 见 §3.1：是宿主边界接线，非引擎能力 |
+| **扩展登记（ext init/destroy）** | **机制留、调用时点归边界**（★修正） | 遍历常表调钩子 = 核心机制；但内容依赖注入产生的 `__native__`，故由宿主在接线后调。见 §3.1 |
 
-**结论**：guest 最小集 = **引擎 + realm 生命周期 + eval/compile + tick + 扩展登记 + polyfill 注入**。约 300–400 行量级，而非 741——差额是混进来的宿主编排 + 文件 I/O + timer 缝合。
+**结论**：guest 最小集 = **引擎 + realm 生命周期（含注册）+ eval/compile + tick**。粗估 **~300–350 行**（`vm_core.c` 182 全留 + `context.c` 建拆 realm ~105 + `ext_lifecycle.c` init/destroy ~50），而非 741——差额是混进来的**边界接线**（pal/polyfill/ext 登记）+ 宿主编排 + 文件 I/O + timer 缝合。
+
+### 3.1 为什么 polyfill 注入与扩展登记不属核心（第一性）
+
+初稿把「polyfill 注入」列为必需——**错**。注入**动作**虽在 `context.c:160-215`（56 行），但它的每一环都是宿主需求：
+
+| 注入所需 | 位置 | 性质 |
+| --- | --- | --- |
+| `qz_create_pal_object_ctx` | `bridge.c:2226` | 注册 **48 个** `pal.*`（`timerStart`/`httpRequest`/`fsRead`/`processSpawn`…）——**全是宿主 I/O** |
+| `qz_polyfill_load` / `qz_default_polyfill` | `src/host/polyfill_load.c` | 宿主加载器（rodata/compressed/external/host 四模式） |
+| polyfill bundle | `src/polyfill/src/*.js` | `var pal = globalThis.__native_inject__` + fetch/fs/console/url…——**pal 之上的宿主 glue** |
+
+即 `context.c:163` 直接调 `bridge.c` 的函数——**这已是分层违规**（qzvm 调宿主）。
+
+注入块四步拆解：
+
+| 步骤 | 属核心？ |
+| --- | --- |
+| 建 pal object | ❌ 纯宿主（48 个宿主函数） |
+| set `__native_inject__` 全局 | ⚠️ 通用机制，但服务于 pal |
+| eval bytecode | ✅ 已有 `qz_eval_bytecode_internal`（重复实现） |
+| `__native_inject__`→`__native__` 改名 | ❌ 是 polyfill build 约定（`build.js`），非引擎 |
+
+**连带**：`textcodec_ext_init`（`ext_textcodec.c:225`）读全局 `__native__`——由注入产生。故 `qz_ext_init_all` **硬依赖**注入先跑。
+
+→ **注入 + 扩展登记 = 同一件事：宿主边界接线（pal 面）**。两者都从 `qz_ctx_create_at` 移出。
 
 ## 4. 奥卡姆裁决
 
@@ -123,8 +149,8 @@ struct qz_t {
     qz_config_t config;
     qz_ctx_t *contexts[QZ_MAX_CONTEXTS];
     int context_count, active_ctx_id;
-    const uint8_t *polyfill; size_t polyfill_len; void *polyfill_owner;
-#ifndef QZ_VM_GUEST          /* 宿主专属 */
+    /* polyfill 缓存归宿主（§3.1）；以下全部宿主专属 */
+#ifndef QZ_VM_GUEST
     uv_loop_t loop; uv_thread_t thread; uv_async_t wake;
     qz_msg_t *msg_head, *msg_tail, msg_stub; qz_mq_t mq_out; int out_efd;
     qz_proc_t *proc; uv_pipe_t *ipc_channel_pipe;
@@ -139,7 +165,8 @@ struct qz_t {
 
 | 字段 | 归属 |
 | --- | --- |
-| `jsctx` / `context_id` / `extensions` / `extensions_count` / `polyfill*` | 核心 |
+| `jsctx` / `context_id` / `extensions` / `extensions_count` | 核心（`extensions` 表是编译期常表，机制核心；登记动作归边界） |
+| `polyfill*`（`qz_ctx_t` 上的缓存） | 边界（见 §3.1：内容属宿主） |
 | `handles[]` / `timer_resolves[]` / `timer_cbds[]` / `handle_count` | 宿主（timer 句柄表） |
 | `suspended`（vestigial，注释明示恒 0） | 可删（奥卡姆） |
 
@@ -147,11 +174,24 @@ struct qz_t {
 
 ### 5.2 context.c 拆分
 
-| 移出到 | 内容 |
+`qz_ctx_create_at`（`context.c:101-240`）当前混装三件事，按 §3.1 拆开：
+
+| 步骤 | 去向 |
 | --- | --- |
-| 保持 `context.c`（内核） | `qz_ctx_create/_at/_destroy`、`qz_get_active_*` |
-| 新宿主文件（如 `host/ctx_orchestrate.c`） | `qz_ctx_spawn/_serialize/_rebuild/_destroy_id` + `qz_read_file`/`qz_write_file` |
-| 删除/宿主化 | `qz_ctx_cleanup_resources` 的 `qz_timer_cancel` 循环 → 宿主侧 timer 清理 |
+| 分配 ctx + 建 JSContext（`:101-127`） | **留内核**（realm 建立） |
+| polyfill **装载**（`qz_polyfill_load`，`:129-143`） | **移边界**（内容属宿主，§3.1） |
+| ctx 进 `rt->contexts`（注册，`:152-158`） | **留内核**（跑任何 JS 前需注册，供 `get_ctx_from_jsctx` 反查） |
+| 建 pal + 装 polyfill + 改名 `__native__`（`:160-213`） | **移边界**（宿主接线） |
+| `qz_ext_init_all`（`:228`） | **移边界原语**（机制可留 VM，调用点归宿主，§5.3） |
+| 删 `WebAssembly` 全局（`:215-226`） | 引擎裁剪动作，可留内核 |
+
+| 函数 | 去向 |
+| --- | --- |
+| `qz_ctx_create/_at/_destroy`、`qz_get_active_*` | 留 `context.c`（内核）；`_at` 去掉边界接线 |
+| `qz_ctx_spawn/_serialize/_rebuild/_destroy_id` + `qz_read_file`/`qz_write_file` | 移 `host/ctx_orchestrate.c`（宿主编排） |
+| `qz_ctx_cleanup_resources` 的 `qz_timer_cancel` 循环 | 宿主侧 timer 清理 |
+
+**附带发现（奥卡姆）**：`qz_inject_polyfill_ctx`（`bridge.c:2334`）**零调用者**（仅 `qz_rt.h:110` 声明）——是注入逻辑的重复实现（`qz_ctx_create_at` 内联了同一套）。拆分时**删**，不搬。
 
 `ext_lifecycle.c`：`qz_ext_suspend_all`/`qz_ext_resume_all` 无外部调用者 → 随 suspend 机制归宿主或删除（奥卡姆：无消费者的保留 = 负债，需单独裁决）。
 
@@ -161,11 +201,20 @@ struct qz_t {
 
 | 宿主需要 | VM 提供 |
 | --- | --- |
-| 建/拆 realm | `qz_ctx_create` / `qz_ctx_destroy` |
+| 建/拆 realm | `qz_ctx_create` / `qz_ctx_destroy`（**内核**：建 JSContext + 注册；不含边界接线） |
 | 取活动 ctx | `qz_get_active_*` |
 | 推 microtask | `qz_tick`（← `qz_flush_microtasks` 上移） |
 | eval/compile | `qz_eval_internal` / `qz_compile` |
-| 扩展登记 | `qz_ext_init_all` / `qz_ext_destroy_all` |
+
+**边界接线不在此接口内**（§3.1）：建 pal、装 polyfill、`qz_ext_init_*` 由**宿主**在 VM 建完 realm 后调。即初始化序列从 `qz_ctx_create` 单体变为：
+
+```
+VM:  qz_ctx_create()         → realm 建好、已注册
+宿主: build_pal(ctx)         → 装 pal 面
+宿主: inject_polyfill(ctx)   → eval bundle
+宿主: qz_ext_init_all(ctx)   → 扩展登记（依赖前两步）
+宿主: qz_tick()              → 每轮拉
+```
 
 因是**单一 wasm 产物的内部实现**，此接口无 ABI 承诺（宿主 native 形态直接 C 调；guest 形态是模块内部调用）——brain 结论成立，且正因为无承诺，把它**设计紧**是零代价的。
 
@@ -185,7 +234,7 @@ struct qz_t {
 flowchart TB
   subgraph wasm["libqzvm.wasm（guest 产物）"]
     QJS["QuickJS-ng"]
-    CORE["qzvm 内核<br/>realm/eval/tick/ext 登记"]
+    CORE["qzvm 内核<br/>引擎/realm 注册/eval/tick"]
     QJS --> CORE
   end
   subgraph host["宿主 qzjs（原生，既有）"]
@@ -203,7 +252,7 @@ flowchart TB
 | # | 里程碑 | 产物 | 验证 |
 | --- | --- | --- | --- |
 | M1 | qz_t/qz_ctx_t 能力切分 | `qz_core.h` 加 `#ifndef QZ_VM_GUEST` 块；`qz_types.h` uv include 条件化 | **native 全回归绿**（切分不改宿主行为）；`-DQZ_VM_GUEST -fsyntax-only` 内核源 uv 不可达 |
-| M2 | context.c 拆分 | 宿主编排移出新文件 | native 回归绿；`qz_ctx_create/destroy` 内核部零 uv |
+| M2 | context.c 拆分（含边界接线移出） | §5.2：pal/polyfill/ext 登记移出内核；宿主编排移新文件；删死码 `qz_inject_polyfill_ctx` | native 回归绿；`qz_ctx_create/destroy` 内核部零 uv、零 `bridge.c` 调用 |
 | M3 | tick 上移 | `qz_tick` 入 qzvm；宿主改调 | native 回归绿（tick 语义不变） |
 | M4 | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target | `libqzvm.wasm` 链接成功，导出符号齐 |
 | M5 | guest 跑通 | import 面 + 最小 host 驱动 | 模块内 `eval("1+1")` 返回 2；一次 tick 推进 promise |
@@ -230,8 +279,8 @@ cmake --build build-inmod --target qzvm-guest
 | 风险 | 说明 | 缓解 |
 | --- | --- | --- |
 | qz_t 切分面广 | `qz_t` 被 N 个源引用；搬字段需同步改 `rt->field` | M1 靠编译器逐个暴露；每步 native 回归 |
-| `qz_msg_t` 的 `uv__queue` 在核心区 | `msg_head/tail/stub` 当前在 qz_t 前部 | 一并归入 `#ifndef QZ_VM_GUEST`（消息队列本属宿主） |
-| quickjs-ng wasm 可编译性 | 引擎的 malloc/stdio/`setjmp`/`alloca` 在 wasm32 是否 OK | M4 实测；可能需引擎侧裁剪宏 |
+| 边界接线移出的连带 | pal/polyfill/ext 登记移出 `qz_ctx_create_at` 需重排初始化顺序（注册→边界→ext init） | M2 逐步；native 回归 |
+| `qz_ctx_create` 内核部仍有 host 导入 | 当前 `context.c` 调 `qz_create_pal_object_ctx`/`qz_polyfill_load`/`qz_timer_cancel`（全 host） | M2 移出后内核部零宿主导入 |
 | 工具链选型 | wasi-sdk vs emscripten | 倾向 wasi-sdk（freestanding，贴合自包含）；M4 定 |
 | `qz_ext_suspend/resume_all` 无调用者 | 是死码还是待接 | 单独裁决：无消费者则删（奥卡姆）或随 suspend 归宿主 |
 | 扩展内容取舍 | 全 OFF 最小，但 guest 的标准面（如 console/URL）依赖 polyfill 非 C 扩展 | M5 定 polyfill 注入的最小集 |
@@ -242,4 +291,4 @@ cmake --build build-inmod --target qzvm-guest
 - 决策链：brain `aot-experiment-verification`（2026-10-13 全部条目）
 - 相关设计：`STR_BACKEND_DESIGN.md`、`ASSESSMENT.md`、`PORTABILITY_32BIT.md`
 - 已落地：提交 `d365171e`（profile 档 + gate 逃逸）
-- 证据点位：`qz_core.h:79-311`（qz_t）、`:17-33`（qz_ctx_t）、`qz_types.h:26-30`、`context.c` 各函数（`:30-455`）、`bridge.c:2117-2172`、`thread.c:22`
+- 证据点位：`qz_core.h:79-311`（qz_t）、`:17-33`（qz_ctx_t）、`qz_types.h:26-30`、`context.c:101-240`（`qz_ctx_create_at` 混装）、`bridge.c:2117-2172`（编排）、`bridge.c:2226`（pal 面）、`bridge.c:2334`（死码注入）、`src/host/polyfill_load.c`、`textcodec_ext.c:225`（ext 依赖 `__native__`）、`thread.c:22`（tick）
