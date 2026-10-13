@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T06:28:09"
+updated: "2026-10-13T06:31:22"
 ---
 
 <!-- compiled_truth -->
@@ -141,4 +141,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: reversal
   summary: "更正上一条（shell 反引号吞词）：待决点 = 用户形态是单一 wasm 模块（静态 wasm + 模块内 qzvm 动态），但设计 §6 只说产独立 guest 产物（qzvm 编出的 .wasm），未写【如何与 AOT emitter 发射的静态 wasm 合并为单一模块】。补问：最终 artifact 是 wasm-merge/wasm-ld 链接成单模块？还是 guest .wasm 与静态 wasm 并列加载（导入导出对接）？前者才契合用户「同 isolate 同内存、零 marshalling」。M4 定。"
   source: "用户单模块声明 vs IN_MODULE_DESIGN.md §6"
+  affects: [in-module-design]
+
+- time: 2026-10-13T06:31:22
+  kind: note
+  summary: "术语修正（用户纠正）：前条「动态部分在同模块内 qzvm（QuickJS-ng 编 wasm32）运行」中括号缩窄了 qzvm。准确：模块内跑的是 qzvm = 纯 VM 构建单元，in-module 档源集 = context.c（realm 生命周期）+ vm_core.c（eval/字节码编译/rt 查询）+ ext_lifecycle.c（扩展生命周期），不含 wasm 引擎（档内 _prof_wamr/_prof_wasm3 OFF）、不含 debugger、不含宿主 I/O。QuickJS-ng 只是其底层引擎（外部依赖），qzvm ≠ QuickJS-ng。"
+  source: "用户纠正 + src/qzvm/CMakeLists.txt:35-44"
   affects: [in-module-design]

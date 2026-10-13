@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-13T06:25:43"
+updated: "2026-10-13T06:31:42"
 ---
 
 <!-- compiled_truth -->
@@ -426,4 +426,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: decision
   summary: "用户重申并细化形态（本次）：TS 编译为 wasm ⇒ 模块内【静态部分是 wasm，动态部分在 wasm 内的 qzvm 中运行】（同模块、同 isolate、非嵌套宿主引擎）；与系统交互走两条 import 面——(1) qzjs 的 JS import（宿主 qzjs 运行时兑现，即 qz.* 阻抗匹配绑定），(2) WASI 的 import（wasm 运行时自己兑现，宿主 qzjs 不介入）。=> 校正与既有条目的关系：本声明与 02:41/02:42/02:46【模块内嵌 qzvm、动态 JS 同模块跑、qz.* 为引擎↔宿主阻抗匹配】一致；新增量 = 明确【两条可选 import 面】，其中 WASI 面此前在 02:33 被记为『非 qzjs 运行时接受的形态』——本轮校正为：WASI 是工具链 lowering target 之一（供『wasm 运行时』自己兑现的形态），与 qzjs 面并列而非被拒。"
   source: "用户本次架构声明 + build.js:128 --target(CPU) vs emitter.js QZ import 表"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-13T06:31:42
+  kind: note
+  summary: "术语精确化（用户纠正 + 源码核实）：02:25 条「qzvm = 引擎（QuickJS-ng + wasm 引擎 + qz.* 原语）」有三处不准。①qzvm 是构建单元（src/qzvm/CMakeLists.txt:35-44），源集 = context.c + vm_core.c + ext_lifecycle.c +【可选】ext_wamr/ext_wasm3 +【可选】debugger；不是「引擎」这个抽象层。②wasm 引擎在 in-module 档是【关掉】的（_prof_wamr/_prof_wasm3 OFF，CMakeLists:41-45），故 in-module 下 qzvm 源集只有前三者。③qz.* 前缀在 C 侧 grep 为空（不存在）——它是 AOT 工具链自带 JS shim（build.js:36/82/91 读 qzvm.js），跑在任意 JS 引擎，不属 qzvm。正确分层：qzvm = VM 构建单元（引擎核心语义 + 扩展生命周期）；QuickJS-ng = 其底层引擎（外部依赖）；qz.* = AOT 工具链 JS shim（02:36 已定性）。"
+  source: "用户纠正 + src/qzvm/CMakeLists.txt:35-44 + grep qz.* in C 为空 + CMakeLists:41-45"
   affects: [aot-experiment-verification]

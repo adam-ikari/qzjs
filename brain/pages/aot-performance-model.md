@@ -5,16 +5,28 @@ category: decision
 status: active
 tags: [decision, aot, performance, f64, wasm, numeric]
 created: "2026-10-13T06:22:46"
-updated: "2026-10-13T06:27:11"
+updated: "2026-10-13T06:31:11"
 ---
 
 <!-- compiled_truth -->
 ## 结论
 
-**AOT 形态 = 单一 wasm 模块**（非"两条并行路线"）：TS 编译为 wasm ⇒ 模块内**静态部分已是 wasm**（emitter 发射的原生指令），**动态部分在同模块内的 qzvm 中运行**（QuickJS-ng 编到 wasm32，与静态 wasm 同 isolate / 同线性内存）。模块对外**两条可选 import 面**：
+**AOT 形态 = 单一 wasm 模块**（非"两条并行路线"）：TS 编译为 wasm ⇒ 模块内**静态部分已是 wasm**（emitter 发射的原生指令），**动态部分在同模块内的 qzvm 中运行**（与静态 wasm 同 isolate / 同线性内存）。模块对外**两条可选 import 面**：
 
 1. **qzjs 的 JS import** —— 宿主 qzjs 运行时兑现（`qz.*` = 引擎↔宿主阻抗匹配绑定：对象/字符串/数组/平台 API 走它）。
 2. **WASI 的 import** —— 「wasm 运行时」自己兑现（qzjs 不介入；工具链 lowering target 之一）。
+
+### qzvm 的准确边界（勿简化为 QuickJS-ng）
+
+**模块内跑的 qzvm ≠ 单纯 QuickJS-ng**。qzvm = **纯 VM 构建单元**（`src/qzvm/CMakeLists.txt:35-44`），源集：
+
+- `context.c` —— realm/ctx 生命周期
+- `vm_core.c` —— eval / 字节码编译 / rt 查询（2026-10-09 从宿主层移入，消除 VM→宿主反向依赖）
+- `ext_lifecycle.c` —— 扩展 init/destroy/suspend/resume
+- （可选）`ext_wamr.c` / `ext_wasm3.c` —— wasm 引擎扩展
+- （可选）`debugger.c` / `debugger_dap.c` —— DAP
+
+in-module 档关掉 wasm 引擎（`_prof_wamr`/`_prof_wasm3` OFF）⇒ **模块内 qzvm 源集 = context.c + vm_core.c + ext_lifecycle.c**，不含 wasm 引擎、不含 debugger、不含宿主 I/O。QuickJS-ng 是其底层引擎（外部依赖），二者不等同。
 
 - **性能天花板架构性、已实测**：纯数值 ~130x 解释器 / 快 V8 ~2.1x；对象循环 ~38–50x 解释器 / 慢 V8 4–12x；字符串慢 V8 ~248x（唯一系统性劣势）。
 - **「整体实现」收益 = 覆盖率，非峰值**（qzvm.js 现 20–33 符号）。
@@ -73,6 +85,7 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
 - **为何单模块可成立**：in-module profile 关掉 qzjs 自己的 wasm 引擎（`_prof_wamr OFF` / `_prof_wasm3 OFF`），模块内不套第二层 wasm 引擎 ⇒ **无 wasm 嵌套**。
 - **两条 import 面互斥可选**：`qz.*`（qzjs 兑现）与 WASI（wasm 运行时兑现）。qzjs 内置 WAMR 的 `WAMR_BUILD_LIBC_WASI 0`（`CMakeLists.txt:582`）、wasm3 `BUILD_WASI=none` ⇒ **qzjs 当前不解 WASI**；WASI 目标模块供其它 wasm 运行时。工具链可发多 target（`build.js:128` `--target` 是 CPU 架构交叉编译，与 lowering target 不同轴）。
 - **`qz.*` 归属**：`02:36` 记为「工具链自带 JS shim」（`build.js:36/82/91`），`02:42` 记为「引擎↔宿主阻抗匹配绑定」。二者统一：shim 实现该绑定，跑在任意 JS 引擎（Node/浏览器/qzjs）；qzjs 只是其中一个兑现者。
+- **待决点（M4）**：单模块如何合并——`IN_MODULE_DESIGN.md §6` 只说产独立 guest 产物（qzvm 编出的 .wasm），未写与 AOT 静态 wasm 的合并步骤。wasm-merge/wasm-ld 链接成单模块（契合"零 marshalling"）vs 并列加载？
 
 
 ## Timeline
@@ -111,4 +124,16 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
   kind: reversal
   summary: "反转本页早先错误框架：此前记「in-module 与 AOT 是两条并行路线，非嵌套」——错。正确：单一 wasm 模块内，静态部分已是 wasm（emitter 发射），动态部分在同模块内 qzvm（QuickJS-ng 编 wasm32）中运行，同 isolate/同线性内存。in-module 档 = 该模块的构建形态（关 qzjs 自己的 wasm 引擎 ⇒ 无第二层 wasm ⇒ 无嵌套）。对外两条 import 面：qzjs 的 JS import（qz.* 阻抗匹配，宿主兑现）与 WASI import（wasm 运行时兑现）。"
   source: "用户本轮架构声明 + CMakeLists:41-45(_prof_wamr/wasm3 OFF)/582(WAMR_BUILD_LIBC_WASI 0) + build.js:36/82/91"
+  affects: [aot-performance-model]
+
+- time: 2026-10-13T06:30:39
+  kind: note
+  summary: "术语精确化（用户纠正）：模块内跑的不是「简单 QuickJS-ng」，而是 qzvm。qzvm = 纯 VM 构建单元（src/qzvm/CMakeLists.txt:35-44），源集 = context.c（realm 生命周期）+ vm_core.c（eval/字节码编译/rt 查询，2026-10-09 从宿主层移入以消除 VM→宿主反向依赖）+ ext_lifecycle.c（扩展 init/destroy/suspend/resume）+【可选】ext_wamr.c/ext_wasm3.c（wasm 引擎扩展）+【可选】debugger.c/debugger_dap.c。in-module 档关掉 wasm 引擎（_prof_wamr/_prof_wasm3 OFF）⇒ 模块内 qzvm 源集 = context.c + vm_core.c + ext_lifecycle.c，不含 wasm 引擎、不含 debugger、不含宿主 I/O。故正确表述：模块内 = qzvm（引擎核心语义 + 扩展生命周期），底层是 QuickJS-ng 引擎，二者不等同。"
+  source: "用户纠正 + src/qzvm/CMakeLists.txt:1-44 + vm_core.c:1-12 + CMakeLists.txt:41-46"
+  affects: [aot-performance-model]
+
+- time: 2026-10-13T06:31:11
+  kind: decision
+  summary: "补 qzvm 准确边界（用户纠正）：模块内跑的是 qzvm（纯 VM 构建单元），非单纯 QuickJS-ng。in-module 档 qzvm 源集 = context.c + vm_core.c + ext_lifecycle.c（不含 wasm 引擎/debugger/宿主 I/O），底层引擎是 QuickJS-ng。其余（性能画像、f64 裁决、单模块形态、双 import 面）不变。"
+  source: "用户纠正 + src/qzvm/CMakeLists.txt:35-44 + CMakeLists.txt:41-45"
   affects: [aot-performance-model]
