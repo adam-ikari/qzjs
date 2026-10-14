@@ -1297,6 +1297,38 @@ jobs:
         run: |
           node test/grpc_server_tls_e2e.mjs --qzjs-bin ./build/qzjs
           node test/grpc_server_harness.mjs
+
+  # ============================================================================
+  # in-module guest: qzvm 编到 wasm32-wasi（IN_MODULE_DESIGN.md）。M4/M5 的
+  # 运行验证此前只是 /tmp 一次性脚本，从不入仓也不被 CI 跑——guest 的导入面
+  # （qz_host.*）或回流协议一改，没人会发现。此 job 把它固化成可复跑的宿主
+  # harness：构建 qzvm-guest → node WASI shim 实例化 → 跑异步回流断言
+  # （成功/拒绝/并发）。需 clang(-target wasm32-wasi) + wasi-libc + lld。
+  # ============================================================================
+  in-module:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    name: in-module guest (wasm32 reactor + async reflow)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/ccache-setup
+
+      - name: Install wasm32 tools (clang + wasi-libc + lld)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld wasi-libc
+
+      - name: Install Node (WASI host shim)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: e2e — in-module guest async reflow (§10.4)
+        run: bash test/test_inmodule_guest_e2e.sh
+
   # ============================================================================
   # Coverage: gcov with WAMR default engine.
   # ============================================================================
