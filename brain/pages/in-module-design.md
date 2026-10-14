@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-14T01:15:21"
+updated: "2026-10-14T05:39:28"
 ---
 
 <!-- compiled_truth -->
@@ -183,4 +183,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: evidence
   summary: "M5 落地：guest 异步回流跑通（§10.4「import 拉」选型真机验证）。guest_entry.c 加 fsRead(path) 原语（建 Promise，qz_host_fs_read 发起异步读，resolve/reject 存 guest 内 op 表持 JSValue——host 无 JSContext）；qz_tick 去自旋（每轮 qz_host_drain 拉 {op_id,status,len,data} → 找 op 槽 → JS_Call(resolve|reject) → return）；结果读出导出 qz_result_ptr/len。导出名 libqzvm.wasm（CMake SUFFIX .wasm/PREFIX lib）。验证：node WASI 宿主 shim（真异步 fs_read+drain 队列）fsRead(data.txt)→tick×2→\"OK len=33 head=hello from host file\"；reject fsRead(NOPE)→tick×1→\"ERR ENOENT…\"；native 32/32 ctest 绿。限制（M6 消除）：单 rt（op 表 static）、单事件≤512B、仅 1 原语（43 js_pal_* 全量移 guest 属 M6 §10.5）。"
   source: "src/qzvm/guest_entry.c + src/qzvm/CMakeLists.txt + IN_MODULE_DESIGN.md §6/§7 M5 + git dd52fbf5"
+  affects: [in-module-design]
+
+- time: 2026-10-14T05:39:28
+  kind: evidence
+  summary: "M5 验证入仓：新增 test/test_inmodule_guest_e2e.sh + test/inmodule-e2e/host.mjs（node WASI shim 实现 qz_host.fs_read/drain），把 M4/M5 的 /tmp 一次性脚本固化为可复现 harness——全新 build 目录 bash 一条命令自包含跑通（~30s）。三条断言：异步读成功回流、ENOENT 拒绝、两个并发 op 按 op_id 派发（顺序无关）。CI 新增独立 job in-module（clang/lld/wasi-libc + node），此前 guest 导入面/回流协议改动无人验。IN_MODULE_DESIGN M5 行验证描述从 /tmp 路径改指仓内 harness。"
+  source: "3c46afe2 + 全新目录跑通 + CI 25 jobs YAML 校验通过"
   affects: [in-module-design]
