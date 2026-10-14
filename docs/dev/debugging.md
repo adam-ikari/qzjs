@@ -260,6 +260,60 @@ pause fire only after you continue. This matches standard debugger
 freeze-on-break semantics and avoids PAL-driven re-entry into a stopped
 runtime (`debugger.c` has a re-entrancy guard as a second line of defense).
 
+## Debugging a WebAssembly module (WAMR debug-interp)
+
+The DAP debugger above debugs **QuickJS bytecode** (programs your host evals as
+JS). It cannot debug a raw **wasm module** loaded via `WebAssembly.instantiate`
+— that object is wasm instructions, not JS. For that, qzjs exposes a second,
+separate channel: WAMR's own debug-interp, which speaks the **GDB remote serial
+protocol (RSP)** over TCP.
+
+Enable it at **build time** (it forces WAMR's classic interpreter and turns
+Fast Interp off — the debugger is incompatible with Fast Interp):
+
+```bash
+cmake -B build-dbg -DQZ_WITH_WAMR=ON -DQZ_WITH_WAMR_DEBUG_INTERP=ON
+cmake --build build-dbg --target qzjs -j$(nproc)
+```
+
+At **run time**, every `WebAssembly.Instance` created from a bytecode module
+binds its cluster to a debug instance and opens a listening socket. The port
+and host come from env vars:
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `QZ_WAMR_DEBUG_PORT` | `0` | TCP port; `0` = OS-assigned. Printed to stderr on start. |
+| `QZ_WAMR_DEBUG_HOST` | `127.0.0.1` | Bind address. |
+
+```bash
+QZ_WAMR_DEBUG_PORT=33445 ./build-dbg/qzjs app.glue.js
+# [qzjs] wasm debug server listening on port 33445 (GDB RSP)
+```
+
+Attach a GDB-RSP client to that port. GDB's `wasm` target is **not** in stock
+GDB — WAMR's source-level flow uses a patched lldb (see
+`deps/wamr/doc/source_debugging_interpreter.md`). A plain GDB 12 client still
+works for instruction-level work if you ignore its `vMustReplyEmpty` probe
+warning (WAMR does not answer that packet):
+
+```bash
+gdb -q -ex 'set remotetimeout 20' -ex 'target remote 127.0.0.1:33445'
+```
+
+Behind the scenes: `wasm_debug_engine_init` runs only from
+`wasm_runtime_full_init` with a non-empty `ip_addr`, so this build routes
+`wamr_ensure_runtime` through `wasm_runtime_full_init` (see
+`wamr_runtime_init_once` in `src/qzvm/ext_wamr.c`).
+
+**Boundary — AOT is not debuggable this way.** `wasm_runtime_start_debug_instance*`
+rejects AOT module instances outright (`Attempt to create a debug instance for
+an AOT module`) and returns 0. The glue path (`build.js` → `<name>.glue.js`)
+prefers the `.aot` artifact when present, so debug runs must use the plain
+`.wasm`/bytecode path (no `options.aot`, or force a `.wasm`-only load).
+Source-level breakpoints (`break file.ts:10`) additionally need the emitter to
+emit DWARF — that is **not** implemented; this channel gives instruction-level
+breakpoints on wasm offsets.
+
 ## Test
 
 ```bash

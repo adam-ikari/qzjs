@@ -12,6 +12,7 @@
 #include "base/qz_rt.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <sched.h>   /* sched_yield: WAMR singleton init spin */
 #if QZ_WITH_WAMR
 #include "wasm_export.h"
@@ -58,6 +59,28 @@ static wamr_state_t g_wamr_state;   /* process singleton, M-R1 §13.2: see CAS s
  *   2 = 初始化进行中（非报主者 spin 等待；报主者失败回滚到 0）
  * 项目严格 -std=c99（无 _Atomic）：uint32_t + __atomic 内建，与
  * bridge.c g_qz_next_port_id 同款。 */
+/* WAMR runtime 一次性初始化。默认走 wasm_runtime_init()；开启源码级调试时
+ * 必须走 wasm_runtime_full_init() 并填 ip_addr —— debug-engine 只在
+ * full_init 的 init_args.ip_addr 非空时被 wasm_debug_engine_init() 初始化
+ * （wasm_runtime_common.c:786），否则后续 wasm_runtime_start_debug_instance*
+ * 会因 g_debug_engine==NULL 直接返回 0（日志里表现为「无法启动调试实例」）。*/
+static bool wamr_runtime_init_once(void)
+{
+#ifdef QZ_WAMR_DEBUG_INTERP
+    RuntimeInitArgs init_args;
+    memset(&init_args, 0, sizeof(init_args));
+    init_args.mem_alloc_type = Alloc_With_System_Allocator;
+    const char *host = getenv("QZ_WAMR_DEBUG_HOST");
+    snprintf(init_args.ip_addr, sizeof(init_args.ip_addr), "%s",
+             host ? host : "127.0.0.1");
+    const char *port_env = getenv("QZ_WAMR_DEBUG_PORT");
+    init_args.instance_port = port_env ? (int)atoi(port_env) : 0;
+    return wasm_runtime_full_init(&init_args);
+#else
+    return wasm_runtime_init();
+#endif
+}
+
 static int wamr_ensure_runtime(void)
 {
     {
@@ -65,7 +88,7 @@ static int wamr_ensure_runtime(void)
         if (__atomic_compare_exchange_n(&g_wamr_state.initialized, &zero,
                                         inprogress, 0, __ATOMIC_ACQ_REL,
                                         __ATOMIC_ACQUIRE)) {
-            if (!wasm_runtime_init()) {
+            if (!wamr_runtime_init_once()) {
                 __atomic_store_n(&g_wamr_state.initialized, 0,
                                  __ATOMIC_RELEASE);   /* 回滚：后续实例可重试 */
                 return -1;
@@ -1495,6 +1518,23 @@ static JSValue wamr_instance_constructor(JSContext *ctx, JSValueConst new_target
     /* Attach the wrap to the module instance so import dispatch can reach the
      * pending-exception slot (and so exported calls can rethrow it). */
     wasm_runtime_set_custom_data(module_inst, wrap);
+
+#ifdef QZ_WAMR_DEBUG_INTERP
+    /* 源码级调试：把该实例的 cluster 绑定到 WAMR debug-interp（GDB RSP over
+     * TCP）。仅 bytecode 模块可调（AOT 实例在 WAMR 内部直接拒绝并告警）。
+     * 端口由 QZ_WAMR_DEBUG_PORT 决定：0=自动分配，-1=用 RuntimeInitArgs
+     * 全局设置；未设则默认 0（自动）。仅当构建开 QZ_WITH_WAMR_DEBUG_INTERP
+     * 时此块才存在——该函数在 WAMR 内被 (THREAD_MGR && DEBUG_INTERP) 守卫，
+     * 未开调试的构建调用会链接失败。 */
+    {
+        const char *port_env = getenv("QZ_WAMR_DEBUG_PORT");
+        int32_t dbg_port = port_env ? (int32_t)atoi(port_env) : 0;
+        uint32_t chosen = wasm_runtime_start_debug_instance_with_port(exec_env, dbg_port);
+        if (chosen)
+            fprintf(stderr, "[qzjs] wasm debug server listening on port %u (GDB RSP)\n",
+                    chosen);
+    }
+#endif
 
     JSValue obj = JS_NewObjectClass(ctx, rt->wamr_instance_class_id);
     if (JS_IsException(obj)) {

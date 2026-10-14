@@ -57,6 +57,7 @@ option(QZ_BUILD_TESTS "Build tests" OFF)
 option(QZ_BUILD_DEBUGGER "Build the DAP step-debugger (applies the QuickJS-ng debugger patch; adds src/qzvm/debugger.c + src/qzvm/debugger_dap.c to libqzjs)" OFF)
 
 option(QZ_WITH_WAMR "Link WAMR WASM engine (default; enables real WebAssembly via WAMR with Fast Interp + AOT)" "${_prof_wamr}")
+option(QZ_WITH_WAMR_DEBUG_INTERP "Enable WAMR source-level debug-interp (GDB RSP on a TCP port; forces classic interpreter, disables Fast Interp)" OFF)
 option(QZ_WITH_WASM3 "Link wasm3 WASM engine (alternative, more portable)" "${_prof_wasm3}")
 option(QZ_WITH_TLS "Build with mbedTLS for HTTPS support" "${_prof_tls}")
 option(QZ_WITH_COMPRESS "Enable native compression via miniz" "${_prof_compress}")
@@ -576,7 +577,17 @@ if(QZ_WITH_WAMR)
     # pure C) — keep vmlib linkable by a plain C compiler.
     set(WAMR_BUILD_FAST_JIT 0)
     set(WAMR_BUILD_LAZY_JIT 0)
-    set(WAMR_BUILD_FAST_INTERP 1)
+    # 源码级调试：WAMR debug-interp（GDB RSP）。debugger 与 fast interp 不兼容。
+    # WAMR 自己也会在 runtime_lib.cmake 把 FAST_INTERP 归 0，但那发生在它
+    # 已经按 FAST_INTERP 选定 interp 源文件（wasm_interp_fast.c）之后 —— 上游
+    # 顺序 bug：会编进 fast interp 源却缺 fast interp 的结构体字段而编译失败。
+    # 故此处必须**提前**把 FAST_INTERP 设为 0，让 WAMR 选 classic interp 源。
+    if(QZ_WITH_WAMR_DEBUG_INTERP)
+        set(WAMR_BUILD_DEBUG_INTERP 1)
+        set(WAMR_BUILD_FAST_INTERP 0)
+    else()
+        set(WAMR_BUILD_FAST_INTERP 1)
+    endif()
     set(WAMR_BUILD_WASM_C_API 1)
     set(WAMR_BUILD_LIBC_BUILTIN 1)
     set(WAMR_BUILD_LIBC_WASI 0)
@@ -868,6 +879,13 @@ target_link_libraries(qzjs PUBLIC cjson)
 # Conditional WASM engine linking
 if(QZ_WITH_WAMR)
     target_link_libraries(qzjs PUBLIC vmlib)
+    # 宿主侧（ext_wamr.c）只有在同一构建开着 debug-interp 时才调用
+    # wasm_runtime_start_debug_instance_with_port —— WAMR 把该函数定义包在
+    # (THREAD_MGR && DEBUG_INTERP) 守卫内，而 wasm_export.h 的声明无守卫；
+    # 未开调试的构建里调用会「编译过、链接炸」。用此宏把调用点对齐到构建开关。
+    if(QZ_WITH_WAMR_DEBUG_INTERP)
+        target_compile_definitions(qzjs PRIVATE QZ_WAMR_DEBUG_INTERP=1)
+    endif()
 endif()
 if(QZ_WITH_WASM3)
     target_link_libraries(qzjs PUBLIC m3)
