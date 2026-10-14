@@ -63,6 +63,21 @@ static const unsigned char kShrinkMemModule[] = {
     0x20, 0x00, 0x28, 0x02, 0x00, 0x0b
 };
 
+// growmem.wasm — (memory (export "memory") 1 4), poke(i32,i32)->i32 writing a
+// byte through the exported memory, and grow(i32)->i32 calling memory.grow.
+// The module contains a memory.grow instruction, so WAMR must not run its
+// SHRUNK_MEMORY folding on it (that path collapses max_page_count to 1 and
+// would make growth impossible).
+static const unsigned char kGrowMemModule[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x02, 0x60,
+    0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03,
+    0x02, 0x00, 0x01, 0x05, 0x04, 0x01, 0x01, 0x01, 0x04, 0x07, 0x18, 0x03,
+    0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x6f,
+    0x6b, 0x65, 0x00, 0x00, 0x04, 0x67, 0x72, 0x6f, 0x77, 0x00, 0x01, 0x0a,
+    0x17, 0x02, 0x0e, 0x00, 0x20, 0x00, 0x20, 0x01, 0x3a, 0x00, 0x00, 0x20,
+    0x00, 0x2d, 0x00, 0x00, 0x0b, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b
+};
+
 // JS fixtures: _wasmBytes (ArrayBuffer), _badAot (ArrayBuffer), _src (a
 // streaming source whose arrayBuffer() resolves to the wasm bytes).
 static const std::string kFixtures = [] {
@@ -88,6 +103,12 @@ static const std::string kFixtures = [] {
     for (size_t i = 0; i < sizeof(kShrinkMemModule); i++) {
         if (i) s += ",";
         s += std::to_string(kShrinkMemModule[i]);
+    }
+    s += "]).buffer;\n";
+    s += "var _growBytes = new Uint8Array([";
+    for (size_t i = 0; i < sizeof(kGrowMemModule); i++) {
+        if (i) s += ",";
+        s += std::to_string(kGrowMemModule[i]);
     }
     s += "]).buffer;\n";
     s += "var _src = { arrayBuffer: function(){ return Promise.resolve(_wasmBytes); } };";
@@ -301,5 +322,49 @@ TEST(wasm_aot, shrunk_memory_export_length) {
     std::string v;
     ASSERT_TRUE(host_poll_until_value(h, "String(_r)", "ok", &v))
         << "shrunk-memory export exposed a short buffer, got: " << v;
+    host_destroy(h);
+}
+
+// Live-buffer regression: `exports.memory.buffer` must be a getter that
+// re-reads the WAMR memory, not a snapshot. When the guest grows its linear
+// memory, WAMR enlarges/relocates it; a fixed ArrayBuffer left hosts reading/
+// writing out of bounds (its length lagged the live page count). Verifies the
+// buffer refreshes after a guest `memory.grow`, that a host view taken before
+// the grow is detached, and that host<->guest writes agree through the
+// refreshed buffer. Buffer identity must stay stable while the size is
+// unchanged (Web platform semantics).
+TEST(wasm_aot, memory_buffer_is_live_across_grow) {
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    std::string out;
+    ASSERT_TRUE(host_eval(h, (kFixtures +
+        "\nvar _r = null;\n"
+        "WebAssembly.instantiate(_growBytes).then(function(res){\n"
+        "  var e = res.instance.exports;\n"
+        "  var mem = e.memory;\n"
+        "  var before = mem.buffer.byteLength;\n"
+        "  var stable = mem.buffer === mem.buffer;\n"
+        "  var oldView = mem.buffer;\n"
+        "  var oldPages = e.grow(1);\n"          /* guest memory.grow */
+        "  var after = mem.buffer.byteLength;\n"
+        "  var grew = after === before + 65536;\n"
+        "  var detached = oldView.byteLength === 0;\n"
+        "  var writable = false;\n"
+        "  try { var v = new Uint8Array(mem.buffer); v[after - 1] = 0xAB;"
+        "        writable = v[after - 1] === 0xAB; } catch (err) {}\n"
+        // Guest write through the grown memory is visible via the host buffer.
+        "  var guest = e.poke(after - 1, 0x5A);\n"
+        "  var visible = guest === 0x5A && new Uint8Array(mem.buffer)[after - 1] === 0x5A;\n"
+        "  _r = (stable && grew && detached && writable && visible) ? 'ok'\n"
+        "     : ('bad stable=' + stable + ' grew=' + grew + ' oldPages=' + oldPages +\n"
+        "        ' detached=' + detached + ' writable=' + writable +\n"
+        "        ' visible=' + visible + ' before=' + before + ' after=' + after);\n"
+        "}).catch(function(err){ _r = 'ERR:' + err.message; });\n"
+        "0").c_str(), &out));
+
+    std::string v;
+    ASSERT_TRUE(host_poll_until_value(h, "String(_r)", "ok", &v))
+        << "live memory buffer semantics wrong, got: " << v;
     host_destroy(h);
 }

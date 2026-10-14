@@ -257,6 +257,7 @@ struct qz_t {
     JSClassID wamr_module_class_id;
     JSClassID wamr_instance_class_id;
     JSClassID wamr_global_class_id;
+    JSClassID wamr_memory_class_id;
 #endif
 #if QZ_WITH_COMPRESS
     JSClassID compress_deflate_class_id;

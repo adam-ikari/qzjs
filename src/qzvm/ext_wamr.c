@@ -252,6 +252,7 @@ static void wamr_instance_finalizer(JSRuntime *jsrt, JSValue val)
 }
 
 static void wamr_global_class_finalizer(JSRuntime *jsrt, JSValue val);
+static void wamr_memory_class_finalizer(JSRuntime *jsrt, JSValue val);
 
 static void wamr_register_classes(qz_t *rt, JSContext *ctx)
 {
@@ -280,6 +281,14 @@ static void wamr_register_classes(qz_t *rt, JSContext *ctx)
         .finalizer = wamr_global_class_finalizer,
     };
     JS_NewClass(jsrt, rt->wamr_global_class_id, &global_class);
+
+    /* Memory class (exported linear memory with live buffer + grow) */
+    JS_NewClassID(jsrt, &rt->wamr_memory_class_id);
+    JSClassDef memory_class = {
+        .class_name = "WebAssembly.Memory",
+        .finalizer = wamr_memory_class_finalizer,
+    };
+    JS_NewClass(jsrt, rt->wamr_memory_class_id, &memory_class);
 }
 
 /* ================================================================
@@ -300,28 +309,82 @@ typedef struct wamr_global_closure_t {
     JSValue instance_ref;
 } wamr_global_closure_t;
 
-/* Owner of an exported linear-memory ArrayBuffer. The ArrayBuffer wraps
- * WAMR memory owned by the instance; holding a JS reference to the instance
- * (freed when the ArrayBuffer is finalized) prevents the instance from being
- * deinstantiated while exports.memory is still referenced. */
-typedef struct wamr_mem_owner_t {
-    JSValue instance_ref;
-} wamr_mem_owner_t;
+/* Owner of an exported linear memory: the JS instance is held so its WAMR
+ * instance outlives any ArrayBuffer still referencing its memory. Also carries
+ * the live memory handle so `buffer` can be rebuilt after memory.grow. */
+typedef struct wamr_memory_owner_t {
+    JSValue instance_ref;      /* JS instance object (keeps WAMR inst alive) */
+    wasm_module_inst_t inst;   /* live WAMR instance (page count source) */
+    JSValue last_ab;           /* cached ArrayBuffer (stable identity until grow) */
+    size_t last_len;           /* byte length of last_ab (0 = none yet) */
+    uint8_t *last_base;        /* base address last_ab points at */
+} wamr_memory_owner_t;
 
-/* JSReallocArrayBufferDataFunc shim: holds a JS reference to the WAMR
- * instance while the ArrayBuffer lives. size==0 releases the owner. */
-static void *wamr_mem_owner_realloc(JSRuntime *jsrt, void *opaque, void *ptr, size_t size)
+static void wamr_memory_owner_free(JSRuntime *jsrt, wamr_memory_owner_t *owner)
 {
-    wamr_mem_owner_t *owner = (wamr_mem_owner_t *)opaque;
-    if (size == 0) {
-        if (owner) {
-            JS_FreeValueRT(jsrt, owner->instance_ref);
-            js_free_rt(jsrt, owner);
-        }
-        return NULL;
+    if (!owner) return;
+    JS_FreeValueRT(jsrt, owner->instance_ref);
+    JS_FreeValueRT(jsrt, owner->last_ab);
+    js_free_rt(jsrt, owner);
+}
+
+static void wamr_memory_class_finalizer(JSRuntime *jsrt, JSValue val)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    if (!rt) return;
+    wamr_memory_owner_t *owner = (wamr_memory_owner_t *)
+        JS_GetOpaque(val, rt->wamr_memory_class_id);
+    if (owner) {
+        JS_SetOpaque(val, NULL);
+        wamr_memory_owner_free(jsrt, owner);
     }
-    (void)ptr;
-    return ptr; /* fixed-size: nothing to resize */
+}
+
+/* Return the ArrayBuffer over the memory's current base/size. The buffer is
+ * cached and its identity is stable while the page count is unchanged (Web
+ * platform semantics). When WAMR grows/relocates the memory, a fresh buffer is
+ * built and the previous one detached (neutered), so hosts that cached the old
+ * `buffer` are forced to re-read it instead of touching stale memory. */
+static JSValue wamr_memory_make_buffer(JSContext *ctx, wamr_memory_owner_t *owner)
+{
+    wasm_memory_inst_t mem = wasm_runtime_get_memory(owner->inst, 0);
+    if (!mem) return JS_NULL;
+
+    uint64_t num_pages = wasm_memory_get_cur_page_count(mem);
+    uint64_t bytes_per_page = wasm_memory_get_bytes_per_page(mem);
+    size_t byte_len = (size_t)(num_pages * bytes_per_page);
+    uint8_t *base = (uint8_t *)wasm_memory_get_base_address(mem);
+    if (!base) return JS_NULL;
+
+    if (JS_IsArrayBuffer(owner->last_ab) && owner->last_len == byte_len &&
+        base == owner->last_base) {
+        return JS_DupValue(ctx, owner->last_ab);
+    }
+
+    /* Detach the stale buffer (browser neutering semantics) before replacing. */
+    if (JS_IsArrayBuffer(owner->last_ab)) {
+        JS_DetachArrayBuffer(ctx, owner->last_ab);
+    }
+    JS_FreeValue(ctx, owner->last_ab);
+    owner->last_ab = JS_UNDEFINED;
+    owner->last_len = 0;
+
+    JSValue ab = JS_NewArrayBuffer(ctx, base, byte_len, 0, NULL, NULL, 0);
+    if (JS_IsException(ab)) return ab;
+    owner->last_ab = JS_DupValue(ctx, ab);
+    owner->last_len = byte_len;
+    owner->last_base = base;
+    return ab;
+}
+
+static JSValue wamr_memory_buffer_get(JSContext *ctx, JSValueConst this_val)
+{
+    qz_t *rt = qz_get_rt_from_ctx(ctx);
+    if (!rt) return JS_NULL;
+    wamr_memory_owner_t *owner = (wamr_memory_owner_t *)
+        JS_GetOpaque(this_val, rt->wamr_memory_class_id);
+    if (!owner) return JS_NULL;
+    return wamr_memory_make_buffer(ctx, owner);
 }
 
 static void wamr_global_class_finalizer(JSRuntime *jsrt, JSValue val)
@@ -1492,28 +1555,32 @@ static JSValue wamr_instance_constructor(JSContext *ctx, JSValueConst new_target
 
             uint64_t num_pages = wasm_memory_get_cur_page_count(mem);
             uint64_t max_pages = wasm_memory_get_max_page_count(mem);
-            uint64_t bytes_per_page = wasm_memory_get_bytes_per_page(mem);
-            /* WAMR's SHRUNK_MEMORY optimization folds the declared page count
-             * into num_bytes_per_page (init_page_count collapses to 1). Derive
-             * the byte length from the real page size, not the 64 KiB spec
-             * constant, or the exposed buffer undershoots by the shrink factor. */
-            size_t byte_len = (size_t)(num_pages * bytes_per_page);
-            uint8_t *base = (uint8_t *)wasm_memory_get_base_address(mem);
 
-            JSValue mem_obj = JS_NewObject(ctx);
-            /* The ArrayBuffer wraps WAMR memory owned by the instance. Give
-             * it an owner that holds a JS reference to the instance, so the
-             * instance cannot be deinstantiated (freeing the memory) while
-             * exports.memory is still referenced — fixes a use-after-free. */
-            wamr_mem_owner_t *owner = (wamr_mem_owner_t *)js_malloc(ctx, sizeof(*owner));
-            if (!owner) continue;
-            JSValue ab = JS_NewArrayBuffer(ctx, base, byte_len, 0,
-                                           wamr_mem_owner_realloc, owner, 0);
-            if (JS_IsException(ab)) {
-                wamr_mem_owner_realloc(JS_GetRuntime(ctx), owner, NULL, 0);
-                continue;
-            }
-            JS_SetPropertyStr(ctx, mem_obj, "buffer", ab);
+            /* The `buffer` property is a live getter, not a snapshot: WAMR may
+             * relocate/enlarge the linear memory (guest malloc, memory.grow),
+             * which a fixed ArrayBuffer cannot track — hosts would then read/
+             * write out of bounds. The owner holds a JS reference to the
+             * instance so it cannot be deinstantiated (freeing the memory)
+             * while exports.memory is still referenced. */
+            JSValue mem_obj = JS_NewObjectClass(ctx, rt->wamr_memory_class_id);
+            if (JS_IsException(mem_obj)) continue;
+            wamr_memory_owner_t *owner = (wamr_memory_owner_t *)
+                js_mallocz(ctx, sizeof(*owner));
+            if (!owner) { JS_FreeValue(ctx, mem_obj); continue; }
+            owner->instance_ref = JS_DupValue(ctx, obj);
+            owner->inst = module_inst;
+            owner->last_ab = JS_UNDEFINED;
+            JS_SetOpaque(mem_obj, owner);
+
+            JSAtom buffer_atom = JS_NewAtom(ctx, "buffer");
+            _QZ_WAMR_DIAG_PUSH
+            _QZ_WAMR_DIAG_IGNORE_CAST
+            JS_DefinePropertyGetSet(ctx, mem_obj, buffer_atom,
+                JS_NewCFunction2(ctx, (JSCFunction *)wamr_memory_buffer_get,
+                    "get buffer", 0, JS_CFUNC_getter, 0),
+                JS_UNDEFINED, JS_PROP_CONFIGURABLE);
+            _QZ_WAMR_DIAG_POP
+            JS_FreeAtom(ctx, buffer_atom);
             JS_SetPropertyStr(ctx, mem_obj, "_initial",
                               JS_NewInt32(ctx, (int32_t)num_pages));
             if (max_pages > 0 && max_pages < UINT32_MAX) {
