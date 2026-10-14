@@ -75,7 +75,11 @@ if(QZ_IN_MODULE)
     # __attribute__((export_name)) 自动导出，不用 --export（它按 C 符号名找，
     # 会找不到 qz_guest_*）。memory/malloc/free 需显式 --export：宿主读写
     # guest 内存 + 分配脚本串（§10.3 ptr+len 传字节）。
-    set_target_properties(qzvm-guest PROPERTIES OUTPUT_NAME qzvm)
+    # 命名 libqzvm.wasm（reactor 的 wasm 产物设计名，§6）。
+    set_target_properties(qzvm-guest PROPERTIES
+        OUTPUT_NAME qzvm
+        SUFFIX ".wasm"
+        PREFIX "lib")
     target_link_options(qzvm-guest PRIVATE
         -mexec-model=reactor
         -Wl,--export=malloc -Wl,--export=free)
