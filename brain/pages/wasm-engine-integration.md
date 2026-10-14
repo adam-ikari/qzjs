@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [wasm, wamr, threading]
 created: "2026-08-15T01:32:50"
-updated: "2026-10-14T03:26:08"
+updated: "2026-10-14T12:28:34"
 ---
 
 <!-- compiled_truth -->
@@ -90,4 +90,10 @@ updated: "2026-10-14T03:26:08"
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "ext_wamr.c memory 导出活 getter 修复"
+  affects: [wasm-engine-integration]
+
+- time: 2026-10-14T12:28:34
+  kind: evidence
+  summary: "WAMR teardown GC 回收修复：JS_FreeRuntime 断言 gc_obj_list 非空（test_wasm_aot shrunk_memory_export_length 失败）。根因两处：(1) wamr_ext_destroy 清零 wamr_*_class_id，而 teardown 顺序是 ctx_destroy→JS_FreeRuntime，后者内部 JS_RunGC 的 finalizer/gc_mark 靠 class_id 经 JS_GetOpaque 取 wrap；清零后 finalizer 拿不到 wrap 直接 return → instance wrap 的 module_obj 永不释放（wasm3 后端早写明同款陷阱并避免清零）。(2) WebAssembly.Module/Instance/Global/Memory 顶类缺 gc_mark，opaque 内 JSValue 强边（module_obj、instance_ref、import closure js_func、memory last_ab）对循环收集器不可见 → 引用环不可回收。修：删 destroy 里的 class_id 清零；给 instance/global/memory 三顶类加 gc_mark 回调。两处缺一不可（双向反证：单独去 gc_mark 或单独留清零都仍断言失败）。验证：test_wasm_aot/imports/streaming 三套 23/23 全绿 + qzjs/context/worker/multi_instance/compress/strict_mode 全绿。"
+  source: "2026-10-14 ext_wamr.c teardown 修复 + gdb watchpoint 定位"
   affects: [wasm-engine-integration]
