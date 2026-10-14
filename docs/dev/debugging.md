@@ -337,6 +337,17 @@ initial `reason:trace` stop already advances past the module entry, so the
 harness sets breakpoints on **every** line row — an entry-line address that is
 already behind the stop PC can never hit. CI job: `wamr-debug-rsp`.
 
+**Source-level consumption (lldb).** The end-to-end proof that a real frontend
+consumes the DWARF: `test/test_wamr_debug_source.sh` runs the prebuilt WAMR
+`wamr-lldb` (`process connect -p wasm connect://…`, then `b strwork.ts:4`)
+against the debug build, and asserts `stop reason = breakpoint` — lldb reads
+the module's DWARF over RSP, resolves file:line to address, and stops. lldb is
+**not** a build/runtime dependency; the script **skips** (exit 0) when absent.
+To obtain it: grab `wamr-lldb-<ver>-x86_64-ubuntu-<os>.tar.gz` from the WAMR
+releases and extract to `$ROOT/.tools/wamr-lldb` (gitignored) — the
+prebuilt binary is stock lldb **plus** `lldb_wasm.patch` (LLVM D78801, the
+`WasmProcess` plugin); stock lldb cannot debug wasm.
+
 ## Test
 
 ```bash
