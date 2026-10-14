@@ -65,7 +65,7 @@ function emitWat(prefix) {
     }
 }
 
-function genGlue(prefix, mainCalls) {
+function genGlue(prefix, mainCalls, wasmOnly) {
     const strings = JSON.parse(fs.readFileSync(prefix + ".strings.json", "utf8"));
     const metaObj = JSON.parse(fs.readFileSync(prefix + ".meta.json", "utf8"));
     const meta = metaObj.funcs;
@@ -77,18 +77,24 @@ function genGlue(prefix, mainCalls) {
     const mainBody = (mainCalls && mainCalls.length)
         ? mainCalls.map(c => `console.log("${c.name}(${c.args.join(",")}) =", __call("${c.name}", [${c.args.join(",")}]));`).join("\n")
         : `if (typeof globalThis.__main === "function") globalThis.__main(__call, __ex);`;
+    // wasmOnly（--no-aot）：WAMR debug-interp 直接拒绝 AOT 实例，调试运行须纯 bytecode 加载。
+    const note = wasmOnly ? `本文件 + ${basename}.wasm（wasm-only）` : `本文件 + ${basename}.wasm + ${basename}.aot`;
+    const load = wasmOnly
+        ? `__fs.readFileBinary("${basename}.wasm").then(bytes =>
+  WebAssembly.instantiate(bytes, { qz }).then(({ instance }) => {`
+        : `Promise.all([
+  __fs.readFileBinary("${basename}.wasm"),
+  __fs.readFileBinary("${basename}.aot"),
+]).then(([bytes, aot]) =>
+  WebAssembly.instantiate(bytes, { qz }, { aot }).then(({ instance }) => {`;
     let glue = `${makeQzvm}
-// ── 生成产物：${basename}（分离形态：本文件 + ${basename}.wasm + ${basename}.aot，同目录）──
+// ── 生成产物：${basename}（分离形态：${note}，同目录）──
 const qz = makeQzvm(${JSON.stringify(strings)});
 const __meta = ${JSON.stringify(meta)};
 const __lams = ${JSON.stringify(lams)};
 const __classes = ${JSON.stringify(classes)};
 const __fs = globalThis.qzjs && globalThis.qzjs.fs;
-Promise.all([
-  __fs.readFileBinary("${basename}.wasm"),
-  __fs.readFileBinary("${basename}.aot"),
-]).then(([bytes, aot]) =>
-  WebAssembly.instantiate(bytes, { qz }, { aot }).then(({ instance }) => {
+${load}
     const __ex = instance.exports;
     qz.bindMem(__ex.memory);
     if (__ex.__bump) qz.bindBump(__ex.__bump);
@@ -108,7 +114,7 @@ Promise.all([
 ).catch(e => { console.error("AOT load failed:", (e && e.message) || String(e)); });
 `;
     fs.writeFileSync(prefix + ".glue.js", glue);
-    console.log(`glue ok: ${prefix}.glue.js（分离形态: ${basename}.wasm + ${basename}.aot 由 fs.readFileBinary 读取）`);
+    console.log(`glue ok: ${prefix}.glue.js（${note}${wasmOnly ? "" : " 由 fs.readFileBinary 读取"}）`);
 }
 
 const cmd = process.argv[2];
@@ -134,7 +140,8 @@ if (cmd === "build") {
     console.log(`✓ wamrc AOT${tIdx >= 0 ? " --target=" + process.argv[tIdx + 1] : ""}${abiIdx >= 0 ? " --target-abi=" + process.argv[abiIdx + 1] : ""}`);
     const mainIdx = process.argv.indexOf("--main");
     const mainCalls = mainIdx >= 0 ? parseMain(process.argv[mainIdx + 1]) : [];
-    genGlue(prefix, mainCalls);
+    const wasmOnly = process.argv.includes("--no-aot");
+    genGlue(prefix, mainCalls, wasmOnly);
     console.log(`== done: ${prefix}.glue.js（运行: qzjs ${prefix}.glue.js）`);
 } else if (cmd === "compile") {
     const src = process.argv[3];
@@ -150,12 +157,14 @@ if (cmd === "build") {
 } else if (cmd === "glue") {
     const mainIdx = process.argv.indexOf("--main");
     const mainCalls = mainIdx >= 0 ? parseMain(process.argv[mainIdx + 1]) : [];
-    genGlue(process.argv[3], mainCalls);
+    const wasmOnly = process.argv.includes("--no-aot");
+    genGlue(process.argv[3], mainCalls, wasmOnly);
 } else {
     console.error("usage: build.js build|compile|glue ...");
     console.error("  build  <src.ts> [prefix] [--main \"fn(a);fn2(b)\"] [--target <arch> --target-abi <abi>] [--debug]");
     console.error("  compile <src.ts> [prefix] [--debug]   # 产出 .wasm/.wat/.strings.json/.meta.json（不经 wamrc）");
     console.error("  --debug: 生成 name 段（函数名）+ DWARF 调试段（.debug_*），wat/wasm 反汇编/lldb 源码调试用（不影响执行）");
-    console.error("  glue <prefix> [--main \"fn(a)\"]");
+    console.error("  --no-aot: glue 只加载 .wasm（纯 bytecode）——WAMR debug-interp 拒绝 AOT 实例，调试运行须此模式");
+    console.error("  glue <prefix> [--main \"fn(a)\"] [--no-aot]");
     process.exit(2);
 }

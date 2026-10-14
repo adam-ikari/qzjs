@@ -325,6 +325,18 @@ form the breakpoint address. End-to-end proof (`strWork`, code-content start
 542): DWARF rows `0x216`(L4)/`0x34d`(L5) → breakpoint addresses `0x434`/`0x56b`
 → both **hit** `T05 reason:breakpoint`.
 
+**Regression harness.** `test/test_wamr_debug_rsp.sh` fixes the whole chain in
+the repo (previously a throwaway `/tmp` script): configure
+`-DQZ_WITH_WAMR_DEBUG_INTERP=ON` → compile `strw` with `--debug` → load the
+plain `.wasm` via `build.js ... --no-aot` (WAMR rejects AOT instances) → read
+the line addresses from DWARF (`llvm-dwarfdump --debug-line`) → bare GDB-RSP
+client (`test/wamr-debug-e2e/rsp_break.py`) sets `Z0` breakpoints and asserts
+`reason:breakpoint`. This guards the DWARF-address↔file-offset convention: a
+drift in either the emitter or `ext_wamr.c` makes the breakpoint miss. Note the
+initial `reason:trace` stop already advances past the module entry, so the
+harness sets breakpoints on **every** line row — an entry-line address that is
+already behind the stop PC can never hit. CI job: `wamr-debug-rsp`.
+
 ## Test
 
 ```bash

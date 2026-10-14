@@ -1330,6 +1330,39 @@ jobs:
         run: bash test/test_inmodule_guest_e2e.sh
 
   # ============================================================================
+  # WAMR debug-interp（GDB RSP）+ DWARF 地址约定。源码级调试通道此前仅 /tmp 手验，
+  # 不入仓也不被 CI 跑：ext_wamr.c 接线 / RSP 帧 / DWARF 地址约定一改无人发现。此
+  # job 固化全链：debug 构建 → 编译 strw(--debug) → 纯 .wasm 加载(--no-aot) →
+  # 从 DWARF 行表取行地址 → 裸 RSP 断点 → 断言 reason:breakpoint 命中。需
+  # llvm-dwarfdump + python3。
+  # ============================================================================
+  wamr-debug-rsp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    name: WAMR debug RSP (DWARF line-address breakpoint)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/ccache-setup
+
+      - name: Install tools (build + llvm-dwarfdump + python3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build llvm python3
+          # 提供 llvm-dwarfdump-14（或平台 llvm-dwarfdump）
+          sudo apt-get install -y llvm-14-tools || true
+
+      - name: Install Node (aot 编译器工具链)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: e2e — WAMR debug RSP + DWARF breakpoint
+        run: bash test/test_wamr_debug_rsp.sh
+
+  # ============================================================================
   # Coverage: gcov with WAMR default engine.
   # ============================================================================
   coverage:

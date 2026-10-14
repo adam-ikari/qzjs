@@ -36,6 +36,9 @@ wat 仅作按需旁路中间产物，不进编译链路。
 （DWARF4，addr_size=4，`wasm-dwarf.js`），供打了 `lldb_wasm.patch` 的定制 lldb 做源码级断点/步进。
 地址约定 = **code 段 payload 起始的相对偏移**（与 clang wasm 后端一致）；WAMR debug-engine 报的 PC 是文件
 绝对偏移，lldb 侧负责重定位。行映射由 emitter 在每个语句 `markLine` 累积。回归门：`test_aot.js` 的 `runDwarf`。
+**`--no-aot`（可选，调试用）**：`glue` 只加载 `.wasm`（纯 bytecode），不读 `.aot`。WAMR debug-interp
+直接拒绝 AOT 实例（`Attempt to create a debug instance for an AOT module`），故 GDB-RSP 调试运行须此模式。
+全链回归门：`test/test_wamr_debug_rsp.sh`（debug 构建 + DWARF 行地址断点 + 命中断言）。
 
 - **JS 技术栈**：`build.js` 是唯一主入口（node 编排 compile→wamrc→glue），全部 JS（wamrc 是唯一外部后端）
 - **值模型**：tagged 值 = i64 f64 NaN-box（数值=原始 f64 位型，精确 53 位；句柄=高16位 `0x7FF9`|低32 offset；字段 8 字节）。wasm f64 恒为 IEEE-754 double，32 位宿主由 wamrc 降到软/硬浮点，**数值语义含 >2^31 的整数不变**，故 32/64 位设备共用同一表示——不按目标位宽切换
