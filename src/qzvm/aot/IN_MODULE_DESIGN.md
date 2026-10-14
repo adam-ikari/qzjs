@@ -1,8 +1,15 @@
 # in-module 档设计
 
-**状态**：设计定稿，待实现
-**范围**：把 qzvm（QuickJS-ng + qz.\* 原语）编到 wasm32 作**模块内 guest** 的构建形态
+**状态**：设计定稿，M1–M5 已实现，M6（宿主去 JS 化）进行中
+**范围**：把 **qzvm**（引擎 + `qz.*` 原语 + realm 生命周期 + DAP 调试器 + 扩展注册机制 + 引擎 patches；**不含** Web API 扩展内容、polyfill、pal 接线、libuv）编成 wasm32 模块（`libqzvm.wasm`）的 qzjs 构建形态。`QZ_PROFILE=in-module` 下**不含 wasm 引擎绑定**（`ext_wamr/ext_wasm3` 不进 guest）。
 **方法**：第一性原理推导 guest 真需要什么 + 奥卡姆剃刀取最小产 —— **不追求最小改动**
+
+> **⚠ 术语框架更正（2026-10-14）**：本文件初版把 qzjs 自身的 C 层（含 libuv）误称为"宿主"，并称 in-module 后"宿主不再链 QuickJS / 没有 JSContext"。**概念错误**：
+> - **宿主 = qzjs 的使用者**（用户 C 程序 / node / 固件），**不含** libuv/WAMR/QuickJS——那些是 **qzjs 自己的责任**。
+> - in-module 是 **qzjs 内部两半**的分层（wasm 外的 qzjs-native IO 层 ↔ wasm 内的 qzvm），**不是** qzjs 与外部分层。
+> - qzjs **永远持有 JS 运行时**（in-module 下即 `libqzvm.wasm` 内的引擎），永不"没有 JS"。
+>
+> 边界 SSOT：`docs/architecture/qzvm-qzjs-layering.md`。本文下文凡称"宿主"处，按该文 §0 术语理解（多数实指 **qzjs native 侧**）。
 
 ---
 
@@ -37,9 +44,15 @@
 
 `ext_lifecycle.c`（104 行）：`qz_ext_init/destroy_all`（机制内核，调用时点归边界）+ `qz_ext_suspend/resume_all`（仅 suspend/resume 用 = 宿主编排，**零外部调用者**）。
 
-### 2.2 扩展源可无痛进 guest
+### 2.2 扩展内容：**不属 qzvm**（★更正）
 
-`ext_compress.c` / `ext_crypto.c` / `ext_textcodec.c` **均零 `uv_` 引用**（仅链 miniz/mbedtls + 字符串）。故「扩展让在 wasm 里跑吗」的答案是**能**——它们是纯计算，无 OS 依赖。裁剪扩展不是 libuv 问题，是**体积/攻击面**取舍。
+`ext_compress.c` / `ext_crypto.c` / `ext_textcodec.c` 在 **`src/ext/`**（不在 `src/qzvm/`），均零 `uv_` 引用（仅链 miniz/mbedtls + 字符串）。初版据此说「扩展可无痛进 guest」——**结论对、归类错**：
+
+- 它们是 **Web API 能力**（CompressionStream / SubtleCrypto / TextCodec），**不是 VM 能力**。技术上零 OS 依赖 ≠ 概念上属 VM。
+- 它们经 `qz_ext_registry`（`QZ_EXTENSIONS` 编译期常表）**注册机制**装入 context——**机制**属 qzvm（`ext_lifecycle.c`），**内容**属 qzjs 能力面（`[[standard-source-policy]]`）。
+- 故 in-module 的正确处理：**不进 qzvm guest 源集**，而是作为 qzjs 层的扩展，按需注册（若 guest 形态确需，走 import 或后置注入，见 §10）。
+
+裁剪扩展不是 libuv 问题，是**能力归属 + 体积/攻击面**取舍。见 `docs/architecture/qzvm-qzjs-layering.md` §3.1/§3.2。
 
 ### 2.3 libuv 依赖的真实形态
 
@@ -260,7 +273,7 @@ flowchart TB
 | M3 ✅ | tick 上移 | `qz_tick` 已入 qzvm（`vm_core.c`，原 `host/thread.c` 的 `qz_flush_microtasks`）；宿主全部调用点（thread/worker/rt_main 主循环 + qzjs.c teardown 两处内联排空循环）统一改调 `qz_tick` | native 回归绿（32/32 ctest，tick 语义不变）；`qz_tick` 零 libuv，`QZ_VM_GUEST` 下内核三源照编 |
 | M4 ✅ | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target（`src/qzvm/CMakeLists.txt` if QZ_IN_MODULE）+ `src/qzvm/guest_entry.c`（导出面 + qz_host.drain import） | `libqzvm.wasm` 链接成功，导出 `qz_create`/`qz_eval`/`qz_tick`/`qz_destroy` + `memory`/`malloc`/`free`；import 段含 `qz_host.drain`；native 全回归绿（32/32 ctest）；`-DQZ_VM_GUEST -fsyntax-only` 内核源+guest_entry 零 error。**运行验证**（node WASI preview1 + `qz_host.drain` shim）：`qz_create`→rt、`qz_eval("1+2*3…")`→0、`qz_tick`→0 且 drain 被调、`qz_eval("throw…")`→-1、`qz_destroy` ok——guest 真跑 QuickJS |
 | M5 ✅ | guest 跑通（真 JS + 异步） | §10.3 import 面（M5 仅 `fs_read`/`drain`）+ §10.4 回流：`guest_entry.c` 加 op 表（resolve/reject 持 JSValue）+ `fsRead(path)` 原语（Promise）+ `qz_tick` 去自旋（drain 一批 → dispatch → return）+ 结果读出 `qz_result_ptr/len`；导出名 `libqzvm.wasm`（SUFFIX .wasm / PREFIX lib） | **仓内 harness 真跑**（`test/test_inmodule_guest_e2e.sh` + `test/inmodule-e2e/host.mjs`，CI job `in-module`）：`fsRead(data.txt)` → 结果 `"OK len=33 head=hello from host file"`；reject 路径 `fsRead(NOPE.txt)` → `"ERR ENOENT"`；两个并发 op 按 `op_id` 派发（顺序无关）。证明 guest 持 resolve(JSValue)、host 无 JSContext 经队列拉回（§10.4 选型「import 拉」成立）。限制（M6 消除）：单 rt、op 表 static、单事件 ≤512B、仅 1 个原语 |
-| M6 | 宿主去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 guest；tcp_io/control/worker 去 JSValue；host 不链 QuickJS | host 目标零 `JS_NewRuntime`；AOT/standard 档不受影响 |
+| M6 | qzjs native 侧去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 qzvm-guest；tcp_io/control/worker 去 JSValue；qzjs native 侧不再**直接**调 QuickJS API | qzjs native 侧零 `JS_NewRuntime`（引擎归 qzvm guest）；AOT/standard 档不受影响 |
 
 **M1–M3 全部在 native 上验证**（切分是纯重构，宿主行为不变）→ 风险最低、最先做。M4–M5 引入 wasm 工具链 + 跨界 ABI 不确定性。M6 是 in-module 真正落地（前 5 步可先跑通 guest 自包含 + 单原语）。
 
@@ -276,7 +289,7 @@ cmake --build build-inmod --target qzvm-guest
 ```
 
 - 引擎 flag（`QZ_WITH_WAMR/WASM3=OFF`）由 profile 提供（已落地 gate 逃逸）。
-- 扩展：默认全 OFF（最小）；如需标准面可逐个开（`ext_*.c` 零 uv，可进 guest）。
+- 扩展（`src/ext/*`，Web API 能力面）：默认全 OFF（最小）；**不属 qzvm**（§2.2），in-module 若确需，作为 qzjs 层扩展按需注册，不进 guest 源集。
 - 源集由 target 决定（内核源），**不再依赖 `QZVM_SOURCES` 全表**。
 
 ## 9. 风险与未决
@@ -392,9 +405,9 @@ guest: qz_tick()  ← 宿主每轮 libuv iteration 后调
 - 对比 AOT 的 `qz.*` import（**JS 函数**，`ASSESSMENT.md` 记 ~4.9µs/次）：in-module 的 `qz_host.*` 直落 **native C**，**快 ~100x**。这是 in-module 相对 node-hosted AOT 的关键优势。
 - 设计取舍：仍应把跨界降到最低（§10.2 分层），但**不必**为省跨界牺牲结构——税便宜。
 
-### 10.5 对宿主源的影响
+### 10.5 对 qzjs native 侧源的影响
 
-in-module 下 host **不再链 QuickJS**（`qzjs.c:489` 的 `JS_NewRuntime` 是 guest 的活）。故 host 侧需去 JS 化的源：
+in-module 下 **qzjs native 侧不再直接调 QuickJS API**（`qzjs.c:489` 的 `JS_NewRuntime` 是 qzvm guest 的活；引擎**仍属 qzjs 运行时**，只是位于 `libqzvm.wasm` 内）。故 qzjs native 侧需去 JS 化的源：
 
 | 源 | JS_ 用量 | 处置 |
 | --- | --- | --- |
@@ -406,11 +419,15 @@ in-module 下 host **不再链 QuickJS**（`qzjs.c:489` 的 `JS_NewRuntime` 是 
 | `host/thread.c` | 2 | tick → 上移 guest |
 | `io/uv_io.c` | **0** | **不动**（已是纯原语层） |
 
-**这不是本轮范围**——记录为 M6，因为 in-module 真正落地才需要；先做 M1–M5（guest 自包含 + 一个 fs 原语跨界跑通）。
+**这不是本轮范围**——记录为 M6，因为 in-module 真正落地才需要；先做 M1–M5（guest 自包含 + 一个 fs 原语跨界跑通）。术语见 `docs/architecture/qzvm-qzjs-layering.md` §0/§4。
 
 ### 10.6 与 AOT 的关系（复用点）
 
 AOT（`qzvm.js` + emitter）已有 `qz.*` import 机制（`qz.add`/`qz.str_len`… NaN-box i64）。in-module 的 host import 是**另一套**（`qz_host_*`，host 能力），但**共享 wasm 工具链 + WAMR 加载**。命名区分：`qz.*` = AOT 值原语（guest 内 AOT 代码用）；`qz_host.*` = host 能力（in-module guest 用）。二者不冲突（不同 import module 名）。
+
+> **★ AOT 通用定位（2026-10-14 裁定）**：TS→wasm 是**通用编译目标**，不绑定 qzjs。wasm 的 import 面**完全由 TS 源码的 `import` 决定**——TS import 的内容若内联（无外部 OS API 需求），产物 wasm **零 import**、自包含；若 import 外部能力，产物只 import 那部分符号。故**任何带 wasm 引擎、能提供所需 import 符号的运行时都能跑** TS 编译的 wasm，qzjs 只是"符号提供者之一"。
+>
+> 推论：`qz.*` 是**需求驱动的最小契约面**，非 qzjs 私有 ABI；设计不得假设 qzjs 专有特性。见 brain `[[aot-generic-compiler-target]]`。
 
 ## 11. 参考
 

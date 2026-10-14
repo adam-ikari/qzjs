@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-14T05:39:28"
+updated: "2026-10-14T06:35:27"
 ---
 
 <!-- compiled_truth -->
@@ -189,4 +189,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: evidence
   summary: "M5 验证入仓：新增 test/test_inmodule_guest_e2e.sh + test/inmodule-e2e/host.mjs（node WASI shim 实现 qz_host.fs_read/drain），把 M4/M5 的 /tmp 一次性脚本固化为可复现 harness——全新 build 目录 bash 一条命令自包含跑通（~30s）。三条断言：异步读成功回流、ENOENT 拒绝、两个并发 op 按 op_id 派发（顺序无关）。CI 新增独立 job in-module（clang/lld/wasi-libc + node），此前 guest 导入面/回流协议改动无人验。IN_MODULE_DESIGN M5 行验证描述从 /tmp 路径改指仓内 harness。"
   source: "3c46afe2 + 全新目录跑通 + CI 25 jobs YAML 校验通过"
+  affects: [in-module-design]
+
+- time: 2026-10-14T06:35:27
+  kind: reversal
+  summary: "术语框架更正：初版把 qzjs 自身 C 层（含 libuv/WAMR）误称为'宿主'，并称 in-module 后'宿主不再链 QuickJS/没有 JSContext'。正确：宿主=qzjs 使用者（不含 libuv/引擎）；in-module 是 qzjs 内部两半分层（wasm 外 qzjs-native IO ↔ wasm 内 qzvm），qzjs 永远持有 JS 运行时（即 libqzvm.wasm 内引擎）。且 qzvm=引擎+qz.*+DAP+扩展注册机制+引擎 patches（in-module 不含 wasm 引擎绑定）；Web API 扩展内容（ext_compress/crypto/textcodec）不属 qzvm。SSOT=docs/architecture/qzvm-qzjs-layering.md"
+  source: docs/architecture/qzvm-qzjs-layering.md
   affects: [in-module-design]

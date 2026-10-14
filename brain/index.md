@@ -1,9 +1,10 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-14T05:39:28.150Z._
+_Auto-generated. Last updated 2026-10-14T10:14:24.308Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
+- [aot-generic-compiler-target](pages/aot-generic-compiler-target.md) — category: decision | tags: [decision, aot, wasm, architecture, generic] | ## 结论
 - [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
 - [aot-wasm-tagged-backend](pages/aot-wasm-tagged-backend.md) — category: decision | tags: [aot, wasm, emitter, qzvm, perf] | # AOT tagged 后端（emitter.js → wasm）
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
@@ -22,6 +23,7 @@ _Auto-generated. Last updated 2026-10-14T05:39:28.150Z._
 - [dap-pc2line-line-attribution](pages/dap-pc2line-line-attribution.md) — category: decision | tags: [dap, debugger, quickjs, bytecode, pc2line] | ## 决策：pc2line 行归属 + 行覆盖（DAP 断点行正确性，两轮修复）
 - [dap-setbreakpoints-scope](pages/dap-setbreakpoints-scope.md) — category: decision | tags: [dap, debugger] | ## 决策：setBreakpoints 按文件作用域替换
 - [dap-variables-expansion](pages/dap-variables-expansion.md) — category: decision | tags: [dap, vscode, debugger, variables] | ## 现状（已实现，gtest 7/7 + e2e 8/8 绿）
+- [debugging-layering](pages/debugging-layering.md) — category: decision | tags: [decision, debug, dap, qzvm, aot, wasm, dwarf, gdb-rsp, debug-interp] | ## 结论
 - [decision-principles](pages/decision-principles.md) — category: decision | tags: [decision, principles, methodology] | ## 决策三原则 + 极简哲学（用户拍板，项目级约束）
 - [doc-comment-language](pages/doc-comment-language.md) — category: decision | tags: [doc, comments, i18n, convention] | ## 文档与注释语言规范（项目级，用户 2026-10-12 决策）
 - [examples-tree](pages/examples-tree.md) — category: decision | tags: [build, examples] | - 示例程序放在根目录 examples/ 下，每个示例一个子目录（examples/hello, examples/worker），不再放根目录 example.c。
@@ -49,6 +51,7 @@ _Auto-generated. Last updated 2026-10-14T05:39:28.150Z._
 - [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## quickjs-ng 上游同步与改动分层策略
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
+- [qzvm-qzjs-layering](pages/qzvm-qzjs-layering.md) — category: decision | tags: [decision, architecture, qzvm, in-module, boundary] | ## 结论
 - [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑（2026-10-07/08 用户拍板）
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论
 - [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | ## 结论
