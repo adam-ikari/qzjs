@@ -67,6 +67,10 @@ class Module {
     constructor(opts) { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null;
         this.debug = !!(opts && opts.debug);   // 生成 name 段（函数名）→ wat/wasm 可读，DAP 友好
         this._fnNames = [];                    // funcidx(全局) → 名（导入在前，本地函数在后）
+        this.debugLine = !!(opts && opts.debugLine); // 生成 DWARF 调试段（.debug_info/line/abbrev/str）
+        this._codeName = {};                   // codeIdx → 函数名（本地函数）
+        this._codeDecl = {};                   // codeIdx → 声明行号
+        this.srcFile = (opts && opts.srcFile) || ""; // 源文件路径（DWARF CU/行表用）
     }
     // type: {name, params:[valtype], results:[valtype]}（results 空 = void）
     funcType(params, results) {
@@ -106,8 +110,10 @@ class Module {
         this.codes.push(null);
         return fidx;
     }
-    startBody(name, locals, names) { this._cur = { idx: (this._codeIdx || {})[name], locals: locals || [], names: names || null, body: [] }; }
-    endBody() { if (this._cur) { this._cur.body.push(OP.end); this.codes[this._cur.idx] = { locals: this._cur.locals, names: this._cur.names, body: this._cur.body }; this._cur = null; } }
+    startBody(name, locals, names, declLine) { this._cur = { idx: (this._codeIdx || {})[name], name, locals: locals || [], names: names || null, body: [], marks: [], declLine: declLine || 1 }; }
+    endBody() { if (this._cur) { this._cur.body.push(OP.end); this.codes[this._cur.idx] = { name: this._cur.name, locals: this._cur.locals, names: this._cur.names, body: this._cur.body, marks: this._cur.marks, declLine: this._cur.declLine }; this._cur = null; } }
+    // 语句级行标记：记录「当前函数体内指令字节偏移 → 源码行」。DWARF 行表用。
+    markLine(srcLine) { if (this.debugLine && this._cur) this._cur.marks.push([this._cur.body.length, srcLine]); }
     addFunc(name, params, results, locals) {
         const t = this.funcType(params, results);
         const fidx = this.funcs.length + this.imports.length; // funcs 索引 = imports + 本地函数序
@@ -115,7 +121,7 @@ class Module {
         this._funcIdx[name] = fidx;
         this._codeIdx = this._codeIdx || {};
         this._codeIdx[name] = fidx - this.imports.length;
-        this._cur = { name, locals: locals || [], body: [] };
+        this._cur = { name, locals: locals || [], body: [], marks: [], declLine: 1 };
         return fidx;
     }
     start(name) { this.addFunc(name, [], []); }
@@ -245,8 +251,9 @@ class Module {
             ]));
             out.push(7, ...uleb(body.length), ...body);
         }
+        let dwarfPayload = null;   // { entries:[{c, low, size}], payloadLen }
         if (this.codes.length) {
-            const body = vec(this.codes.map(c => {
+            const built = this.codes.map(c => {
                 const localGroups = [];
                 for (const l of c.locals) {
                     const last = localGroups[localGroups.length - 1];
@@ -255,9 +262,22 @@ class Module {
                 }
                 const header = vec(localGroups.map(g => uleb(g[0]).concat(g[1])));
                 const code = [...header, ...c.body];
-                return uleb(code.length).concat(code);
-            }));
+                return { c, header, code };
+            });
+            const body = vec(built.map(e => uleb(e.code.length).concat(e.code)));
             out.push(10, ...uleb(body.length), ...body);
+            if (this.debugLine) {
+                // payload 起点 = 本段长度 LEB 之后的 count 字节；低址约定 = code 段 payload 相对偏移
+                const countLeb = uleb(built.length).length;
+                let rel = countLeb;   // count 字节之后
+                const entries = [];
+                for (const e of built) {
+                    rel += uleb(e.code.length).length;      // size LEB
+                    entries.push({ e, low: rel, size: e.code.length, headerLen: e.header.length });
+                    rel += e.code.length;
+                }
+                dwarfPayload = { entries, payloadLen: rel };
+            }
         }
         // data 段（字符串字面量 UTF-8；active，i32.const offset + 字节）—— wasm 段序要求排在 code(10) 之后
         if (this.data.length) {
@@ -297,6 +317,32 @@ class Module {
                 for (const { id, content } of subs) body.push(id, ...uleb(content.length), ...content);
                 const sec = [...uleb(Buffer.byteLength("name")), ...[...Buffer.from("name")], ...body];
                 out.push(0, ...uleb(sec.length), ...sec);   // custom section (id 0)
+            }
+        }
+        // DWARF 调试段（custom，id 0）：.debug_abbrev/.debug_info/.debug_line/.debug_str。
+        // 地址约定 = code 段 payload 相对偏移（见 wasm-dwarf.js 注释）。
+        if (this.debugLine && dwarfPayload) {
+            const { buildDebugSections } = require("./wasm-dwarf.js");
+            const funcs = [], marks = [];
+            let cuLow = Infinity, cuEnd = 0;
+            for (const ent of dwarfPayload.entries) {
+                const c = ent.e.c;
+                funcs.push({ name: c.name || "?", low: ent.low, size: ent.size, line: c.declLine || 1 });
+                cuLow = Math.min(cuLow, ent.low);
+                cuEnd = Math.max(cuEnd, ent.low + ent.size);
+                for (const m of (c.marks || [])) marks.push({ addr: ent.low + ent.headerLen + m[0], line: m[1] });
+            }
+            marks.sort((a, b) => a.addr - b.addr);
+            const abs = this.srcFile && require("path").resolve(this.srcFile);
+            const dir = abs ? require("path").dirname(abs) : ".";
+            const base = abs ? require("path").basename(abs) : (this.srcFile || "module.ts");
+            const ds = buildDebugSections({
+                producer: "qzvm TS->wasm", file: base, dir, funcs, marks,
+                cuLow: cuLow === Infinity ? 0 : cuLow, cuEnd: cuEnd || 1,
+            });
+            for (const [nm, bytes] of [["abbrev", ds.abbrev], ["info", ds.info], ["line", ds.line], ["str", ds.str]]) {
+                const sec = [...uleb(Buffer.byteLength(".debug_" + nm)), ...[...Buffer.from(".debug_" + nm)], ...bytes];
+                out.push(0, ...uleb(sec.length), ...sec);
             }
         }
         return Buffer.from(out.flat());

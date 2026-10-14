@@ -89,7 +89,10 @@ class Emitter {
         this._staticVars = new Map(); // 变量名 → 类名：静态精确接收者（当前函数/方法体有效）
         this._leafClasses = new Set();// 无子类的类：其方法/构造器内 `this` 静态精确
         this._pendingLambdas = [];    // 已登记待发射的 lambda 体
+        this.sf = null;               // 当前 SourceFile（行号查询；compileTS 设置）
     }
+    // 源码行号（1-based）。DWARF 行标记用；无 sf 时返回 0（该 mark 被忽略）。
+    _line(node) { return (this.sf && node && node.pos !== undefined) ? this.sf.getLineAndCharacterOfPosition(node.getStart(this.sf)).line + 1 : 0; }
     _local(name) { return this.varMap.get(name); }
     // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
     _curLabel() { return this._labelStack.length ? this._labelStack.pop() : null; }
@@ -276,7 +279,7 @@ class Emitter {
         const localNames = this.m.debug
             ? f.parameters.map(p => p.name.text).concat(locals)   // locals 是名字数组
             : null;
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]), localNames);
+        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]), localNames, this._line(f));
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
@@ -523,6 +526,7 @@ class Emitter {
     emitBlock(node) { for (const s of node.statements) this.emitStmt(s); }
 
     emitStmt(s) {
+        this.m.markLine(this._line(s));
         if (ts.isVariableStatement(s)) {
             for (const d of s.declarationList.declarations) {
                 if (d.initializer) { this.emitExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
@@ -920,9 +924,10 @@ function funcMode(f) {
 function compileTS(input, outWasm, opts = {}) {
     const program = ts.createProgram([input], { strict: true, target: ts.ScriptTarget.ES2020 });
     const sf = program.getSourceFile(input);
-    const m = new Module({ debug: !!opts.debug });   // opts.debug → name 段（函数名，调试/反汇编）
+    const m = new Module({ debug: !!opts.debug, debugLine: !!opts.debug || !!opts.debugLine, srcFile: input });   // opts.debug → name 段 + DWARF 行表
     if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
     const em = new Emitter(m);
+    em.sf = sf;
     const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
     for (const st of fns) em.fnNames.add(st.name.text);
     const clsStmts = sf.statements.filter(st => ts.isClassDeclaration(st));
@@ -1076,6 +1081,7 @@ Emitter.prototype._emitStrParts = function () {
 };
 Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
 Emitter.prototype.emitTaggedStmt = function (s) {
+    this.m.markLine(this._line(s));
     if (ts.isVariableStatement(s)) {
         for (const d of s.declarationList.declarations) {
             if (d.initializer) { this.emitTaggedExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }

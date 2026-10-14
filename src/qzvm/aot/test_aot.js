@@ -150,10 +150,37 @@ async function runClasses() {
     check("类.字段自增循环", call("fieldIncLoop"), 2508);
 }
 
+
+// DWARF 调试段：编译 --debug 须产 .debug_line/_info/_abbrev/_str 且行表可映射。
+// 静默失败风险高（段序/LEB/终止符），故守：段存在 + 行表含预期源码行 + low_pc 基址约定。
+async function runDwarf() {
+    const src = path.join(os.tmpdir(), "qz_aot_dwarf.ts");
+    const wasm = path.join(os.tmpdir(), "qz_aot_dwarf.wasm");
+    fs.writeFileSync(src, `function add(a: number, b: number): number { const c = a + b; return c; }\n`);
+    const r = compileTS(src, wasm, { debug: true });
+    const buf = fs.readFileSync(wasm);
+    // 扫自定义段名（记录各段 payload 起点）
+    const names = {}; let li = -1;
+    for (let i = 8; i < buf.length;) { const sid = buf[i++]; let ln = 0, s = 0, b; do { b = buf[i++]; ln |= (b & 0x7f) << s; s += 7; } while (b & 0x80); const pstart = i; if (sid === 0) { let l = 0, s2 = 0, b2; do { b2 = buf[i++]; l |= (b2 & 0x7f) << s2; s2 += 7; } while (b2 & 0x80); const nm = buf.slice(i, i + l).toString(); names[nm] = i + l; if (nm === ".debug_line") li = i + l; } i = pstart + ln; }
+    check("dwarf.段含debug_line", ".debug_line" in names, true);
+    check("dwarf.段含debug_info", ".debug_info" in names, true);
+    check("dwarf.段含debug_abbrev", ".debug_abbrev" in names, true);
+    check("dwarf.段含debug_str", ".debug_str" in names, true);
+    // 行表：程序起点 = 单位头(10) + prologue_length；首 op 应 set_address(0x00 扩展, len=5, 0x02) → u32 地址
+    const prog = li + 10 + buf.readUInt32LE(li + 6);
+    const addr = buf.readUInt32LE(prog + 3);
+    check("dwarf.首地址在文件内(段内相对约定)", addr > 0 && addr < buf.length, true);
+    // wasm 仍可运行
+    const qz = makeQzvm(r.strings);
+    const { instance } = await WebAssembly.instantiate(buf, { qz });
+    check("dwarf.带段仍可执行", instance.exports.add(2, 3), 5);
+}
+
 (async () => {
     await runNum();
     await runTagged();
     await runClasses();
+    await runDwarf();
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
     process.exit(failures === 0 ? 0 : 1);
 })().catch(e => { console.error("ERR:", e.message); process.exit(1); });

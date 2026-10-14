@@ -155,7 +155,7 @@ if (cmd === "build") {
     console.error("usage: build.js build|compile|glue ...");
     console.error("  build  <src.ts> [prefix] [--main \"fn(a);fn2(b)\"] [--target <arch> --target-abi <abi>] [--debug]");
     console.error("  compile <src.ts> [prefix] [--debug]   # 产出 .wasm/.wat/.strings.json/.meta.json（不经 wamrc）");
-    console.error("  --debug: 生成 name 段（函数名），wat/wasm 反汇编可读（不影响执行）");
+    console.error("  --debug: 生成 name 段（函数名）+ DWARF 调试段（.debug_*），wat/wasm 反汇编/lldb 源码调试用（不影响执行）");
     console.error("  glue <prefix> [--main \"fn(a)\"]");
     process.exit(2);
 }

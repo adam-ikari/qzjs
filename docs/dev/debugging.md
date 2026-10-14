@@ -310,9 +310,20 @@ rejects AOT module instances outright (`Attempt to create a debug instance for
 an AOT module`) and returns 0. The glue path (`build.js` → `<name>.glue.js`)
 prefers the `.aot` artifact when present, so debug runs must use the plain
 `.wasm`/bytecode path (no `options.aot`, or force a `.wasm`-only load).
-Source-level breakpoints (`break file.ts:10`) additionally need the emitter to
-emit DWARF — that is **not** implemented; this channel gives instruction-level
-breakpoints on wasm offsets.
+Source-level breakpoints: `build.js ... --debug` now emits **DWARF** custom
+sections (`.debug_info/.debug_line/.debug_abbrev/.debug_str`, DWARF4, addr_size=4)
+alongside the `name` section — `aot/wasm-dwarf.js`, with statement-level line
+markers (`emitter.markLine`). The patched lldb consumes these (WAMR's
+debug-engine does **not** parse DWARF; it only reports a PC).
+
+**Address convention (verified).** DWARF addresses are **relative to the start
+of the `code`-section payload** (matching clang's wasm backend: `low_pc 0x2` →
+file offset 65 with code-content start 63). WAMR's GDB server reports the PC
+as the **absolute file offset** of the instruction, encoded as `WasmObj<<62 |
+offset` — so `lldb` adds the code-section file offset to the DWARF address to
+form the breakpoint address. End-to-end proof (`strWork`, code-content start
+542): DWARF rows `0x216`(L4)/`0x34d`(L5) → breakpoint addresses `0x434`/`0x56b`
+→ both **hit** `T05 reason:breakpoint`.
 
 ## Test
 
