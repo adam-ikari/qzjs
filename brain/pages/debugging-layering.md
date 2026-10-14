@@ -5,9 +5,10 @@ category: decision
 status: active
 tags: [decision, debug, dap, qzvm, aot, wasm, dwarf, gdb-rsp, debug-interp]
 created: "2026-10-14T06:51:35"
-updated: "2026-10-14T11:17:15"
+updated: "2026-10-14T11:25:59"
 ---
 
+<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 结论
 
@@ -58,7 +59,7 @@ updated: "2026-10-14T11:17:15"
 - **qzvm 只留 `debugger.c`**（回调驱动、零 OS、可进 guest 源集）。
 - **`debugger_dap.c` 整体归 host（qzjs）**——stdio 与 timer 同为 OS 依赖，不拆。
 - `qz_t.dap_timer`/`dap_timer_active` 字段随传输层移出 qzvm 核心。
-- **AOT 调试 = 编译器 DWARF（已补，wasm-dwarf.js）+ WAMR 侧 debug-interp（已启用）**，源码级行断点仍待 lldb 侧消费验证。
+- **AOT 调试 = 编译器 DWARF（已补，wasm-dwarf.js）+ WAMR 侧 debug-interp（已启用）**；源码级行断点 **lldb 实测闭环（2026-10-15）**——预编译 wamr-lldb 连 RSP，`b strwork.ts:4` 命中 `stop reason=breakpoint`。
 
 ## 暴露的现存缺口
 
@@ -66,7 +67,7 @@ updated: "2026-10-14T11:17:15"
 | --- | --- |
 | ~~emitter 无行表/DWARF~~ | ~~AOT/源码级断点不可用~~ → **已补（2026-10-15，wasm-dwarf.js + emitter markLine）** |
 | guest 源集不含 `debugger.c` | in-module 形态**无任何调试能力** |
-| 源码级行断点未经 lldb 实测 | DWARF 段已产且被 llvm-dwarfdump 干净解析，但 lldb_wasm 侧消费（`break file.ts:N`）未端到端验证 |
+| ~~源码级行断点未经 lldb 实测~~ | ~~DWARF 段已产，但 lldb 侧消费未验~~ → **已补（2026-10-15）**：预编译 wamr-lldb（WAMR-2.2.0）+ `test/test_wamr_debug_source.sh`，`break file.ts:N` 命中 |
 | ~~WAMR debug-interp 未启用~~ | ~~wasm 模块不可指令级调试~~ → **已补（2026-10-14）**，但仅 bytecode 实例、仅偏移级 |
 
 
@@ -117,4 +118,15 @@ updated: "2026-10-14T11:17:15"
 - time: 2026-10-14T11:17:15
   kind: evidence
   summary: "WAMR debug-interp 全链回归门入仓（commit 8fc6a935）：test/test_wamr_debug_rsp.sh + test/wamr-debug-e2e/rsp_break.py + CI job wamr-debug-rsp，守「DWARF 行地址(code 段 payload 相对) + code 基址 = WAMR 文件绝对 PC」约定。前此仅 /tmp 手验、CI 不跑。build.js 增 --no-aot：WAMR debug-interp 拒绝 AOT 实例，调试运行须纯 bytecode（AOT=设备现场 wamrc 产物，AOT 路径默认不变）。全 DWARF 行地址均设点：首行可能早于入口 reason:trace 停顿 PC（已越过则不命中）。实证 17 行地址、基址 0x21e、命中 T05 reason:breakpoint。"
+  affects: [debugging-layering]
+
+- time: 2026-10-14T11:25:39
+  kind: reversal
+  summary: "源码级行断点 lldb 实测闭环（commit 855bf223）：此前「DWARF 已产但 lldb 侧消费未验」的缺口关闭。用 WAMR 预编译 wamr-lldb（WAMR-2.2.0/Ubuntu22.04/lldb13.0.0）连 GDB-RSP，'b strwork.ts:4' → lldb 从远端模块读 DWARF 解析出 0x4000000000000434 → stop reason=breakpoint（与 RSP 层手算一致）。lldb 非构建依赖，test/test_wamr_debug_source.sh 缺则 SKIP。lldb 须 patch：stock lldb 无 wasm 调试能力，需 lldb_wasm.patch（5906行/61文件，LLVM D78801 WasmProcess，基线 release/13.x），预编译已含。"
+  affects: [debugging-layering]
+
+- time: 2026-10-14T11:25:59
+  kind: decision
+  summary: "源码级行断点 lldb 实测闭环；回归门入仓"
+  source: brain update-truth
   affects: [debugging-layering]
