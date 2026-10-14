@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, debug, dap, qzvm, aot, wasm, dwarf, gdb-rsp, debug-interp]
 created: "2026-10-14T06:51:35"
-updated: "2026-10-14T10:14:24"
+updated: "2026-10-14T11:17:15"
 ---
 
 <!-- compiled_truth -->
@@ -112,4 +112,9 @@ updated: "2026-10-14T10:14:24"
   kind: evidence
   summary: "AOT DWARF 端到端实证：qzs 侧地址约定确认=code 段 payload 起始相对偏移（clang 后端一致：low_pc 0x2→file 65，code-content 63）。WAMR GDB server PC = 文件绝对偏移|WasmObj<<62。实测 strWork（code-content 542）：DWARF 行 0x216(L4)/0x34d(L5) → 断点地址 0x434/0x56b → 均命中 T05 reason:breakpoint。lldb 侧=code 段文件偏移 + DWARF 地址。"
   source: "手动实证"
+  affects: [debugging-layering]
+
+- time: 2026-10-14T11:17:15
+  kind: evidence
+  summary: "WAMR debug-interp 全链回归门入仓（commit 8fc6a935）：test/test_wamr_debug_rsp.sh + test/wamr-debug-e2e/rsp_break.py + CI job wamr-debug-rsp，守「DWARF 行地址(code 段 payload 相对) + code 基址 = WAMR 文件绝对 PC」约定。前此仅 /tmp 手验、CI 不跑。build.js 增 --no-aot：WAMR debug-interp 拒绝 AOT 实例，调试运行须纯 bytecode（AOT=设备现场 wamrc 产物，AOT 路径默认不变）。全 DWARF 行地址均设点：首行可能早于入口 reason:trace 停顿 PC（已越过则不命中）。实证 17 行地址、基址 0x21e、命中 T05 reason:breakpoint。"
   affects: [debugging-layering]
