@@ -24,8 +24,13 @@ fail() { echo "FAIL: $1"; exit 1; }
 
 command -v node >/dev/null 2>&1 || fail "node not found"
 command -v python3 >/dev/null 2>&1 || fail "python3 not found"
-DWARFDUMP="$(command -v llvm-dwarfdump-14 || command -v llvm-dwarfdump || command -v dwarfdump || true)"
-[ -n "$DWARFDUMP" ] || fail "llvm-dwarfdump not found"
+# 探测 llvm-dwarfdump：发行版多为版本化名（llvm-dwarfdump-18 等），无后缀名常缺。
+DWARFDUMP=""
+for c in llvm-dwarfdump llvm-dwarfdump-14 llvm-dwarfdump-15 llvm-dwarfdump-16 \
+         llvm-dwarfdump-17 llvm-dwarfdump-18 llvm-dwarfdump-19 dwarfdump; do
+    if command -v "$c" >/dev/null 2>&1; then DWARFDUMP="$c"; break; fi
+done
+[ -n "$DWARFDUMP" ] || fail "llvm-dwarfdump not found (install llvm / llvm-N-tools)"
 
 # ── 1. 配置 + 构建 debug-interp 版 qzjs ──
 mkdir -p "$BUILD"

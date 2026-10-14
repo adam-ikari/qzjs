@@ -1350,9 +1350,12 @@ jobs:
       - name: Install tools (build + llvm-dwarfdump + python3)
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build llvm python3
-          # 提供 llvm-dwarfdump-14（或平台 llvm-dwarfdump）
-          sudo apt-get install -y llvm-14-tools || true
+          sudo apt-get install -y build-essential cmake ninja-build python3
+          # llvm-dwarfdump 来自 llvm 包（低版本发行版为 llvm-N-tools；无则各试）
+          sudo apt-get install -y llvm || sudo apt-get install -y llvm-18-tools
+          llvm-dwarfdump --version \
+            || command -v llvm-dwarfdump-18 \
+            || { echo "no llvm-dwarfdump available"; exit 1; }
 
       - name: Install Node (aot 编译器工具链)
         uses: actions/setup-node@v4
