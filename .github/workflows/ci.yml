@@ -1362,9 +1362,12 @@ jobs:
         with:
           node-version: 22
 
-      # build.js compile 需要 typescript（emitter.js require），无则编译失败。
-      - name: Install typescript (emitter dep)
-        run: npm ci --prefix src/qzvm/aot
+      # build.js(compile) 需要 typescript（emitter.js require）；qzjs 构建期
+      # polyfill add_custom_command 亦需 src/polyfill 依赖。CI 无 node_modules。
+      - name: Install npm deps (aot emitter + polyfill build)
+        run: |
+          npm ci --prefix src/qzvm/aot
+          npm ci --prefix src/polyfill
 
       - name: e2e — WAMR debug RSP + DWARF breakpoint
         run: bash test/test_wamr_debug_rsp.sh

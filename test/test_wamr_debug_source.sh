@@ -37,9 +37,11 @@ QZJS="$BUILD/qzjs"
 if [ ! -x "$QZJS" ]; then
     mkdir -p "$BUILD"
     cmake -S "$ROOT" -B "$BUILD" -DQZ_WITH_WAMR=ON -DQZ_WITH_WAMR_DEBUG_INTERP=ON \
+          -DQZ_BUILD_CLI=ON \
           > "$BUILD/qz-src.cfg.log" 2>&1 \
       || { cat "$BUILD/qz-src.cfg.log"; fail "cmake configure"; }
-    cmake --build "$BUILD" --target qzjs -j"$(nproc 2>/dev/null || echo 4)" \
+    # 可执行 target 是 qz_cli（OUTPUT_NAME qzjs）；`qzjs` 是静态库 target。
+    cmake --build "$BUILD" --target qz_cli -j"$(nproc 2>/dev/null || echo 4)" \
           > "$BUILD/qz-src.build.log" 2>&1 \
       || { tail -40 "$BUILD/qz-src.build.log"; fail "qzjs debug build"; }
 fi

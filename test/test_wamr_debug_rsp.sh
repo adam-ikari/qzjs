@@ -35,9 +35,11 @@ done
 # ── 1. 配置 + 构建 debug-interp 版 qzjs ──
 mkdir -p "$BUILD"
 cmake -S "$ROOT" -B "$BUILD" -DQZ_WITH_WAMR=ON -DQZ_WITH_WAMR_DEBUG_INTERP=ON \
+      -DQZ_BUILD_CLI=ON \
       > "$BUILD/qz-dbg.cfg.log" 2>&1 \
   || { cat "$BUILD/qz-dbg.cfg.log"; fail "cmake configure"; }
-cmake --build "$BUILD" --target qzjs -j"$(nproc 2>/dev/null || echo 4)" \
+# 可执行 target 是 qz_cli（OUTPUT_NAME qzjs）——`qzjs` 是静态库 target，非可执行。
+cmake --build "$BUILD" --target qz_cli -j"$(nproc 2>/dev/null || echo 4)" \
       > "$BUILD/qz-dbg.build.log" 2>&1 \
   || { tail -40 "$BUILD/qz-dbg.build.log"; fail "qzjs debug build"; }
 QZJS="$BUILD/qzjs"
