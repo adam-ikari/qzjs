@@ -277,6 +277,15 @@ static void wamr_instance_finalizer(JSRuntime *jsrt, JSValue val)
 static void wamr_global_class_finalizer(JSRuntime *jsrt, JSValue val);
 static void wamr_memory_class_finalizer(JSRuntime *jsrt, JSValue val);
 
+/* gc_mark：向 QuickJS 循环收集器暴露 opaque 内 JSValue 强边（quickjs-ng
+ * mark_children 走 class gc_mark）。缺失时 instance↔module、exports.memory
+ * 持有者→instance、global→instance、import closure→js_func 等边对 GC 不可见
+ * → 引用环不可回收 → JS_FreeRuntime 断言 gc_obj_list 非空（wasm3 后端同款
+ * 缺陷已修，见 ext_wasm3.c）。定义在各 wrap 结构之后。 */
+static void wamr_instance_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb);
+static void wamr_global_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb);
+static void wamr_memory_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb);
+
 static void wamr_register_classes(qz_t *rt, JSContext *ctx)
 {
     JSRuntime *jsrt = JS_GetRuntime(ctx);
@@ -294,6 +303,7 @@ static void wamr_register_classes(qz_t *rt, JSContext *ctx)
     JSClassDef instance_class = {
         .class_name = "WebAssembly.Instance",
         .finalizer = wamr_instance_finalizer,
+        .gc_mark = wamr_instance_gc_mark,
     };
     JS_NewClass(jsrt, rt->wamr_instance_class_id, &instance_class);
 
@@ -302,6 +312,7 @@ static void wamr_register_classes(qz_t *rt, JSContext *ctx)
     JSClassDef global_class = {
         .class_name = "WebAssembly.Global",
         .finalizer = wamr_global_class_finalizer,
+        .gc_mark = wamr_global_class_gc_mark,
     };
     JS_NewClass(jsrt, rt->wamr_global_class_id, &global_class);
 
@@ -310,6 +321,7 @@ static void wamr_register_classes(qz_t *rt, JSContext *ctx)
     JSClassDef memory_class = {
         .class_name = "WebAssembly.Memory",
         .finalizer = wamr_memory_class_finalizer,
+        .gc_mark = wamr_memory_class_gc_mark,
     };
     JS_NewClass(jsrt, rt->wamr_memory_class_id, &memory_class);
 }
@@ -408,6 +420,39 @@ static JSValue wamr_memory_buffer_get(JSContext *ctx, JSValueConst this_val)
         JS_GetOpaque(this_val, rt->wamr_memory_class_id);
     if (!owner) return JS_NULL;
     return wamr_memory_make_buffer(ctx, owner);
+}
+
+static void wamr_instance_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    wamr_instance_wrap_t *wrap = rt ? (wamr_instance_wrap_t *)
+        JS_GetOpaque(val, rt->wamr_instance_class_id) : NULL;
+    if (!wrap) return;
+    JS_MarkValue(jsrt, wrap->module_obj, mark_cb);
+    JS_MarkValue(jsrt, wrap->pending_exception, mark_cb);
+    for (uint32_t i = 0; i < wrap->import_closure_count; i++) {
+        wamr_import_closure_t *ic = wrap->import_closures[i];
+        if (ic) JS_MarkValue(jsrt, ic->js_func, mark_cb);
+    }
+}
+
+static void wamr_global_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    wamr_global_closure_t *gc = rt ? (wamr_global_closure_t *)
+        JS_GetOpaque(val, rt->wamr_global_class_id) : NULL;
+    if (gc) JS_MarkValue(jsrt, gc->instance_ref, mark_cb);
+}
+
+static void wamr_memory_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    wamr_memory_owner_t *owner = rt ? (wamr_memory_owner_t *)
+        JS_GetOpaque(val, rt->wamr_memory_class_id) : NULL;
+    if (owner) {
+        JS_MarkValue(jsrt, owner->instance_ref, mark_cb);
+        JS_MarkValue(jsrt, owner->last_ab, mark_cb);
+    }
 }
 
 static void wamr_global_class_finalizer(JSRuntime *jsrt, JSValue val)
@@ -1972,6 +2017,7 @@ static int wamr_ext_init(qz_ext_t *ext, qz_t *rt)
 static void wamr_ext_destroy(qz_ext_t *ext, qz_t *rt)
 {
     (void)ext;
+    (void)rt;
     /* 卸载本线程安装的 WAMR signal 环境（SIGSEGV/SIGBUS handler、栈 guard
      * pages、sigaltstack）。WAMR 的 guard pages 与 signal handler 都是进程
      * 级副作用：不清理的话，下一个实例（新 worker 线程）在 os_thread_signal_init
@@ -1979,10 +2025,13 @@ static void wamr_ext_destroy(qz_ext_t *ext, qz_t *rt)
      * 线程内（qz_thread_teardown → qz_ctx_destroy），与本线程的
      * wasm_runtime_init_thread_env 对称。 */
     wasm_runtime_destroy_thread_env();
-    /* Reset class IDs so JS_NewClassID allocates fresh ones for the next runtime */
-    rt->wamr_module_class_id = 0;
-    rt->wamr_instance_class_id = 0;
-    rt->wamr_global_class_id = 0;
+    /* 注意：绝不在此清空 wamr_*_class_id。qzjs teardown 顺序是
+     * ctx_destroy（含本 destroy）→ JS_FreeRuntime，而 JS_FreeRuntime 内部
+     * 的 JS_RunGC 依赖 finalizer/gc_mark 用 class_id 经 JS_GetOpaque 取 wrap；
+     * 清零后 finalizer 的 JS_GetOpaque 返回 NULL 直接 return →
+     * instance wrap 的 module_obj 引用永不释放 → gc_obj_list 断言非空。
+     * 每个 runtime 是全新 qz_t（calloc，字段天然 0），JS_NewClassID 在
+     * register_classes 里重新分配，无需手动重置。（wasm3 后端同款注释。） */
 }
 
 static int wamr_ext_suspend(qz_ext_t *ext, qz_t *rt)
