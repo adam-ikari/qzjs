@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-13T15:33:38"
+updated: "2026-10-14T01:15:21"
 ---
 
 <!-- compiled_truth -->
@@ -177,4 +177,10 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: evidence
   summary: "M4 运行验证（超出链接验收）：用 node v24 WASI preview1 + qz_host.drain shim 实例化 libqzvm.wasm（reactor）并驱动导出——qz_create→rt 句柄、qz_eval(\"1+2*3…\")→0、qz_tick→0 且 drain 被调 1 次、qz_eval(\"throw…\")→-1、qz_destroy ok。证明 guest 真在 wasm 内跑 QuickJS（非仅可链接），qz_host.* import 生效。脚本为一次性 /tmp 冒烟，未入仓（M5 接 C 宿主驱动）。"
   source: "node runqz.mjs + libqzvm.wasm（27542529）"
+  affects: [in-module-design]
+
+- time: 2026-10-14T01:15:21
+  kind: evidence
+  summary: "M5 落地：guest 异步回流跑通（§10.4「import 拉」选型真机验证）。guest_entry.c 加 fsRead(path) 原语（建 Promise，qz_host_fs_read 发起异步读，resolve/reject 存 guest 内 op 表持 JSValue——host 无 JSContext）；qz_tick 去自旋（每轮 qz_host_drain 拉 {op_id,status,len,data} → 找 op 槽 → JS_Call(resolve|reject) → return）；结果读出导出 qz_result_ptr/len。导出名 libqzvm.wasm（CMake SUFFIX .wasm/PREFIX lib）。验证：node WASI 宿主 shim（真异步 fs_read+drain 队列）fsRead(data.txt)→tick×2→\"OK len=33 head=hello from host file\"；reject fsRead(NOPE)→tick×1→\"ERR ENOENT…\"；native 32/32 ctest 绿。限制（M6 消除）：单 rt（op 表 static）、单事件≤512B、仅 1 原语（43 js_pal_* 全量移 guest 属 M6 §10.5）。"
+  source: "src/qzvm/guest_entry.c + src/qzvm/CMakeLists.txt + IN_MODULE_DESIGN.md §6/§7 M5 + git dd52fbf5"
   affects: [in-module-design]
