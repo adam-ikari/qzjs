@@ -177,6 +177,21 @@ struct qz_t {
     int context_count;
     int active_ctx_id;   /* -1 if no active context */
 
+    /* ── GC 观测（约束③ ⑤，仅宿主侧）──
+     * 显式驱动点（qz_gc() 落到主RT 的 wake 安全点 / 控制面 "gc" op）的累计
+     * 次数与耗时，经 qz_gc_drive() 统一记账（唯一实现，见 qzjs.c）。
+     * gc_runs **只计显式驱动**：引擎自发的隐式 GC（gc_threshold > 0 的阈值
+     * 路径、OOM 路径）不经此处。所以它**不能**用来判断「引擎有没有偷偷 GC」
+     * ——那需要引擎侧的 GC hook（未做）。它的真实用处是跨进程核对：宿主驱动
+     * N 次 → RT 实际执行几次（驱动在途丢失/被 shutdown 丢弃会露出来）。
+     * gc_last_us/gc_total_us 是 wall-clock 诊断量，**不**参与复现性断言
+     * （同输入同驱动序列下暂停时长本来就不可能逐位相同）。 */
+#ifndef QZ_VM_GUEST
+    uint64_t gc_runs;
+    uint64_t gc_last_us;     /* 最近一次 JS_RunGC 耗时（微秒） */
+    uint64_t gc_total_us;    /* 累计 JS_RunGC 耗时（微秒） */
+#endif
+
     /* Polyfill bytecode cache（边界：内容属宿主，§3.1）：loaded once (lazily
      * at first context creation), shared by all contexts, unloaded at runtime
      * teardown. polyfill_owner is the opaque handle to free (NULL in mode C;

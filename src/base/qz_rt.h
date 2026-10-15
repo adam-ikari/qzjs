@@ -74,6 +74,12 @@ void qz_worker_free(qz_worker_t *w);
  * 移除的 qz_worker_is_proc_handle（C 层进程 worker 分流, Phase C）。
  * ipc_process.c 定义，thread.c 在 wait_idle 豁免这些恒活动 pipe。 */
 int qz_proc_handle_is_pipe(qz_t *rt, uv_handle_t *h);
+
+/* qzjs.c — 显式 GC 驱动点的**唯一**入口（约束③ ⑤）：跑一次 JS_RunGC 并记账
+ * （rt->gc_runs/gc_last_us/gc_total_us）。所有显式驱动点（rt_main.c 的 wake
+ * 安全点、thread.c 的 qz_wake_cb、控制面 "gc" op）都经它，计数才不会有洞。
+ * 只在宿主侧存在（guest 无控制面、无 uv_hrtime）。 */
+void qz_gc_drive(qz_t *rt);
 #endif /* !QZ_VM_GUEST */
 
 /* context.c — context lifecycle helpers */

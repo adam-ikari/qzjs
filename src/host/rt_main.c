@@ -82,8 +82,9 @@ static void child_wake_cb(uv_async_t *a)
             /* 宿主显式 GC（qz_gc / 控制面 "gc" op）：C 层就地跑 mark-sweep
              * 回收引用环。刻意不入 JS——环回收不需要 JS 栈，且本点是
              * WAKE_SAFEPOINT（无 JS 在执行），是确定点。JS_RunGC 在本线程
-             * （主RT 的 loop 线程 = JS 线程）调用，满足引擎单线程所有权。 */
-            if (rt->jsrt) JS_RunGC(rt->jsrt);
+             * （主RT 的 loop 线程 = JS 线程）调用，满足引擎单线程所有权。
+             * 经 qz_gc_drive 走唯一入口：回收 + 计数（约束③ ⑤）。 */
+            qz_gc_drive(rt);
         } else if (g_server_mode) {
             qz_dispatch_message(rt, m);
             qz_tick(rt);

@@ -480,6 +480,21 @@ int qz_gc(qz_t *rt)
 #endif
 }
 
+/* 显式 GC 驱动点的唯一实现（qz_rt.h 声明，约束③ ⑤）。
+ * 所有会就地跑 JS_RunGC 的宿主侧位置都走这里——记账与回收同处一地，计数才
+ * 不会有洞（新增一个漏接此处的 JS_RunGC 调用点 = 计数偏小，而且没有任何东西
+ * 会变红）。耗时用 uv_hrtime（单调，ns 精度）→ 微秒。 */
+void qz_gc_drive(qz_t *rt)
+{
+    if (!rt || !rt->jsrt) return;
+    uint64_t t0 = uv_hrtime();
+    JS_RunGC(rt->jsrt);
+    uint64_t dt_us = (uv_hrtime() - t0) / 1000u;
+    rt->gc_runs++;
+    rt->gc_last_us = dt_us;
+    rt->gc_total_us += dt_us;
+}
+
 void  qz_free(void *ptr) {
     if (!ptr) return;
     qz_t *rt = (qz_t *)ptr;
