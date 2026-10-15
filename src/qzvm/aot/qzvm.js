@@ -108,6 +108,14 @@ function makeQzvm(strings) {
   let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null, classMeta = null;
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   const bindBump = (g) => { bumpRef = g; };
+  // 宿主侧 bump 分配：与 wasm 侧 STR_BASE(8MiB) 同界；越界抛错（绝不静默覆盖字面量段）。
+  const ARENA_END = 8 << 20;
+  const bumpAlloc = (nbytes) => {
+    const off = bumpRef.value;
+    if (off + nbytes > ARENA_END) throw new Error(`qzvm: bump arena 溢出（${off}+${nbytes} > ${ARENA_END}）；调用间未重置 __bump？`);
+    bumpRef.value = off + nbytes;
+    return off;
+  };
   // JS 字符串 → wasm 堆（[len:i32 LE][utf8]），bump 分配，返回 0x7FFA 句柄。
   const strWriteback = (str) => {
     const bytes = [];
@@ -119,10 +127,7 @@ function makeQzvm(strings) {
       else if (c < 0x10000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
       else bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
     }
-    const off = bumpRef.value;
-    const total = 4 + bytes.length;
-    const aligned = (total + 7) & ~7;
-    bumpRef.value = off + aligned;
+    const off = bumpAlloc((4 + bytes.length + 7) & ~7);
     memU8[off] = bytes.length & 0xff; memU8[off+1] = (bytes.length >>> 8) & 0xff;
     memU8[off+2] = (bytes.length >>> 16) & 0xff; memU8[off+3] = (bytes.length >>> 24) & 0xff;
     for (let i = 0; i < bytes.length; i++) memU8[off + 4 + i] = bytes[i];
@@ -140,9 +145,8 @@ function makeQzvm(strings) {
   // .length/索引/push/pop（此前返回 JS 句柄 0x7FF9，wasm 侧 .length 落到 str_len 读垃圾 → 静默返回 0）。
   const arrWriteback = (js) => {
     const N = js.length;
-    const start = bumpRef.value;
+    const start = bumpAlloc((16 + N * 8 + 7) & ~7);
     const dataOff = start + 16;
-    bumpRef.value = start + ((16 + N * 8 + 7) & ~7);
     const dv = new DataView(mem.buffer);
     dv.setInt32(start, N, true);
     dv.setInt32(start + 4, N, true);
@@ -159,9 +163,8 @@ function makeQzvm(strings) {
     let cap = dv.getInt32(off + 4, true);
     const N = js.length;
     if (N > cap) {
-      dataOff = bumpRef.value;
       cap = N < 4 ? 4 : N * 2;
-      bumpRef.value += cap * 8;
+      dataOff = bumpAlloc(cap * 8);
       dv.setInt32(off + 8, dataOff, true);
       dv.setInt32(off + 4, cap, true);
     }

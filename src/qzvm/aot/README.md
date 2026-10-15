@@ -40,30 +40,42 @@ wat 仅作按需旁路中间产物，不进编译链路。
 直接拒绝 AOT 实例（`Attempt to create a debug instance for an AOT module`），故 GDB-RSP 调试运行须此模式。
 全链回归门：`test/test_wamr_debug_rsp.sh`（debug 构建 + DWARF 行地址断点 + 命中断言）。
 
+**`--interp <fn1,fn2>`（可选）：把指定函数**从 wasm 里摘出去**，退到宿主解释器跑**（同一个
+qzjs 进程内的 qzvm），调用者经传递闭包一并退（`.ts` 里没有 wasm 函数索引可指）。glue 内联
+transpile 出的 JS（去类型 + 去模块语法），`__call` 对 `mode === "interp"` 直接走它。
+**何时用**：字符串密集型函数——每轮 `s = s + i` 都要跨 `qz.string_concat` 调宿主 JS，跨界税
+吃掉全部 AOT 收益。实测 strWork(200000)（best-of-10 × 6 轮 A/B 交替）：AOT wasm 中位 28.18ms
+vs interp 回退 26.50ms —— **wasm 零收益、回退省 ~6%**，故 str 直接放弃 wasm 化（`bench_mix.js`
+的 `str` 负载即此配置）。纯数值/对象循环不要加（numWork 27x / objWork ~9x 对解释器）。
+`compile` 子命令同样支持；产物多一个 `<name>.interp.js`。
+
 - **JS 技术栈**：`build.js` 是唯一主入口（node 编排 compile→wamrc→glue），全部 JS（wamrc 是唯一外部后端）
 - **值模型**：tagged 值 = i64 f64 NaN-box（数值=原始 f64 位型，精确 53 位；句柄=高16位 `0x7FF9`|低32 offset；字段 8 字节）。wasm f64 恒为 IEEE-754 double，32 位宿主由 wamrc 降到软/硬浮点，**数值语义含 >2^31 的整数不变**，故 32/64 位设备共用同一表示——不按目标位宽切换
 - **产物分离**：`glue.js` + `.wasm` + `.aot` 三文件（不 base64 内嵌防膨胀），全部 gitignore（`build/`）
 - **32 位设备交叉编译**：`.aot` 是绑宿主架构的原生 ELF；加 `--target <arch> --target-abi <abi>` 透传 wamrc（`armv7 + gnueabihf` / `riscv32 + ilp32d` / `i386 + gnu`）。表示层不变，f64 语义一致
 - wamrc 查找顺序：`WAMRC` 环境变量 > `PATH` 上的 wamrc > 旧 demo 固定路径；质量门 = wamrc 编译成功（隐含 wasm 有效）
 
-## 性能画像（三方对比：AOT vs 解释器 vs 原生 V8，本机实测 2026-10-12）
+## 性能画像（三方对比：AOT vs 解释器 vs 原生 V8，本机实测 2026-10-15）
 
 基准：`node src/qzvm/aot/bench_mix.js`（AOT 经 wamrc O3 编译，qzjs 宿主跑 wasm；
 解释器 = qzjs 跑纯 JS；原生 V8 = node v24 JIT 跑同语义 JS）。
 **倍速 = 对手耗时 / AOT 耗时**：>1 = AOT 更快，<1 = AOT 更慢。
 
-| 负载                     | AOT(qzjs) | 解释器(qzjs) | 原生 V8(node) | AOT 比解释器 | AOT 比 V8    |
-| ------------------------ | --------- | ------------ | ------------- | ------------ | ------------ |
-| numWork(3000) 纯数值递归 | 361ms     | 48.4s        | 758ms         | **快 ~134x** | **快 ~2.1x** |
-| objWork(30000) 对象循环  | 1.3ms     | 50ms         | 0.11–0.36ms   | 快 ~38x      | 慢 ~4–12x    |
-| strWork(8000) 字符串拼接 | 30ms      | 5ms          | 0.12ms        | 慢 ~6x       | 慢 ~248x     |
+| 负载                      | AOT(qzjs) | 解释器(qzjs) | 原生 V8(node) | AOT 比解释器  | AOT 比 V8    |
+| ------------------------- | --------- | ------------ | ------------- | ------------- | ------------ |
+| numWork(3000) 纯数值递归  | 367ms     | 10.1s        | 748ms         | **快 ~27x**   | **快 ~2.0x** |
+| objWork(30000) 对象循环   | 0.8ms     | 7.0ms        | 0.10ms        | 快 ~9x        | 慢 ~8x       |
+| strWork(200000) 字符串拼接 | 26.3ms    | 26.6ms       | 6.7ms         | **~1.0x（无收益）** | 慢 ~3.9x |
 
 - **numWork（数值热点）AOT 超 V8 ~2x**：wamrc LLVM O3 + 零 JIT 预热 + 裸 f64 原生指令。
 - **objWork/strWork AOT 慢于 V8**：V8 隐藏类（IC）+ rope 惰性拼接碾压 wasm bump 分配/逐字节写。
-- 解释器（QuickJS-ng 无 JIT）在数值负载最慢；AOT 比解释器快 ~135x。
+- **strWork 在 wasm 里零收益**（独立 A/B 实测 best-of-10 × 6 轮交替：wasm 中位 28.18ms vs
+  interp 回退 26.50ms）——每轮 concat 跨 `qz.string_concat` 边界，跨界税吃掉 AOT 收益。
+  **故 str 放弃 wasm 化**，走 `--interp` 回退（见「使用」段）。
 
 ## 已知限制
 - **tagged 数值精确 53 位**（f64 NaN-box），32/64 位一致；无 31 位上限（旧 i32 模型已删，`test_aot.js` bigAcc=3e12 守此）
+- **bump arena 8 MiB（静态部分无 GC）**：内存 256 页=16 MiB；bump 堆 `[SCRATCH, 8MiB)`，字符串字面量段 `[8MiB,16MiB)`。所有 bump 增长点经 wasm 内 `qzs_ckmem` 守卫，越过 8 MiB 即 `unreachable` trap（宿主 `qzvm.bumpAlloc` 同界抛错）——绝不静默覆盖字面量。导出 `__bump_reset()`，glue 每次 `__call` 前重置到起点：一次调用的 arena 占用与调用时长解耦。动态部分（解释器）另有 qzvm GC。
 - 32 位设备：`build.js --target <arch> --target-abi <abi>` 交叉编译 `.aot`（i386 实测通过），表示层/f64 语义不变 — 详见 `PORTABILITY_32BIT.md`
 - **字符串原生表示**：句柄 `0x7FFA`|offset，内存 `[len][utf8]`。字面量编译进 data 段（去重）；`s+x` 经 `qzs_append`（在 bump 顶则原地追加，否则新建拷贝）；数字→十进制 `qzs_numstr`——值 ≤ `0xFFFFFFFF` 走硬件 i32 div/rem，大值回退 i64（软件 libcall），负数前置 `-`。a 数 + b 串回退 `qz.string_concat`。**性能**：构建大串的瓶颈**不在 wasm 执行**，而在返回值/参数穿越时的 wasm 串↔JS 串转换 `qzvm._utf8`/`strWriteback`。实测 wasm 循环本体建 1.09MB 串仅 **4.7ms**，而转换占 ~90ms。旧 `_utf8` 逐字节 `r += fromCharCode` 每字符一次 JS_ConcatString（QuickJS 无 rope）→ 已改为 ASCII 快路径（`Uint32Array` 批量测高位 + `fromCharCode.apply(u8.subarray)`）+ 非 ASCII 分块解码。修后 `strWork(200000)`（1.09MB）**93ms → 30ms**，`o1`（400k 次 1 字节追加，400KB）**73ms → 12.5ms**。对照：node(V8) 跑同 wasm 快，是因 V8 的 `+=` 有 rope 优化——非 WAMR AOT codegen 问题。
 - **`qzvm` 数组方法**（2026-10-12）：`split` 返 wasm 原生数组（`0x7FF8`，此前返 JS 句柄 `0x7FF9` → wasm 侧 `.length` 落 `qz.str_len` 读垃圾，静默得 0）。宿主 `method_call` 加 `0x7FF8` 分派 `doArrMethod`：`indexOf`/`lastIndexOf`/`includes`/`join`/`slice`/`concat`/`reverse`/`shift`/`unshift`/`map`/`filter`/`reduce`/`forEach`/`find`/`findIndex`/`some`/`every`/`sort`/`splice`/`fill`。回调经 `qz.closure_call` 调 wasm 箭头函数；`reverse`/`sort`/`fill`/`splice`/`shift`/`unshift` 原地改写保句柄别名。`pop`/`push`/索引/`.length` 仍走 wasm 原生（零跨界）。

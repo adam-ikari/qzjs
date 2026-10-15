@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, aot, performance, f64, wasm, numeric]
 created: "2026-10-13T06:22:46"
-updated: "2026-10-13T08:24:44"
+updated: "2026-10-15T07:12:13"
 ---
 
 <!-- compiled_truth -->
@@ -28,18 +28,24 @@ updated: "2026-10-13T08:24:44"
 
 in-module 档关掉 wasm 引擎（`_prof_wamr`/`_prof_wasm3` OFF）⇒ **模块内 qzvm 源集 = context.c + vm_core.c + ext_lifecycle.c**，不含 wasm 引擎、不含 debugger、不含宿主 I/O。QuickJS-ng 是其底层引擎（外部依赖），二者不等同。
 
-- **性能天花板架构性、已实测**：纯数值 ~134x 解释器（numWork(3000)：AOT 361ms vs 解释器 48.4s，见下表）/ 快 V8 ~2.1x；对象循环 ~38–50x 解释器 / 慢 V8 4–12x；字符串慢 V8 ~248x（唯一系统性劣势）。
+- **性能天花板架构性、已实测（2026-10-15 复测）**：纯数值 ~27x 解释器（numWork(3000)：AOT 367ms vs 解释器 10.1s，见下表）/ 快 V8 ~2.0x；对象循环 ~9x 解释器 / 慢 V8 ~8x；字符串**在 wasm 里零收益**（≈解释器），慢 V8 ~3.9x。
 - **「整体实现」收益 = 覆盖率，非峰值**（qzvm.js 现 20–33 符号）。
 - **最大性能杠杆 = `qz.*` 跨界税 4.9µs → 45–66ns（~100x）**：把 `qz.*` import 从 JS 函数改为 WAMR raw native（`ext_wamr.c:1071` `wasm_runtime_register_natives_raw`）。
 - **数值表示裁决：维持 f64 NaN-box；num 快路径已是裸 f64**。原生整数 i32/i64 实测仅快 12–18%，被三约束否决。
 
-## 实测锚点（本机 2026-10-11/12，`README.md:48-52`）
+## 实测锚点（本机 2026-10-15 复测，`README.md` 性能画像）
 
 | 负载 | AOT(qzjs) | 解释器(qzjs) | V8(node) | vs 解释器 | vs V8 |
 |---|---|---|---|---|---|
-| numWork(3000) 纯数值递归 | 361ms | 48.4s | 758ms | 快 ~134x | 快 ~2.1x |
-| objWork(30000) 对象循环 | 1.3ms | 50ms | 0.11–0.36ms | 快 ~38x | 慢 ~4–12x |
-| strWork(8000) 字符串拼接 | 30ms | 5ms | 0.12ms | 慢 ~6x | 慢 ~248x |
+| numWork(3000) 纯数值递归 | 367ms | 10.1s | 748ms | 快 ~27x | 快 ~2.0x |
+| objWork(30000) 对象循环 | 0.8ms | 7.0ms | 0.10ms | 快 ~9x | 慢 ~8x |
+| strWork(200000) 字符串拼接 | 26.3ms | 26.6ms | 6.7ms | **~1.0x（无收益）** | 慢 ~3.9x |
+
+- **str 的裁决（2026-10-15，推翻旧锚点「慢 ~6x」）**：字符串负载在 wasm 里既非收益也无系统性劣势，
+  **≈解释器持平**。独立 A/B 交替实测（best-of-10 × 6 轮，strWork(200000)）：AOT wasm 中位 **28.18ms**
+  vs interp 回退 **26.50ms** —— 每轮 `s = s + i` 跨一次 `qz.string_concat` 边界，跨界税吃掉全部
+  AOT 收益。**故 str 放弃 wasm 化**，走 `--interp` 退解释器（`compileTS(opts.interp)`，调用者
+  经传递闭包一并退，glue 内联 transpile 出的 JS；判据不做自动推断，显式列名）。
 
 ## 跨界税：唯一的大杠杆
 
@@ -142,4 +148,16 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
   kind: decision
   summary: "消解页内数字矛盾：结论段「纯数值 ~130x」与同页实测表「~134x」不一致，统一为 ~134x 并标注负载/规模（numWork(3000)：AOT 361ms vs 解释器 48.4s）。"
   source: "48.4s/361ms=134.1 核算 + 同页表格"
+  affects: [aot-performance-model]
+
+- time: 2026-10-15T07:11:31
+  kind: reversal
+  summary: "字符串负载放弃 wasm 化：A/B 交替实测（best-of-10 × 6 轮）strWork(200000) AOT wasm 中位 28.18ms vs interp 回退 26.50ms —— wasm 零收益（每轮 s=s+i 跨一次 qz.string_concat 边界，跨界税吃掉全部 AOT 收益）。实现 --interp：compileTS(opts.interp) 把指定函数从 wasm 摘出去（不 declareFunc/不 emitFunc，funcMeta.mode=interp），调用者经传递闭包一并退；program.emit 复用同一 AST 产出可内联 JS（checker 重写 import 引用、剥 export 修饰符、清 externalModuleIndicator 防 require/exports 包装），glue 闭包内求值 + __call 按 mode 分派（与 wasm 同一份源码，语义等价）。bench_mix 的 str 负载即此配置。不做自动推断（用户裁决：不用太复杂），显式列名。守门 test_aot.js runInterp（7 项）。"
+  source: "用户裁决 2026-10-15：不用太复杂，测量 wasm 性能确实不如模块内 qzvm 就放弃 str 的 wasm 化加速"
+  affects: [aot-performance-model]
+
+- time: 2026-10-15T07:12:13
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
   affects: [aot-performance-model]

@@ -66,7 +66,10 @@ const QZ = {
   // wasm 侧仅用于 0x7FF8 数组；字符串/其它不适用。
   arr_set_len: { params: ["i64", "i64"], results: ["i64"] },
 };
-function registerQz(m) { for (const k of Object.keys(QZ)) m.importFn("qz", k, QZ[k].params, QZ[k].results); return m; }
+// 注册 qz.* import。only = 采集到的「实际用到」集合（Set<"qz.<name>">）；缺省/undefined
+// 则全量注册（向后兼容）。按需注册是 brain [[aot-generic-compiler-target]] 的要求：
+// import 面 = 需求驱动的最小契约面，不是 qzjs 私有 ABI 的全集。
+function registerQz(m, only) { for (const k of Object.keys(QZ)) { if (only && !only.has("qz." + k)) continue; m.importFn("qz", k, QZ[k].params, QZ[k].results); } return m; }
 
 // 类方法/构造器在函数名中的编码（内部前缀，避免与用户函数名冲突）。
 const MTH_PREFIX = "__m_";
@@ -90,9 +93,13 @@ class Emitter {
         this._leafClasses = new Set();// 无子类的类：其方法/构造器内 `this` 静态精确
         this._pendingLambdas = [];    // 已登记待发射的 lambda 体
         this.sf = null;               // 当前 SourceFile（行号查询；compileTS 设置）
+        this.importAlias = null;      // { 本地导入名 → 目标顶层函数名 }；compileTS 多文件时设置
     }
     // 源码行号（1-based）。DWARF 行标记用；无 sf 时返回 0（该 mark 被忽略）。
     _line(node) { return (this.sf && node && node.pos !== undefined) ? this.sf.getLineAndCharacterOfPosition(node.getStart(this.sf)).line + 1 : 0; }
+    /* 跨文件内联：把 `import { x as y }` 的本地别名 y 折回目标模块的导出名 x。
+     * 非导入名原样返回（本模块顶层函数 / 闭包变量）。 */
+    _fnName(name) { return (this.importAlias && this.importAlias.get(name)) || name; }
     _local(name) { return this.varMap.get(name); }
     // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
     _curLabel() { return this._labelStack.length ? this._labelStack.pop() : null; }
@@ -240,6 +247,7 @@ class Emitter {
     }
 
     emitFunc(f) {
+        // 多文件编译：em.sf 由 compileTS 按「本函数所属源文件」设置（行号/DWARF 用）。
         const savedCurClass = this._curClass, savedCapActive = this.capListActive, savedStatic = this._staticVars;
         this._curClass = undefined; this.capListActive = false;
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
@@ -677,7 +685,7 @@ class Emitter {
             const fn = e.expression.text;
             if (fn === "Math_floor") { this.emitExpr(e.arguments[0]); this.m.f64Floor(); return; }
             for (const a of e.arguments) this.emitExpr(a);
-            this.m.call(fn);
+            this.m.call(this._fnName(fn));
             return;
         }
         throw new Error("不支持的表达式: " + ts.SyntaxKind[e.kind]);
@@ -702,25 +710,42 @@ class Emitter {
             this.m.localTee(idx);
             return;
         }
-        // 逻辑复合赋值：a ||= b → a = a || b（truthy 判）；a &&= b 同理（数值域：非 0 即真）
+        // 逻辑复合赋值：a ||= b / a &&= b —— 真短路 + **值语义**（JS 精确）：
+        // a ||= b ≡ a || (a = b)；a &&= b ≡ a && (a = b)。值 = truthy(a) ? a : b（||）
+        // / truthy(a) ? b : a（&&）。左侧仅求值一次（左值恒为标识符，cache local 即可）。
         if (op === ts.SyntaxKind.BarBarEqualsToken || op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) {
             if (!ts.isIdentifier(e.left)) throw new Error("赋值左值必须是标识符");
             const idx = this._local(e.left.text);
             if (idx === undefined) throw new Error("未定义变量: " + e.left.text);
-            this.m.localGet(idx); this.emitCond();
-            this.emitBinaryOperandValue(e.right); this.emitCond();
-            if (op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) this.m.i32And(); else this.m.i32Or();
-            this.m.f64ConvertI32S(); this.m.localTee(idx);
+            const isAnd = op === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
+            this.m.block("f64");                              // block(result f64)
+            this.m.localGet(idx);                             // [a]
+            this.m.localTee(this.scratch);                    // scratch=a；栈 [a]（短路时作块结果）
+            this.m.localGet(this.scratch); this.emitCond();   // [a, truthy(a)]
+            if (isAnd) this.m.i32Eqz();                       // && : falsy(a) → 跳出（返回 a）
+            this.m.brIf(0);                                   // 条件真（|| 的 a 真 / && 的 a 假）→ 返回 a
+            this.m.drop();                                    // 落下路径丢弃 a
+            this.emitBinaryOperandValue(e.right);             // 仅此路径求值 b
+            this.m.localSet(idx);                             // 副作用：a = b
+            this.m.localGet(idx);                             // 块结果 = b
+            this.m.end(); this.m.localTee(idx);               // 写回 a，栈留结果值
             return;
         }
 
-        // 短路逻辑（数值域：非 0 即真）
+        // 短路逻辑（**真短路 + 值语义**，JS 精确）：
+        //  a && b ≡ truthy(a) ? b : a   a || b ≡ truthy(a) ? a : b
+        // 关键：b 只在短路决策需要时才求值（副作用语义）；结果保留操作数原值而非 0/1。
         if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
-            // 简化：非短路直接算两边（truthy→0/1 f64）；结果 0/1
-            this.emitBinaryOperandValue(e.left); this.emitCond();
-            this.emitBinaryOperandValue(e.right); this.emitCond();
-            if (op === ts.SyntaxKind.AmpersandAmpersandToken) this.m.i32And(); else this.m.i32Or();
-            this.m.f64ConvertI32S();
+            const isAnd = op === ts.SyntaxKind.AmpersandAmpersandToken;
+            this.m.block("f64");                              // block(result f64)
+            this.emitBinaryOperandValue(e.left);              // [a]
+            this.m.localTee(this.scratch);                    // scratch=a；栈 [a]（短路时作块结果）
+            this.m.localGet(this.scratch); this.emitCond();   // [a, truthy(a)]
+            if (isAnd) this.m.i32Eqz();                       // && : falsy(a) → 跳出（返回 a）
+            this.m.brIf(0);                                   // 短路条件真 → 返回 a
+            this.m.drop();                                    // 落下路径丢弃 a
+            this.emitBinaryOperandValue(e.right);             // 仅此路径求值 b
+            this.m.end();                                     // 块结果 = b
             return;
         }
         this.emitBinaryOperandValue(e.left);
@@ -789,11 +814,33 @@ class Emitter {
 const STR_TAG_HI = 0x7ffa;                       // 字符串句柄高 16 位标记
 const ARR_TAG_HI = 0x7ff8;                       // 数组句柄高 16 位标记（布局 [len:i32][pad:i32][elem:i64×N]，元素 +8 起）
 const SCRATCH = 16;                              // numstr 临时区（48 字节，够 20 位 + 负号 + len）
-const STR_BASE = 1 << 20;                        // 字面量 data 段基址（1 MiB，heap 不会撞）
+const STR_BASE = 8 << 20;                        // 字面量 data 段基址（8 MiB）：bump 堆 arena 上限，越过即 trap
 const STR_BUMP = 128;                            // bump 堆起始（跳过 scratch）
 
 // 字符串 helper 函数（每模块一份，emitter call 调用）
+
+// 推进 bump 堆：emitDelta 把增量(i32)压栈；新值经 qzs_ckmem 守卫（越界 trap）后写回 global0。
+function emitBumpGrow(m, emitDelta) {
+    m.globalGet(0); emitDelta(); m.i32Add(); m.call("qzs_ckmem"); m.globalSet(0);
+}
+// 分配 emitTotal 字节：bump 经守卫增长后回退，栈顶留 offset(i32)（= 增长前的 bump）。
+function emitBumpAlloc(m, emitTotal) {
+    emitBumpGrow(m, emitTotal);
+    m.globalGet(0); emitTotal(); m.i32Sub();
+}
+// 直接落定 bump 新值：emitNewVal 压栈得 newBump(i32)，经 qzs_ckmem 守卫后写回 global0。
+function emitBumpSet(m, emitNewVal) {
+    emitNewVal(); m.call("qzs_ckmem"); m.globalSet(0);
+}
 function emitStringHelpers(m) {
+    // qzs_ckmem(newBump:i32) -> i32：bump 越界守卫。arena = [SCRATCH, STR_BASE)，越过基址
+    // 即 trap（unreachable），杜绝静默覆盖字面量段（STR_BASE 起）或 OOB 崩溃。
+    m.declareFunc("qzs_ckmem", ["i32"], ["i32"]);
+    m.startBody("qzs_ckmem", [], []);
+    m.localGet(0); m.i32Const(STR_BASE); m.i32GtU();
+    m.ifBlock("void"); m.unreachable(); m.end();
+    m.localGet(0);
+    m.endBody();
     // qzs_memcpy(dest, src, n)：先 8 字节块（i64.load/store，wasm 允许非对齐），尾字节。
     // 逐字节版对每次 append 的小 n 太慢（真实上下文 ~178ns/byte）。
     m.declareFunc("qzs_memcpy", ["i32", "i32", "i32"], []);
@@ -889,14 +936,14 @@ function emitStringHelpers(m) {
     m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(3); m.i32Add();
     m.globalGet(0); m.i32Eq();                            // top?
     m.ifBlock("i32");
-    m.globalGet(0); m.localGet(2); m.i32Add(); m.globalSet(0);   // bump+=addLen
+    emitBumpGrow(m, () => m.localGet(2));                 // bump+=addLen（越界 trap）
     m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(3); m.i32Add();  // dest
     m.localGet(1); m.localGet(2); m.call("qzs_memcpy");
     m.localGet(0); m.localGet(3); m.localGet(2); m.i32Add(); m.i32Store(2, 0);
     m.localGet(0);
     m.else_();
     m.globalGet(0); m.localSet(4);                        // newBuf
-    m.globalGet(0); m.i32Const(4); m.i32Add(); m.localGet(3); m.i32Add(); m.localGet(2); m.i32Add(); m.globalSet(0);
+    emitBumpGrow(m, () => { m.i32Const(4); m.localGet(3); m.i32Add(); m.localGet(2); m.i32Add(); });   // bump+=4+oldLen+addLen
     m.localGet(4); m.localGet(3); m.localGet(2); m.i32Add(); m.i32Store(2, 0);
     m.localGet(4); m.i32Const(4); m.i32Add(); m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(3); m.call("qzs_memcpy");
     m.localGet(4); m.i32Const(4); m.i32Add(); m.localGet(3); m.i32Add(); m.localGet(1); m.localGet(2); m.call("qzs_memcpy");
@@ -905,78 +952,246 @@ function emitStringHelpers(m) {
     m.endBody();
 }
 
-// 函数编译模式：参数全 number 且返回 number/void/无标注 → "num"（f64 快路径）。
-// 必须同时看返回类型：零参函数 .every() 恒 true，返回 any 的函数须走 tagged。
+/* 函数编译模式：参数全 number、返回 number/void、且函数体**只含 num 安全表达式**
+ * → "num"（f64 快路径）。任一不安全表达式 → "tagged"。
+ * num emitExpr 只支持：Identifier / NumericLiteral / BinaryExpression(算术/逻辑/比较) /
+ * CallExpression(到 num 函数) / PrefixUnaryExpression(++/--/!) / PostfixUnaryExpression /
+ * ConditionalExpression(三元) / ParenthesizedExpression / 赋值表达式。
+ * 其余（对象/数组/字符串字面量、属性/元素访问、模板、new、箭头、类型断言…）num 路径
+ * emitExpr 会直接抛 `不支持的表达式` —— 必须在 funcMode 阶段就检出并退到 tagged。
+ * 这不是「性能换语义」——是编译器**崩溃预防**：不降级的后果是硬错误而非运行时慢。 */
 function funcMode(f) {
     const rt = f.type;
     const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
     const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
-    // 含箭头/函数表达式/`new` 的函数走 tagged（闭包与类实例是 tagged 特性，num 快路径不支持）
-    let hasLam = false;
+    // 非安全表达式：只要函数体含任一即退 tagged
+    let unsafe = false;
     const walk = (n) => {
-        if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && n !== f) hasLam = true;
-        if (ts.isNewExpression(n)) hasLam = true;
+        if (n === f) { ts.forEachChild(n, walk); return; }
+        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isNewExpression(n)
+            || ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)
+            || ts.isObjectLiteralExpression(n) || ts.isArrayLiteralExpression(n)
+            || ts.isTemplateExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n)
+            || ts.isSpreadElement(n) || ts.isTaggedTemplateExpression(n)
+            || ts.isClassExpression(n) || ts.isAwaitExpression(n) || ts.isYieldExpression(n)
+            || ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n))
+            unsafe = true;
         ts.forEachChild(n, walk);
     };
-    if (f.body) walk(f.body);
-    return (allNum && rtOk && !hasLam && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
+    if (f.body) walk(f);
+    return (allNum && rtOk && !unsafe && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
 }
+
 function compileTS(input, outWasm, opts = {}) {
-    const program = ts.createProgram([input], { strict: true, target: ts.ScriptTarget.ES2020 });
-    const sf = program.getSourceFile(input);
-    const m = new Module({ debug: !!opts.debug, debugLine: !!opts.debug || !!opts.debugLine, srcFile: input });   // opts.debug → name 段 + DWARF 行表
-    if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
-    const em = new Emitter(m);
-    em.sf = sf;
-    const fns = sf.statements.filter(st => ts.isFunctionDeclaration(st) && st.name);
-    for (const st of fns) em.fnNames.add(st.name.text);
-    const clsStmts = sf.statements.filter(st => ts.isClassDeclaration(st));
+    // tsc 的 createProgram **自带模块解析**（import 链）：它把被 import 的 .ts 文件全部
+    // 纳入 program.getSourceFiles()。这是现成的 TS 内联工具——不自己实现模块图遍历。
+    // 每个源文件（非声明文件）的顶层函数/类都编进**同一个** wasm 模块（内联）；跨文件
+    // 引用经 tsc 解析后是同模块内的普通 call（名字域 = wasm 函数索引）。
+    // module: None —— interp 回退要直接 emit 出可内联的 JS（见下方 interpJs），不希望 tsc 生成
+    // require/exports 包装；wasm 路径只用 AST，不受影响。
+    const program = ts.createProgram([input], { strict: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None, moduleResolution: ts.ModuleResolutionKind.NodeJs });
+    const sfs = program.getSourceFiles().filter(f => !f.isDeclarationFile && f.fileName.endsWith(".ts"));
+    const sf = program.getSourceFile(input);   // 入口文件（默认 em.sf；逐函数按源文件覆盖）
+    // 收集顶层函数/类，并记录各自源文件（`ts.getSourceFileOfNode` 需要 parent 指针，
+    // 而未绑定的 program 里 parent 为空；收集时就近记录，避免额外触发类型绑定）。
+    const fns = [];
+    const fnSf = new Map();          // 函数节点 → 源文件（逐函数设 em.sf，供行号/DWARF）
+    const clsStmts = [];
+    for (const f of sfs) {
+        for (const st of f.statements) {
+            if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); }
+            else if (ts.isClassDeclaration(st)) clsStmts.push(st);
+        }
+    }
     const hasClasses = clsStmts.length > 0;
-    // 阶段1：任一函数为 tagged 或存在类 → 注册全部 qz.* import + 字符串 helper；登记顶层函数签名
-    const anyTagged = fns.some(f => funcMode(f) === "tagged") || hasClasses;
+    // import 绑定：{ 本地名 → 目标模块导出名 }。模块图由 tsc 解析（createProgram），
+    // 这里只把 `import { x as y }` 的本地别名折回目标顶层函数名（跨文件调用解析用）。
+    const importAlias = new Map();
+    for (const f of sfs) {
+        for (const st of f.statements) {
+            if (!ts.isImportDeclaration(st) || !st.importClause) continue;
+            const ic = st.importClause;
+            if (ic.name) throw new Error(`[inline] 默认/命名空间导入暂不支持（${path.basename(f.fileName)}）`);
+            if (!ic.namedBindings || !ts.isNamedImports(ic.namedBindings)) continue;
+            for (const sp of ic.namedBindings.elements) {
+                importAlias.set(sp.name.text, sp.propertyName ? sp.propertyName.text : sp.name.text);
+            }
+        }
+    }
+    // 内联到同一 wasm 模块 ⇒ 顶层函数名必须全局唯一。冲突宁可显式报错，
+    // 不静默覆盖（覆盖 = 调错函数，属语义错误）。
+    {
+        const seenFn = new Map();
+        for (const f of fns) {
+            const n = f.name.text;
+            const fs2 = fnSf.get(f);
+            const where = fs2 ? fs2.fileName : "(unknown)";
+            if (seenFn.has(n))
+                throw new Error(`[inline] 顶层函数名冲突: "${n}" 同时出现在 ${path.basename(seenFn.get(n))} 与 ${path.basename(where)}`);
+            seenFn.set(n, where);
+        }
+    }
+    // ── interp 回退：opts.interp 列出的函数不编 wasm，退到 JS 跑在宿主解释器里。
+    // 理由：字符串操作在 wasm 里每轮循环都跨 qz.add 调宿主 → 跨界开销吃掉 AOT 收益。
+    // 传递闭包：wasm 函数调 interp 函数 = 该函数也须 interp（wasm 内无该函数索引）。
+    const allFnNames = new Set(fns.map(f => f.name.text));
+    const interpSet = new Set(opts.interp || []);
+    if (interpSet.size > 0) {
+        // 调用图：顶层函数 → 它调用的顶层函数集
+        const calls = new Map();
+        for (const f of fns) {
+            const callees = new Set();
+            const walk = (n) => {
+                if (ts.isCallExpression(n) && n.expression && ts.isIdentifier(n.expression)) {
+                    const resolved = importAlias.get(n.expression.text) || n.expression.text;
+                    if (allFnNames.has(resolved)) callees.add(resolved);
+                }
+                ts.forEachChild(n, walk);
+            };
+            if (f.body) walk(f.body);
+            calls.set(f.name.text, callees);
+        }
+        // 传递闭包
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const [fn, callees] of calls) {
+                if (interpSet.has(fn)) continue;
+                for (const callee of callees) {
+                    if (interpSet.has(callee)) { interpSet.add(fn); changed = true; break; }
+                }
+            }
+        }
+    }
+    // TS→JS（去类型）供 glue 内联 interp 函数。
+    // 内联后是**单一作用域**（模块边界已由 inlining 消除），故须剥掉模块语法：
+    //  ① 删 import/export 声明；
+    //  ② `import { pad as fill }` 的**引用点**重写成目标顶层函数名（fill → pad）——tsc 的模块
+    //     transform 本来会把引用改写成 `str2_1.pad`（依赖 require），内联后没有它，必须自己重写；
+    //  ③ 剥 export/default 修饰符（否则 emit 出 `exports.X = X`，glue 里没有 exports）。
+    // 用 program.getTypeChecker() 精确定位 import 绑定（而非按名字猜），program.emit 复用同一 AST。
+    let interpJs = "";
+    if (interpSet.size > 0) {
+        const checker = program.getTypeChecker();
+        const stripModuleSyntax = (ctx) => (sf2) => {
+            const visit = (n) => {
+                if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) return undefined;
+                if (ts.isIdentifier(n)) {
+                    const sym = checker.getSymbolAtLocation(n);          // import 绑定 = alias symbol
+                    if (sym && (sym.flags & ts.SymbolFlags.Alias) && sym.declarations && ts.isImportSpecifier(sym.declarations[0])) {
+                        const target = checker.getAliasedSymbol(sym);
+                        if (target && target.name && target.name !== n.text) return ts.factory.createIdentifier(target.name);
+                    }
+                    return n;
+                }
+                if (ts.canHaveModifiers(n)) {
+                    const mods = ts.getModifiers(n);
+                    const EXP = ts.SyntaxKind.ExportKeyword, DEF = ts.SyntaxKind.DefaultKeyword;
+                    if (mods && mods.some(m => m.kind === EXP || m.kind === DEF))
+                        n = ts.factory.replaceModifiers(n, mods.filter(m => m.kind !== EXP && m.kind !== DEF));
+                }
+                return ts.visitEachChild(n, visit, ctx);
+            };
+            const out = ts.visitNode(sf2, visit);
+            if (out) {   // 清掉「这是模块」的标记 → emit 不再生成 __esModule 包装
+                out.externalModuleIndicator = undefined;
+                if (typeof out.transformFlags === "number") out.transformFlags &= ~ts.TransformFlags.ContainsES2015Module;
+            }
+            return out;
+        };
+        const emitted = new Map();
+        program.emit(undefined, (fname, text) => { emitted.set(fname, text); }, undefined, false, { before: [stripModuleSyntax] });
+        for (const sf2 of sfs) {
+            const text = emitted.get(sf2.fileName.replace(/\.ts$/, ".js"));
+            if (text) interpJs += text + "\n";
+        }
+    }
+    // interp 函数不占 wasm，故不参与「是否需要 tagged 运行时」的判定。
+    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "tagged") || hasClasses;
+
+
+    /* 单趟发射：对给定 module 走完「注册 → 声明 → 发射 body → 导出」。
+     * 调两趟：① collect 模式**采出实际用到**的 qz.* 契约面（产物丢弃）；
+     *         ② 按该子集注册后真发。
+     * 为什么必须两趟：import 索引要在 declareFunc 之前定妥（funcidx = codeIdx +
+     * imports.length），无法边发射边补登记。见 brain [[aot-generic-compiler-target]]：
+     * import 面 = 需求驱动的最小契约面，不是 qzjs 私有 ABI 全集。 */
+    const emitAll = (m, contract) => {
+        const em = new Emitter(m);
+        em.sf = sf;
+        em.importAlias = importAlias;    // 跨文件 import 别名 → 目标顶层函数名
+        for (const st of fns) em.fnNames.add(st.name.text);
+        for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
+        if (!m.collect) {
+            if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
+            if (contract) registerQz(m, contract);
+        }
+        if (anyTagged) {
+            m.addMemory(256);                                // 16 MiB：bump arena [0,STR_BASE=8MiB) + 字面量段 [8MiB,16MiB)
+            m.addGlobal("i32", STR_BUMP);                    // global0 = bump 堆（字符串/对象）
+            m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
+            emitStringHelpers(m);
+        }
+        for (const st of fns) {
+            if (interpSet.has(st.name.text)) continue;   // interp 函数不进 wasm
+            const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
+            const isNum = funcMode(st) === "num";
+            const vt = isNum ? "f64" : "i64";   // num=f64；tagged=i64（NaN-box）
+            m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
+        }
+        // 阶段1.5：收集类（登记方法/构造器签名）——须在发射体前
+        if (hasClasses) for (const s of sfs) em.collectClasses(s);
+        // 阶段1.5b：扫描 lambda（顶层函数体 + 类方法/构造器体 + 字段初值），登记 __lam_N 签名
+        let lamSeq = 0;
+        for (const st of fns) {
+            if (interpSet.has(st.name.text)) continue;
+            for (const lam of em._collectLambdas(st.body)) em.emitLambda(lam, lamSeq++);
+        }
+        for (const cname of em._classList) {
+            const c = em.classes.get(cname);
+            if (c.ctor) for (const lam of em._collectLambdas(c.ctor.body)) em.emitLambda(lam, lamSeq++);
+            for (const mth of c.methods) for (const lam of em._collectLambdas(mth.node.body)) em.emitLambda(lam, lamSeq++);
+            for (const f of c.fields) if (f.init) for (const lam of em._collectLambdas(f.init)) em.emitLambda(lam, lamSeq++);
+        }
+        // 阶段2：逐个发射 body（顶层函数 + lambda + 类方法/构造器）
+        for (const st of fns) { if (interpSet.has(st.name.text)) continue; em.sf = fnSf.get(st) || sf; em.emitFunc(st); }
+        em.emitLambdaBodies();
+        if (hasClasses) em.emitClassBodies();
+        for (const cname of em._classList) {
+            const c = em.classes.get(cname);
+            for (const mth of c.methods) m.exportFn(methName(cname, mth.name), methName(cname, mth.name));
+            m.exportFn(ctorName(cname), ctorName(cname));
+        }
+        if (m.memory !== null) m.exportMemory();
+        if (anyTagged) {
+            m.exportGlobal("__bump", m.globalIdx());
+            // __bump_reset()：把 bump 堆指针重置到起点。glue 在每次宿主 __call 前调用，
+            // 使一次调用的 arena 占用与调用时长解耦（否则长循环累加耗尽 arena）。
+            m.declareFunc("__bump_reset", [], []);
+            m.startBody("__bump_reset", [], []);
+            m.i32Const(STR_BUMP); m.globalSet(0);
+            m.endBody();
+            m.exportFn("__bump_reset", "__bump_reset");
+        }
+        for (const meta of em._lamById.values()) m.exportFn(meta.fname, meta.fname);
+        return em;
+    };
+
+    // 第一趟（仅需契约面时）：采集实际用到的 qz.* 符号。
+    let contract = null;
     if (anyTagged) {
-        registerQz(m);
-        m.addMemory(32);                                 // 2 MiB：heap(<1MiB) + 字面量(STR_BASE 起)
-        m.addGlobal("i32", STR_BUMP);                    // global0 = bump 堆（字符串/对象）
-        m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
-        emitStringHelpers(m);
+        const mc = new Module({ collectImports: true });
+        emitAll(mc, null);
+        contract = mc.collected;
     }
-    for (const st of fns) {
-        const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
-        const isNum = funcMode(st) === "num";
-        const vt = isNum ? "f64" : "i64";   // num=f64；tagged=i64（NaN-box）
-        m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
-    }
-    // 阶段1.5：收集类（登记方法/构造器签名）——须在发射体前
-    if (hasClasses) em.collectClasses(sf);
-    // 阶段1.5b：扫描 lambda（顶层函数体 + 类方法/构造器体 + 字段初值），登记 __lam_N 签名
-    let lamSeq = 0;
-    for (const st of fns) {
-        for (const lam of em._collectLambdas(st.body)) em.emitLambda(lam, lamSeq++);
-    }
-    for (const cname of em._classList) {
-        const c = em.classes.get(cname);
-        if (c.ctor) for (const lam of em._collectLambdas(c.ctor.body)) em.emitLambda(lam, lamSeq++);
-        for (const mth of c.methods) for (const lam of em._collectLambdas(mth.node.body)) em.emitLambda(lam, lamSeq++);
-        for (const f of c.fields) if (f.init) for (const lam of em._collectLambdas(f.init)) em.emitLambda(lam, lamSeq++);
-    }
-    // 阶段2：逐个发射 body（顶层函数 + lambda + 类方法/构造器）
-    for (const st of fns) em.emitFunc(st);
-    em.emitLambdaBodies();
-    if (hasClasses) em.emitClassBodies();
-    for (const cname of em._classList) {
-        const c = em.classes.get(cname);
-        for (const mth of c.methods) m.exportFn(methName(cname, mth.name), methName(cname, mth.name));
-        m.exportFn(ctorName(cname), ctorName(cname));
-    }
-    if (m.memory !== null) m.exportMemory();
-    if (anyTagged) m.exportGlobal("__bump", m.globalIdx());
-    for (const meta of em._lamById.values()) m.exportFn(meta.fname, meta.fname);
+    // 第二趟：按采集到的子集注册契约面，真发产物。
+    const m = new Module({ debug: !!opts.debug, debugLine: !!opts.debug || !!opts.debugLine, srcFile: input });
+    const em = emitAll(m, contract);
     fs.writeFileSync(outWasm, m.build());
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
     const funcMeta = fns.map(f => ({
         name: f.name.text,
-        mode: funcMode(f),
+        mode: interpSet.has(f.name.text) ? "interp" : funcMode(f),   // interp = 不编 wasm，glue 走宿主 JS
         params: f.parameters.length,
     }));
     const lamMeta = {};
@@ -991,7 +1206,7 @@ function compileTS(input, outWasm, opts = {}) {
         const p = c.parent ? em.classes.get(c.parent) : null;
         return { id: c.id, parent: p ? p.id : null, methods };
     });
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta };
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs };
 }
 
 
@@ -1310,13 +1525,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         // 分配 size = 最大字段字节偏移 + 8（偏移 0 保留给 __cls 头，POJO 留 0 亦无害）。
         const fIdx = e.properties.map(p => this._fieldIndex(p.name.text));
         const size = Math.max(...fIdx) + 8;
-        this.m.globalGet(0);
-        this.m.i32Const(size);
-        this.m.i32Add();
-        this.m.globalSet(0);
-        this.m.globalGet(0);
-        this.m.i32Const(size);
-        this.m.i32Sub();                            // → offset(i32)
+        emitBumpAlloc(this.m, () => this.m.i32Const(size));   // → offset(i32)（越界 trap）
         this.m.i64ExtendI32U(); this.m.i64ConstBits(0, 0x7ff9); this.m.i64Or();   // 句柄 = 高16位0x7FF9 | offset(低32)
         const slot = this.objBase + this._objDepth;   // 本层句柄槽（嵌套各占一层，避免内层覆盖）
         this._objDepth++;
@@ -1336,8 +1545,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         // 句柄 = 0x7FF8|headerOff；push 增长只换 data 块、句柄不变（支持别名/传参/属性）。
         const N = e.elements.length;
         const total = 16 + N * 8;
-        this.m.globalGet(0); this.m.i32Const(total); this.m.i32Add(); this.m.globalSet(0);
-        this.m.globalGet(0); this.m.i32Const(total); this.m.i32Sub();     // → headerOff(i32)
+        emitBumpAlloc(this.m, () => this.m.i32Const(total));   // → headerOff(i32)（越界 trap）
         this.m.localSet(this.sT[0]);
         this.m.localGet(this.sT[0]); this.m.i32Const(N); this.m.i32Store(2, 0);    // len
         this.m.localGet(this.sT[0]); this.m.i32Const(N); this.m.i32Store(2, 4);    // cap
@@ -1399,7 +1607,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
         const fn = e.expression.text;
-        if (this.m._funcIdx[fn] === undefined && !this.fnNames.has(fn)) {
+        if (this.m._funcIdx[this._fnName(fn)] === undefined && !this.fnNames.has(this._fnName(fn))) {
             // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)
             const hIdx = this._local(fn);
             if (hIdx === undefined) throw new Error("未定义函数: " + fn);
@@ -1414,7 +1622,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             return;
         }
         for (const a of e.arguments) this.emitTaggedExpr(a);
-        this.m.call(e.expression.text); return;
+        this.m.call(this._fnName(fn)); return;
     }
     if (ts.isConditionalExpression(e)) {                                                     // a ? b : c
         this.emitCondI32(e.condition);
@@ -1655,7 +1863,7 @@ Emitter.prototype._emitArrayPush = function (rx, arg) {
       M.end();
       M.localSet(this.sT[4]);                                 // newCap
       M.globalGet(0); M.localSet(this.sT[5]);                 // newData = bump
-      M.globalGet(0); M.localGet(this.sT[4]); M.i32Const(8); M.i32Mul(); M.i32Add(); M.globalSet(0);
+      emitBumpSet(M, () => { M.globalGet(0); M.localGet(this.sT[4]); M.i32Const(8); M.i32Mul(); M.i32Add(); });   // bump += newCap*8
       M.localGet(this.sT[5]);                                 // dest
       M.localGet(this.sT[3]); M.i32Load(2,8);                 // src = oldData
       M.localGet(this.sT[3]); M.i32Load(2,0); M.i32Const(8); M.i32Mul();   // n = len*8
@@ -1698,8 +1906,7 @@ Emitter.prototype._emitLambdaNew = function (lam) {
     const fidx = this.m._funcIdx[meta.fname];
     const caps = meta.caps.filter(n => this.varMap.has(n) || this.capMap.has(n));
     const total = 8 + caps.length * 8;
-    M.globalGet(0); M.i32Const(total); M.i32Add(); M.globalSet(0);
-    M.globalGet(0); M.i32Const(total); M.i32Sub();
+    emitBumpAlloc(M, () => M.i32Const(total));               // → off(i32)（越界 trap）
     M.localSet(this.cloOff);                          // cloOff = off
     M.localGet(this.cloOff); M.i32Const(fidx); M.i32Store(2, 0);    // [off]=funcidx
     M.localGet(this.cloOff); M.i32Const(caps.length); M.i32Store(2, 4);  // [off+4]=nCaps
@@ -1733,7 +1940,7 @@ Emitter.prototype._emitNewCall = function (e) {
     // 布局：offset 8 对齐，[off]=clsId(i32)，字段槽由 ctor 写。
     M.globalGet(0); M.i32Const(7); M.i32Add(); M.i32Const(-8); M.i32And();   // off=(bump+7)&~7
     M.localSet(this.sT[0]);
-    M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Add(); M.globalSet(0);   // bump=off+size
+    emitBumpSet(M, () => { M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Add(); });   // bump = off+size（越界 trap）
     M.localGet(this.sT[0]);
     M.i32Const(c.id); M.i32Store(2, 0);                     // [off]=clsId
     M.localGet(this.sT[0]); M.i64ExtendI32U(); M.i64ConstBits(0, 0x7ff9); M.i64Or();

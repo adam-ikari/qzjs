@@ -71,6 +71,12 @@ class Module {
         this._codeName = {};                   // codeIdx → 函数名（本地函数）
         this._codeDecl = {};                   // codeIdx → 声明行号
         this.srcFile = (opts && opts.srcFile) || ""; // 源文件路径（DWARF CU/行表用）
+        // collectImports：**采集模式**——只记录被引用到的 import 名（call/importFn），
+        // 不真正登记、不产字节。用于「先求出实际用到的契约面，再按需注册」：import
+        // 索引必须在 declareFunc 之前定妥（funcidx = codeIdx + imports.length），
+        // 故无法边发射边补登记；两趟发射（一趟采集、一趟真发）是唯一干净解。
+        this.collect = !!(opts && opts.collectImports);
+        this.collected = new Set();
     }
     // type: {name, params:[valtype], results:[valtype]}（results 空 = void）
     funcType(params, results) {
@@ -90,6 +96,7 @@ class Module {
     }
     importFn(module, field, params, results) {
         const key = module + "." + field;
+        if (this.collect) { this.collected.add(key); return 0; }   // 采集模式：只记名
         if (this._importIdx[key] !== undefined) return this._importIdx[key];
         const t = this.funcType(params, results);
         const idx = this.imports.length;
@@ -133,7 +140,16 @@ class Module {
     i64Const(v) { this._emit(OP.i64_const, ...sleb64(v)); }
     i64ConstBits(lo, hi) { this._emit(OP.i64_const, ...sleb64((BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0))); }
     f64Const(v) { const b = Buffer.alloc(8); b.writeDoubleLE(v); this._emit(OP.f64_const, ...b); }
-    call(name) { const idx = this._importIdx[name] !== undefined ? this._importIdx[name] : this._funcIdx[name]; if (idx === undefined) throw new Error("call 未定义: " + name); this._emit(OP.call, ...uleb(idx)); }
+    call(name) {
+        const idx = this._importIdx[name] !== undefined ? this._importIdx[name] : this._funcIdx[name];
+        if (idx === undefined) {
+            /* 采集模式：遇到 qz.* 记为「契约面用到」，不产字节（本趟 module 丢弃）。
+             * 非 qz.*（本地函数/helper）未定义 = 真错误，照抛。 */
+            if (this.collect && typeof name === "string" && name.indexOf("qz.") === 0) { this.collected.add(name); return; }
+            throw new Error("call 未定义: " + name);
+        }
+        this._emit(OP.call, ...uleb(idx));
+    }
     addGlobal(type, init) { (this.globals = this.globals || []).push({ type, init: init || 0 }); return this.globals.length - 1; }
     globalGet(i) { this._emit(OP.global_get, ...uleb(i)); }
     globalSet(i) { this._emit(OP.global_set, ...uleb(i)); }

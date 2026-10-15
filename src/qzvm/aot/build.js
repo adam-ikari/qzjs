@@ -71,6 +71,10 @@ function genGlue(prefix, mainCalls, wasmOnly) {
     const meta = metaObj.funcs;
     const lams = metaObj.lams || {};
     const classes = metaObj.classes || [];
+    // interp 回退：列在 funcMeta.mode === "interp" 的函数不编 wasm，跑 transpile 出的 JS。
+    const interpNames = meta.filter(m => m.mode === "interp").map(m => m.name);
+    const interpFile = prefix + ".interp.js";
+    const interpJs = (interpNames.length && fs.existsSync(interpFile)) ? fs.readFileSync(interpFile, "utf8") : "";
     const makeQzvm = extractMakeQzvm();
     const basename = path.basename(prefix);   // glue 读同目录外部文件（不内嵌）
     // 主逻辑体：--main 生成逐调用行；否则 __main 钩子（用户追加）
@@ -94,16 +98,30 @@ const __meta = ${JSON.stringify(meta)};
 const __lams = ${JSON.stringify(lams)};
 const __classes = ${JSON.stringify(classes)};
 const __fs = globalThis.qzjs && globalThis.qzjs.fs;
+// interp 回退函数：transpile 出的 JS（去类型）在闭包里求值，按名取出。
+// 与 wasm 路径语义等价（同一份 TS 源码），只是跑在宿主解释器而非 AOT 机器码。
+const __interp = (function () {
+${interpJs}
+return { ${interpNames.map(n => `${n}: typeof ${n} === "function" ? ${n} : undefined`).join(", ")} };
+})();
 ${load}
     const __ex = instance.exports;
-    qz.bindMem(__ex.memory);
+    if (__ex.memory) qz.bindMem(__ex.memory);   // 全 interp 产物无内存（空 wasm 模块）
     if (__ex.__bump) qz.bindBump(__ex.__bump);
     qz.bindClosures(__ex, __lams);
     qz.bindClasses(__ex, __classes);
     // __call(name, args)：按 funcMeta 自动转换 num(裸) vs tagged(_fromJS/_toJS)
+    // 每次调用前重置 bump arena（静态编译无 GC：调用内分配随调用结束失效，与调用时长解耦）。
     const __call = (name, args) => {
       const m = __meta.find(f => f.name === name);
       if (!m) throw new Error("未知导出: " + name);
+      // interp 模式：函数体跑宿主解释器（transpile 的 JS），参数/返回都是裸 JS 值，不经 qz 转换。
+      if (m.mode === "interp") {
+        const fn = __interp[name];
+        if (typeof fn !== "function") throw new Error("interp 函数缺失: " + name);
+        return fn(...args);
+      }
+      if (__ex.__bump_reset) __ex.__bump_reset();
       const conv = m.mode === "num" ? args : args.map(a => qz._fromJS(a));
       const r = __ex[name](...conv);
       return m.mode === "num" ? r : qz._toJS(r);
@@ -126,10 +144,15 @@ if (cmd === "build") {
     const prefix = path.join(outDir(), name);
     const wamrc = resolveWamrc();
     fs.mkdirSync(outDir(), { recursive: true });
-    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug") });
+    // --interp <fn1,fn2>：这些函数不编 wasm，退到宿主 JS 解释器跑。
+    const interpIdx = process.argv.indexOf("--interp");
+    const interp = interpIdx >= 0 ? process.argv[interpIdx + 1].split(",").filter(Boolean) : [];
+    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
     fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [] }));
-    console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}`);
+    if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
+    const nInterp = r.funcMeta.filter(m => m.mode === "interp").length;
+    console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp ? ` interp=${nInterp}` : ""}`);
     if (emitWat(prefix)) console.log(`  wat: ${prefix}.wat`);
     // --target <arch> [--target-abi <abi>]：交叉编译 .aot 到 32 位设备（armv7/riscv32/i386 等）
     const tIdx = process.argv.indexOf("--target");
@@ -149,10 +172,14 @@ if (cmd === "build") {
     const name = (nameArg && !nameArg.startsWith("--")) ? nameArg : path.basename(src).replace(/\.ts$/, "");
     const prefix = path.join(outDir(), name);
     fs.mkdirSync(outDir(), { recursive: true });
-    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug") });
+    const interpIdx2 = process.argv.indexOf("--interp");
+    const interp2 = interpIdx2 >= 0 ? process.argv[interpIdx2 + 1].split(",").filter(Boolean) : [];
+    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp: interp2 });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {} }));
-    console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}`);
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [] }));
+    if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
+    const nInterp2 = r.funcMeta.filter(m => m.mode === "interp").length;
+    console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp2 ? ` interp=${nInterp2}` : ""}`);
     if (emitWat(prefix)) console.log(`  wat: ${prefix}.wat`);
 } else if (cmd === "glue") {
     const mainIdx = process.argv.indexOf("--main");

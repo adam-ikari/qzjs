@@ -15,7 +15,7 @@
 
 ## 性能画像（qzjs 内 AOT vs 解释器，本机实测 2026-10-11）
 
-基准：`node src/qzvm/aot/bench_mix.js`（负载同 `mixbench.ts`；每负载独立子进程，bump 不重置）。
+基准：`node src/qzvm/aot/bench_mix.js`（负载同 `mixbench.ts`；每负载独立子进程隔离，glue 每次 `__call` 重置 bump）。
 
 | 负载                        | AOT 倍率       | 机制                             |
 | --------------------------- | -------------- | -------------------------------- |
@@ -50,9 +50,14 @@
 1. **数值运算已对齐 TS number**（tagged = f64 NaN-box，53 位；早期 i32 31 位模型已删）：`objWork(30000)` AOT 与解释器一致 = 8999999990000。
 2. **字符串已 wasm 内原生**（2026-10-11）：句柄 `0x7FFA`|offset，内存 `[len][utf8]`；字面量 data 段去重、`s+x` bump 顶原地追加、数字→十进制 `qzs_numstr`。原「慢 14x 跨界」已消除。a 数 + b 串仍回退 `qz.string_concat`。
    - 修复（2026-10-11）：guard 谓词原只识别对象句柄 `0x7FF9`，漏字符串 `0x7FFA` → `s == "..."` 等字符串比较回落 f64（两 NaN `f64.eq` 恒 false）。抽 `_emitIsHandle`（识别两种句柄）修 `emitGuardedOp` 与 `emitCmpI32`；`s=="..."` 命中/`!=` 现正确。
-3. **tagged 布尔/自增/逻辑语义**（2026-10-11 修复）：比较（`<`/`==`/…）、`!`、`&&`/`||` 产 tagged bool **f64 位型** 0.0/1.0（此前 `i64ExtendI32U` 产整数 1，与 `qz.lt` 回退分支不一致 → 当值用得 `5e-324`）；`if(!x)` 此前编译崩溃（prefix `!` 直调 `qz.truthy` 产 i32 违反 i64 契约）；`&&`/`||` 左操作数误加 `i32Eqz`（等价 `(!a)&b`）；postfix 不区分 `++`/`--`、prefix `++x` 不生效——均已修。`&&`/`||` 值语义（`a&&b→b`）仍简化为布尔 0/1（非 TS 精确），因两侧均求值、非真短路。
+3. **tagged 布尔/自增/逻辑语义**（2026-10-11 修复，2026-10-15 收口）：比较（`<`/`==`/…）、`!`、`&&`/`||` 产 tagged bool **f64 位型** 0.0/1.0（此前 `i64ExtendI32U` 产整数 1，与 `qz.lt` 回退分支不一致 → 当值用得 `5e-324`）；`if(!x)` 此前编译崩溃（prefix `!` 直调 `qz.truthy` 产 i32 违反 i64 契约）；`&&`/`||` 左操作数误加 `i32Eqz`（等价 `(!a)&b`）；postfix 不区分 `++`/`--`、prefix `++x` 不生效——均已修。
+   - **逻辑运算值语义已收口（2026-10-15）**：`&&`/`||`/`||=`/`&&=` 此前在 **num 快路径**里被简化成「两侧都求值 + 结果强制 0/1」，违反 JS 语义（`5&&3` 应为 `3`，实测得 `1`；`x=5; x||=9` 应为 `5`，实测得 `1`）。现两模式统一为**真短路 + 值语义**：`a&&b ≡ truthy(a)?b:a`，`a||b ≡ truthy(a)?a:b`（右侧仅在短路决策需要时求值，结果保留操作数原值）。tagged 走 `emitShortCircuit`，num 走 `block(f64)` + `brIf`（零 import）。回归门：`test_aot.js` 的 `and_val`/`or_val`/`or_assign`/`and_assign`。
+   - **原则（用户裁决 2026-10-15）**：**语义精度必须保证，不可用性能换**。任何「简化掉 JS 语义以换快路径」都按缺陷处理，不按 tradeoff 记录。
 4. **`%` 已 wasm 内原生**（2026-10-11）：tagged 模式 `emitTaggedRem` 命中 number 走 `a - trunc(a/b)*b`（= JS 余数语义，含负数/除零 NaN），回退 `qz.rem`。此前 `%` 无条件跨界，含 `%` 的 tagged 循环每轮一次 host 调用。10000 次含 `%` 循环跨界归零。
-5. **qzvm 仅 20 符号**（Perry 规模 211）——对象方法/数组方法/更多 API 未覆盖。
+5. **qzvm 契约面按需注册（2026-10-15 落地）**：`QZ` 表定义 30 个符号（Perry 规模 211，对象/数组方法未覆盖），但**产物只 import 实际用到的子集**——满足 brain `[[aot-generic-compiler-target]]` 的「import 面 = 需求驱动的最小契约面」。实现：`compileTS` **两趟发射**——第一趟 `Module({collectImports:true})` 只采集 `call()`/`importFn()` 触及的 `qz.*` 名（不登记、不产字节，产物丢弃），第二趟按该子集 `registerQz(m, contract)` 后真发。必须两趟的理由：import 索引要在 `declareFunc` 之前定妥（`funcidx = codeIdx + imports.length`），无法边发射边补登记。
+   - **多文件内联（2026-10-15）**：编译器不再只吃单文件——`compileTS` 用 tsc 的 `createProgram`（**现成的模块解析器**，不自研模块图遍历）拿到 `program.getSourceFiles()` 里的全部 `.ts`，把各模块顶层函数/类编进**同一个** wasm 模块（跨文件调用 = 同模块内普通 `call`）。`import { x as y }` 的本地别名折回目标导出名（`Emitter._fnName`）；顶层同名冲突**显式报错**（不静默覆盖）。实测：`mathx.ts`+`mainx.ts`（别名 `inc as bump`）→ `run(40)=42`、0 import；两模块同名 `dup` → 报 `顶层函数名冲突`。回归门 `test_aot.js` 的 `runMultiFile`。**未做**：默认导入 / 命名空间导入（`import * as ns`）/ 重导出（`export { x } from`）暂不支持（显式报错）；`any` 对象字段访问在 num 模式函数里仍不支持（须该函数走 tagged）。
+   - **funcMode 退 tagged 判据收紧（2026-10-15）**：此前 `funcMode` 只检查参数/返回类型注解 + 有无箭头/`new`，**漏了** body 里的属性访问/对象字面量/字符串字面量等 num emitExpr 不支持的表达式——如果 `: number` 参数函数体内用了 `o.value`（返回 `any`），funcMode 误判 num，emitExpr 崩溃 `不支持的表达式: PropertyAccessExpression`。现 walk 扫描 body 全部节点，任一非 num 安全表达式（PropertyAccess/ElementAccess/ObjectLiteral/ArrayLiteral/StringLiteral/Template/AsExpression/New/ArrowFunction/FunctionExpression/ClassExpression/Spread/TaggedTemplate/Await/Yield/NonNull）→ 退 tagged。**不是「性能换语义」**——是编译器崩溃预防（不降级的后果是硬错误而非慢）。num 快路径未误伤：`fib:num`、`numWork:num` 保持。
+   - **字符串密集型退解释器（`--interp`，2026-10-15）**：编译器支持把指定函数**从 wasm 摘出去**，退到同进程的解释器跑（`opts.interp` → `funcMeta.mode = "interp"`，wasm 里不 `declareFunc`/不 `emitFunc`；glue 内联 transpile 出的 JS，`__call` 按 mode 分派）。调用者经**传递闭包**一并退（wasm 内没有该函数的索引）。**依据（A/B 交替实测，best-of-10 × 6 轮）**：`strWork(200000)` AOT wasm 中位 **28.18ms** vs interp 回退 **26.50ms** —— wasm **零收益**（每轮 `s = s + i` 跨一次 `qz.string_concat` 边界，跨界税吃掉全部 AOT 收益）。故 `bench_mix.js` 的 `str` 负载直接放弃 wasm 化。num/obj 循环不要加（numWork 27x / objWork ~9x 对解释器）。判据**不做自动推断**（用户裁决：不用太复杂）——由使用者显式列出。
 6. **wasm 解释模式无意义**（1.74x）——必须 AOT（wamrc）或 JIT。
 7. **WAMR classic AOT 约束**：memory 必须本地定义（不能 import）、不能带 max、导出索引 0（wasm index space 独立）。
 

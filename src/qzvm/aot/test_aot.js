@@ -34,6 +34,11 @@ function inc(n: number): number { let x = n; x++; return x; }
 function postfix_ret(n: number): number { let x = n; let y = x++; return x * 10 + y; }
 function wsum(n: number): number { let s = 0; let i = 0; while (i < n) { s += i; i++; } return s; }
 function flo(a: number): number { return Math_floor(a); }
+// 逻辑运算**值语义**（守 2026-10-15 修复：曾结果强制 0/1，且 ||= 曾非真短路）
+function and_val(a: number, b: number): number { const r: any = a && b; return r; }
+function or_val(a: number, b: number): number { const r: any = a || b; return r; }
+function or_assign(a: number, b: number): number { let x = a; x ||= b; return x; }
+function and_assign(a: number, b: number): number { let x = a; x &&= b; return x; }
 `;
 
 async function runNum() {
@@ -59,6 +64,16 @@ async function runNum() {
     check("postfix_ret(10)", e.postfix_ret(10), 120);
     check("wsum(5)", e.wsum(5), 10);
     check("flo(3.7)", e.flo(3.7), 3);
+    // 逻辑值语义（JS 精确：返回操作数本身，不是 0/1）
+    check("and_val(5,3)", e.and_val(5, 3), 3);
+    check("and_val(0,3)", e.and_val(0, 3), 0);
+    check("or_val(0,7)", e.or_val(0, 7), 7);
+    check("or_val(5,7)", e.or_val(5, 7), 5);
+    // 逻辑复合赋值（a ||= b / a &&= b）
+    check("or_assign(5,9)", e.or_assign(5, 9), 5);
+    check("or_assign(0,9)", e.or_assign(0, 9), 9);
+    check("and_assign(5,9)", e.and_assign(5, 9), 9);
+    check("and_assign(0,9)", e.and_assign(0, 9), 0);
 }
 
 async function runTagged() {
@@ -74,6 +89,7 @@ async function runTagged() {
     qz.bindClosures(instance.exports, r.lamMeta);
     const call = (n, a) => {
         const m = r.funcMeta.find(f => f.name === n);
+        if (e.__bump_reset) e.__bump_reset();
         const conv = m.mode === "num" ? a : a.map(x => qz._fromJS(x));
         const res = e[n](...conv);
         return m.mode === "num" ? res : qz._toJS(res);
@@ -101,7 +117,7 @@ async function runTagged() {
     const { instance: instS } = await WebAssembly.instantiate(fs.readFileSync(strs), { qz: qzs });
     qzs.bindMem(instS.exports.memory);
     if (instS.exports.__bump) qzs.bindBump(instS.exports.__bump);
-    const callS = (n, a) => qzs._toJS(instS.exports[n](...a.map(x => qzs._fromJS(x))));
+    const callS = (n, a) => { if (instS.exports.__bump_reset) instS.exports.__bump_reset(); return qzs._toJS(instS.exports[n](...a.map(x => qzs._fromJS(x)))); };
     check("strWork(5)", callS("strWork", [5]), "001234");
     check("strWork(0)", callS("strWork", [0]), "0");
     { let ref = "0"; for (let i = 0; i < 2000; i++) ref += i; check("strWork(2000)", callS("strWork", [2000]), ref); }
@@ -122,7 +138,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     qzc.bindMem(instCl.exports.memory);
     if (instCl.exports.__bump) qzc.bindBump(instCl.exports.__bump);
     qzc.bindClosures(instCl.exports, rcl.lamMeta);
-    const callC = (n, a) => { const m = rcl.funcMeta.find(f => f.name === n); const r = instCl.exports[n](...a.map(x => qzc._fromJS(x))); return m.mode === "num" ? r : qzc._toJS(r); };
+    const callC = (n, a) => { const m = rcl.funcMeta.find(f => f.name === n); if (instCl.exports.__bump_reset) instCl.exports.__bump_reset(); const r = instCl.exports[n](...a.map(x => qzc._fromJS(x))); return m.mode === "num" ? r : qzc._toJS(r); };
     check("闭包.adder(5)", callC("adder", [5]), 15);
     check("闭包.closure()", callC("closure", []), 105);
 }
@@ -176,10 +192,69 @@ async function runDwarf() {
     check("dwarf.带段仍可执行", instance.exports.add(2, 3), 5);
 }
 
+/* 多文件内联（tsc createProgram 解析模块图）+ import 别名 + 冲突检测。
+ * 守「不同 .ts 模块编进同一 wasm」：跨文件调用、`import { x as y }` 别名折回、
+ * 顶层同名显式报错（不静默覆盖）。 */
+async function runMultiFile() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qz_aot_multi_"));
+    fs.writeFileSync(path.join(dir, "mathx.ts"), "export function inc(x: number): number { return x + 1; }\n");
+    // 别名 + 两层调用：bump(bump(x)) → x+2；且 main 自己不定义 inc
+    fs.writeFileSync(path.join(dir, "mainx.ts"),
+        "import { inc as bump } from './mathx';\n" +
+        "export function run(x: number): number { return bump(bump(x)); }\n");
+    const wasm = path.join(dir, "out.wasm");
+    const r = compileTS(path.join(dir, "mainx.ts"), wasm, {});
+    check("多文件.funcs=2(inc+run)", r.funcMeta.length, 2);
+    check("多文件.导出名含目标模块函数", r.funcMeta.some(f => f.name === "inc"), true);
+
+    const buf = fs.readFileSync(wasm);
+    const { instance } = await WebAssembly.instantiate(buf, {});
+    check("多文件.别名跨文件调用 run(40)", instance.exports.run(40), 42);
+    // 无 tagged ⇒ 契约面应为空（内联后全自洽）
+    check("多文件.import 面为空", WebAssembly.Module.imports(await WebAssembly.compile(buf)).length, 0);
+
+    // 同名冲突：两模块都导出 dup → 必须显式报错，不静默覆盖
+    fs.writeFileSync(path.join(dir, "a.ts"), "export function dup(x: number): number { return x + 1; }\n");
+    fs.writeFileSync(path.join(dir, "b.ts"), "export function dup(x: number): number { return x + 100; }\n");
+    fs.writeFileSync(path.join(dir, "m.ts"),
+        "import { dup as dupA } from './a';\nimport { dup as dupB } from './b';\n" +
+        "export function m(): number { return dupA(1); }\n");
+    let threw = "";
+    try { compileTS(path.join(dir, "m.ts"), path.join(dir, "m.wasm"), {}); }
+    catch (e) { threw = e.message; }
+    check("多文件.同名冲突显式报错", threw.includes("顶层函数名冲突"), true);
+}
+
+/* interp 回退（opts.interp）：列出的函数不进 wasm，改由 glue 内联的 JS 跑。
+ * 守「wasm 里无该函数 + 调用者被传递闭包带下来 + 可执行」。 */
+async function runInterp() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qz_aot_interp_"));
+    const src = path.join(dir, "i.ts");
+    fs.writeFileSync(src,
+        "function heavy(n: number): number { let s = 0; for (let i = 0; i < n; i++) s = s + i; return s; }\n" +
+        "export function caller(n: number): number { return heavy(n); }\n" +
+        "export function pureNum(x: number): number { return x * 3; }\n");
+    const wasm = path.join(dir, "i.wasm");
+    const r = compileTS(src, wasm, { interp: ["heavy"] });
+    const mode = (n) => (r.funcMeta.find(f => f.name === n) || {}).mode;
+    check("interp.heavy 标记为 interp", mode("heavy"), "interp");
+    check("interp.调用者传递闭包 → interp", mode("caller"), "interp");
+    check("interp.无关函数仍 num", mode("pureNum"), "num");
+    // 产物里不该有 interp 函数（wasm 导出表）
+    const exp = WebAssembly.Module.exports(await WebAssembly.compile(fs.readFileSync(wasm))).map(e => e.name);
+    check("interp.wasm 不含 heavy", exp.includes("heavy"), false);
+    check("interp.wasm 含 pureNum", exp.includes("pureNum"), true);
+    // interp JS 已产出且去掉了模块语法（无 exports/require/import 残留）
+    check("interp.产出去模块语法", /exports|require\(/.test(r.interpJs), false);
+    check("interp.JS 含目标函数", /function heavy\s*\(/.test(r.interpJs), true);
+}
+
 (async () => {
     await runNum();
     await runTagged();
     await runClasses();
+    await runMultiFile();
+    await runInterp();
     await runDwarf();
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
     process.exit(failures === 0 ? 0 : 1);
