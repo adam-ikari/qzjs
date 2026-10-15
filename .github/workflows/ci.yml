@@ -1238,6 +1238,12 @@ jobs:
         run: |
           bash test/test_host_contract_e2e.sh ./build/qzjs
 
+      # 确定性随机源（约束③）：--seed 穿 ISOLATED 宿主→主RT 进程边界生效。
+      # ISOLATED 下 qz_config_t 只能靠 argv 传，这段断了是「静默失效」。
+      - name: e2e — deterministic RNG seed across the ISOLATED boundary
+        run: |
+          bash test/test_seed_determinism_e2e.sh ./build/qzjs
+
       # 控制面 CTL-1/CTL-2（本地端点 + 信封 CONTROL 树路由到 worker）。
       - name: e2e — control plane (CTL-1 tree routing / CTL-2 endpoint + qzjs-ctl)
         run: |

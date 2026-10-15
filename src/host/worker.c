@@ -318,6 +318,14 @@ qz_worker_t *qz_worker_create(qz_t *parent, const char *script, int *out_err)
     self->msg_head = &self->msg_stub;
     self->msg_tail = &self->msg_stub;
 
+    /* 确定性随机（约束③）：worker 是独立 qz_t（config 被 calloc 清零），不继承
+     * 父的种子就会退回时钟播种 —— 同一程序里 worker 的 Math.random()/Map 序
+     * 不可复现、而主RT 可复现，属静默的**部分**确定。按槽位派生：既确定
+     * （slot 由父确定分配）又让各 worker 的随机流互异（全用父种子会让所有
+     * worker 产生同一条序列）。父未设种子（0）时保持时钟播种。 */
+    if (parent->config.random_seed)
+        self->config.random_seed = parent->config.random_seed + (uint64_t)(slot + 1);
+
     /* 继承父 runtime 的 CA 信任库。
      *
      * worker 是独立的 qz_t（上面 calloc 清零），不共享父 runtime 的任何状态，

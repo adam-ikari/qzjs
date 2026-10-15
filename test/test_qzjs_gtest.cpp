@@ -125,3 +125,33 @@ TEST(qz_msg_push, rejects_alloc_overflow) {
     EXPECT_EQ(0, qz_msg_push(h->rt, "ok", 2, 0, 0));
     host_destroy(h);
 }
+
+/* 确定性随机源（brain/pages/qzvm-qzjs-layering.md 约束③）：qz_config_t.random_seed
+ * 经 qz_runtime_init 的 JS_SetRandomSeed（引擎 patch）注入 → Math.random() 逐次
+ * 可复现。这是「相同输入 + 相同显式驱动序列 → 逐位相同输出」的前置条件：时钟
+ * 播种（random_seed == 0）下 Math.random() 每次运行都不同。 */
+TEST(qz_config, random_seed_makes_math_random_reproducible) {
+    const char *expr = "[Math.random(),Math.random(),Math.random()].join(',')";
+    std::string a, b, c;
+    {
+        HostCtx *h = host_create_seeded(0x5EED1234ULL);
+        ASSERT_NE(nullptr, h);
+        ASSERT_TRUE(host_eval(h, expr, &a));
+        host_destroy(h);
+    }
+    {
+        HostCtx *h = host_create_seeded(0x5EED1234ULL);   // 同种子 → 同序列
+        ASSERT_NE(nullptr, h);
+        ASSERT_TRUE(host_eval(h, expr, &b));
+        host_destroy(h);
+    }
+    {
+        HostCtx *h = host_create_seeded(0x5EED9999ULL);   // 异种子 → 异序列
+        ASSERT_NE(nullptr, h);
+        ASSERT_TRUE(host_eval(h, expr, &c));
+        host_destroy(h);
+    }
+    EXPECT_EQ(a, b);
+    EXPECT_NE(a, c);
+    EXPECT_FALSE(a.empty());
+}

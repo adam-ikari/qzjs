@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-15T07:12:13.685Z._
+_Auto-generated. Last updated 2026-10-15T07:54:38.332Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
@@ -51,7 +51,7 @@ _Auto-generated. Last updated 2026-10-15T07:12:13.685Z._
 - [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## quickjs-ng 上游同步与改动分层策略
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
-- [qzvm-qzjs-layering](pages/qzvm-qzjs-layering.md) — category: decision | tags: [decision, architecture, qzvm, in-module, boundary] | <!-- compiled_truth -->
+- [qzvm-qzjs-layering](pages/qzvm-qzjs-layering.md) — category: decision | tags: [decision, architecture, qzvm, in-module, boundary] | ## 结论
 - [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑（2026-10-07/08 用户拍板）
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论
 - [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | ## 结论

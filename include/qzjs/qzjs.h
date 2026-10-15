@@ -15,7 +15,7 @@ typedef struct qz_t qz_t;
  * 重新编译宿主。qz_config_t 按值跨库边界传递（qz_create 整块拷贝），跨版本
  * 混用会越界读宿主栈上的结构体尾部，abi_version 门控把这个静默的内存不安全
  * 变成显式的 qz_create 失败 + 诊断串。 */
-#define QZ_ABI_VERSION 1
+#define QZ_ABI_VERSION 2
 
 /* 库侧运行时 ABI 版本。宿主用它核对「编译时头文件」与「运行时库」是否同
  * 版本——动态链接场景下这是唯一能提前发现 ABI 错配的手段（否则症状是随机的
@@ -82,6 +82,17 @@ typedef struct qz_config_s {
      * 增量语义同 quickjs（触发后阈值 = 当前用量 × 1.5），非绝对值上限；
      * 要硬上限用 JS_SetMemoryLimit（未接线）。 */
     size_t gc_threshold;
+    /* ── 随机源种子（确定性执行，brain/pages/qzvm-qzjs-layering.md 约束③）──
+     * 引擎的 `ctx->random_state` 默认由时钟播种（`js__gettimeofday_us()`），
+     * 而 `hash_seed` 由它派生 → `Math.random()` 与 **Map/Set 迭代序**逐次运行
+     * 不同，破坏「相同输入 → 逐位相同输出」。
+     * random_seed != 0：runtime 的全部 context 以该值作初始 random_state
+     * （经引擎 patch 的 `JS_SetRandomSeed`；同一 runtime 内各 context 起步种子
+     * 相同，各自随调用推进）。
+     * random_seed == 0（默认）：沿用引擎的时钟播种（非确定性，兼容旧行为）。
+     * 须在建 context 前生效——qz_create 在 qz_runtime_init 里于 context 创建
+     * 之前调用 JS_SetRandomSeed。 */
+    uint64_t random_seed;
 } qz_config_t;
 
 /* 初始化 qz_config_t 的 ABI 门控字段（struct_size / abi_version）与其余字段的

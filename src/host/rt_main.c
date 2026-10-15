@@ -527,6 +527,8 @@ int rt_main_entry(int argc, char **argv)
     /* --gc-threshold：0 = 关隐式阈值 GC（缺省，确定性内存），>0 = 阈值安全网。
      * 语义见 qz_config_t.gc_threshold。 */
     size_t gc_threshold = 0;
+    /* --seed：确定性随机源种子（0 = 时钟播种，见 qz_config_t.random_seed）。 */
+    uint64_t random_seed = 0;
     const char *path_arg = NULL;       /* §8.2 path 链 "k1,k2,..."（父经 argv 传） */
 
     for (int i = 1; i < argc; i++) {
@@ -577,6 +579,8 @@ int rt_main_entry(int argc, char **argv)
             control_pipe = argv[++i];
         } else if (strcmp(argv[i], "--gc-threshold") == 0 && i + 1 < argc) {
             gc_threshold = (size_t)strtoull(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+            random_seed = strtoull(argv[++i], NULL, 10);
         }
     }
 
@@ -862,6 +866,7 @@ int rt_main_entry(int argc, char **argv)
     }
     rt->config.control_pipe_path = control_pipe;
     rt->config.gc_threshold = gc_threshold;
+    rt->config.random_seed = random_seed;
 
     /* §8.2：本节点 path 链。父经 --path 传完整链；缺省（无 --path 的 worker）
      * 退化为单元素 [worker_id]（深度 1 的旧扁平语义）。主RT/宿主形态为空 path。 */

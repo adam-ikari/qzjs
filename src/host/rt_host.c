@@ -289,9 +289,13 @@ int qz_host_start(qz_t *rt)
     gc_arg[0] = '\0';
     if (rt->config.gc_threshold > 0)
         snprintf(gc_arg, sizeof gc_arg, "%zu", rt->config.gc_threshold);
+    char seed_arg[32];
+    seed_arg[0] = '\0';
+    if (rt->config.random_seed != 0)
+        snprintf(seed_arg, sizeof seed_arg, "%llu", (unsigned long long)rt->config.random_seed);
     /* argv 元素数 = 6 固定 + 可选对（script/bytecode/debug/control-plane/
-     * control-pipe/gc）= 6 + 12 = 18，含 NULL 收尾取 24。旧值 16 在可选对
-     * 全在场时就越界写，加 gc 后必然溢出。 */
+     * control-pipe/gc/seed）= 6 + 14 = 20，含 NULL 收尾取 24。旧值 16 在可选对
+     * 全在场时就越界写，加 gc/seed 后必然溢出。 */
     char *argv[24];
     int n = 0;
     argv[n++] = (char *)"qzjs-rt";
@@ -335,6 +339,13 @@ int qz_host_start(qz_t *rt)
     if (rt->config.gc_threshold > 0) {
         argv[n++] = (char *)"--gc-threshold";
         argv[n++] = gc_arg;
+    }
+    /* 确定性随机（约束③）：random_seed 只在主RT 进程生效（context 在那创建）
+     * ——不传的话宿主经 qz_config_t 设的种子静默失效（同 gc/debug 那一路的
+     * 缺口）。语义：0 = 时钟播种（默认），!=0 = 确定性种子。 */
+    if (rt->config.random_seed != 0) {
+        argv[n++] = (char *)"--seed";
+        argv[n++] = seed_arg;
     }
     argv[n] = NULL;
 

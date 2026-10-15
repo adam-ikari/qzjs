@@ -552,6 +552,12 @@ int qz_runtime_init(qz_t *rt)
     JS_SetGCThreshold(rt->jsrt, rt->config.gc_threshold ? rt->config.gc_threshold
                                                         : (size_t)-1);
 
+    /* 确定性随机（约束③）：random_seed != 0 时 runtime 的全部 context 以它作
+     * 初始 random_state（引擎 patch 的 JS_SetRandomSeed）→ Math.random() 与
+     * Map/Set 迭代序逐次可复现。必须在任何 context 创建**之前**生效
+     * （JS_NewContextRaw 由 random_state 派生 hash_seed）。0 = 沿用时钟播种。 */
+    JS_SetRandomSeed(rt->jsrt, rt->config.random_seed);
+
     JS_SetRuntimeOpaque(rt->jsrt, rt);
 
     /* Initialize context table */

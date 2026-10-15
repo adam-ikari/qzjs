@@ -1,0 +1,55 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -361,6 +361,8 @@
+     struct list_head tmp_obj_list; /* used during GC */
+     JSGCPhaseEnum gc_phase : 8;
+     size_t malloc_gc_threshold;
++    /* qz: deterministic RNG seed. 0 = seed from the clock (upstream default). */
++    uint64_t random_seed;
+ #ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
+     struct list_head string_list; /* list of JSString.link */
+ #endif
+@@ -2473,6 +2475,14 @@
+     rt->malloc_gc_threshold = gc_threshold;
+ }
+ 
++/* qz: seed the RNG used by Math.random() and by the Map/Set hash (hash_seed is
++ * derived from it in JS_NewContextRaw), making both reproducible run-to-run.
++ * Must be called before any context is created. 0 restores clock seeding. */
++void JS_SetRandomSeed(JSRuntime *rt, uint64_t seed)
++{
++    rt->random_seed = seed;
++}
++
+ #define malloc(s) malloc_is_forbidden(s)
+ #define free(p) free_is_forbidden(p)
+ #define realloc(p,s) realloc_is_forbidden(p,s)
+@@ -2938,8 +2948,12 @@
+     ctx->error_prepare_stack = JS_UNDEFINED;
+     ctx->error_stack_trace_limit = js_int32(10);
+     init_list_head(&ctx->loaded_modules);
+-    // TODO(bnoordhuis) use getrandom() etc.
+-    ctx->random_state = js__gettimeofday_us();
++    /* qz: a runtime-level seed (JS_SetRandomSeed) makes Math.random() and the
++     * Map/Set hash reproducible; 0 keeps the upstream clock seeding. */
++    if (rt->random_seed != 0)
++        ctx->random_state = rt->random_seed;
++    else
++        ctx->random_state = js__gettimeofday_us(); // TODO(bnoordhuis) use getrandom() etc.
+     // the state must be non zero
+     if (ctx->random_state == 0)
+         ctx->random_state = 1;
+diff --git a/quickjs.h b/quickjs.h
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -517,6 +517,9 @@
+ JS_EXTERN uint64_t JS_GetDumpFlags(JSRuntime *rt);
+ JS_EXTERN size_t JS_GetGCThreshold(JSRuntime *rt);
+ JS_EXTERN void JS_SetGCThreshold(JSRuntime *rt, size_t gc_threshold);
++/* qz: seed Math.random() and the Map/Set hash for reproducible runs.
++   Must be called before creating contexts; 0 restores clock seeding. */
++JS_EXTERN void JS_SetRandomSeed(JSRuntime *rt, uint64_t seed);
+ /* use 0 to disable maximum stack size check */
+ JS_EXTERN void JS_SetMaxStackSize(JSRuntime *rt, size_t stack_size);
+ /* should be called when changing thread to update the stack top value

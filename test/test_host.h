@@ -87,6 +87,19 @@ static inline HostCtx *host_create(const char *script = kTestBootstrap) {
     return h;
 }
 
+// 带确定性随机种子建 runtime（qz_config_t.random_seed；0 = 时钟播种）。
+// 用于「同种子 → 逐位相同输出」的复现性断言（constraint ③ 随机源）。
+static inline HostCtx *host_create_seeded(uint64_t seed, const char *script = kTestBootstrap) {
+    auto *h = new HostCtx();
+    qz_config_t cfg;
+    qz_config_init(&cfg);
+    cfg.initial_script = script;
+    cfg.random_seed = seed;
+    h->rt = qz_create(&cfg);
+    if (!h->rt) { delete h; return nullptr; }
+    return h;
+}
+
 static inline void host_destroy(HostCtx *h) {
     if (!h) return;
     qz_destroy(h->rt);

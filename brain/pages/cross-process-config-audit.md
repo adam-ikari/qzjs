@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [audit, cross-process, ipc, methodology]
 created: "2026-10-06T10:04:34"
-updated: "2026-10-13T08:35:24"
+updated: "2026-10-15T07:54:38"
 ---
 
 <!-- compiled_truth -->
@@ -85,4 +85,10 @@ IPC 控制帧只有 READY/IDLE/SHUTDOWN/CLOSING/PING/PONG/PFAIL，**IDLE 仅存�
   kind: decision
   summary: "规范化存储标记：compiled_truth 区块开头重复的 <!-- compiled_truth --> 标记（CLI extractSection 会把它当正文首行）已去掉；正文无实质改动。"
   source: "brain CLI 重复 marker 自愈"
+  affects: [cross-process-config-audit]
+
+- time: 2026-10-15T07:54:38
+  kind: decision
+  summary: "新增字段 random_seed 的跨进程传递 + 判据升级。random_seed（确定性随机源，约束③）照本页判据 #1 走 rt_host.c 的 --seed argv 进主RT；worker 是独立 qz_t（config 被 calloc 清零、不继承父配置）故另按槽位派生 parent_seed+slot+1——这类「worker 不继承父 qz_config_t」是本页未覆盖的第 5 类边界（父→in-process worker runtime），目前只有 seed 与 CA 做了继承。判据加固：本页 #1 是**静态**检查（字段名是否出现在 argv 组装里），捕不到「argv 拼了但子进程没解析」或「解析了但没写进 config」——新增行为型 e2e test/test_seed_determinism_e2e.sh 补这一段，并带**负控**（临时把 rt_host.c 的 --seed 透传断掉，e2e 立刻红）。建议后续为其它跨进程字段复制该「静态门 + 行为 e2e + 负控」三件套。"
+  source: "实现 random_seed 跨进程传递时按本页判据核对"
   affects: [cross-process-config-audit]
