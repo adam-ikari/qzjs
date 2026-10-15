@@ -1004,16 +1004,50 @@ function compileTS(input, outWasm, opts = {}) {
         }
     }
     const hasClasses = clsStmts.length > 0;
-    // import 绑定：{ 本地名 → 目标模块导出名 }。模块图由 tsc 解析（createProgram），
-    // 这里只把 `import { x as y }` 的本地别名折回目标顶层函数名（跨文件调用解析用）。
+    // import 绑定：{ 本地名 → 目标顶层函数名 }。模块图由 tsc 解析（createProgram），
+    // 用 checker 穿透 re-export 链解析到最终目标——AST 级 `sp.propertyName` 只
+    // 处理 `import { x as y }` 自身别名，穿不过 `export { x as y } from` 链。
+    // 同时检测外部模块 re-export（不可内联 → 显式报错，不静默丢绑定）。
+    const checker = program.getTypeChecker();
+    const sfNames = new Set(sfs.map(f => f.fileName));
     const importAlias = new Map();
     for (const f of sfs) {
         for (const st of f.statements) {
+            if (ts.isExportDeclaration(st) && st.moduleSpecifier) {
+                if (st.exportClause && ts.isNamedExports(st.exportClause)) {
+                    for (const el of st.exportClause.elements) {
+                        const sym = checker.getSymbolAtLocation(el.name);
+                        if (!sym || !(sym.flags & ts.SymbolFlags.Alias))
+                            throw new Error(`[inline] 外部模块 re-export 不支持内联: "${el.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
+                        const tgt = checker.getAliasedSymbol(sym);
+                        const decl = tgt.valueDeclaration || (tgt.declarations && tgt.declarations[0]);
+                        const declFile = decl && ts.getSourceFileOfNode(decl);
+                        if (!declFile || !sfNames.has(declFile.fileName))
+                            throw new Error(`[inline] 外部模块 re-export 不支持内联: "${el.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
+                    }
+                } else {
+                    throw new Error(`[inline] 不支持 export * re-export（${path.basename(f.fileName)}）`);
+                }
+                continue;
+            }
             if (!ts.isImportDeclaration(st) || !st.importClause) continue;
             const ic = st.importClause;
             if (ic.name) throw new Error(`[inline] 默认/命名空间导入暂不支持（${path.basename(f.fileName)}）`);
             if (!ic.namedBindings || !ts.isNamedImports(ic.namedBindings)) continue;
             for (const sp of ic.namedBindings.elements) {
+                const sym = checker.getSymbolAtLocation(sp.name);
+                if (sym && (sym.flags & ts.SymbolFlags.Alias)) {
+                    const tgt = checker.getAliasedSymbol(sym);
+                    if (tgt && tgt.name) {
+                        const decl = tgt.valueDeclaration || (tgt.declarations && tgt.declarations[0]);
+                        const declFile = decl && ts.getSourceFileOfNode(decl);
+                        if (declFile && sfNames.has(declFile.fileName)) {
+                            importAlias.set(sp.name.text, tgt.name);
+                            continue;
+                        }
+                        throw new Error(`[inline] 外部模块导入不支持内联: "${sp.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
+                    }
+                }
                 importAlias.set(sp.name.text, sp.propertyName ? sp.propertyName.text : sp.name.text);
             }
         }
@@ -1069,10 +1103,9 @@ function compileTS(input, outWasm, opts = {}) {
     //  ② `import { pad as fill }` 的**引用点**重写成目标顶层函数名（fill → pad）——tsc 的模块
     //     transform 本来会把引用改写成 `str2_1.pad`（依赖 require），内联后没有它，必须自己重写；
     //  ③ 剥 export/default 修饰符（否则 emit 出 `exports.X = X`，glue 里没有 exports）。
-    // 用 program.getTypeChecker() 精确定位 import 绑定（而非按名字猜），program.emit 复用同一 AST。
+    // 用 checker（上方已创建）精确定位 import 绑定（而非按名字猜），program.emit 复用同一 AST。
     let interpJs = "";
     if (interpSet.size > 0) {
-        const checker = program.getTypeChecker();
         const stripModuleSyntax = (ctx) => (sf2) => {
             const visit = (n) => {
                 if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) return undefined;

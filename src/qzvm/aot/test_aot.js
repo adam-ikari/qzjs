@@ -223,6 +223,36 @@ async function runMultiFile() {
     try { compileTS(path.join(dir, "m.ts"), path.join(dir, "m.wasm"), {}); }
     catch (e) { threw = e.message; }
     check("多文件.同名冲突显式报错", threw.includes("顶层函数名冲突"), true);
+
+    // re-export 链：export { foo as bar } from "./bar" + import { bar } from "./a"
+    // checker 须穿透 re-export 链解析 bar → foo（否则 _fnName 找不到函数）
+    fs.writeFileSync(path.join(dir, "orig.ts"), "export function foo(x: number): number { return x * 10; }\n");
+    fs.writeFileSync(path.join(dir, "relay.ts"), "export { foo as bar } from './orig';\n");
+    fs.writeFileSync(path.join(dir, "use.rs.ts"),
+        "import { bar } from './relay';\nexport function runRs(x: number): number { return bar(x); }\n");
+    const wasmRs = path.join(dir, "rs.wasm");
+    compileTS(path.join(dir, "use.rs.ts"), wasmRs, {});
+    const bufRs = fs.readFileSync(wasmRs);
+    const { instance: instRs } = await WebAssembly.instantiate(bufRs, {});
+    check("re-export.别名穿透 runRs(5)", instRs.exports.runRs(5), 50);
+
+    // 同名 re-export（无别名）：export { foo } from "./orig" → import { foo } from "./relay"
+    fs.writeFileSync(path.join(dir, "relay2.ts"), "export { foo } from './orig';\n");
+    fs.writeFileSync(path.join(dir, "use2.ts"),
+        "import { foo } from './relay2';\nexport function runRs2(x: number): number { return foo(x); }\n");
+    const wasmRs2 = path.join(dir, "rs2.wasm");
+    compileTS(path.join(dir, "use2.ts"), wasmRs2, {});
+    const bufRs2 = fs.readFileSync(wasmRs2);
+    const { instance: instRs2 } = await WebAssembly.instantiate(bufRs2, {});
+    check("re-export.同名穿透 runRs2(7)", instRs2.exports.runRs2(7), 70);
+
+    // 外部模块 re-export → 显式报错（不静默丢绑定）
+    fs.writeFileSync(path.join(dir, "ext.ts"),
+        "export { pi } from 'mathlib';\nexport function runExt(): number { return pi; }\n");
+    let extErr = "";
+    try { compileTS(path.join(dir, "ext.ts"), path.join(dir, "ext.wasm"), {}); }
+    catch (e) { extErr = e.message; }
+    check("re-export.外部模块显式报错", extErr.includes("外部模块"), true);
 }
 
 /* interp 回退（opts.interp）：列出的函数不进 wasm，改由 glue 内联的 JS 跑。
