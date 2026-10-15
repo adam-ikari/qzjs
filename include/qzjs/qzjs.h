@@ -72,6 +72,16 @@ typedef struct qz_config_s {
     int strict_mode;                 /* 0 = off（默认）| 1 = on */
     const char *sandbox_root;
     const char *const *env_allowlist;
+    /* ── GC 策略（确定性内存，brain/pages/qzvm-qzjs-layering.md 约束③）──
+     * 引擎回收 = 引用计数（引用归 0 立即释放，确定性）+ 环回收（引用环只能靠
+     * mark-sweep 收）。默认（gc_threshold == 0）：**关掉阈值驱动的隐式 GC**
+     * ——回收只发生在确定点（qz_gc() / 控制面 "gc" op），环不会在任意分配点
+     * 被非确定地回收。代价：无宿主显式驱动时环会累积。
+     * gc_threshold > 0：恢复引擎的阈值自动 GC 作为安全网（长跑、宿主不驱动
+     * 回收的场景）——代价是回收时机不确定（内存压力即触发）。
+     * 增量语义同 quickjs（触发后阈值 = 当前用量 × 1.5），非绝对值上限；
+     * 要硬上限用 JS_SetMemoryLimit（未接线）。 */
+    size_t gc_threshold;
 } qz_config_t;
 
 /* 初始化 qz_config_t 的 ABI 门控字段（struct_size / abi_version）与其余字段的
@@ -204,6 +214,15 @@ int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
  *   loop 验过了，而实际上什么都没验。
  * 返回 0 = 通畅 / 1 = 阻塞 / -1 = 参数或状态错误 / -2 = 本模型不可测。 */
 int qz_ping_if_available(qz_t *rt, int32_t timeout_ms);
+/* 显式回收引用环（**确定性 GC 的宿主驱动入口**，见 qz_config_t.gc_threshold）。
+ * 引用计数回收（引用归 0）本就即时、确定，无需驱动；此函数只跑 mark-sweep
+ * 回收引用环。默认配置下引擎的阈值自动 GC 已关闭，环只在两处回收：本函数，
+ * 或控制面 {"op":"gc"}。**线程安全**：入队到主执行体（ISOLATED = 主RT 进程 /
+ * THREAD = qzjs 线程）的事件循环安全点执行，返回 0 = 已入队（非已回收）。
+ * 回收量不在此返回——需要可观测性用控制面 "gc" op（回执带回 heap_bytes）。
+ * 返回 0 成功入队，-1 参数/状态错误（rt 无效或正在关停）。 */
+int qz_gc(qz_t *rt);
+
 
 /* qz_ping_path 的跨模型版本，返回值语义同上（path/path_len 语义见
  * qz_ping_path 注释；THREAD 构建下 path 不会被读）。 */

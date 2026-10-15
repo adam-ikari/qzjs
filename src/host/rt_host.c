@@ -283,7 +283,16 @@ int qz_host_start(qz_t *rt)
     snprintf(fd_arg, sizeof fd_arg, "%d", QZ_IPC_CHANNEL_FD);
     char debug_arg[16];
     snprintf(debug_arg, sizeof debug_arg, "%d", rt->config.debug);
-    char *argv[16];
+    /* gc_arg 与 fd_arg/debug_arg 同作用域：argv 在 spawn 返回前一直持有它的
+     * 指针（qz_proc_spawn 同步 fork+exec），放块内会悬垂。 */
+    char gc_arg[32];
+    gc_arg[0] = '\0';
+    if (rt->config.gc_threshold > 0)
+        snprintf(gc_arg, sizeof gc_arg, "%zu", rt->config.gc_threshold);
+    /* argv 元素数 = 6 固定 + 可选对（script/bytecode/debug/control-plane/
+     * control-pipe/gc）= 6 + 12 = 18，含 NULL 收尾取 24。旧值 16 在可选对
+     * 全在场时就越界写，加 gc 后必然溢出。 */
+    char *argv[24];
     int n = 0;
     argv[n++] = (char *)"qzjs-rt";
     argv[n++] = (char *)"--qzjs-rt-server";
@@ -319,6 +328,13 @@ int qz_host_start(qz_t *rt)
             argv[n++] = (char *)"--control-pipe";
             argv[n++] = (char *)rt->config.control_pipe_path;
         }
+    }
+    /* 确定性内存（约束③）：gc_threshold 决定主RT 的隐式 GC 策略，而 runtime
+     * 只在主RT 进程——不传的话宿主经 qz_config_t 设的值静默失效（同 debug
+     * 那一路的缺口）。语义：0 = 关隐式 GC（默认），>0 = 阈值安全网。 */
+    if (rt->config.gc_threshold > 0) {
+        argv[n++] = (char *)"--gc-threshold";
+        argv[n++] = gc_arg;
     }
     argv[n] = NULL;
 

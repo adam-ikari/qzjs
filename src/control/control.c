@@ -995,6 +995,30 @@ static void ctl_metrics(qz_t *rt, JSContext *ctx, char *correl)
     ctl_send_receipt(rt, ctx, r);
 }
 
+/* 控制面 "gc" op：在本线程（= JS 线程，dispatch 即安全点）就地跑一次
+ * mark-sweep，回执带回收量。这是**可观测**的回收点——qz_gc() 只保证「已
+ * 排队到确定点」，要看回收了多少得用本 op（见 qzjs.h 的说明）。
+ *
+ * 回收量 = memory_used_size 的进/出差值。注意它**不是**「本次回收释放的
+ * 全部字节」——JS_RunGC 同时回收环与引用计数已归零但尚未 free 的残块，
+ * 差值就是这两者之和；且若期间有别的分配混入会偏小。作为诊断量足够，不用
+ * 它做精确账。 */
+static void ctl_gc(qz_t *rt, JSContext *ctx, char *correl)
+{
+    JSMemoryUsage before, after;
+    JS_ComputeMemoryUsage(rt->jsrt, &before);
+    JS_RunGC(rt->jsrt);
+    JS_ComputeMemoryUsage(rt->jsrt, &after);
+
+    JSValue r = ctl_receipt_obj(ctx, correl, 1);
+    JS_SetPropertyStr(ctx, r, "reclaimed_bytes",
+                      JS_NewInt64(ctx, (int64_t)before.memory_used_size -
+                                           (int64_t)after.memory_used_size));
+    JS_SetPropertyStr(ctx, r, "heap_bytes",
+                      JS_NewInt64(ctx, after.memory_used_size));
+    ctl_send_receipt(rt, ctx, r);
+}
+
 void qz_control_dispatch(qz_t *rt, qz_msg_t *m)
 {
     /* qzjs 线程独占。m->data 为命令 JSON（msgq 保证 NUL 结尾）。 */
@@ -1045,6 +1069,9 @@ void qz_control_dispatch(qz_t *rt, qz_msg_t *m)
         correl0 = NULL;
         JS_SetPropertyStr(ctx, r, "interrupted", JS_TRUE);
         ctl_send_receipt(rt, ctx, r);
+    } else if (op && strcmp(op, "gc") == 0) {
+        ctl_gc(rt, ctx, correl0);
+        correl0 = NULL;
     } else {
         /* 未知 op（含 IDLE_SAFEPOINT 类——CTL-0 不执行，§6 范围外） */
         ctl_error_receipt(rt, ctx, correl0, op ? op : "missing op",

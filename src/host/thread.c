@@ -105,7 +105,11 @@ static void qz_wake_cb(uv_async_t *a)
          * 的非零取值。 */
         if (m->flags == QZ_MSG_FLAG_CONTROL)
             qz_control_dispatch(rt, m);
-        else
+        else if (m->flags == QZ_MSG_FLAG_GC_RUN) {
+            /* 同 rt_main child_wake_cb：C 层就地 mark-sweep 回收引用环，
+             * 不进 JS（不需要 JS 栈），本点即 WAKE_SAFEPOINT 确定点。 */
+            if (rt->jsrt) JS_RunGC(rt->jsrt);
+        } else
             qz_dispatch_message(rt, m);
         /* 节点不 free：pop 内部已释放旧 head；m 成为下次 pop 的 head */
 

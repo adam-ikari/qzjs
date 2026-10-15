@@ -2,7 +2,7 @@
 
 > 状态：架构级 DESIGN（active）
 > 日期：2026-10-14
-> 范围：界定「宿主 / qzjs 运行时 / qzvm」三层，并确立 qzvm 的两条硬约束。
+> 范围：界定「宿主 / qzjs 运行时 / qzvm」三层，并确立 qzvm 的三条硬约束。
 > 依据：用户裁决（2026-10-14）；`src/qzvm/` 实况；`docs/architecture/c-js-layering.md`（C/JS 分层，另一维度）；brain `[[qzjs-positioning]]` `[[release-artifact-topology]]`。
 > 冲突处置：本文为 qzvm/qzjs 边界的 SSOT。与旧文档（含 `IN_MODULE_DESIGN.md` 初版措辞）冲突时，以本文为准并回改旧文档。
 
@@ -39,6 +39,7 @@
 │  │   + 调试核(引擎 hook) + 扩展注册机制                 │
 │  │   ⟂ 零 libuv（硬约束 ①）                            │   │
 │  │   ⟂ 可独立使用（硬约束 ②）                           │   │
+│  │   ⟂ GC 确定性（硬约束 ③）                            │   │
 │  └───────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -47,7 +48,7 @@
 
 ---
 
-## 2. qzvm 的两条硬约束
+## 2. qzvm 的三条硬约束
 
 ### 约束 ①：qzvm 零 libuv
 
@@ -95,6 +96,29 @@
 1. 独立构建单元 `libqzvm`（native 形态），qzjs 链接它。
 2. 独立公开头（VM 层 API：建/拆 realm、eval/compile、tick、扩展注册）——**与 `qzjs.h` 分离**。
 3. 卸载所有对 qzjs 的隐式依赖：扩展注册内容、polyfill 注入、pal 接线（这些属 qzjs，见 §3.2）。
+
+### 约束 ③：qzvm GC 确定性（用户裁决 2026-10-15）
+
+**含义**：给定相同输入与相同显式驱动序列，qzvm 的 GC 行为（**何时触发、回收什么、暂停多久**）必须可复现——同一脚本跑两遍，内存轨迹与 GC 触发点一致。这是嵌入式/边缘目标的**确定性护城河**在 qzvm 内的落点。
+
+**为什么落在 qzvm 而非 qzjs 的 C 层**：确定性曾以「宿主主导权（C 层可脱离 JS 独立跑）」之名记在 C/JS 分层约束①（`docs/architecture/c-js-layering.md` §1.2）。该表述**已废**——qzjs 永远持有 JS 引擎（见 §4），context 创建**必经** polyfill 注入（`ctx_orchestrate.c:66` 失败即 `goto fail`）。故"确定性"不能靠"C 不带 JS"获得，只能作为**引擎（qzvm）自身**的属性要求。
+
+**现状缺口（已核实，`deps/quickjs-ng/quickjs.c`）**：
+
+1. **随机源时钟播种**：`random_state = js__gettimeofday_us()`（`:2942`，附上游 `TODO use getrandom()`），`hash_seed` 由它派生（`:2946`）。→ `Math.random()`（`:49550`）与 **Map/Set 迭代序**（`hash_seed` 参与 hash，`:53937`）逐次运行不同。
+2. **GC 触发依分配压力**：阈值初值 `malloc_gc_threshold = 256*1024`（`:2343`），`js_trigger_gc`（`:1689`）在 `malloc_size > threshold` 时 `JS_RunGC` 并把阈值抬到 1.5×。→ GC 触发点随分配历史漂移，非确定点。
+3. **无确定性控制面**：`qz_config_t`（`include/qzjs/qzjs.h:30`）无种子/GC 字段。引擎**公有面无种子注入 API**——`quickjs.h` 只导出 `JS_SetGCThreshold`/`JS_GetGCThreshold`/`JS_RunGC`/`JS_SetMemoryLimit`，**无 `JS_SetRandomSeed`**；且这些 API 在 `src/` 内**零接线**（唯一使用点是 `deps/quickjs-ng/qjs.c:624` 的 CLI 内存上限）。种子注入须走**引擎 patch**（`src/qzvm/patches/*`，与 DAP/bc-reader 加固同套路）。
+
+**落地状态**：
+1. ✅ **显式 GC 驱动点（已完成 2026-10-15）**：默认（`qz_config_t.gc_threshold == 0`）**关掉阈值隐式 GC**（`JS_SetGCThreshold(rt, (size_t)-1)`），环只在两个确定点回收——宿主 `qz_gc()` 或控制面 `{"op":"gc"}`。两处都落 **WAKE_SAFEPOINT**（`rt_main.c` child_wake_cb / `thread.c` qz_wake_cb 的 `QZ_MSG_FLAG_GC_RUN` 分支）就地 `JS_RunGC`，位置与时机由宿主驱动序列唯一决定。跨进程（ISOLATED）形式：宿主发 CONTROL `{"qzjs":1,"gc":1}` → 主RT 读回调转 msgq（**不经控制面路由**，故与 `control_plane` 档位正交，OFF 档下仍生效）。`gc_threshold > 0` 保留阈值路径作安全网（显式选择即接受非确定触发点）。
+2. ✅ **接线阈值 API**：`JS_SetGCThreshold` 从 `qz_config_t.gc_threshold` 透传（`qzjs.c` runtime_init）；ISOLATED 下经 `rt_host.c` 的 `--gc-threshold` argv 传给主RT 子进程（否则宿主经 config 设的值静默失效，同 debug 那一路的缺口）。
+3. ✅ **可观测性**：控制面 `"gc"` op 回执带 `reclaimed_bytes`/`heap_bytes`（`control.c` ctl_gc：`JS_ComputeMemoryUsage` 差值）；`metrics` op 已有 `heap_bytes`。宿主要校验复现性可对比同一驱动序列下的前后堆值。
+4. ⏳ **种子注入（未做，须打引擎 patch）**：quickjs-ng 无公有 seed API，故须在 `src/qzvm/patches/` 增 patch 导出 `JS_SetRandomSeed(rt, uint64_t)`（或经 `qz_config_t` 直写 `ctx->random_state`/`hash_seed`），`qz_config_t` 增种子字段 + `QZ_ABI_VERSION` 递增（现 1）。未做则 `Math.random()` 与 Map/Set 迭代序仍逐次不同。
+5. ⏳ **GC 触发/暂停计数**：目前仅暴露堆字节量，无「触发次数/暂停时长」计数。
+
+**实测（2026-10-15，`build-dbg` ISOLATED + `build-thread` THREAD）**：控制面造 3000 个自引用环 → `heap_bytes` 809KB→13.67MB → `{"op":"gc"}` 回 `reclaimed_bytes:12864088` → `heap_bytes` 回落 809KB；宿主 `qz_gc(rt)` 返回 0 且主RT 子进程 RSS 26084→5448 kB（`qz_gc(NULL)` = -1）。默认档无宿主驱动时堆稳定在 13.67MB 不回落（隐式 GC 确已关闭），对照组由此确认。
+
+**边界**：确定性是 qzvm 的**机制**（引擎内可否复现）；「用不用、播什么种子」是宿主 **policy**（`qz_config_t` 注入）。与 `[[c-js-layering]]` 同款分工。
 
 ---
 
@@ -184,3 +208,4 @@ qzjs 运行时
    - **wasm 模块本身**（TS→wasm，调试对象=wasm 指令）：WAMR `WASM_ENABLE_DEBUG_INTERP`（debug-engine/gdbserver，GDB RSP）——CMake `QZ_WITH_WAMR_DEBUG_INTERP`（默认 OFF）已接通；debug-engine **不解 DWARF**（全库无解析器，只报 PC 偏移），行映射由编译器产 DWARF、由定制 lldb 消费。
    - **native 内 JS**：走 `debugger.c` + DAP（现状）。
 8. **AOT 不可源码级调试**：WAMR `WASM_ENABLE_DEBUG_AOT`（`aot/debug/jit_debug.c`）**只产 jitdump/perf map**（`perf record` 用），**无行表、无源码映射** → **AOT 执行形态**不可步进。源码级调试须走 **bytecode/interp 形态** + 上面 #5 的 DWARF 段 + debug-interp（AOT 实例被 WAMR 直接拒绝绑调试实例）。
+9. **GC 确定性落地**（约束③派生）：② 显式 GC 驱动点 ✅、③ 接线 `JS_SetGCThreshold` ✅、④ 可观测（`reclaimed_bytes`/`heap_bytes`）✅ —— 详见 §2 约束③「落地状态」。**未做**：① 引擎 patch 出种子注入入口（`src/qzvm/patches/*`，quickjs-ng 公有面无 seed API），`qz_config_t` 增种子字段 + `QZ_ABI_VERSION` 递增；⑤ GC 触发次数/暂停时长计数；⑥ `JS_SetMemoryLimit` 透传（当前仅阈值）。

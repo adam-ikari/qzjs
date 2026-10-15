@@ -7,6 +7,7 @@
 #include <cstring>
 #include <thread>
 #include <cstdio>
+#include <cstdlib>   /* atoll */
 #include <unistd.h>
 
 // 启用控制面的 host 工厂（control_plane=IN_PROC）。
@@ -516,5 +517,49 @@ TEST(control_, timeout) {
     std::string out;
     ASSERT_TRUE(host_wait_ctl(h, "c7", &out, 10000)) << out;
     EXPECT_NE(std::string::npos, out.find("\"code\":\"TIMEOUT\"")) << out;
+    host_destroy(h);
+}
+
+// 8. gc op：造引用环（无外部引用 → 只能 mark-sweep 回收）→ "gc" 回执报回收量，
+//    heap 回落。守「确定性 GC 的显式驱动点确实回收环」这条核心行为：
+//    默认档隐式阈值 GC 已关（JS_SetGCThreshold((size_t)-1)），若 "gc" 没接上
+//    JS_RunGC，这里 heap 不会回落 → 环永久泄漏。
+TEST(control_, gc_reclaims_cycle_heap) {
+    HostCtx *h = host_create_ctl();
+    ASSERT_NE(nullptr, h);
+
+    auto heap_of = [&](const char *correl) -> long long {
+        EXPECT_EQ(0, host_control(h, std::string("{\"op\":\"metrics\",\"correl\":\"") +
+                                      correl + "\"}"));
+        std::string out;
+        EXPECT_TRUE(host_wait_ctl(h, correl, &out)) << out;
+        size_t p = out.find("\"heap_bytes\":");
+        if (p == std::string::npos) return -1;
+        return atoll(out.c_str() + p + 13);
+    };
+
+    long long base = heap_of("g-base");
+    ASSERT_GT(base, 0);
+
+    // 3000 个自引用环：each ~ Array(256)，逃出作用域后无外部引用。
+    ASSERT_EQ(0, host_control(h, ctl_eval_json(
+        "g-mk", "for(let i=0;i<3000;i++){const o={buf:new Array(256).fill(1)};o.self=o;};1")));
+    std::string out;
+    ASSERT_TRUE(host_wait_ctl(h, "g-mk", &out)) << out;
+
+    long long after_alloc = heap_of("g-alloc");
+    EXPECT_GT(after_alloc, base + (1 << 20)) << "环应显著抬高堆；实测差值过小 = 脚本没造出环";
+
+    ASSERT_EQ(0, host_control(h, R"({"op":"gc","correl":"g-run"})"));
+    ASSERT_TRUE(host_wait_ctl(h, "g-run", &out)) << out;
+    EXPECT_NE(std::string::npos, out.find("\"ok\":true")) << out;
+    size_t rp = out.find("\"reclaimed_bytes\":");
+    ASSERT_NE(std::string::npos, rp) << out;
+    long long reclaimed = atoll(out.c_str() + rp + 18);
+    EXPECT_GT(reclaimed, (1 << 20)) << out;
+
+    long long after_gc = heap_of("g-after");
+    // 回落到基线量级（留 2MB 余量吸收引擎内部缓存/碎片）。
+    EXPECT_LT(after_gc, base + (2 << 20)) << "gc 后堆应回落到基线附近；未回落 = 环没被回收";
     host_destroy(h);
 }

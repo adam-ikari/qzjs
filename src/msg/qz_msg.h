@@ -23,6 +23,12 @@ typedef enum { QZ_MSG_SRC_HOST = 0 } qz_msg_src_t;
  * by the PORT_TRANSFER header instead of guessing the payload shape (M-P3). */
 #define QZ_MSG_FLAG_CONTROL       1   /* kind=CONTROL(3) */
 #define QZ_MSG_FLAG_PORT_TRANSFER 2   /* kind=PORT_TRANSFER(1) */
+/* 显式 GC 驱动（qz_gc()）：**不是** CONTROL 类——CONTROL 受 control_plane
+ * 档位门控（OFF 即丢弃，§4.1），而 GC 驱动是宿主的内存管理，与「要不要暴露
+ * 控制面」正交：OFF 档下 qz_gc() 仍须生效。跨进程形式是信封 CONTROL 类
+ * 系统消息 {"qzjs":1,"gc":1}（见 ipc_process.h），到达主RT 后转成本 flag 入
+ * msgq，由 wake 分割点就地跑 JS_RunGC，不进 JS、不回执。 */
+#define QZ_MSG_FLAG_GC_RUN        4
 
 /* flags -> envelope kind for the JS dispatch boundary (control never reaches
  * __qz_dispatch__: the wake split point consumes it). */
