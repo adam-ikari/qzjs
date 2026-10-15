@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, aot, wasm, architecture, generic]
 created: "2026-10-14T06:39:19"
-updated: "2026-10-15T05:36:28"
+updated: "2026-10-15T13:03:40"
 ---
 
 <!-- compiled_truth -->
@@ -28,7 +28,21 @@ wasm 模块的 **import 面由「内联 / 外部」判据决定**（用户裁决
 
 实测收缩（同一份源码，修前/修后 import 数）：纯数值 `fib` 0/0（零 import 自洽）；`{a:1}+console.log` 30/**1**（只 `log`）；`mix.ts` 30/**10**；`strwork.ts` 30/**4**；`cls.ts` 30/**8**。
 
-**未做**：编译器仍**不解析 TS `import`/`export` 语句**（无多模块支持）——上面的"外部能力"来自语言级动态语义需求，不来自模块 import。多模块 → import 面的映射仍是缺口。
+## 多文件 / 模块内联（2026-10-15 落地，全形态）
+
+`compileTS` 用 tsc `createProgram`（现成模块解析器，不自研模块图遍历）取 `program.getSourceFiles()` 全部 `.ts`；**各模块顶层函数/类编进同一 wasm 模块**（跨文件调用 = 同模块内 `call`，零额外 import）。支持：
+
+- `import { x as y }` 具名 + 别名（`Emitter._fnName` 折回目标导出名）。
+- `import d from './m'` 默认导入（折回目标的**命名**默认导出；匿名默认导出显式报错）。
+- `import * as M from './m'` 命名空间导入：`M.member(...)` 折回目标顶层函数（`checker.getExportsOfModule` 穿透 re-export，含 `M.default`）。
+- `import { C } from './m'` 导入类 + `new C()`（`classAlias` → `_className`，`_computeStaticVars`/`_emitNewCall` 接入）。
+- re-export 链穿透；外部模块（import 来自非源码文件）→ **显式报错**，不静默丢绑定。
+
+**与 import 面的关系**：多文件内联是**编译期**折叠（跨文件调用变同模块 `call`），不改变上面「内联/外部」判据 —— 多模块本身不引入 import；只有语言级动态语义需求才引入。
+
+## 判定与验证
+
+- 回归门 `src/qzvm/aot/test_aot.js`（node WebAssembly 直跑，无需 wamrc）：`runMultiFile`（默认/混合/命名空间/default 成员/外部报错/匿名报错/导入类）+ `runInterp`（interp 跨文件重写与执行）。
 
 ## 推论（对设计的约束）
 
@@ -66,4 +80,16 @@ wasm 模块的 **import 面由「内联 / 外部」判据决定**（用户裁决
   kind: decision
   summary: "多文件内联落地：compileTS 用 tsc createProgram（现成模块解析器，不自研模块图遍历）取 program.getSourceFiles() 全部 .ts，各模块顶层函数/类编进同一 wasm 模块（跨文件调用=同模块内 call）。import { x as y } 别名折回目标导出名（Emitter._fnName，两处 call 解析接入）；顶层同名冲突显式报错不静默覆盖。实测 mathx.ts+mainx.ts(别名 inc as bump) → run(40)=42、0 import；同名 dup → 报冲突。守门 test_aot.js runMultiFile。未做：默认导入/命名空间导入/重导出（显式报错）。"
   source: "用户指示 2026-10-15：TS 内联工具不必自己实现（用 tsc 现成解析）+ 实现"
+  affects: [aot-generic-compiler-target]
+
+- time: 2026-10-15T13:02:58
+  kind: decision
+  summary: "多文件 import 全形态落地：① 默认导入 import d from './m'（折回目标命名默认导出；匿名默认导出显式报错）；② 命名空间导入 import * as M → M.member(...) 折回目标顶层名（经 checker.getExportsOfModule 穿透 re-export，含 M.default）；③ 导入类 new C（classAlias，Emitter._className，_computeStaticVars/_emitNewCall 接入）；④ re-export 链穿透。修两处既有 bug：(a) collectClasses 每文件调用却遍历整个 _classList 重复 declareFunc → 编码崩（多文件含类即触发），改为仅声明本文件新增类；(b) interp TS→JS 重写：同名导入换新节点（否则 tsc 模块 transform 残留 (0, mod_1.x)）+ 剥 export default 赋值语句。外部模块 ns 导入原静默空表（后续误报未定义捕获变量）→ 改显式报错。守门 test_aot.js runMultiFile + runInterp（默认/混合/命名空间/default 成员/外部报错/匿名报错/导入类/interp 多文件执行）。"
+  source: "会话 2026-10-15：按用户意图补齐多文件 import 全形态"
+  affects: [aot-generic-compiler-target]
+
+- time: 2026-10-15T13:03:40
+  kind: decision
+  summary: "compileTS 多文件：默认/命名空间/导入类/re-export 全形态；多文件为编译期折叠，不改变内联/外部 import 判据"
+  source: "会话 2026-10-15 落地多文件 import 全形态"
   affects: [aot-generic-compiler-target]

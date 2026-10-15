@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-15T04:05:49"
+updated: "2026-10-15T13:30:21"
 ---
 
 <!-- compiled_truth -->
@@ -87,3 +87,9 @@ updated: "2026-10-15T04:05:49"
   summary: "语义精度原则（用户裁决 2026-10-15）：**不可用性能换语义精度**，任何『简化掉 JS 语义以换快路径』按缺陷处理而非 tradeoff。依据：num 快路径把 &&/||/||=/&&= 编译成『两侧求值 + 结果强制 0/1』，实测 5&&3=1（应 3）、0||7=1（应 7）、x=5;x||=9=1（应 5），并破坏短路副作用语义。已修为真短路+值语义（num 用 block(f64)+brIf，零 import；tagged 沿用 emitShortCircuit），test_aot.js 加 and_val/or_val/or_assign/and_assign 四组守门。"
   source: "用户裁决 2026-10-15 + emitter.js 修复"
   affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-15T13:30:21
+  kind: decision
+  summary: "跨模式调用 ABI 修复：num 值=f64 / tagged 值=i64（数值侧=原始 f64 位型），同模块内跨模式直调（tagged↔num）原不插转换 → 产非法 wasm（call 参数类型不符）实例化即崩。修：fnMode 表 + 三处调用点逐实参按位重解释（f64ReinterpretI64/i64ReinterpretF64），返回后逆转换；按位无损。回归门 test_aot.js runMultiFile 跨模式两向。"
+  source: "会话 2026-10-15 修跨模式 ABI bug"
+  affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
