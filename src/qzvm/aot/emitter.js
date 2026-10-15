@@ -679,6 +679,10 @@ class Emitter {
             this.m.localGet(idx); return;
         }
         if (ts.isParenthesizedExpression(e)) { this.emitExpr(e.expression); return; }
+        // 纯类型层构造（运行时恒等，TS 会在 emit 前擦除）→ 直接透传表达式：
+        // `as T` / `x!` / `e satisfies T` / 尖括号断言 `<T>e`（≡ as）。
+        if (ts.isAsExpression(e) || ts.isNonNullExpression(e)
+            || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) { this.emitExpr(e.expression); return; }
         if (ts.isPrefixUnaryExpression(e)) {
             // ++/-- 需先判是否自增自减
             if (ts.isIdentifier(e.operand) && (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken)) {
@@ -1012,7 +1016,7 @@ function funcMode(f) {
         if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isNewExpression(n)
             || ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)
             || ts.isObjectLiteralExpression(n) || ts.isArrayLiteralExpression(n)
-            || ts.isTemplateExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n)
+            || ts.isTemplateExpression(n)
             || ts.isSpreadElement(n) || ts.isTaggedTemplateExpression(n)
             || ts.isClassExpression(n) || ts.isAwaitExpression(n) || ts.isYieldExpression(n)
             || ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n))
@@ -1635,6 +1639,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) { this._emitLambdaNew(e); return; }
     if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
+    // 纯类型层构造（运行时恒等，TS 会在 emit 前擦除）→ 直接透传：
+    // `as T` / `x!` / `e satisfies T` / 尖括号断言 `<T>e`。
+    if (ts.isAsExpression(e) || ts.isNonNullExpression(e)
+        || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) { this.emitTaggedExpr(e.expression); return; }
     if (ts.isTypeOfExpression(e)) {
         // 内联分类：字符串句柄(hi16=0x7FFA)→"string"；数组/对象(0x7FF8/0x7FF9)→"object"；其余→"number"。
         const M = this.m;

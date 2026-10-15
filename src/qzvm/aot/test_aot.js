@@ -39,6 +39,11 @@ function and_val(a: number, b: number): number { const r: any = a && b; return r
 function or_val(a: number, b: number): number { const r: any = a || b; return r; }
 function or_assign(a: number, b: number): number { let x = a; x ||= b; return x; }
 function and_assign(a: number, b: number): number { let x = a; x &&= b; return x; }
+// 纯类型层构造（运行时恒等）：as / 非空断言 / satisfies / 尖括号断言 —— 必须被擦除为操作数本身。
+function asNum(x: number): number { return (x as number) + 1; }
+function angleNum(x: number): number { return (<number>x) + 1; }
+function satNum(x: number): number { return ((x as any) satisfies number) + 1; }
+function nonNullNum(x: number): number { return x! + 1; }
 `;
 
 async function runNum() {
@@ -74,6 +79,11 @@ async function runNum() {
     check("or_assign(0,9)", e.or_assign(0, 9), 9);
     check("and_assign(5,9)", e.and_assign(5, 9), 9);
     check("and_assign(0,9)", e.and_assign(0, 9), 0);
+    // 纯类型层构造擦除（运行时恒等）：此前 emitExpr/emitTaggedExpr 无 AsExpression 分支 → 编译崩。
+    check("asNum(5)", e.asNum(5), 6);
+    check("angleNum(5)", e.angleNum(5), 6);
+    check("satNum(5)", e.satNum(5), 6);
+    check("nonNullNum(5)", e.nonNullNum(5), 6);
 }
 
 async function runTagged() {
