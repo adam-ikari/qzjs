@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, architecture, qzvm, in-module, boundary]
 created: "2026-10-14T06:35:48"
-updated: "2026-10-15T11:47:12"
+updated: "2026-10-15T12:08:36"
 ---
 
 <!-- compiled_truth -->
@@ -135,4 +135,10 @@ qzjs 分三层，**依赖单向**：宿主 → qzjs 运行时 → qzvm。
   kind: decision
   summary: "入站派发异常不再静默吞（fix bridge.c qz_dispatch_message）。此前 qz_js_call_cleanup 静默丢弃所有未处理分发异常——经 qz_post_message 触发的 eval 里 __qz_dispatch__ 抛异常时宿主只见超时。根因：qz_js_call_cleanup = JS_Call + JS_GetException + JS_FreeValue（异常取出即释放，不上报）。触发场景：引擎 OOM 是 uncatchable error（is_uncatchable_error，与栈溢出同类），脚本 try/catch 捕不到，异常径直穿到 JS_Call——memory_limit 超限时正是此路径。修法：qz_dispatch_message 的 JS_Call 后显式检测 JS_IsException → JS_GetException → JS_ToCStringLen（toString，因 Error 的 message/stack 非可枚举，JSON.stringify(err)='{}' 须先 toString）→ 建 envelope 对象 {type:error,error:dispatch-failed,detail:字符串} → JS_JSONStringify → qz_post_to_host。OOM 双重失败（envelope 对象建不起来 / stringify 失败）退静态 {type:error,error:out-of-memory} 帧。关键判断：这是行为契约变更（此前静默→现有 error 帧），消费方须识别 type:error 帧（与 bad-json/mailbox-alloc-failed 同族已有先例），用户已确认做。Error 属性非可枚举是 JS 标准行为，JSON.stringify(new Error('x'))='{}' 在所有引擎成立，不是 quickjs 特有。"
   source: "用户指示：oom（做超限 OOM 的静默吞修）"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T12:08:36
+  kind: decision
+  summary: "约束③ 子项编号 ⑤/⑥ 裁定：⑤=memory_limit（config 字段，与①④同类）、⑥=GC计数/暂停时长（可观测项，与④同类）。旧 handoff 原文是 ⑤=GC计数/⑥=memory_limit，本轮按 coherence 重排后全线自洽（brain truth+timeline、docs 架构文档落地状态+待办#9、CHANGELOG、commit 信息）。用户确认保持现状，不回退。"
+  source: "用户裁决"
   affects: [qzvm-qzjs-layering]
