@@ -1160,6 +1160,14 @@ if(QZ_BUILD_CLI AND NOT QZ_BUILD_TESTS)
     target_link_libraries(host_contract_e2e PRIVATE qz_full)
     target_compile_definitions(host_contract_e2e PRIVATE _POSIX_C_SOURCE=200809L)
     qz_enable_warnings(host_contract_e2e)
+
+    # mem_limit_e2e — 堆硬上限（qz_config_t.memory_limit）的跨进程验证。
+    # 同 host_contract_e2e：ISOLATED 下 runtime 只在子进程，宿主经 qz_config_t
+    # 设的上限有没有真的穿过去、值级对不对，静态门（字段名出现）验不了。
+    add_executable(mem_limit_e2e test/mem_limit_e2e.c)
+    target_link_libraries(mem_limit_e2e PRIVATE qz_full)
+    target_compile_definitions(mem_limit_e2e PRIVATE _POSIX_C_SOURCE=200809L)
+    qz_enable_warnings(mem_limit_e2e)
 endif()
 
 # ============================================================================

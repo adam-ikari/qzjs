@@ -15,7 +15,7 @@ typedef struct qz_t qz_t;
  * 重新编译宿主。qz_config_t 按值跨库边界传递（qz_create 整块拷贝），跨版本
  * 混用会越界读宿主栈上的结构体尾部，abi_version 门控把这个静默的内存不安全
  * 变成显式的 qz_create 失败 + 诊断串。 */
-#define QZ_ABI_VERSION 2
+#define QZ_ABI_VERSION 3
 
 /* 库侧运行时 ABI 版本。宿主用它核对「编译时头文件」与「运行时库」是否同
  * 版本——动态链接场景下这是唯一能提前发现 ABI 错配的手段（否则症状是随机的
@@ -80,7 +80,7 @@ typedef struct qz_config_s {
      * gc_threshold > 0：恢复引擎的阈值自动 GC 作为安全网（长跑、宿主不驱动
      * 回收的场景）——代价是回收时机不确定（内存压力即触发）。
      * 增量语义同 quickjs（触发后阈值 = 当前用量 × 1.5），非绝对值上限；
-     * 要硬上限用 JS_SetMemoryLimit（未接线）。 */
+     * 要**硬上限**用 memory_limit（见下）。 */
     size_t gc_threshold;
     /* ── 随机源种子（确定性执行，brain/pages/qzvm-qzjs-layering.md 约束③）──
      * 引擎的 `ctx->random_state` 默认由时钟播种（`js__gettimeofday_us()`），
@@ -93,6 +93,28 @@ typedef struct qz_config_s {
      * 须在建 context 前生效——qz_create 在 qz_runtime_init 里于 context 创建
      * 之前调用 JS_SetRandomSeed。 */
     uint64_t random_seed;
+    /* ── 堆硬上限（确定性内存 + 资源约束，约束③）──
+     * 透传引擎的 `JS_SetMemoryLimit`：一把**硬上限**——分配使堆超过该值时，
+     * 引擎不比阈值 GC 而直接让分配失败 → 抛 `InternalError: out of memory`
+     * （`JS_ThrowInternalError`）。**这是 quickjs-ng 的 uncatchable error**
+     * （`is_uncatchable_error`，与栈溢出同类）：脚本自己的 try/catch **捕不到**，
+     * 异常径直穿过到调 eval 的嵌入方。与 gc_threshold 的「惰性触发点」正交。
+     *
+     * memory_limit == 0（默认）：不限（引擎缺省）。
+     * memory_limit > 0：堆字节上限。宿主用它把「不可信 JS 把进程撑爆」变成
+     *   可预期的失败点，或在确定性回放里锁定内存包络。
+     * 与 gc_threshold 同理：**相对引擎的堆账**（malloc 用量 + MALLOC_OVERHEAD），
+     * 非 RSS。
+     * 检查点在 runtime 的 malloc_state（`js_malloc_rt`/`js_calloc_rt`/
+     * `js_realloc_rt` 每条路径，非 per-context），故首次分配前设置即可；
+     * qz_runtime_init 在建 context 之前接线。
+     *
+     * ⚠ 超限后的可观测性：引擎抛的是 uncatchable error，JS 层捕不到，异常要
+     * 由**嵌入方**接住。而 qzjs 当前在入站消息派发处会丢弃未被处理的分发异常
+     * （`qz_js_call_cleanup` 吞掉 `__qz_dispatch__` 抛出的异常），故经
+     * qz_post_message 触发的 eval 超限时**邮箱里不会有任何回执**——宿主看到的是
+     * 超时而非错误。用本字段的宿主须自行准备超时兜底。 */
+    size_t memory_limit;
 } qz_config_t;
 
 /* 初始化 qz_config_t 的 ABI 门控字段（struct_size / abi_version）与其余字段的

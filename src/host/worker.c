@@ -326,6 +326,14 @@ qz_worker_t *qz_worker_create(qz_t *parent, const char *script, int *out_err)
     if (parent->config.random_seed)
         self->config.random_seed = parent->config.random_seed + (uint64_t)(slot + 1);
 
+    /* 堆硬上限（约束③）：worker 同上——config 被 calloc 清零，不继承就退回
+     * 「不限」。父声明 memory_limit 的动机通常是**资源约束**（strict 沙箱下
+     * 防止不可信 JS 撑爆进程）或确定性回放的内存包络，这两者都要求 worker
+     * 同样受限；不继承 = 上限在 worker 里静默失效，症状（worker 把进程撑死）
+     * 与真因（上限没传过来）毫无关联。取**同一绝对值**（语义：每个 runtime
+     * 各自的上限，非全进程总量预算）。 */
+    self->config.memory_limit = parent->config.memory_limit;
+
     /* 继承父 runtime 的 CA 信任库。
      *
      * worker 是独立的 qz_t（上面 calloc 清零），不共享父 runtime 的任何状态，

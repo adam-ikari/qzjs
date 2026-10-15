@@ -100,6 +100,19 @@ static inline HostCtx *host_create_seeded(uint64_t seed, const char *script = kT
     return h;
 }
 
+// 带堆硬上限建 runtime（qz_config_t.memory_limit；0 = 不限）。用于验证
+// JS_SetMemoryLimit 的透传与 enforcement（constraint ③ 内存上限）。
+static inline HostCtx *host_create_limited(size_t limit, const char *script = kTestBootstrap) {
+    auto *h = new HostCtx();
+    qz_config_t cfg;
+    qz_config_init(&cfg);
+    cfg.initial_script = script;
+    cfg.memory_limit = limit;
+    h->rt = qz_create(&cfg);
+    if (!h->rt) { delete h; return nullptr; }
+    return h;
+}
+
 static inline void host_destroy(HostCtx *h) {
     if (!h) return;
     qz_destroy(h->rt);

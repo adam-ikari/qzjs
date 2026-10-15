@@ -293,9 +293,14 @@ int qz_host_start(qz_t *rt)
     seed_arg[0] = '\0';
     if (rt->config.random_seed != 0)
         snprintf(seed_arg, sizeof seed_arg, "%llu", (unsigned long long)rt->config.random_seed);
+    /* ml_arg 同 gc_arg/seed_arg：argv 在 spawn 返回前一直持有指针。 */
+    char ml_arg[32];
+    ml_arg[0] = '\0';
+    if (rt->config.memory_limit > 0)
+        snprintf(ml_arg, sizeof ml_arg, "%zu", rt->config.memory_limit);
     /* argv 元素数 = 6 固定 + 可选对（script/bytecode/debug/control-plane/
-     * control-pipe/gc/seed）= 6 + 14 = 20，含 NULL 收尾取 24。旧值 16 在可选对
-     * 全在场时就越界写，加 gc/seed 后必然溢出。 */
+     * control-pipe/gc/seed/memory-limit）= 6 + 16 = 22，含 NULL 收尾取 24。旧值 16 在
+     * 可选对全在场时就越界写，加 gc/seed 后必然溢出。 */
     char *argv[24];
     int n = 0;
     argv[n++] = (char *)"qzjs-rt";
@@ -346,6 +351,13 @@ int qz_host_start(qz_t *rt)
     if (rt->config.random_seed != 0) {
         argv[n++] = (char *)"--seed";
         argv[n++] = seed_arg;
+    }
+    /* 堆硬上限（约束③）：memory_limit 只在主RT 进程生效（context 在那创建）
+     * ——不传的话宿主经 qz_config_t 设的上限静默失效（同 gc/seed/debug 那
+     * 一路的缺口）。语义：0 = 不限（默认），>0 = 堆字节上限。 */
+    if (rt->config.memory_limit > 0) {
+        argv[n++] = (char *)"--memory-limit";
+        argv[n++] = ml_arg;
     }
     argv[n] = NULL;
 

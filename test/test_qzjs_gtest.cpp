@@ -155,3 +155,38 @@ TEST(qz_config, random_seed_makes_math_random_reproducible) {
     EXPECT_NE(a, c);
     EXPECT_FALSE(a.empty());
 }
+
+/* 堆硬上限（约束③）：qz_config_t.memory_limit 经 qz_runtime_init 的
+ * JS_SetMemoryLimit 透传 → 分配超限时引擎让分配失败。负控：同一表达式在不设
+ * 上限时必须成功——否则不能断言失败是上限导致的。
+ *
+ * 断言是「没有成功」而不是「收到 OOM 错误」：引擎的 OOM 是 quickjs-ng 的
+ * uncatchable error（`is_uncatchable_error`，见 qzjs.h 的 memory_limit 备注），
+ * 脚本 try/catch 捕不到、qzjs 的入站派发又会吞掉未处理的分发异常，故今天
+ * **根本没有回执**。本断言对「今天静默」与「将来改成回错误帧」都成立。 */
+TEST(qz_config, memory_limit_fails_oversized_allocation) {
+    /* 64MiB 上限下：256MiB 的 ArrayBuffer 必须拿不到；同一表达式在不设上限
+     * 时必须成功（负控）。上限取宽裕——runtime 自身要在 64MiB 内跑起来。 */
+    const char *expr = "new ArrayBuffer(256*1024*1024).byteLength";
+    {
+        HostCtx *h = host_create_limited(64u << 20);
+        ASSERT_NE(nullptr, h);
+        std::string limited;
+        bool got = host_eval(h, expr, &limited, 3000);
+        EXPECT_FALSE(got && limited.find("\"ok\":true") != std::string::npos)
+            << "上限没生效：256MiB 分配成功（" << limited << "）";
+        /* 存活：没回执必须真的是「被拒」，不是 RT 死了。 */
+        std::string alive;
+        ASSERT_TRUE(host_eval(h, "1+1", &alive));
+        EXPECT_NE(std::string::npos, alive.find("\"v\":\"2\""));
+        host_destroy(h);
+    }
+    {
+        HostCtx *h = host_create_limited(0);   // 0 = 不限
+        ASSERT_NE(nullptr, h);
+        std::string unlimited;
+        ASSERT_TRUE(host_eval(h, expr, &unlimited));
+        EXPECT_NE(std::string::npos, unlimited.find("268435456"));   // 负控
+        host_destroy(h);
+    }
+}

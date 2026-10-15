@@ -558,6 +558,14 @@ int qz_runtime_init(qz_t *rt)
      * （JS_NewContextRaw 由 random_state 派生 hash_seed）。0 = 沿用时钟播种。 */
     JS_SetRandomSeed(rt->jsrt, rt->config.random_seed);
 
+    /* 堆硬上限（约束③）：memory_limit != 0 时透传引擎的 JS_SetMemoryLimit
+     * ——分配使堆超过该值时引擎让分配失败 → JS 层 InternalError: out of memory
+     * （可 try/catch），与 gc_threshold 的「惰性触发点」正交。0 = 不限（引擎缺省）。
+     * 相对引擎的堆账（malloc 用量 + MALLOC_OVERHEAD），非 RSS；检查点在
+     * rt->malloc_state（非 per-context），首次分配前设置即可。 */
+    if (rt->config.memory_limit)
+        JS_SetMemoryLimit(rt->jsrt, rt->config.memory_limit);
+
     JS_SetRuntimeOpaque(rt->jsrt, rt);
 
     /* Initialize context table */
