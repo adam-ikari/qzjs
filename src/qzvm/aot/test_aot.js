@@ -42,8 +42,12 @@ function and_assign(a: number, b: number): number { let x = a; x &&= b; return x
 // 纯类型层构造（运行时恒等）：as / 非空断言 / satisfies / 尖括号断言 —— 必须被擦除为操作数本身。
 function asNum(x: number): number { return (x as number) + 1; }
 function angleNum(x: number): number { return (<number>x) + 1; }
-function satNum(x: number): number { return ((x as any) satisfies number) + 1; }
 function nonNullNum(x: number): number { return x! + 1; }
+function satNum(x: number): number { return ((x as any) satisfies number) + 1; }
+// NaN truthy：JS Boolean(NaN)=false（此前 emitCond 仅 x!=0 → NaN 误判 truthy）。
+function nanTruthy(a: number, b: number): number { const x = a / b; return x ? 1 : 7; }
+function nanAnd(a: number, b: number): number { const x = a / b; return x && 3; }
+function nanOr(a: number, b: number): number { const x = a / b; return x || 9; }
 `;
 
 async function runNum() {
@@ -84,6 +88,10 @@ async function runNum() {
     check("angleNum(5)", e.angleNum(5), 6);
     check("satNum(5)", e.satNum(5), 6);
     check("nonNullNum(5)", e.nonNullNum(5), 6);
+    // NaN truthy（JS Boolean(NaN)=false）：此前 emitCond 仅 x!=0 → NaN 误判 truthy 得 1。
+    check("nanTruthy(0,0)", e.nanTruthy(0, 0), 7);   // NaN ? 1 : 7 → 7
+    check("nanAnd(0,0)", isNaN(e.nanAnd(0, 0)), true);  // NaN && 3 → NaN
+    check("nanOr(0,0)", e.nanOr(0, 0), 9);              // NaN || 9 → 9
 }
 
 async function runTagged() {
@@ -151,6 +159,20 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     const callC = (n, a) => { const m = rcl.funcMeta.find(f => f.name === n); if (instCl.exports.__bump_reset) instCl.exports.__bump_reset(); const r = instCl.exports[n](...a.map(x => qzc._fromJS(x))); return m.mode === "num" ? r : qzc._toJS(r); };
     check("闭包.adder(5)", callC("adder", [5]), 15);
     check("闭包.closure()", callC("closure", []), 105);
+    // 字符串参数（_fromJS 须 strWriteback 成 0x7FFA 句柄；此前仅 tagHandle → .length/concat 静默 0）。
+    const stT = path.join(os.tmpdir(), "qz_aot_strparam.ts");
+    fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\n");
+    const rst2 = compileTS(stT, path.join(os.tmpdir(), "qz_aot_strparam.wasm"), {});
+    const qzsp = makeQzvm(rst2.strings);
+    const { instance: instSp } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_strparam.wasm")), { qz: qzsp });
+    qzsp.bindMem(instSp.exports.memory); if (instSp.exports.__bump) qzsp.bindBump(instSp.exports.__bump);
+    const callSp = (n, a) => { if (instSp.exports.__bump_reset) instSp.exports.__bump_reset(); return qzsp._toJS(instSp.exports[n](...a.map(x => qzsp._fromJS(x)))); };
+    check("strParam.len(\"abc\")", callSp("strLen", ["abc"]), 3);
+    check("strParam.typeof", callSp("strType", ["abc"]), "string");
+    check("strParam.cat(\"a\",5)", callSp("strCat", [5, "a"]), "a5");
+    // NaN 返回值不得被误判为数组（数组标签原 0x7FF8 = canonical NaN → box(NaN) 相撞）
+    const nanVal = callSp("nanRet", [0, 0]);
+    check("strParam.nanRet(0,0) is NaN", typeof nanVal === "number" && isNaN(nanVal), true);
 }
 
 async function runClasses() {

@@ -63,7 +63,7 @@ const QZ = {
   // 类实例分配在 wasm 内联（bump，见 _emitNewCall）——不经宿主，故无对应 import。
   method_call: { params: ["i64", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
-  // wasm 侧仅用于 0x7FF8 数组；字符串/其它不适用。
+  // wasm 侧仅用于 0x7FFB 数组；字符串/其它不适用。
   arr_set_len: { params: ["i64", "i64"], results: ["i64"] },
 };
 // 注册 qz.* import。only = 采集到的「实际用到」集合（Set<"qz.<name>">）；缺省/undefined
@@ -797,8 +797,15 @@ class Emitter {
         this.emitBinaryOperandValue(e.right);
         this.emitBinaryOp(op);
     }
-    // 条件求值：栈顶 f64 → i32（!=0 为真）
-    emitCond() { this.m.f64Const(0); this.m.f64Ne(); }
+    // 条件求值：栈顶 f64 → i32（truthy）。JS ToBoolean(number): false iff 0/-0/NaN。
+    // (x != 0) 排除 0/-0（IEEE: -0==0）；(x == x) 排除 NaN（IEEE: NaN≠NaN → eq=false）。AND = truthy。
+    // 此前仅 `x != 0` → NaN 误判 truthy（NaN≠0 为 true）→ `NaN ? 1 : 7` 得 1 而非 7。
+    emitCond() {
+        this.m.localSet(this.scratchA);
+        this.m.localGet(this.scratchA); this.m.f64Const(0); this.m.f64Ne();        // x != 0
+        this.m.localGet(this.scratchA); this.m.localGet(this.scratchA); this.m.f64Eq();  // x == x
+        this.m.i32And();
+    }
     emitBinaryOperandValue(e) { if (ts.isBinaryExpression(e)) this.emitBinary(e); else this.emitExpr(e); }
     emitBinaryOp(op) {
         switch (op) {
@@ -857,7 +864,9 @@ class Emitter {
 // 字面量驻留 data 段（STR_BASE 起）；动态拼接走 bump 堆（global0 从 STR_BUMP 起）。
 // 数字→字符串用固定 scratch 区（SCRATCH 起）。
 const STR_TAG_HI = 0x7ffa;                       // 字符串句柄高 16 位标记
-const ARR_TAG_HI = 0x7ff8;                       // 数组句柄高 16 位标记（布局 [len:i32][pad:i32][elem:i64×N]，元素 +8 起）
+const ARR_TAG_HI = 0x7ffb;                       // 数组句柄高 16 位标记（布局 [len:i32][pad:i32][elem:i64×N]，元素 +8 起）。
+                                                 // 不可用 0x7FF8：那是 canonical quiet NaN（宿主 box(NaN) 恰产此位型），
+                                                 // 与 f64 算术结果相撞 → 任何 NaN 会被误判为数组句柄。
 const SCRATCH = 16;                              // numstr 临时区（48 字节，够 20 位 + 负号 + len）
 const STR_BASE = 8 << 20;                        // 字面量 data 段基址（8 MiB）：bump 堆 arena 上限，越过即 trap
 const STR_BUMP = 128;                            // bump 堆起始（跳过 scratch）
@@ -1644,7 +1653,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isAsExpression(e) || ts.isNonNullExpression(e)
         || ts.isSatisfiesExpression(e) || ts.isTypeAssertionExpression(e)) { this.emitTaggedExpr(e.expression); return; }
     if (ts.isTypeOfExpression(e)) {
-        // 内联分类：字符串句柄(hi16=0x7FFA)→"string"；数组/对象(0x7FF8/0x7FF9)→"object"；其余→"number"。
+        // 内联分类：字符串句柄(hi16=0x7FFA)→"string"；数组/对象(0x7FFB/0x7FF9)→"object"；其余→"number"。
         const M = this.m;
         this.emitTaggedExpr(e.expression); M.localSet(this.scratch);
         M.block("i64");
@@ -1652,7 +1661,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         M.ifBlock("i64");
         this._emitStrLitHandle("string");
         M.else_();
-        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff8n); M.i64Eq();
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
         M.i32Or();
         M.ifBlock("i64");
@@ -1690,7 +1699,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isArrayLiteralExpression(e)) {
         // 数组：稳定句柄布局 header(16B: len,cap,dataOff,pad) + data 块(elem i64×N)。
-        // 句柄 = 0x7FF8|headerOff；push 增长只换 data 块、句柄不变（支持别名/传参/属性）。
+        // 句柄 = 0x7FFB|headerOff；push 增长只换 data 块、句柄不变（支持别名/传参/属性）。
         const N = e.elements.length;
         const total = 16 + N * 8;
         emitBumpAlloc(this.m, () => this.m.i32Const(total));   // → headerOff(i32)（越界 trap）
@@ -1704,11 +1713,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.i64Store(3, i * 8);
         }
         this.m.localGet(this.sT[0]); this.m.i64ExtendI32U();
-        this.m.i64ConstBits(0, 0x7ff80000); this.m.i64Or();               // 句柄
+        this.m.i64ConstBits(0, 0x7ffb0000); this.m.i64Or();               // 句柄
         return;
     }
     if (ts.isElementAccessExpression(e)) {
-        // a[i]：数组句柄(0x7FF8) → header[+8]=dataOff → load [dataOff + i*8]；i 须 number。
+        // a[i]：数组句柄(0x7FFB) → header[+8]=dataOff → load [dataOff + i*8]；i 须 number。
         this.emitTaggedExpr(e.expression); this.m.localSet(this.scratch);   // scratch = 数组值
         this.emitTaggedExpr(e.argumentExpression);                          // [i_value:i64]
         this.m.f64ReinterpretI64(); this.m.i32TruncF64S();                  // → i32 index
@@ -1718,14 +1727,14 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
-        // .length：字符串(0x7FFA)/数组(0x7FF8) 结构首 i32 即 len → wasm 内 load；
+        // .length：字符串(0x7FFA)/数组(0x7FFB) 结构首 i32 即 len → wasm 内 load；
         // 其余回退 qz.str_len（跨界，罕见）。
         this.emitTaggedExpr(e.expression);
         this.m.localSet(this.scratch);
         this.m.localGet(this.scratch); this.m.i64Const(48n); this.m.i64ShrU();
         this.m.i64Const(0x7ffan); this.m.i64Eq();
         this.m.localGet(this.scratch); this.m.i64Const(48n); this.m.i64ShrU();
-        this.m.i64Const(0x7ff8n); this.m.i64Eq();
+        this.m.i64Const(0x7ffbn); this.m.i64Eq();
         this.m.i32Or();
         this.m.ifBlock("i64");
         this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Load(2, 0);
@@ -1978,7 +1987,7 @@ Emitter.prototype._emitStoreProp = function (left) {
     M.i64Store(3, this._fieldIndex(left.name.text));
     M.localGet(this.scratch);                     // 赋值表达式返回所赋之值
 };
-// `.length=` 赋值：数组(0x7FF8) → qz.arr_set_len（宿主截断/扩容）；其余 → 普通字段存储
+// `.length=` 赋值：数组(0x7FFB) → qz.arr_set_len（宿主截断/扩容）；其余 → 普通字段存储
 // （POJO 恰有 length 字段）。返回所赋之值（JS 语义）。scratch=值, scratchA=接收者（皆 i64）。
 Emitter.prototype._emitStoreLength = function (left) {
     const M = this.m;
@@ -1986,7 +1995,7 @@ Emitter.prototype._emitStoreLength = function (left) {
     this.emitTaggedExpr(left.expression);           // 接收者
     M.localSet(this.scratchA);
     M.localGet(this.scratchA); M.i64Const(48n); M.i64ShrU();
-    M.i64Const(0x7ff8n); M.i64Eq();
+    M.i64Const(0x7ffbn); M.i64Eq();
     M.ifBlock("void");
     M.localGet(this.scratchA); M.localGet(this.scratch); M.call("qz.arr_set_len"); M.drop();   // 数组：宿主处理
     M.else_();

@@ -3,8 +3,9 @@
  *
  * 值模型（i64）：
  *   - 数值：直接是 f64 的 IEEE-754 位型（i64.reinterpret_f64），对齐 TS number 53 位精度。
- *   - 句柄：高 16 位 = 0x7FF9 的 NaN 位型（真实 f64 算术不会产出，canonical NaN 高 16 位是 0x7FF8），
- *           低 32 位存表索引。判定「是句柄」= `b >> 48 == 0x7FF9`。
+ *   - 句柄：高 16 位 = 0x7FF9/0x7FFA(串)/0x7FFB(数组) 等 NaN 位型；canonical NaN 高 16 位是
+ *           0x7FF8 —— 该值**禁用**为标签（宿主 box(NaN) 恰产此位型，会与 NaN 相撞）。
+ *           低 32 位存表索引/偏移。判定「是句柄」= 高 16 位 ∈ {0x7FF9, 0x7FFA, 0x7FFB}。
  * 该表示与宿主字长无关：wasm f64 恒为 IEEE-754 double，32 位宿主由 wamrc 降到软/硬浮点，
  * 数值语义（含 >2^31 的整数）不变 —— 故 32/64 位设备共用同一表示，无需按目标位宽切换。
  * 跨界（wasm import ↔ JS）用 BigInt 传 i64。
@@ -89,8 +90,8 @@ function makeQzvm(strings) {
     const len = dv[off] | (dv[off+1] << 8) | (dv[off+2] << 16) | (dv[off+3] << 24);
     return _utf8(dv, off + 4, off + 4 + len);
   };
-  const isArrH = (b) => (BigInt(b) >> 48n) === 0x7ff8n;
-  // wasm 原生数组（0x7FF8）：header[0]=len，header[2]=dataOff，data = i64×len（元素解引用递归）。
+  const isArrH = (b) => (BigInt(b) >> 48n) === 0x7ffbn;
+  // wasm 原生数组（0x7FFB）：header[0]=len，header[2]=dataOff，data = i64×len（元素解引用递归）。
   const arrRead = (b) => {
     const off = Number(BigInt(b) & MASK32);
     const dv = new DataView(mem.buffer);
@@ -133,14 +134,14 @@ function makeQzvm(strings) {
     for (let i = 0; i < bytes.length; i++) memU8[off + 4 + i] = bytes[i];
     return (0x7ffan << 48n) | BigInt(off);
   };
-  // JS 值 → 句柄位型（i64）。string→0x7FFA；number→f64 位型；array→wasm 原生数组(0x7FF8)；
-  // 其它→JS 句柄(0x7FF9)。wasm 侧可直接 .length/索引/push/pop 的只有 0x7FFA/0x7FF8。
+  // JS 值 → 句柄位型（i64）。string→0x7FFA；number→f64 位型；array→wasm 原生数组(0x7FFB)；
+  // 其它→JS 句柄(0x7FF9)。wasm 侧可直接 .length/索引/push/pop 的只有 0x7FFA/0x7FFB。
   const bitsOf = (e) => typeof e === "string" ? strWriteback(e)
                      : typeof e === "number" ? numToBits(e)
                      : typeof e === "boolean" ? numToBits(e ? 1 : 0)
                      : Array.isArray(e) ? arrWriteback(e)
                      : tagHandle(e);
-  // JS 数组 → wasm 原生数组（0x7FF8 布局：header 16B [len,cap,dataOff,pad] + data i64×N），
+  // JS 数组 → wasm 原生数组（0x7FFB 布局：header 16B [len,cap,dataOff,pad] + data i64×N），
   // 与 emitter 数组字面量一致。关键：使 split(…)/数组方法产出的数组在 wasm 侧可直接
   // .length/索引/push/pop（此前返回 JS 句柄 0x7FF9，wasm 侧 .length 落到 str_len 读垃圾 → 静默返回 0）。
   const arrWriteback = (js) => {
@@ -153,7 +154,7 @@ function makeQzvm(strings) {
     dv.setInt32(start + 8, dataOff, true);
     dv.setInt32(start + 12, 0, true);
     for (let i = 0; i < N; i++) dv.setBigInt64(dataOff + i * 8, BigInt.asIntN(64, bitsOf(js[i])), true);
-    return (0x7ff8n << 48n) | BigInt(start);
+    return (0x7ffbn << 48n) | BigInt(start);
   };
   // 原地改写既有数组（保持句柄不变，支持别名/传参）：容量不足则换 data 块（同 push 语义）。
   const arrSetInPlace = (recv, js) => {
@@ -183,7 +184,7 @@ function makeQzvm(strings) {
     const args = [off + 8, a0, a1, a2, a3].slice(0, 1 + meta.n);
     return fn(...args);
   };
-  // 数组方法（recv=0x7FF8 原生数组）。回调（map/filter/reduce/…）为闭包句柄，
+  // 数组方法（recv=0x7FFB 原生数组）。回调（map/filter/reduce/…）为闭包句柄，
   // 经 closure_call(handle, v, i, arr) 调用 wasm 侧箭头函数。返回：number/bool→box、
   // string→strWriteback、array→arrWriteback、null/undefined/其它→JS 句柄。
   const doArrMethod = (recv, mid, a0, a1) => {
@@ -252,7 +253,7 @@ function makeQzvm(strings) {
       default: throw new Error("未知字符串方法: " + name);
     }
     // 字符串 → 写回 wasm 堆（[len][utf8]），返回 0x7FFA 句柄（与热路径内存布局一致）；
-    // 数字（charCodeAt/indexOf/lastIndexOf）→ box；数组（split）→ wasm 原生数组（0x7FF8，
+    // 数字（charCodeAt/indexOf/lastIndexOf）→ box；数组（split）→ wasm 原生数组（0x7FFB，
     // 使 .length/索引/push/pop 在 wasm 侧可用）；其它 → JS 句柄。
     if (typeof r === "string") return strWriteback(r);
     if (typeof r === "number") return box(r);
@@ -299,7 +300,7 @@ function makeQzvm(strings) {
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
     // 字符串方法：recv + 方法名 id + 2 参（undefined 句柄 = 缺省）→ 结果字符串句柄。
     str_method: (recv, mid, a0, a1) => doStrMethod(recv, mid, a0, a1),
-    // 通用方法调用：字符串 → doStrMethod；数组(0x7FF8) → doArrMethod；类实例（内存 [0]=__cls id）
+    // 通用方法调用：字符串 → doStrMethod；数组(0x7FFB) → doArrMethod；类实例（内存 [0]=__cls id）
     // → 沿继承链查 classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
     method_call: (recv, mid, a0, a1, a2, a3) => {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1);
@@ -343,7 +344,10 @@ function makeQzvm(strings) {
     bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; },
     bindBump,
     // 供宿主检查用（不在 wasm import 面）
-    _toJS: toJS, _fromJS: (x) => (typeof x === "number" ? numToBits(x) : tagHandle(x)),
+    // 宿主 JS 值 → wasm 句柄位型：复用 bitsOf（string→0x7FFA 写回、array→0x7FFB、bool→num、其它→0x7FF9）。
+    // 此前仅 number→numToBits、其余一律 tagHandle → 字符串入参得 0x7FF9 假句柄，wasm 侧 .length/concat
+    // 落到 str_len 读垃圾，静默返回 0 / 丢操作数。修复后与 bitsOf/arrWriteback 语义一致。
+    _toJS: toJS, _fromJS: (x) => bitsOf(x),
     _handles: handles, _TAG: TAG,
     closure_call: (handle, a0, a1, a2, a3) => closureCall(handle, a0, a1, a2, a3),
     bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
