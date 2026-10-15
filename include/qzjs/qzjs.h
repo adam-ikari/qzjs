@@ -109,11 +109,14 @@ typedef struct qz_config_s {
      * `js_realloc_rt` 每条路径，非 per-context），故首次分配前设置即可；
      * qz_runtime_init 在建 context 之前接线。
      *
-     * ⚠ 超限后的可观测性：引擎抛的是 uncatchable error，JS 层捕不到，异常要
-     * 由**嵌入方**接住。而 qzjs 当前在入站消息派发处会丢弃未被处理的分发异常
-     * （`qz_js_call_cleanup` 吞掉 `__qz_dispatch__` 抛出的异常），故经
-     * qz_post_message 触发的 eval 超限时**邮箱里不会有任何回执**——宿主看到的是
-     * 超时而非错误。用本字段的宿主须自行准备超时兜底。 */
+     * ⚠ 超限后的可观测性：引擎抛的是 uncatchable error，JS 层捕不到。
+     * qzjs 入站消息派发（`qz_dispatch_message`）在 `JS_Call` 后检测异常：
+     * 若 `__qz_dispatch__` 抛异常（含 OOM 穿透 try/catch），投递
+     * `{"type":"error","error":"dispatch-failed","detail":...}` 错误帧到宿主
+     * 邮箱；OOM 双重失败（envelope 对象建不起来）退静态
+     * `{"type":"error","error":"out-of-memory"}` 帧。故经 `qz_post_message`
+     * 触发的 eval 超限时宿主会收到错误帧而非静默超时。用本字段的宿主仍应
+     * 自行准备超时兜底（错误帧是 best-effort，极端双重 OOM 下也只退静态帧）。 */
     size_t memory_limit;
 } qz_config_t;
 

@@ -17,12 +17,13 @@
  *   存活：正例之后 RT 必须仍能回 `1+1`——否则「没回执」可能只是 RT 死了，
  *         正例就失去意义（拒绝 vs 崩溃必须分得开）。
  *
- * ⚠ 为什么正例断言是「没有 ALLOCATED」而不是「收到错误回执」：引擎的 OOM 是
- * quickjs-ng 的 **uncatchable error**（`is_uncatchable_error`，与栈溢出同类），
- * 脚本 try/catch 捕不到，异常穿到嵌入方；而 qzjs 的入站派发会吞掉未处理的
- * 分发异常（`qz_js_call_cleanup`），故今天**邮箱里根本没有回执**。本断言对
- * 「今天静默」与「将来改成回错误帧」两种情形都成立——它测的是上限有没有生效，
- * 不是 qzjs 怎么报错（后者见 qzjs.h 的 memory_limit 备注）。
+ * ⚠ 正例断言是「收到 error 帧」：引擎的 OOM 是 quickjs-ng 的 **uncatchable
+ * error**（`is_uncatchable_error`，与栈溢出同类），脚本 try/catch 捕不到，
+ * 异常穿到嵌入方；qzjs 入站派发（`qz_dispatch_message`）在 `JS_Call` 后检测
+ * `JS_IsException` → 投递 `{"type":"error","error":"dispatch-failed",
+ * "detail":"InternalError: out of memory"}` 帧（OOM 双重失败退静态
+ * `{"type":"error","error":"out-of-memory"}` 帧）。本断言验证上限生效 +
+ * 异常不再被静默吞掉。
  *
  * 用法：mem_limit_e2e
  *   必须在真实 ISOLATED 构建（QZ_BUILD_TESTS=OFF + QZ_BUILD_CLI=ON）上跑，
@@ -77,6 +78,25 @@ static int eval1(qz_t *rt, const char *code, char *buf, size_t bufsz, int timeou
     }
 }
 
+/* 投一条 code 消息（与 eval1 同格式，但不收回执——只投）。 */
+static int post_code(qz_t *rt, const char *code) {
+    char msg[256];
+    int n = snprintf(msg, sizeof msg, "{\"code\":\"%s\"}", code);
+    if (n <= 0 || (size_t)n >= sizeof msg) return -1;
+    return qz_post_message(rt, msg, (size_t)n);
+}
+
+/* 收一条原始消息（不跳过 error 帧）。0 = 取到，-1 = 超时/错误。 */
+static int recv_raw(qz_t *rt, char *buf, size_t bufsz, int timeout_ms) {
+    char *json = NULL;
+    size_t len = 0;
+    int r = qz_recv_message(rt, &json, &len, timeout_ms);
+    if (r == 1 || r < 0) { qz_free_message(json); return -1; }
+    snprintf(buf, bufsz, "%.*s", (int)len, json);
+    qz_free_message(json);
+    return 0;
+}
+
 static qz_t *make_rt(size_t limit) {
     qz_config_t cfg;
     qz_config_init(&cfg);
@@ -105,13 +125,17 @@ int main(void) {
             return 1;
         }
 
-        /* 成功与否看 ok:true（kBig 求值出的是 byteLength 数字，没有 "ALLOCATED"
-         * 这种字面量可匹配）。 */
-        int got = eval1(rt, kBig, a, sizeof a, 3000);
-        if (got == 0 && strstr(a, "\"ok\":true"))
-            fail("big-alloc(limited) 竟然成功——上限没穿到主RT？", a);
-        else if (got == 0 && !strstr(a, "out of memory"))
-            fail("big-alloc(limited) 有回执但不是 OOM", a);
+        /* OOM 是 uncatchable → 穿过 onmessage 的 try/catch → 冒泡到
+         * qz_dispatch_message 的 JS_Call → error envelope。此前静默吞
+         * （qz_js_call_cleanup），现改为投递 error 帧。 */
+        if (post_code(rt, kBig) != 0)
+            fail("big-alloc(limited) post 失败", "");
+        else if (recv_raw(rt, a, sizeof a, 5000) != 0)
+            fail("big-alloc(limited) 无回执——应收到 error 帧", a);
+        else if (!strstr(a, "\"type\":\"error\""))
+            fail("big-alloc(limited) 回执不是 error 帧", a);
+        else if (!strstr(a, "out of memory") && !strstr(a, "out-of-memory"))
+            fail("big-alloc(limited) error 帧不含 OOM 信息", a);
 
         /* 存活：没回执必须真的是「被拒」而不是「RT 死了」。 */
         if (eval1(rt, "1+1", a, sizeof a, 10000) != 0 || !strstr(a, "\"v\":\"2\""))

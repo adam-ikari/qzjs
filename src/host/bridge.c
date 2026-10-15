@@ -2209,7 +2209,58 @@ void qz_dispatch_message(qz_t *rt, qz_msg_t *m)
             data = JS_NewArrayBufferCopy(ctx, (const uint8_t *)m->data, m->len);
         }
         JSValue args[3] = { data, src, kind };
-        qz_js_call_cleanup(ctx, fn, JS_UNDEFINED, 3, args);
+        JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 3, args);
+        if (JS_IsException(ret)) {
+            /* spec §5: __qz_dispatch__ 抛异常 → error envelope。此前
+             * qz_js_call_cleanup 静默吞掉（JS_GetException + free），宿主
+             * 只见超时。OOM 是 uncatchable（is_uncatchable_error，与栈
+             * 溢出同类）：JS_GetException 取回的是 InternalError 对象或
+             * JS_NULL（引擎 OOM-of-OOM 退路，quickjs.c:8716-8717 "throw
+             * JS_NULL to avoid recursing"）。此时堆仍在上限，建 envelope
+             * 对象会再 OOM → 退静态 OOM 帧。 */
+            JSValue exc = JS_GetException(ctx);
+            /* Error 对象的 message/stack 是非可枚举属性，JSON.stringify(err)
+             * → "{}"——须先 toString() 取字符串再放进 detail。 */
+            size_t msglen = 0;
+            const char *msg = (!JS_IsNull(exc) && !JS_IsException(exc))
+                ? JS_ToCStringLen(ctx, &msglen, exc) : NULL;
+            JS_FreeValue(ctx, exc);
+            JSValue env = JS_NewObject(ctx);
+            bool posted = false;
+            if (!JS_IsException(env)) {
+                JS_SetPropertyStr(ctx, env, "type",
+                                  JS_NewString(ctx, "error"));
+                JS_SetPropertyStr(ctx, env, "error",
+                                  JS_NewString(ctx, "dispatch-failed"));
+                if (msg)
+                    JS_SetPropertyStr(ctx, env, "detail",
+                                      JS_NewStringLen(ctx, msg, msglen));
+                else
+                    JS_SetPropertyStr(ctx, env, "detail",
+                                      JS_NewString(ctx, "out-of-memory"));
+                JSValue j = JS_JSONStringify(ctx, env, JS_UNDEFINED,
+                                             JS_UNDEFINED);
+                if (!JS_IsException(j)) {
+                    size_t slen;
+                    const char *s = JS_ToCStringLen(ctx, &slen, j);
+                    if (s) {
+                        qz_post_to_host(rt, s, slen);
+                        JS_FreeCString(ctx, s);
+                        posted = true;
+                    }
+                }
+                JS_FreeValue(ctx, j);
+                JS_FreeValue(ctx, env);
+            }
+            JS_FreeCString(ctx, msg);
+            if (!posted) {
+                /* 双重 OOM（envelope 对象建不起来）或 stringify 失败 */
+                static const char *oom =
+                    "{\"type\":\"error\",\"error\":\"out-of-memory\"}";
+                qz_post_to_host(rt, oom, strlen(oom));
+            }
+        }
+        JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, data);
         JS_FreeValue(ctx, src);
         JS_FreeValue(ctx, kind);

@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, architecture, qzvm, in-module, boundary]
 created: "2026-10-14T06:35:48"
-updated: "2026-10-15T09:41:39"
+updated: "2026-10-15T11:47:12"
 ---
 
 <!-- compiled_truth -->
@@ -28,7 +28,7 @@ qzjs 分三层，**依赖单向**：宿主 → qzjs 运行时 → qzvm。
 
 **硬上限（2026-10-15 补齐，约束③ ⑤）**：新增 `qz_config_t.memory_limit`（0 = 不限）+ **`QZ_ABI_VERSION` 2→3**，透传引擎公有 API `JS_SetMemoryLimit`（无需 patch）。与 `gc_threshold` 正交：前者是**惰性触发点**（超阈值即 RunGC、阈值 ×1.5），后者是**分配直接失败**（`js_malloc_rt`/`js_calloc_rt`/`js_realloc_rt` 检查 `rt->malloc_state`）。ISOLATED 经 `rt_host.c` 的 `--memory-limit` argv 过边界；worker（config 清零）按**同一绝对值**继承（父声明上限的动机是资源约束，worker 不受限 = 上限静默失效）。
 
-⚠ **实测发现（未修）**：引擎的 OOM 是 quickjs-ng 的 **uncatchable error**（`quickjs.c:1147` `is_uncatchable_error`，与栈溢出同类）——纯引擎实证 `try{new ArrayBuffer(256MiB)}catch(e){}` 异常照样穿出（`JS_IsException` 为真），脚本**根本捕不到**；而 qzjs 的入站派发 `qz_js_call_cleanup`（`bridge.c:136`）`JS_GetException` + `JS_FreeValue` **静默吞掉** `__qz_dispatch__` 抛出的异常→ 经 `qz_post_message` 触发的 eval 超限时**邮箱无任何回执**，宿主只见超时。故 `memory_limit` 今天只能当「有兜底超时的资源上限」用，不能当「会给脚本一个可捕获错误」的机制。测试断言刻意写成「没有成功」而非「收到 OOM 回执」，对今天静默与将来改成回错误帧两种情形都成立。
+⚠ **实测发现（未修）**：引擎的 OOM 是 quickjs-ng 的 **uncatchable error**（`quickjs.c:1147` `is_uncatchable_error`，与栈溢出同类）——纯引擎实证 `try{new ArrayBuffer(256MiB)}catch(e){}` 异常照样穿出（`JS_IsException` 为真），脚本**根本捕不到**；而 qzjs 的入站派发 `qz_js_call_cleanup`（`bridge.c:136`）`JS_GetException` + `JS_FreeValue` **静默吞掉** `__qz_dispatch__` 抛出的异常→ 经 `qz_post_message` 触发的 eval 超限时**邮箱无任何回执**，宿主只见超时。故 `memory_limit` 今天只能当「有兜底超时的资源上限」用，不能当「会给脚本一个可捕获错误」的机制。**入站派发不再静默吞（2026-10-15 修）**：`qz_dispatch_message` 在 `JS_Call` 后检测 `JS_IsException` → 取异常 `toString()`（Error 的 message/stack 非可枚举，`JSON.stringify(err) → "{}"`，须先 toString）→ 投递 `{"type":"error","error":"dispatch-failed","detail":"..."}` 错误帧到宿主邮箱（bad-json 先例）；OOM 双重失败（envelope 对象建不起来）退静态 `{"type":"error","error":"out-of-memory"}` 帧。行为契约变更：此前静默 → 现有 error 帧；消费方须识别 `{"type":"error"}` 帧（与 bad-json / mailbox-alloc-failed 同族）。测试断言已从「没有成功」升级为「收到 error 帧」。
 
 **GC 驱动计数/暂停时长（2026-10-15 补齐，约束③ ⑥，全部落地收口）**：所有显式驱动点收口到唯一入口 `qz_gc_drive()`（`qzjs.c`，JS_RunGC + `uv_hrtime` 计时 + 记账），三个调用点——`rt_main.c child_wake_cb`（`qz_gc()` msgq GC_RUN 落点）/ `thread.c qz_wake_cb` / 控制面 `ctl_gc`——都走它（漏一个 = 计数偏小且无门变红，故收口）。计数挂 `rt->gc_runs/gc_last_us/gc_total_us`（host-only）；`"gc"` op 回执与 `metrics` op 都带。**语义边界（刻意不踩坑）**：`gc_runs` 只计**显式驱动**——引擎自发的隐式 GC（`gc_threshold>0` 阈值路径、OOM 路径）不经 `qz_gc_drive`，故它**不是**「引擎有没有偷偷 GC」的检测器（那要引擎侧 GC hook，未做）；真实用处是**跨进程核对**：宿主驱动 N 次 → RT 实际执行几次（在途丢失/被 shutdown 丢弃露出来）。暂停时长是 wall-clock 诊断量，不参与复现性断言。至此约束③ 六个子项（随机种子① / 显式驱动点② / 阈值 API③ / 可观测④ / 硬上限⑤ / 计数⑥）全部落地。ISOLATED 下驱动形式为 CONTROL `{"qzjs":1,"gc":1}`，**刻意不经控制面路由**（`qz_control_route` 受 `control_plane` 档位门控，OFF 档静默丢）——GC 驱动是内存管理与「暴露不暴露控制面」正交，OFF 档下仍生效。`gc_threshold > 0` = 显式选择阈值安全网（接受非确定触发点），ISOLATED 下由 `rt_host.c` 经 `--gc-threshold` 透传主RT 子进程（否则宿主 config 设的值静默失效）。可观测：控制面 `"gc"` op 回执带 `reclaimed_bytes`/`heap_bytes`；`qz_gc()` 只保证「已入队到确定点」（返回 0）。**实测**：造 3000 自引用环 → heap 809KB→13.67MB → `{"op":"gc"}` 回 `reclaimed_bytes:12864088` → 回落 809KB；`qz_gc(rt)` 后主RT 子进程 RSS 26084→5448 kB；默认档无宿主驱动时堆不回落。**未做**：① 种子注入（quickjs-ng 无公有 `JS_SetRandomSeed`，`random_state = js__gettimeofday_us()` @quickjs.c:2942，`hash_seed` 派生 :2946 → `Math.random()` 与 Map/Set 迭代序仍不确定；须打引擎 patch `src/qzvm/patches/*` + `qz_config_t` 种子字段 + `QZ_ABI_VERSION` 递增）；② GC 触发次数/暂停时长计数；③ `JS_SetMemoryLimit` 透传。
 
@@ -123,4 +123,16 @@ qzjs 分三层，**依赖单向**：宿主 → qzjs 运行时 → qzvm。
   kind: decision
   summary: "GC 驱动计数/暂停时长落地（约束③ ⑥，最后一项收口）。收口设计：所有显式 JS_RunGC 调用点都改走唯一入口 qz_gc_drive()（qzjs.c：JS_RunGC + uv_hrtime 计时 + 记账 rt->gc_runs/gc_last_us/gc_total_us），三个调用点 rt_main child_wake_cb（qz_gc() 的 msgq GC_RUN 落点）/thread qz_wake_cb/控制面 ctl_gc。关键判断：gc_runs 只计显式驱动——引擎自发隐式 GC（gc_threshold>0/OOM）不经此入口，故它不是「引擎有没有偷偷 GC」的检测器（那要引擎侧 GC hook，未做，刻意不做以免误判），真实用处是跨进程核对（宿主驱动 N 次→RT 执行几次）。暂停时长是诊断量，不参与复现断言。无 ABI 变化（qz_config_t 不动，struct qz_t 加三个 host-only 字段）。守门 gtest control_.gc_counters_track_explicit_drives（三路径都过账：gc op×2 + qz_gc C API + metrics 同源），负控：注释掉 gc_runs++ 立刻红。"
   source: "用户指示：继续执行 handoff Next Steps（约束③ ⑥ 之后最后一项）"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T11:46:59
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T11:47:12
+  kind: decision
+  summary: "入站派发异常不再静默吞（fix bridge.c qz_dispatch_message）。此前 qz_js_call_cleanup 静默丢弃所有未处理分发异常——经 qz_post_message 触发的 eval 里 __qz_dispatch__ 抛异常时宿主只见超时。根因：qz_js_call_cleanup = JS_Call + JS_GetException + JS_FreeValue（异常取出即释放，不上报）。触发场景：引擎 OOM 是 uncatchable error（is_uncatchable_error，与栈溢出同类），脚本 try/catch 捕不到，异常径直穿到 JS_Call——memory_limit 超限时正是此路径。修法：qz_dispatch_message 的 JS_Call 后显式检测 JS_IsException → JS_GetException → JS_ToCStringLen（toString，因 Error 的 message/stack 非可枚举，JSON.stringify(err)='{}' 须先 toString）→ 建 envelope 对象 {type:error,error:dispatch-failed,detail:字符串} → JS_JSONStringify → qz_post_to_host。OOM 双重失败（envelope 对象建不起来 / stringify 失败）退静态 {type:error,error:out-of-memory} 帧。关键判断：这是行为契约变更（此前静默→现有 error 帧），消费方须识别 type:error 帧（与 bad-json/mailbox-alloc-failed 同族已有先例），用户已确认做。Error 属性非可枚举是 JS 标准行为，JSON.stringify(new Error('x'))='{}' 在所有引擎成立，不是 quickjs 特有。"
+  source: "用户指示：oom（做超限 OOM 的静默吞修）"
   affects: [qzvm-qzjs-layering]
