@@ -17,6 +17,11 @@ qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→
 ```bash
 # JS 技术栈主入口：TS → wasm → wamrc AOT → glue（一键）
 node src/qzvm/aot/build.js build src.ts [name] [--main "fn(a); fn2(b)"] [--target i386 --target-abi gnu] [--debug]
+**多文件**：`compileTS` 用 tsc `createProgram` 解析 import 图，把入口可达的全部 `.ts` 顶层函数/类编进
+**同一个** wasm 模块（跨文件调用 = 同模块内 `call`，不引入 import）。支持具名/别名、默认、命名空间
+（`import * as M` → `M.member(...)`，含 `M.default`）、`import { C }` + `new C()`、re-export 链穿透；
+顶层同名冲突与外部模块导入均**显式报错**。回归门 `test_aot.js` 的 `runMultiFile`。
+
 
 # 产物（统一到工程 build/aot/，AOT_OUT_DIR 可覆盖）
 build/aot/<name>.{wasm,wat,aot,glue.js}   # wat = wasm2wat 反汇编的可读中间产物（审计/调试）

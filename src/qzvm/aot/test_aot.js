@@ -253,6 +253,110 @@ async function runMultiFile() {
     try { compileTS(path.join(dir, "ext.ts"), path.join(dir, "ext.wasm"), {}); }
     catch (e) { extErr = e.message; }
     check("re-export.外部模块显式报错", extErr.includes("外部模块"), true);
+
+    // 默认导入：`import d from './m'`（d 为目标模块命名默认导出）
+    fs.writeFileSync(path.join(dir, "dm.ts"), "function df(n: number): number { return n + 100; }\nexport default df;\n");
+    fs.writeFileSync(path.join(dir, "usedef.ts"),
+        "import df from './dm';\nexport function runDef(x: number): number { return df(x); }\n");
+    const wasmDef = path.join(dir, "def.wasm");
+    compileTS(path.join(dir, "usedef.ts"), wasmDef, {});
+    const { instance: instDef } = await WebAssembly.instantiate(fs.readFileSync(wasmDef), {});
+    check("默认导入.runDef(5)", instDef.exports.runDef(5), 105);
+
+    // 默认 + 具名混合导入
+    fs.writeFileSync(path.join(dir, "dm2.ts"),
+        "function d2(n: number): number { return n + 10; }\nexport default d2;\nexport function inc(n: number): number { return n + 1; }\n");
+    fs.writeFileSync(path.join(dir, "usemix.ts"),
+        "import d2, { inc } from './dm2';\nexport function runMix(x: number): number { return d2(inc(x)); }\n");
+    const wasmMix = path.join(dir, "mix.wasm");
+    compileTS(path.join(dir, "usemix.ts"), wasmMix, {});
+    const { instance: instMix } = await WebAssembly.instantiate(fs.readFileSync(wasmMix), {});
+    check("混合导入.runMix(5)", instMix.exports.runMix(5), 16);
+
+    // 命名空间导入：`import * as M from './m'` → M.foo(...) 解析为目标顶层函数
+    fs.writeFileSync(path.join(dir, "nsm.ts"),
+        "export function f(x: number): number { const s = 'ab'; return x * 3 + s.length - 2; }\n" +
+        "export function g(x: number): number { const s = 'ab'; return x + 1 + s.length - 2; }\n");
+    fs.writeFileSync(path.join(dir, "usens.ts"),
+        "import * as M from './nsm';\nexport function runNs(x: number): number { return M.f(M.g(x)); }\n");
+    const wasmNs = path.join(dir, "ns.wasm");
+    const rNs = compileTS(path.join(dir, "usens.ts"), wasmNs, {});
+    const qzNs = makeQzvm(rNs.strings);
+    const { instance: instNs } = await WebAssembly.instantiate(fs.readFileSync(wasmNs), { qz: qzNs });
+    qzNs.bindMem(instNs.exports.memory);
+    if (instNs.exports.__bump) qzNs.bindBump(instNs.exports.__bump);
+    check("命名空间导入.runNs(5)", qzNs._toJS(instNs.exports.runNs(qzNs._fromJS(5))), 18);
+
+    // 命名空间导入 default 成员：`M.default(...)`
+    fs.writeFileSync(path.join(dir, "nsd2.ts"),
+        "function nd(n: number): number { const s = 'ab'; return n + 7 + s.length - 2; }\nexport default nd;\n");
+    fs.writeFileSync(path.join(dir, "usensd.ts"),
+        "import * as D from './nsd2';\nexport function runNsd(x: number): number { return D.default(x); }\n");
+    const wasmNsd = path.join(dir, "nsd.wasm");
+    const rNsd = compileTS(path.join(dir, "usensd.ts"), wasmNsd, {});
+    const qzNsd = makeQzvm(rNsd.strings);
+    const { instance: instNsd } = await WebAssembly.instantiate(fs.readFileSync(wasmNsd), { qz: qzNsd });
+    qzNsd.bindMem(instNsd.exports.memory);
+    if (instNsd.exports.__bump) qzNsd.bindBump(instNsd.exports.__bump);
+    check("命名空间.default.runNsd(5)", qzNsd._toJS(instNsd.exports.runNsd(qzNsd._fromJS(5))), 12);
+
+    // 外部模块命名空间导入 → 显式报错
+    fs.writeFileSync(path.join(dir, "useEXT.ts"),
+        "import * as E from 'mathlib';\nexport function runE(): number { return E.pi; }\n");
+    let nsErr = "";
+    try { compileTS(path.join(dir, "useEXT.ts"), path.join(dir, "ext2.wasm"), {}); }
+    catch (e) { nsErr = e.message; }
+    check("命名空间.外部模块显式报错", nsErr.includes("外部模块"), true);
+
+    // 匿名默认导出 → 无法折回顶层名，显式报错
+    fs.writeFileSync(path.join(dir, "anon.ts"), "export default function (n: number): number { return n; }\n");
+    fs.writeFileSync(path.join(dir, "useanon.ts"),
+        "import a from './anon';\nexport function runA(x: number): number { return a(x); }\n");
+    let anonErr = "";
+    try { compileTS(path.join(dir, "useanon.ts"), path.join(dir, "anon.wasm"), {}); }
+    catch (e) { anonErr = e.message; }
+    check("匿名默认导出.显式报错", anonErr.includes("匿名默认导出"), true);
+
+    // 导入类：`import { C } from './m'` + new C —— 多文件类签名只声明一次（不重复 declareFunc）
+    fs.writeFileSync(path.join(dir, "cmod.ts"),
+        "export class Pt { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } sum(): number { return this.x + this.y; } }\n");
+    fs.writeFileSync(path.join(dir, "usec.ts"),
+        "import { Pt } from './cmod';\nexport function runC(x: number): number { const p = new Pt(x, 4); return p.sum(); }\n");
+    const wasmC = path.join(dir, "c.wasm");
+    const rc = compileTS(path.join(dir, "usec.ts"), wasmC, {});
+    const qzc = makeQzvm(rc.strings);
+    const { instance: instC } = await WebAssembly.instantiate(fs.readFileSync(wasmC), { qz: qzc });
+    qzc.bindMem(instC.exports.memory);
+    if (instC.exports.__bump) qzc.bindBump(instC.exports.__bump);
+    qzc.bindClasses(instC.exports, rc.classMeta);
+    const resC = instC.exports.runC(qzc._fromJS(5));
+    check("导入类.runC(5)", qzc._toJS(resC), 9);
+
+    // 跨模式调用 ABI：tagged 调用者 ↔ num 被调（同一 wasm 模块内）。
+    // num 值 = f64，tagged 值 = i64 NaN-box（数值侧 = 原始 f64 位型）→ 边界按位重解释（精确无损）。
+    // 回归守：此前 tagged→num / num→tagged 直调均产非法 wasm（call 参数类型不符），实例化即崩。
+    // (1) tagged 调 num（含字符串使 caller 走 tagged）
+    fs.writeFileSync(path.join(dir, "xnum.ts"),
+        "function pure(a: number, b: number): number { return a + b; }\n" +
+        "export function callNumTagged(x: number): number { const s = 'x'; return pure(x, 1) + s.length - 1; }\n");
+    const wasmXT = path.join(dir, "xt.wasm");
+    const rXT = compileTS(path.join(dir, "xnum.ts"), wasmXT, {});
+    const qzXT = makeQzvm(rXT.strings);
+    const { instance: iXT } = await WebAssembly.instantiate(fs.readFileSync(wasmXT), { qz: qzXT });
+    qzXT.bindMem(iXT.exports.memory);
+    if (iXT.exports.__bump) qzXT.bindBump(iXT.exports.__bump);
+    if (iXT.exports.__bump_reset) iXT.exports.__bump_reset();
+    check("跨模式.tagged调num(5)", qzXT._toJS(iXT.exports.callNumTagged(qzXT._fromJS(5))), 6);
+
+    // (2) num 调 tagged
+    fs.writeFileSync(path.join(dir, "xtag.ts"),
+        "function th(a: number, b: number): number { const s = 'y'; return a + b + s.length - 1; }\n" +
+        "export function callTaggedNum(x: number): number { return th(x, 1); }\n");
+    const wasmTN = path.join(dir, "tn.wasm");
+    const rTN = compileTS(path.join(dir, "xtag.ts"), wasmTN, {});
+    const qzTN = makeQzvm(rTN.strings);
+    const { instance: iTN } = await WebAssembly.instantiate(fs.readFileSync(wasmTN), { qz: qzTN });
+    check("跨模式.num调tagged(5)", iTN.exports.callTaggedNum(5), 6);
 }
 
 /* interp 回退（opts.interp）：列出的函数不进 wasm，改由 glue 内联的 JS 跑。
@@ -277,6 +381,26 @@ async function runInterp() {
     // interp JS 已产出且去掉了模块语法（无 exports/require/import 残留）
     check("interp.产出去模块语法", /exports|require\(/.test(r.interpJs), false);
     check("interp.JS 含目标函数", /function heavy\s*\(/.test(r.interpJs), true);
+
+    // interp 跨文件：默认/命名导入引用点须折回顶层名（无 mod_1.x / require / export default 残留），
+    // 且产出 JS 可直接执行得正确值。同名具名导入也须折回（否则 tsc 模块 transform 残留 (0, mod_1.x)）。
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "qz_aot_interp2_"));
+    fs.writeFileSync(path.join(dir2, "lib.ts"),
+        "export function add(a: number, b: number): number { const s = 'x'; return a + b + s.length - 1; }\n" +
+        "function base(n: number): number { const s = 'y'; return n + 100 + s.length - 1; }\n" +
+        "export default base;\n");
+    const ie = path.join(dir2, "ie.ts");
+    fs.writeFileSync(ie,
+        "import base, { add } from './lib';\n" +
+        "export function run(x: number): number { return base(add(x, 1)); }\n" +
+        "export function r2(x: number): number { return add(x, 2); }\n");
+    const ri = compileTS(ie, path.join(dir2, "ie.wasm"), { interp: ["run", "r2"] });
+    check("interp.多文件去模块语法", /exports|require\(|export default|= require/.test(ri.interpJs), false);
+    check("interp.多文件无模块对象残留", /lib_1\.|modd_1\./.test(ri.interpJs), false);
+    const fnRun = new Function(ri.interpJs + "\nreturn run;")();
+    check("interp.多文件执行 run(5)", fnRun(5), 106);
+    const fnR2 = new Function(ri.interpJs + "\nreturn r2;")();
+    check("interp.多文件同名导入执行 r2(5)", fnR2(5), 7);
 }
 
 (async () => {

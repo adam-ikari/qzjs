@@ -94,12 +94,39 @@ class Emitter {
         this._pendingLambdas = [];    // 已登记待发射的 lambda 体
         this.sf = null;               // 当前 SourceFile（行号查询；compileTS 设置）
         this.importAlias = null;      // { 本地导入名 → 目标顶层函数名 }；compileTS 多文件时设置
+        this.nsAlias = null;          // { 命名空间本地名 → Map(成员名 → 目标顶层名) }（`import * as ns`）
+        this.classAlias = null;       // { 本地类名 → 目标类名 }（默认/命名导入的类）
     }
     // 源码行号（1-based）。DWARF 行标记用；无 sf 时返回 0（该 mark 被忽略）。
     _line(node) { return (this.sf && node && node.pos !== undefined) ? this.sf.getLineAndCharacterOfPosition(node.getStart(this.sf)).line + 1 : 0; }
     /* 跨文件内联：把 `import { x as y }` 的本地别名 y 折回目标模块的导出名 x。
      * 非导入名原样返回（本模块顶层函数 / 闭包变量）。 */
     _fnName(name) { return (this.importAlias && this.importAlias.get(name)) || name; }
+    // 导入的类本地名 → 目标类名（默认/具名导入的类）；非导入类原样返回。
+    _className(name) { return (this.classAlias && this.classAlias.get(name)) || name; }
+    // 命名空间成员访问 `ns.member` → 目标顶层名；非命名空间访问返回 undefined。
+    _nsMember(nsName, member) {
+        if (!this.nsAlias) return undefined;
+        const m = this.nsAlias.get(nsName);
+        return m ? m.get(member) : undefined;
+    }
+    /* 跨模式调用 ABI：num 值 = f64，tagged 值 = i64（数值侧 = 原始 f64 位型，见文件尾注释）。
+     * 故跨模式边界只要按位重解释（精确无损），无需装箱。fnMode: {名 → {mode, void}}。 */
+    _calleeInfo(fn) { return this.fnMode ? this.fnMode.get(this._fnName(fn)) : undefined; }
+    // 实参发射后调用：把值从本函数模式转到被调函数模式（相等则空操作）。
+    _argToCallee(fn) {
+        const ci = this._calleeInfo(fn);
+        if (!ci || ci.mode === this.mode) return;
+        if (ci.mode === "num") this.m.f64ReinterpretI64();   // tagged(i64) → num(f64)
+        else this.m.i64ReinterpretF64();                      // num(f64) → tagged(i64)
+    }
+    // call 之后调用：把返回值从被调函数模式转回本函数模式（void / 相等则空操作）。
+    _retFromCallee(fn) {
+        const ci = this._calleeInfo(fn);
+        if (!ci || ci.void || ci.mode === this.mode) return;
+        if (ci.mode === "num") this.m.i64ReinterpretF64();   // num(f64) → tagged(i64)
+        else this.m.f64ReinterpretI64();                      // tagged(i64) → num(f64)
+    }
     _local(name) { return this.varMap.get(name); }
     // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
     _curLabel() { return this._labelStack.length ? this._labelStack.pop() : null; }
@@ -163,11 +190,13 @@ class Emitter {
         const walkDecl = (n) => {
             if (ts.isVariableDeclaration(n)) {
                 collectBinding(n.name);
-                if (ts.isIdentifier(n.name) && n.initializer
-                    && isNewIdent(n.initializer) && this.classes.has(n.initializer.expression.text)) {
-                    const name = n.name.text, cls = n.initializer.expression.text;
-                    if (declaredClass.has(name) && declaredClass.get(name) !== cls) declaredClass.set(name, null);
-                    else declaredClass.set(name, cls);
+                if (ts.isIdentifier(n.name) && n.initializer && isNewIdent(n.initializer)) {
+                    const cls = this._className(n.initializer.expression.text);
+                    if (this.classes.has(cls)) {
+                        const name = n.name.text;
+                        if (declaredClass.has(name) && declaredClass.get(name) !== cls) declaredClass.set(name, null);
+                        else declaredClass.set(name, cls);
+                    }
                 }
             }
             ts.forEachChild(n, walkDecl);
@@ -382,6 +411,7 @@ class Emitter {
     // `this` 映射 local 0（self），`this.x` 复用 POJO 字段 load/store（零跨界）。
     // 静态分派：receiver 静态类型已知 → 沿父链直调导出 __m_<C>$<m>；动态 → qz.method_call。
     collectClasses(sf) {
+        const firstNew = this._classList.length;   // 本文件新增类的起点（多文件时逐文件调用）
         for (const st of sf.statements) {
             if (!ts.isClassDeclaration(st)) continue;
             if (!st.name) throw new Error("[tagged] 匿名类不支持");
@@ -419,7 +449,10 @@ class Emitter {
             const c = this.classes.get(cname);
             if (c.parent && this.classes.has(c.parent)) this._leafClasses.delete(c.parent);
         }
-        for (const cname of this._classList) {
+        // 仅为本文件新增类登记签名——collectClasses 每文件调用一次；若遍历整个 _classList
+        // 会重复 declareFunc 早前文件的类（codes 占位未填 → 编码时崩）。
+        for (let i = firstNew; i < this._classList.length; i++) {
+            const cname = this._classList[i];
             const c = this.classes.get(cname);
             for (const mth of c.methods) {
                 const voidRet = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
@@ -681,11 +714,19 @@ class Emitter {
             return;
         }
         if (ts.isCallExpression(e)) {
-            if (!ts.isIdentifier(e.expression)) throw new Error("不支持的调用目标");
-            const fn = e.expression.text;
+            let fn;
+            if (ts.isIdentifier(e.expression)) fn = e.expression.text;
+            else if (ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression)) {
+                const resolved = this._nsMember(e.expression.expression.text, e.expression.name.text);
+                if (resolved === undefined) throw new Error("不支持的调用目标");
+                fn = resolved;
+            } else throw new Error("不支持的调用目标");
             if (fn === "Math_floor") { this.emitExpr(e.arguments[0]); this.m.f64Floor(); return; }
-            for (const a of e.arguments) this.emitExpr(a);
+            const ciNum = this._calleeInfo(fn);
+            const xNum = ciNum && ciNum.mode !== this.mode;
+            for (const a of e.arguments) { this.emitExpr(a); if (xNum) this._argToCallee(fn); }
             this.m.call(this._fnName(fn));
+            this._retFromCallee(fn);
             return;
         }
         throw new Error("不支持的表达式: " + ts.SyntaxKind[e.kind]);
@@ -1011,6 +1052,8 @@ function compileTS(input, outWasm, opts = {}) {
     const checker = program.getTypeChecker();
     const sfNames = new Set(sfs.map(f => f.fileName));
     const importAlias = new Map();
+    const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)
+    const classAlias = new Map();    // 导入的类本地名 → 目标类名（默认/具名导入类）
     for (const f of sfs) {
         for (const st of f.statements) {
             if (ts.isExportDeclaration(st) && st.moduleSpecifier) {
@@ -1032,8 +1075,42 @@ function compileTS(input, outWasm, opts = {}) {
             }
             if (!ts.isImportDeclaration(st) || !st.importClause) continue;
             const ic = st.importClause;
-            if (ic.name) throw new Error(`[inline] 默认/命名空间导入暂不支持（${path.basename(f.fileName)}）`);
-            if (!ic.namedBindings || !ts.isNamedImports(ic.namedBindings)) continue;
+            // 默认导入：`import d from './m'`。目标须为源码内声明的函数/类；折回目标顶层名，
+            // 与具名导入同机制。
+            if (ic.name) {
+                const sym = checker.getSymbolAtLocation(ic.name);
+                const tgt = (sym && (sym.flags & ts.SymbolFlags.Alias)) ? checker.getAliasedSymbol(sym) : null;
+                const decl = tgt && (tgt.valueDeclaration || (tgt.declarations && tgt.declarations[0]));
+                const declFile = decl && ts.getSourceFileOfNode(decl);
+                if (!declFile || !sfNames.has(declFile.fileName))
+                    throw new Error(`[inline] 默认导入来自外部模块，不支持内联: "${ic.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
+                if (!decl.name)   // `export default function(){}` 匿名默认导出：无稳定顶层名
+                    throw new Error(`[inline] 匿名默认导出不支持内联（请给函数/类命名）（${path.basename(declFile.fileName)}）`);
+                importAlias.set(ic.name.text, decl.name.text);
+                if (ts.isClassDeclaration(decl)) classAlias.set(ic.name.text, decl.name.text);
+            }
+            if (!ic.namedBindings) continue;
+            // 命名空间导入：`import * as ns from './m'` → 记录 ns → { 成员名 ↦ 目标顶层名 }。
+            // 用 checker 模块导出表（穿透 re-export 链）；外部模块成员不在源码内 → 显式报错。
+            if (ts.isNamespaceImport(ic.namedBindings)) {
+                const modSym = checker.getSymbolAtLocation(st.moduleSpecifier);
+                if (!modSym)
+                    throw new Error(`[inline] 命名空间导入来自外部模块，不支持内联: "${ic.namedBindings.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
+                const members = new Map();
+                for (const e of checker.getExportsOfModule(modSym)) {
+                    const t = (e.flags & ts.SymbolFlags.Alias) ? checker.getAliasedSymbol(e) : e;
+                    if (!t || !t.name) continue;
+                    const d = t.valueDeclaration || (t.declarations && t.declarations[0]);
+                    const df = d && ts.getSourceFileOfNode(d);
+                    if (!df || !sfNames.has(df.fileName))
+                        throw new Error(`[inline] 命名空间导入含外部模块成员，不支持内联: "${e.name}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
+                    members.set(e.name, t.name);
+                }
+                importAlias.set(ic.namedBindings.name.text, ic.namedBindings.name.text);
+                nsAlias.set(ic.namedBindings.name.text, members);
+                continue;
+            }
+            if (!ts.isNamedImports(ic.namedBindings)) continue;
             for (const sp of ic.namedBindings.elements) {
                 const sym = checker.getSymbolAtLocation(sp.name);
                 if (sym && (sym.flags & ts.SymbolFlags.Alias)) {
@@ -1043,6 +1120,7 @@ function compileTS(input, outWasm, opts = {}) {
                         const declFile = decl && ts.getSourceFileOfNode(decl);
                         if (declFile && sfNames.has(declFile.fileName)) {
                             importAlias.set(sp.name.text, tgt.name);
+                            if (ts.isClassDeclaration(decl)) classAlias.set(sp.name.text, tgt.name);
                             continue;
                         }
                         throw new Error(`[inline] 外部模块导入不支持内联: "${sp.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
@@ -1109,11 +1187,27 @@ function compileTS(input, outWasm, opts = {}) {
         const stripModuleSyntax = (ctx) => (sf2) => {
             const visit = (n) => {
                 if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) return undefined;
+                // `export default <名>;` → 顶层声明已在；非纯标识符则退成表达式语句（去 export default）。
+                if (ts.isExportAssignment(n)) {
+                    return ts.isIdentifier(n.expression) ? undefined
+                        : ts.factory.createExpressionStatement(ts.visitNode(n.expression, visit));
+                }
+                if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
+                    const nsMap = nsAlias.get(n.expression.text);
+                    const resolved = nsMap && nsMap.get(n.name.text);
+                    if (resolved !== undefined) return ts.factory.createIdentifier(resolved);
+                    return ts.visitEachChild(n, visit, ctx);
+                }
                 if (ts.isIdentifier(n)) {
                     const sym = checker.getSymbolAtLocation(n);          // import 绑定 = alias symbol
-                    if (sym && (sym.flags & ts.SymbolFlags.Alias) && sym.declarations && ts.isImportSpecifier(sym.declarations[0])) {
-                        const target = checker.getAliasedSymbol(sym);
-                        if (target && target.name && target.name !== n.text) return ts.factory.createIdentifier(target.name);
+                    if (sym && (sym.flags & ts.SymbolFlags.Alias) && sym.declarations) {
+                        const d0 = sym.declarations[0];
+                        if (ts.isImportSpecifier(d0) || ts.isImportClause(d0)) {   // 具名 / 默认导入
+                            const target = checker.getAliasedSymbol(sym);
+                            // 无条件换新节点：即便同名，也须脱离 tsc 的模块绑定，否则 after 阶段
+                            // 的模块 transform 会把它改写成 `(0, mod_1.x)`（内联后无 require）。
+                            if (target && target.name) return ts.factory.createIdentifier(target.name);
+                        }
                     }
                     return n;
                 }
@@ -1141,6 +1235,16 @@ function compileTS(input, outWasm, opts = {}) {
     }
     // interp 函数不占 wasm，故不参与「是否需要 tagged 运行时」的判定。
     const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "tagged") || hasClasses;
+    // 顶层函数名 → {mode, void}：跨模式调用点据此插入 f64↔i64 按位重解释。
+    // interp 函数不进 wasm（其调用者经传递闭包一并退），故不在表内 —— 表内即 wasm 内可直调者。
+    const fnMode = new Map();
+    for (const st of fns) {
+        if (interpSet.has(st.name.text)) continue;
+        fnMode.set(st.name.text, {
+            mode: funcMode(st),
+            void: !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword,
+        });
+    }
 
 
     /* 单趟发射：对给定 module 走完「注册 → 声明 → 发射 body → 导出」。
@@ -1153,6 +1257,9 @@ function compileTS(input, outWasm, opts = {}) {
         const em = new Emitter(m);
         em.sf = sf;
         em.importAlias = importAlias;    // 跨文件 import 别名 → 目标顶层函数名
+        em.nsAlias = nsAlias;            // 命名空间导入解析表
+        em.classAlias = classAlias;      // 导入类本地名 → 目标类名
+        em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
         for (const st of fns) em.fnNames.add(st.name.text);
         for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
         if (!m.collect) {
@@ -1634,6 +1741,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isCallExpression(e)) {
         if (ts.isPropertyAccessExpression(e.expression)) {
             const rx = e.expression.expression, method = e.expression.name.text;
+            // 命名空间成员 `ns.foo(...)`：解析为目标顶层函数直调（非动态方法派发）。
+            if (ts.isIdentifier(rx)) {
+                const resolved = this._nsMember(rx.text, method);
+                if (resolved !== undefined) {
+                    const cn = this._calleeInfo(resolved);
+                    const xn = cn && cn.mode !== this.mode;
+                    for (const a of e.arguments) { this.emitTaggedExpr(a); if (xn) this._argToCallee(resolved); }
+                    this.m.call(this._fnName(resolved));
+                    this._retFromCallee(resolved); return;
+                }
+            }
             if (method === "push" && e.arguments.length === 1) { this._emitArrayPush(rx, e.arguments[0]); return; }
             if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
             this._emitDynMethod(rx, method, e.arguments); return;
@@ -1654,8 +1772,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.call("qz.closure_call");
             return;
         }
-        for (const a of e.arguments) this.emitTaggedExpr(a);
-        this.m.call(this._fnName(fn)); return;
+        const ct = this._calleeInfo(fn);
+        const xt = ct && ct.mode !== this.mode;
+        for (const a of e.arguments) { this.emitTaggedExpr(a); if (xt) this._argToCallee(fn); }
+        this.m.call(this._fnName(fn));
+        this._retFromCallee(fn); return;
     }
     if (ts.isConditionalExpression(e)) {                                                     // a ? b : c
         this.emitCondI32(e.condition);
@@ -1960,8 +2081,8 @@ Emitter.prototype._instSize = function () {
 Emitter.prototype._emitNewCall = function (e) {
     const M = this.m;
     if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] new 目标必须是标识符");
-    const cname = e.expression.text;
-    if (!this.classes.has(cname)) throw new Error("[tagged] new 未知类: " + cname);
+    const cname = this._className(e.expression.text);   // 导入类本地名 → 目标类名
+    if (!this.classes.has(cname)) throw new Error("[tagged] new 未知类: " + e.expression.text);
     const c = this.classes.get(cname);
     const args = e.arguments;
     if (args.length > 4) throw new Error("[tagged] new 最多 4 参");
