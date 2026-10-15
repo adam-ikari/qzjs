@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-15T13:30:21"
+updated: "2026-10-15T15:33:54"
 ---
 
 <!-- compiled_truth -->
@@ -93,3 +93,9 @@ updated: "2026-10-15T13:30:21"
   summary: "跨模式调用 ABI 修复：num 值=f64 / tagged 值=i64（数值侧=原始 f64 位型），同模块内跨模式直调（tagged↔num）原不插转换 → 产非法 wasm（call 参数类型不符）实例化即崩。修：fnMode 表 + 三处调用点逐实参按位重解释（f64ReinterpretI64/i64ReinterpretF64），返回后逆转换；按位无损。回归门 test_aot.js runMultiFile 跨模式两向。"
   source: "会话 2026-10-15 修跨模式 ABI bug"
   affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
+
+- time: 2026-10-15T15:33:54
+  kind: decision
+  summary: "三处静默语义错误修复：①数组句柄标签 0x7FF8=canonical quiet NaN（宿主 box(NaN) 恰产此位型）→ NaN 返回值被误判为数组→[]；改 0x7FFB。②_fromJS 原仅 number→numToBits、其余 tagHandle → 字符串入参得 0x7FF9 假句柄（非 0x7FFA 写回）→ .length/concat 静默 0；改 _fromJS=bitsOf。③num emitCond 原 x!=0 → NaN 误判 truthy（IEEE NaN≠0=true，JS Boolean(NaN)=false）；改 (x!=0)&&(x==x)。回归门 test_aot.js +7 项，101 ALL PASS。"
+  source: "会话 2026-10-15：差分测试发现静默语义偏差"
+  affects: [aot-wasm-tagged-backend]
