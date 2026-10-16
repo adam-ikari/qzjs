@@ -68,7 +68,7 @@ const QZ = {
   str_method: { params: ["i64", "i32", "i64", "i64"], results: ["i64"] },
   // 闭包调用：closure_call(句柄, a0, a1, a2, a3) → i64。JS 侧按句柄内 funcidx
   // 跳 __lam_N（wasm 导出），最多 4 参（缺省 undefined 句柄）。返回 tagged 值。
-  closure_call: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  closure_call: { params: ["i64", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // handle, a0..a3, recv
   // 通用方法调用回退：method_call(recv, mid, a0, a1, a2, a3) → i64。
   // qz 侧按 recv 类型派发：字符串 → str_method 逻辑；类实例（内存 [0]=__cls≠0）→
   // 按 classMeta[clsId].methods[mid]（含继承链）调 wasm 导出 __m_<C>$<m>(recv, a0..a3)。
@@ -134,7 +134,7 @@ const QZ = {
   iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组
   builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
   spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
-  call_value: { params: ["i64", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // v, a0..a3, 溢出实参数组   // 值调用（闭包/宿主函数）
+  call_value: { params: ["i64", "i64", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // v, a0..a3, 溢出实参数组, recv   // 值调用（闭包/宿主函数）
   call_named_rest: { params: ["i32", "i64", "i32"], results: ["i64"] },             // 展开实参 + rest 收尾被调函数
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
@@ -706,6 +706,7 @@ class Emitter {
             litV.pos = args[0].pos; litV.end = args[args.length - 1].end;
             this.emitTaggedExpr(litV);
         } else this._emitUndefined();
+        this._emitUndefined();                        // recv（普通调用 = undefined）
         M.call("qz.call_value");
         this._emitErrCheck();
         this._expLeave();
@@ -781,6 +782,7 @@ class Emitter {
             M.i64ConstBits(...f64Bits(nFix3)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
             M.call("qz.method_call");
             for (let i = cp3.length; i < 4; i++) this._emitUndefined();
+            this._emitUndefined();                                    // recv（展开/可变调用：普通调用 = undefined）
             M.call("qz.closure_call");
         }
         else { M.localGet(t.v); M.call("qz.closure_call_spread"); }
@@ -839,7 +841,9 @@ class Emitter {
             M.localSet(t.v);
         }
         M.localGet(t.v);
-        const cp = this._calleeParams(fn);
+        const cp0raw = this._calleeParams(fn);
+        // 带 `this` 形参的被调：receiver 由宿主按 `synthThis` 约定前置（本处不占实参槽）
+        const cp = (cp0raw && cp0raw.length && ts.isIdentifier(cp0raw[0].name) && cp0raw[0].name.text === "this") ? cp0raw.slice(1) : cp0raw;
         const needOvf = (cp === null && args.length > 3) || (cp !== null && cp.length > 4);   // >4 形参（含 rest）恒用溢出约定
         if (needOvf) {
             // 形参未知（变量/参数持闭包）或 >4 形参：a0..a3 = 实参 0..3，第 6 参 = 实参 3.. 数组（宿主按 meta.n 还原）
@@ -851,6 +855,7 @@ class Emitter {
             const litK = ts.factory.createArrayLiteralExpression(ovfN);
             litK.pos = args.length ? args[0].pos : 0; litK.end = args.length ? args[args.length - 1].end : 0;
             this.emitTaggedExpr(litK);
+            this._emitUndefined();                                    // recv（普通调用 = undefined）
             M.call("qz.call_value");
             this._emitErrCheck();
             this._expLeave();
@@ -864,6 +869,7 @@ class Emitter {
                 if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
             }
         }
+        this._emitUndefined();                                        // recv（普通调用 = undefined）
         M.call("qz.closure_call");
         this._emitErrCheck();
         this._expLeave();
@@ -1180,12 +1186,16 @@ class Emitter {
     // 捕获变量存在堆 cell 块（blk 指向 [i64 × captures]，对象布局），读经 capMap、写回 store。
     emitLambda(lam, id) {
         const fname = "__lam_" + id;
-        const skipThis = !lam._qzSynthThis;                  // 用户函数表达式的 `this` 形参为 TS 注解 → 不占 ABI 槽
+        // 带 `this` 形参的用户函数表达式：`this` 走**真实槽位**（local 1，紧接 blk），receiver 由调用方
+        // 按 `synthThis` 约定传入（普通调用 = undefined，与 JS 一致）。
+        const hasThisParam0 = lam.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this");
+        const thisSlot = !!lam._qzSynthThis || hasThisParam0;
+        const skipThis = !thisSlot;
         const astParams = lam.parameters.filter(p => !(skipThis && ts.isIdentifier(p.name) && p.name.text === "this"));
         const params = astParams.map(p => p.name.text);
         // 捕获名先分析并记录（emitLambdaBody 内 identifier 读写用 capMap 路由）
         const caps = this._capturesOf(lam);
-        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(astParams.length && astParams[astParams.length - 1].dotDotDotToken), synthThis: !!lam._qzSynthThis });
+        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(astParams.length && astParams[astParams.length - 1].dotDotDotToken), synthThis: thisSlot });
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
         this._pendingLambdas.push({ lam, fname, params, caps, astParams });
         return { fname, caps };
@@ -1248,7 +1258,8 @@ class Emitter {
         this.mode = "tagged";
         this._fnVoid = false;                                  // lambda 恒返回 i64
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
-        this._lamThisParam = !lam._qzSynthThis && lam.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this");   // 用**原始**形参表（astParams 已剔除 this 注解）   // 仅**用户**写的 this 注解形参 → 运行时 this = undefined
+        const thisSlotB = lam.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this");
+        this._lamThisParam = !(lam._qzSynthThis || thisSlotB) && thisSlotB;   // 用**原始**形参表（astParams 已剔除 this 注解）   // 仅**用户**写的 this 注解形参 → 运行时 this = undefined
         const locals = this._collectLocals(lam.body);
         for (const p of lam.parameters) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         const nParams = 1 + params.length;                 // blk + 参数
@@ -3242,6 +3253,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 ovfT.pos = e.pos; ovfT.end = e.end;
                 this.emitTaggedExpr(ovfT);
             } else this._emitUndefined();
+            this._emitUndefined();                    // recv（普通调用 = undefined）
             M.call("qz.call_value");
             this._emitErrCheck();
             this._expLeave();
@@ -3265,6 +3277,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             else this._emitUndefined();
         }
         this._emitUndefined();   // 第 6 参（ovf）
+        this._emitUndefined();   // 第 7 参（recv；普通调用 = undefined）
         M.call("qz.call_value");
         this._emitErrCheck();
         this._expLeave();
@@ -3696,6 +3709,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         M.localGet(t.v);
         for (let i = 0; i < 4; i++) { if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined(); }
         this._emitUndefined();                                    // 第 6 参（溢出实参）：可选调用不打包
+        this._emitUndefined();                                    // 第 7 参（recv）
         M.call("qz.call_value");
         this._emitErrCheck();
         M.end();
@@ -3802,8 +3816,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 const litI = ts.factory.createArrayLiteralExpression(ovfI);
                 litI.pos = e.pos; litI.end = e.end;
                 this.emitTaggedExpr(litI);
+                this._emitUndefined();                                    // 第 7 参（recv）
                 M2.call("qz.call_value");
-            } else M2.call("qz.closure_call");
+            } else { this._emitUndefined(); M2.call("qz.closure_call"); }   // recv（普通调用 = undefined）
             this._emitErrCheck();
             this._expLeave();
             return;

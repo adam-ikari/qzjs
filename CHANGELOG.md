@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### receiver 通道（2026-10-16）
+- **闭包 receiver 槽**：`qz.closure_call` 增第 6 参 `recv`、`qz.call_value` 增第 7 参 `recv`；宿主 `closureCall(handle, a0..a3, ovfArr, recv)` 对 `synthThis` 闭包把 `recv` 前置为槽 0（`hasEx` 路径归一为「ovf[0] = 实参 3」同形）。
+- **发射器**：`lamMeta` 对带 `this` 形参的闭包同样标 `synthThis: true`（`this` ↦ local 1）；`_calleeParams` 首参为 `this` 时 `slice(1)`（receiver 不占实参槽）；9 处调用点（`closure_call` ×3、`call_value` ×6）末尾补 `recv = undefined`。
+- **宿主三类调用方**：wasm 侧调用 / 物化包装器（`object_set_method`、`obj_accessor` 的 `opt.get`·`opt.set`）/ `call`·`apply`·`bind`（`callIt`、`cm`）全部改为经 `recv` 传 receiver。
+- 效果：`fn-call-apply-bind`、`callback-this-binding`、`this-arrow-vs-fn`、`closure-captures-this-method` 转为一致；**466/474（98.3%）**，残余 8 项全部 loud（零静默错值）。
+
 ### 修复（2026-10-16）
 - **类表达式别名解析**：`const C = class { … }` 后 `typeof C` / `C.x` 经 `_classOfExpr` 按 `_className` 别名解析 → 此前 `typeof C` 静默给 `undefined`（应 `"function"`）。
 - 结果：**464/474（97.9%）**；残余 10 项全部 loud。

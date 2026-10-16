@@ -202,8 +202,8 @@ function makeQzvm(strings, opts) {
         const acc2 = dynAcc.get(off + "|" + name);
         if (acc2) {                                    // 运行时访问器 → 物化对象上定义 get/set（JSON.stringify 会调 getter）
           const opt = { configurable: true, enumerable: !nonEnum.has(off + "|" + name) };
-          if (acc2.g !== undefined) { const gh = acc2.g, ugh = BigInt.asUintN(64, gh); opt.get = ugh >> 48n === CLO_HI ? (() => toJS(closureCall(gh, TAG | BigInt(off), TAG, TAG, TAG))) : (() => handles[idxOf(gh)].call(o)); }
-          if (acc2.s !== undefined) { const sh = acc2.s, ush = BigInt.asUintN(64, sh); opt.set = ush >> 48n === CLO_HI ? ((nv) => { closureCall(sh, TAG | BigInt(off), ret(nv), TAG, TAG); }) : ((nv) => handles[idxOf(sh)].call(o, nv)); }
+          if (acc2.g !== undefined) { const gh = acc2.g, ugh = BigInt.asUintN(64, gh); opt.get = ugh >> 48n === CLO_HI ? (() => toJS(closureCall(gh, TAG, TAG, TAG, TAG, undefined, TAG | BigInt(off)))) : (() => handles[idxOf(gh)].call(o)); }
+          if (acc2.s !== undefined) { const sh = acc2.s, ush = BigInt.asUintN(64, sh); opt.set = ush >> 48n === CLO_HI ? ((nv) => { closureCall(sh, ret(nv), TAG, TAG, TAG, undefined, TAG | BigInt(off)); }) : ((nv) => handles[idxOf(sh)].call(o, nv)); }
           Object.defineProperty(o, name, opt); setNow.add(name);
           continue;
         }
@@ -421,7 +421,7 @@ function makeQzvm(strings, opts) {
   };
   // 闭包调用：handle → 堆对象 [funcidx:i32][nCaps:i32][cell×N i64]。
   // blk = off+8（cell 起点），按 lamMeta[funcidx]={name,n} 调 wasm 导出 __lam_N。
-  const closureCall = (handle, a0, a1, a2, a3, ovfArr) => {
+  const closureCall = (handle, a0, a1, a2, a3, ovfArr, recv) => {
     const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
     const funcidx = new DataView(mem.buffer).getUint32(off, true);   // 免 4 对齐（bump 偏移可非 4 倍数）
     const meta = lamMeta && lamMeta[funcidx];
@@ -430,6 +430,14 @@ function makeQzvm(strings, opts) {
     const blk = new DataView(mem.buffer).getInt32(off + 4, true);   // env 索引（0 = 无捕获）
     let args;
     const hasEx = ovfArr !== undefined && ovfArr !== TAG;      // 调用点是否显式传了溢出实参数组
+    if (meta.synthThis) {                                       // 合成方法箭头 / 带 `this` 形参的闭包：槽 0 = receiver
+      const rv = recv === undefined ? TAG : recv;
+      if (hasEx) { const ex0 = toJS(ovfArr) || []; const s0 = [a0, a1, a2, a3];
+        ovfArr = arrWriteback([a0, a1, a2, a3].concat(ex0).slice(0));   // 原样透传（下面按 slots 重排）
+        a0 = rv; a1 = s0[0]; a2 = s0[1]; a3 = s0[2];
+        ovfArr = arrWriteback([s0[2], s0[3]].concat(ex0).map(x => x === undefined ? TAG : x).slice(2));
+      } else { a3 = a2; a2 = a1; a1 = a0; a0 = rv; }
+    }
     if (hasEx) {
       // 新约定：slots a0..a3 = 实参 0..3（未传补 TAG），ovfArr = 实参 3.. 的数组 → 两种被调均可还原
       const ex = toJS(ovfArr) || [];
@@ -659,9 +667,9 @@ function makeQzvm(strings, opts) {
       return arrWriteback(Array.from(x));
     },
     // 值调用：闭包句柄 → closure_call；宿主函数句柄 → 直接调用
-    call_value: (v, a0, a1, a2, a3, ovf) => {
+    call_value: (v, a0, a1, a2, a3, ovf, recv) => {
       const h = BigInt.asUintN(64, v) >> 48n;
-      if (h === CLO_HI) return closureCall(v, a0, a1, a2, a3, ovf);
+      if (h === CLO_HI) return closureCall(v, a0, a1, a2, a3, ovf, recv);
       if (h === HOST_HI) {
         const f = handles[idxOf(v)];
         if (typeof f === "function") {
@@ -749,7 +757,7 @@ function makeQzvm(strings, opts) {
         if (acc) {
           if (acc.g === undefined) return TAG;
           const uu = BigInt.asUintN(64, acc.g);
-          if (uu >> 48n === CLO_HI) return closureCall(acc.g, recv, TAG, TAG, TAG);
+          if (uu >> 48n === CLO_HI) return closureCall(acc.g, TAG, TAG, TAG, TAG, undefined, recv);
           return ret(handles[idxOf(acc.g)].call(toJS(recv)));
         }
       }
@@ -805,7 +813,7 @@ function makeQzvm(strings, opts) {
         if (name === "valueOf") return recv;
         if (name === "toString") return tagHandle(() => "function " + (nm2 || "anonymous") + "() { [native code] }");
         if (name === "call" || name === "apply" || name === "bind") {
-          const cm = (this2, rest) => toJS(closureCall(recv, this2 === undefined ? TAG : this2, ...[0, 1, 2].map(i => rest[i] === undefined ? TAG : rest[i])));
+          const cm = (this2, rest) => toJS(closureCall(recv, ...[0, 1, 2].map(i => rest[i] === undefined ? TAG : rest[i]), TAG, undefined, this2 === undefined ? TAG : this2));
           if (name === "call") return tagHandle((this2, x0, x1, x2) => cm(bitsOf(this2), [bitsOf(x0), bitsOf(x1), bitsOf(x2)]));
           if (name === "apply") return tagHandle((this2, arr3) => cm(bitsOf(this2), (arr3 === undefined ? [] : (toJS(arr3) || [])).map(bitsOf)));
           return tagHandle((...xs) => (...ys) => cm(bitsOf(xs[0]), [...xs.slice(1), ...ys].slice(0, 3).map(bitsOf)));
@@ -845,7 +853,7 @@ function makeQzvm(strings, opts) {
         if (acc) {
           if (acc.s === undefined) return;                          // 只读访问器：strict 下应抛错（此处静默忽略，见限制）
           const us = BigInt.asUintN(64, acc.s);
-          if (us >> 48n === CLO_HI) closureCall(acc.s, recv, v, TAG, TAG);
+          if (us >> 48n === CLO_HI) closureCall(acc.s, v, TAG, TAG, TAG, undefined, recv);
           else handles[idxOf(acc.s)].call(toJS(recv), toJS(v));
           return;
         }
@@ -957,7 +965,7 @@ function makeQzvm(strings, opts) {
       const obj = handles[idxOf(o)];
       obj[strings[k]] = function (...args) {
         const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG;   // 实际接收者；提取后调用 this=undefined（JS 语义）
-        return toJS(closureCall(v, selfH, ret(args[0]), ret(args[1]), ret(args[2])));
+        return toJS(closureCall(v, ret(args[0]), ret(args[1]), ret(args[2]), TAG, undefined, selfH));   // receiver 走 recv
       };
       obj[strings[k]].__qzClo = v;   // 原始闭包句柄（访问器调用需替换 this）
     },
@@ -965,15 +973,15 @@ function makeQzvm(strings, opts) {
       const obj = handles[idxOf(o)], key = toJS(keyHandle);
       obj[key] = function (...args) {
         const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG;
-        return toJS(closureCall(v, selfH, ret(args[0]), ret(args[1]), ret(args[2])));
+        return toJS(closureCall(v, ret(args[0]), ret(args[1]), ret(args[2]), TAG, undefined, selfH));   // receiver 走 recv
       };
       obj[key].__qzClo = v;
     },
     obj_accessor: (o, k, g, s2) => {
       const name = strings[k], obj = handles[idxOf(o)], opt = {};
       const selfOf = function () { return (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG; };
-      if (BigInt.asUintN(64, g) >> 48n === CLO_HI) opt.get = function () { return toJS(closureCall(g, selfOf.call(this), TAG, TAG, TAG)); };
-      if (BigInt.asUintN(64, s2) >> 48n === CLO_HI) opt.set = function (v) { closureCall(s2, selfOf.call(this), ret(v), TAG, TAG); };
+      if (BigInt.asUintN(64, g) >> 48n === CLO_HI) opt.get = function () { return toJS(closureCall(g, TAG, TAG, TAG, TAG, undefined, selfOf.call(this))); };
+      if (BigInt.asUintN(64, s2) >> 48n === CLO_HI) opt.set = function (v) { closureCall(s2, ret(v), TAG, TAG, TAG, undefined, selfOf.call(this)); };
       if (opt.get || opt.set) Object.defineProperty(obj, name, { get: opt.get, set: opt.set, configurable: true, enumerable: true });
     },
     obj_merge: (target, src) => {
@@ -1067,7 +1075,7 @@ function makeQzvm(strings, opts) {
         { syncDynAcc(); const acc = dynAcc.get(off + "|" + name);            // 运行时 setter（o[k] = v）
           if (acc) { if (acc.s === undefined) return;
             const us = BigInt.asUintN(64, acc.s);
-            if (us >> 48n === CLO_HI) closureCall(acc.s, o, v, TAG, TAG); else handles[idxOf(acc.s)].call(toJS(o), toJS(v));
+            if (us >> 48n === CLO_HI) closureCall(acc.s, v, TAG, TAG, TAG, undefined, o); else handles[idxOf(acc.s)].call(toJS(o), toJS(v));
             return; } }
         if (protGuard(off, name)) return;
         const e = fieldEntries.find(([n]) => n === name);
@@ -1326,8 +1334,7 @@ function makeQzvm(strings, opts) {
               const mm = lamMeta && lamMeta[mi];
               const passSelf = !!(mm && mm.synthThis);            // 合成箭头（对象字面量方法/访问器）：this 为真实 receiver 槽
               const a = rest.map(x => x === undefined ? TAG : x);
-              return toJS(passSelf ? closureCall(recv, self2 === undefined ? TAG : self2, a[0], a[1], a[2])
-                                   : closureCall(recv, a[0], a[1], a[2], TAG));
+              return toJS(closureCall(recv, a[0], a[1], a[2], TAG, undefined, self2 === undefined ? TAG : self2));   // receiver 走 recv（宿主按 synthThis 前置）
             }
             return rawFn.apply(thisArgOf(self2), rest.slice(0, 3).map(toJS));
           };
@@ -1394,7 +1401,7 @@ function makeQzvm(strings, opts) {
           const fe = fieldEntries.find(([n]) => n === name);
           if (fe && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= fe[1] + 8) {
             const fv = new DataView(mem.buffer).getBigInt64(off + fe[1], true);
-            if (BigInt.asUintN(64, fv) >> 48n === CLO_HI) return closureCall(fv, a0, a1, a2, a3);
+            if (BigInt.asUintN(64, fv) >> 48n === CLO_HI) return closureCall(fv, a0, a1, a2, a3, undefined, recv);   // 方法位置的闭包值：receiver = recv
           }
         }
       }
@@ -1580,7 +1587,7 @@ function makeQzvm(strings, opts) {
     _toJS: toJS, _fromJS: (x) => bitsOf(x),
     _handles: handles, _TAG: TAG,
     // 闭包调用：闭包句柄 → wasm；宿主函数句柄（bind 结果/宿主回调）→ 直接调用（调用点无法静态区分）
-    closure_call: (handle, a0, a1, a2, a3) => {
+    closure_call: (handle, a0, a1, a2, a3, recv) => {
       if (BigInt.asUintN(64, handle) >> 48n === HOST_HI) {
         const f = handles[idxOf(handle)];
         if (typeof f !== "function") throw new Error("closure_call: 非函数值");
@@ -1588,7 +1595,7 @@ function makeQzvm(strings, opts) {
         while (as.length && as[as.length - 1] === undefined) as.pop();
         return ret(f(...as));
       }
-      return closureCall(handle, a0, a1, a2, a3);
+      return closureCall(handle, a0, a1, a2, a3, undefined, recv);
     },
     bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
   };

@@ -113,9 +113,9 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24)。
-结果：**464/474 一致（97.9%）**；残余 10 项**全部 loud**（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**466/474 一致（98.3%）**；残余 8 项**全部 loud**（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
-**残余 loud 清单（第十八批后，10 项）**：
+**残余 loud 清单（receiver 通道后，8 项）**：
 1. `arguments` 对象（建议 rest 形参）
 2. generator（`function*` / `yield`）
 3. async / await（需 Promise 运行时）
@@ -123,11 +123,10 @@
 5. 类名作值（`const C = class {}` 之外：类标识符当值传递）
 6. 类方法/对象方法 >4 形参（方法调用 ABI 仅 4 槽）
 7. 箭头函数内的 `super`
-8. 函数表达式带 `this` 形参作回调实参（receiver 无传递通道 → 运行时 `this` 为 undefined，访问属性抛 TypeError）
-9. 内建调用 >4 实参（内建 ABI 仅 4 槽；如 `Date.UTC(y,m,d,h,mi,s,ms)`）
-10. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
+8. 内建调用 >4 实参（内建 ABI 仅 4 槽；如 `Date.UTC(y,m,d,h,mi,s,ms)`）
+9. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
 
-**receiver 通道重构（已尝试，待重做）**：目标 = 带 `this` 形参的闭包获得真实 receiver（消除「函数表达式 `this` 形参作回调」loud + 恢复 `fn-call-apply-bind`）。
+**receiver 通道（已完成 2026-10-16）**：带 `this` 形参的闭包/函数表达式现有真实 receiver 槽 —— `qz.closure_call` 增第 6 参 `recv`、`qz.call_value` 增第 7 参 `recv`，宿主在 `closureCall` 内对 `synthThis` 闭包把 `recv` 前置为槽 0；发射器所有调用点补 `recv`（普通调用 = undefined，与 JS 一致），`_calleeParams` 见首参为 `this` 即 `slice(1)`（receiver 不占实参槽）。三类宿主调用方（wasm 侧调用 / 物化包装器 `object_set_method`·`obj_accessor` / `call`·`apply`·`bind` 的 `callIt`·`cm`）全部改为经 `recv` 传 receiver。效果：`fn-call-apply-bind`、`callback-this-binding`、`this-arrow-vs-fn`、`closure-captures-this-method` 全部转为一致。
 现状约定：`synthThis` 闭包（对象字面量方法/访问器，`_synthArrow` 合成）期望 **槽 0 = receiver**，由三类调用方以 `a0` 传入：
 1) wasm 侧 `qz.closure_call` / `qz.call_value`（发射器 `_emitClosureCall` / `_emitValueCall`，共 6 处 `call_value` + 2 处 `closure_call` 发射点）；
 2) **宿主物化包装器**：`object_set_method`（`obj[strings[k]] = function(...args)`）、`obj_accessor`（`opt.get` / `opt.set`，含 `selfOf`）；
