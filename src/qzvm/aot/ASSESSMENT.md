@@ -117,7 +117,7 @@
 
 **残余 loud 清单（第二十一批后，8 项 loud + 1 项已知静默）**
 
-**方法/对象方法 >4 形参（进行中，补丁已备）**：ABI 铺路已提交（`qz.method_call` 增第 7 参 `ovf`=实参 4..，7 处发射点补位，行为中性）。剩余补丁见 `/tmp/qzaux/patch_mo2.js`（方法/静态方法签名 +`i64` 槽、`$ovf` 形参槽、`_mEnter` 的 `$ovfArg` 预留 local 与 varMap `i<4?1+i:1+params.length+(i-4)`、`_emitOvfParamUnpack` 解包、动态分派传真实溢出数组、删「方法最多 4 参」守卫）。**第二轮尝试的结论（重要，可直接复用）**：
+**方法/对象方法 >4 形参 / rest（类路径已通，对象字面量 rest 未通）**：ABI 铺路已提交（`qz.method_call` 增第 7 参 `ovf`=实参 4..，7 处发射点补位，行为中性）。剩余补丁见 `/tmp/qzaux/patch_mo2.js`（方法/静态方法签名 +`i64` 槽、`$ovf` 形参槽、`_mEnter` 的 `$ovfArg` 预留 local 与 varMap `i<4?1+i:1+params.length+(i-4)`、`_emitOvfParamUnpack` 解包、动态分派传真实溢出数组、删「方法最多 4 参」守卫）。**第二轮尝试的结论（重要，可直接复用）**：
 - **local 布局 bug 已定位并修复**：`params` 必须是「前 4 个实参形参 + 补位 + `$ovf`」，即 `realParams.slice(0, 4).concat(["$p1"..].slice(0, max(0,4-len))).concat(len>4?["$ovf"]:[])`；此前写成 `realParams.concat(补位)` 导致 `params.length` 比 wasm 形参数多 1 → 之后所有 local（scratch/sT/objPool）错位 → 校验报 `expected [f64] but got [i64]`。修好后 wasm-validate 通过。
 - **实参约定**：方法直调/动态分派统一采用**闭包同款**约定 —— `a0..a3` = 实参 0..3，`ovf` = **实参 3..**（`ovf[0]` = 实参 3，已在 a3）；callee 侧解包用 `ovf[i-3]`。`_emitMethodArgs(params, args)`：前 4 槽 +（形参 >4 时）`args.slice(3)` 数组 +（rest 收尾且索引 <4 时）尾部打包数组落在该槽。
 - **宿主**：类方法路径需按 `m.n`/`m.rest` 重建平坦实参（`[a0,a1,a2,a3].concat(ex.slice(1))`）后 `fn(recv, ...)`；POJO 闭包方法把 `ovf` 透传 `closureCall(fv, a0..a3, ovf, recv)`（闭包 ABI 已支持 rest/>4）。`classMeta.methods[name]` 需加 `rest` 字段。
