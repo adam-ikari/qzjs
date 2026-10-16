@@ -4,6 +4,16 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十一批差分审计（2026-10-16）
+- 新增 `audit_corpus11.js`（24 例：类表达式 / IIFE·逗号·void / 标签循环 / switch 边界 / Map·Set 边界 / 运行期键序 / 访问器定义 / 模板标签函数 / 解构默认值 / rest·spread / 私有静态方法 / 排序稳定性…）。
+- **对象恒等（物化缓存）**：同一次 bump 生命周期内同 offset → 同一 JS 对象（按需刷新、自引用直接复用）→ `o === o`、`Map`/`Set` 以对象为键、`===` 语义正确（此前每次物化新对象 → Map.get 对象键静默失效）。
+- **物化刷新**：按「本轮实际写入的键」集合删除陈旧属性（`delete o.k` 后 `Object.keys`/JSON 不再列出）。
+- **`in`**：实例先查类链（getter/setter/方法，原型成员）→ `"v" in obj` 与 JS 一致。
+- **`call_value` 省略尾随未传实参**：`(0, Math.max)(1, 2)` 此前 → NaN。
+- **标签模板**：标签为已知形参的函数时按形参表落栈（rest 形参打包、元数补齐），此前 rest 形参拿到非数组。
+- **POJO 上的 `defineProperty` 访问器** → 编译期/运行期 loud（不能静默丢访问器）。
+- 结果：**333/345（96.5%）**；**残余 12 项全部为 loud（零静默错值）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿。
+
 ### 稀疏数组洞（2026-10-16）
 - 新增洞哨兵 `HOLE`(0x7FF9|2)：`arrWriteback`/`arrSetInPlace` 保留 JS 空洞、数组按下标越界增长与 `delete a[i]` 写洞、`arrRead` 还原为**真稀疏 JS 数组** → `map/filter/reduce/indexOf/join/flat/Object.keys/JSON.stringify/for-of` 与 JS 语义一致；`Array.prototype.includes` 不跳洞（`[,].includes(undefined) === true`）。
 - 元素读快路径（下标 / for-of）对洞归一化为 `undefined`（此前 `typeof a[0]` 会得 `object`）；数组字面量 `[1,,3]` 的省略元素写洞。

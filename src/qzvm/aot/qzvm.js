@@ -186,9 +186,8 @@ function makeQzvm(strings, opts) {
   // POJO/类实例（内存驻留）→ JS 对象物化：按 [0]=size 限定范围，逐字段读（undefined sentinel 跳过）。
   const pojoOf = new WeakMap();   // 物化对象 → { off, mem }（往返还原 POJO 句柄）
   const cloOf = new WeakMap();    // 闭包包装函数 → 闭包句柄
-  const materializeUncached = (off, isInst, o) => {
-    syncExtras();
-    // 每次新鲜物化：POJO/实例由 bump 分配，调用间 __bump_reset 会复用偏移 → 不可跨调用缓存。
+  const materializeUncached = (off, isInst, o, setNow) => {
+    syncExtras(); syncPojoCache();
     if (!mem) return o;
     const dv = new DataView(mem.buffer);
     const size = dv.getInt32(off + 4, true);
@@ -199,22 +198,24 @@ function makeQzvm(strings, opts) {
     if (ord) {                                   // 插入序优先（JS 语义：键序 = 插入序；含赋值为 undefined 的键）
       for (const name of ord) {
         seen.add(name);
-        const idx = fieldEntries.find(([n]) => n === name);
-        const v = idx ? toJS(dv.getBigInt64(off + idx[1], true)) : undefined;
-        if (!nonEnum.has(off + "|" + name)) o[name] = v;
+        const e2 = fieldEntries.find(([n]) => n === name);
+        let v;
+        if (e2) v = toJS(dv.getBigInt64(off + e2[1], true));
+        else { syncExtras(); const x2 = extras.get(off + "|" + name); v = x2 === undefined ? undefined : toJS(x2); }   // 运行期新增键（extras）
+        if (v !== undefined && !nonEnum.has(off + "|" + name)) { o[name] = v; setNow.add(name); }
       }
     }
     for (const [name, idx] of fieldEntries) {
       if (idx >= size || seen.has(name)) continue;
       if (nonEnum.has(off + "|" + name)) continue;   // defineProperty enumerable:false
       const v = toJS(dv.getBigInt64(off + idx, true));
-      if (v !== undefined) o[name] = v;
+      if (v !== undefined) { o[name] = v; setNow.add(name); }
     }
     for (const [k, v] of extras) {                        // 运行期新增字段
       const bar = k.indexOf("|");
       if (Number(k.slice(0, bar)) !== off) continue;
       const jv = toJS(v);
-      if (jv !== undefined) o[k.slice(bar + 1)] = jv;
+      if (jv !== undefined) { o[k.slice(bar + 1)] = jv; setNow.add(k.slice(bar + 1)); }
     }
     { const m = symProps.get(off);                       // 符号键属性（own enumerable symbol）
       if (m) for (const [sy, tv] of m) Object.defineProperty(o, sy, { value: toJS(tv), enumerable: true, writable: true, configurable: true }); }
@@ -253,17 +254,23 @@ function makeQzvm(strings, opts) {
   };
   // 循环结构：同一次物化树内同一 offset 复用同一 JS 对象（否则 o.self=o 会无限递归 → 栈溢出；
   // JS 侧 JSON.stringify 才能抛真实 TypeError("Converting circular structure to JSON")）
-  let matDepth = 0;
-  const matCache = new Map();
+  const inProgress = new Set();                    // 正在物化的 offset（自引用 → 返回同一对象）
+  const pojoCache = new Map();                     // offset → JS 对象（同一 bump 生命周期内恒等）
+  const cacheKeys = new Map();                     // offset → 已写入的键集合（刷新时删陈旧键）
+  let pojoCacheAt = -1;
+  const syncPojoCache = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < pojoCacheAt) { pojoCache.clear(); cacheKeys.clear(); } pojoCacheAt = v; };
   const materialize = (off, isInst) => {
-    if (matDepth === 0) matCache.clear();          // 顶层调用：偏移会被 __bump_reset 复用 → 不可跨调用缓存
-    const hit = matCache.get(off);
-    if (hit !== undefined) return hit;
-    const o = {};
-    matCache.set(off, o);                          // 先登记再填充 → 自引用得到同一对象
-    matDepth++;
-    try { return materializeUncached(off, isInst, o); }
-    finally { matDepth--; }
+    let o = pojoCache.get(off);
+    if (!o) { o = {}; pojoCache.set(off, o); cacheKeys.set(off, new Set()); }
+    if (inProgress.has(off)) return o;                  // 自引用/循环：正在填充 → 直接给同一对象（否则无限递归）
+    inProgress.add(off);
+    const ks = cacheKeys.get(off);
+    const setNow = new Set();
+    let out;
+    try { out = materializeUncached(off, isInst, o, setNow); } finally { inProgress.delete(off); }
+    for (const k of ks) if (!setNow.has(k)) delete o[k];   // 刷新：本轮未写入的旧键 → 删除
+    cacheKeys.set(off, setNow);
+    return out;
   };
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
   const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
@@ -570,7 +577,11 @@ function makeQzvm(strings, opts) {
       if (h === CLO_HI) return closureCall(v, a0, a1, a2, a3);
       if (h === HOST_HI) {
         const f = handles[idxOf(v)];
-        if (typeof f === "function") return ret(f(...[a0, a1, a2, a3].map(toJS)));
+        if (typeof f === "function") {
+          const as3 = [a0, a1, a2, a3].map(toJS);
+          while (as3.length && as3[as3.length - 1] === undefined) as3.pop();   // 未传实参必须省略
+          return ret(f(...as3));
+        }
       }
       throw new Error("call_value: 被调值不是函数");
     },
@@ -895,7 +906,15 @@ function makeQzvm(strings, opts) {
       toJS(o)[toJS(k)] = toJS(v);
     },
     // k in o：宿主语义（POJO/实例先物化；数组/宿主对象直接 in）。
-    in_op: (k, o) => boxBool(toJS(k) in toJS(o)),   // tagged bool（不可经 ret：BigInt 会被当宿主句柄）
+    in_op: (k, o) => {
+      const u0 = BigInt.asUintN(64, o);
+      if ((u0 >> 48n) === INST_HI && mem && classMeta) {          // 原型上的 getter/setter/方法 → JS: "v" in obj 为 true
+        const key = String(toJS(k));
+        let c = classMeta[new DataView(mem.buffer).getInt32(Number(u0 & MASK32), true)];
+        while (c) { if (own(c.getters, key) || own(c.setters, key) || own(c.methods, key)) return boxBool(true); c = c.parent != null ? classMeta[c.parent] : null; }
+      }
+      return boxBool(toJS(k) in toJS(o));
+    },   // tagged bool（不可经 ret：BigInt 会被当宿主句柄）
     // delete o.k：宿主对象真删；POJO/实例由 emitter 直接把槽写成 undefined sentinel（本函数仅宿主）。
     object_delete: (o, kid) => { const obj = handles[idxOf(o)]; if (obj !== null && typeof obj === "object") delete obj[strings[kid]]; },
     // 内建全局调用/常量：nameId + n(实际参数个数) + a0..a3 → 宿主 JS 内建 → ret。
@@ -945,6 +964,7 @@ function makeQzvm(strings, opts) {
         const key = toJS(a1), desc = toJS(a2) || {};
         if ((h === TAG_HI && off0 >= 8) || h === INST_HI || h === HOST_HI) {
           if (h === HOST_HI) { Object.defineProperty(handles[off0], key, desc); return a0; }
+          if (desc.get || desc.set) { throwValue(new TypeError("Object.defineProperty 访问器仅支持宿主对象（POJO/实例未实现）；见 ASSESSMENT 限制")); return TAG; }
           const val = bitsOf(desc.value);
           const e2 = fieldEntries.find(([n]) => n === key);
           if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(off0 + e2[1], val, true);

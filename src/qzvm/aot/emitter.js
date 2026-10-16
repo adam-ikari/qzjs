@@ -2947,6 +2947,26 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isTaggedTemplateExpression(e)) {
         // tag`a${1}b`：构造字面量数组 [a, b]（含 raw 省略）+ 值 1 → closure_call(tag, arr, a0, a1, a2)
         const M = this.m, t = this._expEnter();
+        const noSub0 = ts.isNoSubstitutionTemplateLiteral(e.template);
+        // 标签为**已知形参**的函数（本作用域函数声明/闭包）→ 按形参表落栈（rest 打包 / 元数补齐；否则 rest 形参会拿到非数组）
+        const tagName0 = ts.isIdentifier(e.tag) ? e.tag.text : null;
+        const cp0 = tagName0 ? (this._calleeParams(tagName0) || null) : null;
+        if (cp0 && cp0.length) {
+            const parts0 = [ts.factory.createStringLiteral(noSub0 ? e.template.text : e.template.head.text)]
+                .concat((noSub0 ? [] : e.template.templateSpans).map(sp => ts.factory.createStringLiteral(sp.literal.text)));
+            const lit0 = ts.factory.createArrayLiteralExpression(parts0);
+            lit0.pos = e.pos; lit0.end = e.end;
+            const argNodes = [lit0].concat((noSub0 ? [] : e.template.templateSpans).map(sp => sp.expression));
+            this.emitTaggedExpr(e.tag); M.localSet(t.v);
+            M.localGet(t.v);
+            this._emitCallArgs(cp0, argNodes, tagName0);
+            const pushed = cp0.length > 4 ? 4 : cp0.length;            // call_value ABI 固定 4 个实参槽
+            for (let i = pushed; i < 4; i++) this._emitUndefined();
+            M.call("qz.call_value");
+            this._emitErrCheck();
+            this._expLeave();
+            return;
+        }
         this.emitTaggedExpr(e.tag); M.localSet(t.v);                       // 标签（闭包句柄）
         const noSub = ts.isNoSubstitutionTemplateLiteral(e.template);
         const spans = noSub ? [] : e.template.templateSpans;
