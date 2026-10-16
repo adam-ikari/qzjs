@@ -119,6 +119,7 @@ const QZ = {
   builtin_fn: { params: ["i32"], results: ["i64"] },                  // 内建函数值（作为值读取）
   builtin_member: { params: ["i32"], results: ["i64"] },              // 内建成员当作值读
   regex: { params: ["i32"], results: ["i64"] },                        // 正则字面量 → 宿主 RegExp
+  str_dup: { params: ["i64"], results: ["i64"] },                     // 字符串私有副本（不可变语义）
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
@@ -497,7 +498,8 @@ class Emitter {
     // 其余（数组/字符串/数字上的普通属性）→ undefined。
     _emitPropReadFromLocal(base, name) {
         const M = this.m;
-        if (this._hasAccessor(name, "get")) {   // 程序内有该名 getter → 宿主分派（实例经继承链）
+        if (this._hasAccessor(name, "get") || this._hasMethodName(name)) {   // getter/原型方法 → 宿主分派（实例经继承链）
+
             M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
             return;
         }
@@ -834,6 +836,7 @@ class Emitter {
         const savedCurClass = this._curClass, savedCapActive = this.capListActive, savedStatic = this._staticVars;
         const savedFnVars = this._fnVars; this._fnVars = new Set();   // 本函数的「持有闭包的变量」集合
         const savedFnNodes = this._fnNodes; this._fnNodes = new Map(savedFnNodes || []);
+        const savedBody = this._curBody; this._curBody = f.body;
         this._curClass = undefined; this.capListActive = false;
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this.mode = funcMode(f);
@@ -852,8 +855,8 @@ class Emitter {
         const extra = this.mode === "tagged" ? ["f64", "f64"] : [];
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
         // 字符串逻辑临时（仅 tagged）：sT0..sT7 共 8 个 i32
-        const sT = this.mode === "tagged" ? Array.from({ length: 32 }, () => "i32") : [];
-        this.sT = this.mode === "tagged" ? Array.from({ length: 32 }, (_, i) => nLoc + 5 + i) : null;
+        const sT = this.mode === "tagged" ? Array.from({ length: 40 }, () => "i32") : [];
+        this.sT = this.mode === "tagged" ? Array.from({ length: 40 }, (_, i) => nLoc + 5 + i) : null;
         // 嵌套对象字面量的句柄临时槽（i64）：每层独立，避免内层覆盖外层句柄。
         const objPool = this.mode === "tagged" ? Array.from({ length: 48 }, () => "i64") : [];
         this.objBase = nLoc + 3 + extra.length + sT.length;
@@ -917,7 +920,7 @@ class Emitter {
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
         this._curClass = savedCurClass; this.capListActive = savedCapActive; this._staticVars = savedStatic;
-        this._fnVars = savedFnVars; this._fnNodes = savedFnNodes;
+        this._fnVars = savedFnVars; this._fnNodes = savedFnNodes; this._curBody = savedBody;
     }
 
 
@@ -1006,8 +1009,8 @@ class Emitter {
         this.scratchB = nLoc + 2;
         const extra = ["f64", "f64"];
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
-        const sT = Array.from({ length: 32 }, () => "i32");
-        this.sT = Array.from({ length: 32 }, (_, i) => nLoc + 5 + i);
+        const sT = Array.from({ length: 40 }, () => "i32");
+        this.sT = Array.from({ length: 40 }, (_, i) => nLoc + 5 + i);
         const objPool = Array.from({ length: 48 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
@@ -1207,8 +1210,8 @@ class Emitter {
         this.scratch = nLoc; this.scratchA = nLoc + 1; this.scratchB = nLoc + 2;
         const extra = ["f64", "f64"];
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
-        const sT = Array.from({ length: 32 }, () => "i32");
-        this.sT = Array.from({ length: 32 }, (_, i) => nLoc + 5 + i);
+        const sT = Array.from({ length: 40 }, () => "i32");
+        this.sT = Array.from({ length: 40 }, (_, i) => nLoc + 5 + i);
         const objPool = Array.from({ length: 48 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
@@ -1612,7 +1615,8 @@ const ARR_TAG_HI = 0x7ffb;                       // 数组句柄高 16 位标记
                                                  // 不可用 0x7FF8：那是 canonical quiet NaN（宿主 box(NaN) 恰产此位型），
                                                  // 与 f64 算术结果相撞 → 任何 NaN 会被误判为数组句柄。
 const SCRATCH = 16;                              // numstr 临时区（48 字节，够 20 位 + 负号 + len）
-const STR_BASE = 8 << 20;                        // 字面量 data 段基址（8 MiB）：bump 堆 arena 上限，越过即 trap
+const STR_BASE = 16 << 20;                       // 字面量 data 段基址（16 MiB）：bump 堆 arena 上限，越过即 trap
+                                                 // （字符串拼接不再原地追加 → 内存需求约翻倍，故 arena 加倍）
 const STR_BUMP = 128;                            // bump 堆起始（跳过 scratch）
 
 // 字符串 helper 函数（每模块一份，emitter call 调用）
@@ -2079,7 +2083,7 @@ function compileTS(input, outWasm, opts = {}) {
             if (contract) registerQz(m, contract);
         }
         if (anyTagged) {
-            m.addMemory(256);                                // 16 MiB：bump arena [0,STR_BASE=8MiB) + 字面量段 [8MiB,16MiB)
+            m.addMemory(640);                                // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
             m.addGlobal("i32", STR_BUMP);                    // global0 = bump 堆（字符串/对象）
             m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
             emitStringHelpers(m);
@@ -2177,6 +2181,18 @@ Emitter.prototype._fieldIndex = function (name) {
     return (i + 1) * 8;   // 字节偏移；偏移 0 保留给实例 __cls 头（类实例），字段从 8 起
 };
 // 程序内是否存在名为 name 的属性访问器（getter/setter）——决定属性读/写是否走宿主访问器分派。
+// 名字是否为程序内某类的方法名（属性读命中时走宿主：实例原型方法 → 绑定函数；字段仍优先）
+Emitter.prototype._hasMethodName = function (name) {
+    if (!this._methodNames) {
+        this._methodNames = new Set();
+        for (const cname of this._classList) {
+            const c = this.classes.get(cname);
+            if (!c || !c.methods) continue;
+            for (const m of c.methods) this._methodNames.add(m.name);
+        }
+    }
+    return this._methodNames.has(name);
+};
 Emitter.prototype._hasAccessor = function (name, kind) {
     if (!this._accessorNames) {          // 惰性：首次使用时由已收集类汇总（编译期一次）
         this._accessorNames = { get: new Set(), set: new Set() };
@@ -2200,9 +2216,9 @@ Emitter.prototype._strId = function (text) {
 // 避免内层表达式（含 .length / 下标 / 拼接）覆盖外层正在使用的接收者/值。
 Emitter.prototype._expEnter = function () {
     const d = this._expDepth || 0; this._expDepth = d + 1;
-    if (!this.sT) return { v: 0, w: 0, x: 0, y: 0, z: 0, a: 0, b: 0, c: 0 };
+    if (!this.sT) return { v: 0, w: 0, x: 0, y: 0, z: 0, a: 0, b: 0, c: 0, d: 0 };
     return { v: this.objBase + 8 + d, w: this.objBase + 16 + d, x: this.objBase + 24 + d, y: this.objBase + 32 + d, z: this.objBase + 40 + d,   // 各 8 层（objPool 48 槽）
-             a: this.sT[8 + 3 * d], b: this.sT[9 + 3 * d], c: this.sT[10 + 3 * d] };   // 各 8 层（sT 共 32 槽）
+             a: this.sT[8 + 4 * d], b: this.sT[9 + 4 * d], c: this.sT[10 + 4 * d], d: this.sT[11 + 4 * d] };   // 各 8 层（sT 共 40 槽）
 };
 Emitter.prototype._expLeave = function () { this._expDepth--; };
 // 类静态字段：C.x 前确保静态已初始化（lazy 内联初始值 → 宿主表 qz.static_set / statics_mark）。
@@ -2257,7 +2273,71 @@ Emitter.prototype._emitStrLitHandle = function (text) {
 // 字符串拼接：栈顶 [a, b]（i64）→ 结果句柄。
 // a 字符串 → qzs_append(a, bytesOf(b))（b 数→numstr 到 SCRATCH；b 串→其字节）——热路径原地追加。
 // a 数 + b 串 → qz.string_concat 回退（少见）；双数 → 原生 f64 add。
-Emitter.prototype._emitConcat = function () {
+// 字符串累加器判定：x 的每次出现都只可能是 自身赋值目标 / 自身拼接左侧 / 只读属性访问（x.length、x.m()…）／
+// 被追加的源（"a" + x）；此时其缓冲不会被别名引用 ⇒ 允许原地追加（累加循环 O(n)）。否则强制拷贝。
+// 被闭包捕获的名字一律不算（可能别名）。
+Emitter.prototype._strAccSetOf = function (body) {
+    if (!body) return new Set();
+    this._strAccCache = this._strAccCache || new WeakMap();
+    if (this._strAccCache.has(body)) return this._strAccCache.get(body);
+    const cand = new Set(), unsafe = new Set();
+    const assignTarget = (n) => {                       // 该标识符所在（最近的）赋值语句的目标名
+        let p = n;
+        while (p) {
+            if (ts.isBinaryExpression(p)) {
+                const op = p.operatorToken.kind;
+                if (op === ts.SyntaxKind.EqualsToken
+                    || (op >= ts.SyntaxKind.FirstCompoundAssignment && op <= ts.SyntaxKind.LastCompoundAssignment)) {
+                    return p.left && ts.isIdentifier(p.left) ? p.left.text : null;
+                }
+            }
+            if (ts.isVariableDeclaration(p)) return ts.isIdentifier(p.name) ? p.name.text : null;
+            if (ts.isStatement(p) || ts.isFunctionLike(p)) return null;
+            p = p.parent;
+        }
+        return null;
+    };
+    const walk = (n) => {
+        if (ts.isIdentifier(n)) {
+            const nm = n.text, p = n.parent;
+            if (p && ts.isBinaryExpression(p) && p.left === n) {
+                const op = p.operatorToken.kind;
+                if (op === ts.SyntaxKind.EqualsToken
+                    || (op >= ts.SyntaxKind.FirstCompoundAssignment && op <= ts.SyntaxKind.LastCompoundAssignment)) {
+                    cand.add(nm);                                   // x = … / x += …
+                    return ts.forEachChild(n, walk);
+                }
+            }
+            if (p && (ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && p.expression === n) {
+                /* 只读访问：x.length / x.charAt() → 安全 */
+            } else if (p && ts.isVariableDeclaration(p) && p.name === n) {
+                /* 声明 → 安全 */
+            } else if (assignTarget(n) === nm) {
+                /* 出现在「赋值给 x 的右侧」→ 安全（x = x + y 的累加模式） */
+            } else {
+                unsafe.add(nm);
+            }
+        }
+        ts.forEachChild(n, walk);
+    };
+    walk(body);
+    const out = new Set();
+    for (const nm of cand) if (!unsafe.has(nm)) out.add(nm);
+    this._strAccCache.set(body, out);
+    return out;
+};
+// 拼接左操作数是否可原地追加
+Emitter.prototype._concatSafe = function (leftNode) {
+    if (!leftNode || !ts.isIdentifier(leftNode)) return true;              // 临时量（字面量/调用/嵌套拼接）→ 无别名
+    const nm = leftNode.text;
+    if (this.capMap && this.capMap.has(nm)) return false;                  // 闭包捕获 → 可能别名
+    if (this._local(nm) === undefined) return true;                        // 非本层局部（如类静态表）→ 保守给 true? 否：未知来源按不安全处理
+    const body = this._curBody;
+    return body ? this._strAccSetOf(body).has(nm) : false;
+};
+Emitter.prototype._emitConcat = function (inPlace) {
+    const saved = this._concatInPlace;
+    if (inPlace !== undefined) this._concatInPlace = !!inPlace;   // GUARD 调用（无参）→ 沿用调用点已设的标志
     const M = this.m;
     M.localSet(this.scratchA); M.localSet(this.scratchB);   // a=scratchB, b=scratchA
     // 测试 pureNum：b 纯数 → numstr；否则宿主
@@ -2266,7 +2346,8 @@ Emitter.prototype._emitConcat = function () {
       M.localGet(this.scratchA); this._emitIsStr();
       M.ifBlock("i64");
         M.localGet(this.scratchA); this._emitStrParts();
-        M.localGet(this.scratchB); M.i32WrapI64();
+        // 左操作数可能被别名引用（非私有累加器）→ 先复制一份再原地追加（JS 字符串不可变）
+        M.localGet(this.scratchB); if (!this._concatInPlace) M.call("qz.str_dup"); M.i32WrapI64();
         M.localGet(this.sT[2]); M.localGet(this.sT[0]); M.call("qzs_append");
         this._strTag();
       M.else_();
@@ -2302,6 +2383,7 @@ Emitter.prototype._emitConcat = function () {
         M.localGet(this.scratchB); M.localGet(this.scratchA); M.call("qz.add");
       M.end();
     M.end();
+    this._concatInPlace = saved;
 };
 // 栈顶 i32 结构偏移 → i64 字符串句柄
 Emitter.prototype._strTag = function () {
@@ -2446,7 +2528,15 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.forOfCount--;
         return;
     }
-    if (ts.isLabeledStatement(s)) { if (ts.isIterationStatement(s.statement, false)) this._labelStack.push(s.label.text); this.emitTaggedStmt(s.statement); return; }
+    if (ts.isLabeledStatement(s)) {
+        if (ts.isIterationStatement(s.statement, false)) { this._labelStack.push(s.label.text); this.emitTaggedStmt(s.statement); return; }
+        this.m.block("void"); this.depth++;                       // 非循环标签块：break label → 跳到块尾
+        this.labels.push({ brk: this.depth, cont: null, label: s.label.text });
+        this.emitTaggedStmt(s.statement);
+        this.labels.pop();
+        this.depth--; this.m.end();
+        return;
+    }
     if (ts.isBlock(s)) { this.emitTaggedBlock(s); return; }
     if (ts.isExpressionStatement(s)) {
         // console.log(x) → qz.log（边界输出）
@@ -2708,10 +2798,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     Ma.localGet(ta.w); Ma.i64Const(48n); Ma.i64ShrU(); Ma.i64Const(0x7ffen); Ma.i64Eq();
                     Ma.i32Or();
                     Ma.ifBlock("void");
-                    Ma.localGet(ta.a); Ma.i32Const(8); Ma.i32Add();                    // dst = 新对象 + 8
-                    Ma.localGet(ta.w); Ma.i32WrapI64(); Ma.i32Const(8); Ma.i32Add();   // src = 源对象 + 8
-                    Ma.i32Const(cap - 8);                                              // n（统一容量 → 常量）
-                    Ma.call("qzs_memcpy");
+                    // 槽级合并：仅当源槽≠undefined 才写入（JS：后展开段只覆盖其自有键；undefined 槽不覆盖）
+                    Ma.localGet(ta.a); Ma.i32Const(8); Ma.i32Add(); Ma.localSet(ta.b);        // dst 游标（a 保留 = 新对象）
+                    Ma.localGet(ta.w); Ma.i32WrapI64(); Ma.i32Const(8); Ma.i32Add(); Ma.localSet(ta.c);   // src 游标
+                    Ma.localGet(ta.a); Ma.i32Const(cap); Ma.i32Add(); Ma.localSet(ta.d);      // dst 末尾
+                    Ma.block("void"); Ma.loop("void");
+                    Ma.localGet(ta.b); Ma.localGet(ta.d); Ma.i32GeU(); Ma.brIf(1);            // 到尾 → 退出
+                    Ma.localGet(ta.c); Ma.i64Load(3, 0);
+                    Ma.i64ConstBits(0, 0x7ff90000); Ma.i64Eq(); Ma.i32Eqz();
+                    Ma.ifBlock("void");
+                    Ma.localGet(ta.b); Ma.localGet(ta.c); Ma.i64Load(3, 0); Ma.i64Store(3, 0);
+                    Ma.end();
+                    Ma.localGet(ta.b); Ma.i32Const(8); Ma.i32Add(); Ma.localSet(ta.b);
+                    Ma.localGet(ta.c); Ma.i32Const(8); Ma.i32Add(); Ma.localSet(ta.c);
+                    Ma.br(0);
+                    Ma.end(); Ma.end();
                     Ma.else_();
                     Ma.localGet(ta.v); Ma.localGet(ta.w); Ma.call("qz.obj_merge");      // 宿主对象等 → 物化合并
                     Ma.end();
@@ -2847,6 +2948,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.i32Const(this._strId(cn)); this.m.i32Const(this._strId(e.name.text)); this.m.call("qz.static_get");
         return;
     }
+    if (ts.isPropertyAccessExpression(e) && ts.isSuperKeyword(e.expression)) {
+        // super.v：父类 getter → 调之；否则按字段偏移直读（父类字段与子类共用同一 fieldMap 偏移）
+        const parent = this._curClassObj && this._curClassObj.parent;
+        if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
+        // 实例访问器：沿父链找 get
+        let owner = parent, acc = null;
+        while (owner && !acc) {
+            const cl = this.classes.get(owner);
+            acc = (cl.methods || []).find(m => m.accessor === "get" && m.name === e.name.text) || null;
+            if (!acc) owner = cl.parent;
+        }
+        if (acc) { this.m.localGet(0); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
+        this.m.localGet(0); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
+        return;
+    }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
         // .length：字符串(0x7FFA) → qzs_utf16len（UTF-16 码元数，非 UTF-8 字节数："你好".length=2）；
         //   数组(0x7FFB) → 结构首 i32（元素数）；其余 → qz.str_len（跨界，罕见）。
@@ -2878,12 +2994,36 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._expLeave();
         return;
     }
+    if (ts.isNewExpression(e) && e.arguments.some(a => ts.isSpreadElement(a))) {
+        const M = this.m, t = this._expEnter();
+        const lit = ts.factory.createArrayLiteralExpression(e.arguments);
+        lit.pos = e.pos; lit.end = e.end;
+        this.emitTaggedExpr(lit); M.localSet(t.y);                       // 实参数组（受保护）
+        this._emitNewCall({ expression: e.expression, arguments: [] }, (i) => this._emitElemOf(t.y, ts.factory.createNumericLiteral(i)));
+        this._expLeave();
+        return;
+    }
     if (ts.isNewExpression(e)) { this._emitNewCall(e); return; }
     if (ts.isCallExpression(e) && ts.isSuperKeyword(e.expression)) {
         if (!this._curClassObj) throw new Error("[tagged] super() 仅在构造器内可用");
         this._emitSuperCall(this._curClassObj, e.arguments || []); return;
     }
     // super.m(args)：父类方法**静态**直调（继承链编译期已知 → 无虚派发，与 JS super 语义一致）
+    if (ts.isPropertyAccessExpression(e) && ts.isSuperKeyword(e.expression)) {
+        // super.v：父类 getter → 调之；否则按字段偏移直读（父类字段与子类共用同一 fieldMap 偏移）
+        const parent = this._curClassObj && this._curClassObj.parent;
+        if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
+        // 实例访问器：沿父链找 get
+        let owner = parent, acc = null;
+        while (owner && !acc) {
+            const cl = this.classes.get(owner);
+            acc = (cl.methods || []).find(m => m.accessor === "get" && m.name === e.name.text) || null;
+            if (!acc) owner = cl.parent;
+        }
+        if (acc) { this.m.localGet(0); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
+        this.m.localGet(0); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
+        return;
+    }
     if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression)
         && ts.isSuperKeyword(e.expression.expression)) {
         const owner = this._curClassObj && this._curClassObj.parent;
@@ -3473,7 +3613,7 @@ Emitter.prototype._emitFillUndef = function (size) {
 Emitter.prototype._instSize = function () {
     return ((this.fieldMap ? this.fieldMap.size : 0) + 1) * 8;
 };
-Emitter.prototype._emitNewCall = function (e) {
+Emitter.prototype._emitNewCall = function (e, argSrc) {
     const M = this.m;
     if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] new 目标必须是标识符");
     const cname = this._className(e.expression.text);   // 导入类本地名 → 目标类名
@@ -3490,7 +3630,9 @@ Emitter.prototype._emitNewCall = function (e) {
     const te = this._expEnter();                            // 实例 off / ctor 实参用可重入槽（嵌套 new 不覆盖）
     { const argSlots = [te.w, te.x, te.y, te.z];   // self 占 te.v，实参用 w/x/y/z
       for (let i = 0; i < 4; i++) {
-        if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        if (argSrc) argSrc(i);                                    // 实参来自运行期数组（new C(...args)）
+        else if (i < args.length) this.emitTaggedExpr(args[i]);
+        else this._emitUndefined();
         M.localSet(argSlots[i]);
       } }
     // 内联 bump 分配（与 POJO/数组同款）：避免 qz.newobj 跨界 + BigInt 装箱（构造热路径）。
@@ -3591,7 +3733,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
     if (op === ts.SyntaxKind.InstanceOfKeyword) {
         // a instanceof C：C 须为用户类（内建类不支持）→ qz.instanceof_op(a, clsId) → tagged bool
         const right = e.right;
-        if (ts.isIdentifier(right) && /^(Array|Object|String|Number|Boolean|Function|Error|RegExp|Date)$/.test(right.text)
+        if (ts.isIdentifier(right) && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(right.text)
             && !this.classes.has(this._className(right.text))) {
             // 内建类：宿主按 tag/物化判定（Array/Object/String/Number/Boolean/Function…）
             this.emitTaggedExpr(e.left);
@@ -3674,6 +3816,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
             this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this._emitBinOp(COMPOUND[op]);
             this._emitStoreElem(e.left); return;
         }
+        if (COMPOUND[op] === ts.SyntaxKind.PlusToken) this._concatInPlace = this._concatSafe(e.left);
         this._emitVarGet(e.left.text); this.emitTaggedExpr(e.right);
         this._emitBinOp(COMPOUND[op]);
         this._emitVarStore(e.left.text, this.scratchB); return;
@@ -3702,6 +3845,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         this.emitNullish(e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
     }
+    // 拼接左操作数来历 → 是否允许原地追加（_emitConcat 内部读 _concatInPlace）
+    if (op === ts.SyntaxKind.PlusToken) this._concatInPlace = this._concatSafe(e.left);
     this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right);
     this._emitBinOp(op);
 };
@@ -3740,7 +3885,7 @@ Emitter.prototype.emitNullish = function (left, right) {
 Emitter.prototype._emitBinOp = function (op) {
     const G = (qz, f64op, cmp) => () => this.emitGuardedOp(qz, f64op, cmp);
     const GUARD = {
-        [ts.SyntaxKind.PlusToken]: () => this._emitConcat(),   // 任一操作数 0x7FFA → wasm 内拼接，否则数值
+        [ts.SyntaxKind.PlusToken]: () => this._emitConcat(),   // 任一操作数 0x7FFA → wasm 内拼接，否则数值（inPlace 由调用点设置）
         [ts.SyntaxKind.MinusToken]: G("qz.sub", this.m.f64Sub),
         [ts.SyntaxKind.AsteriskToken]: G("qz.mul", this.m.f64Mul),
         [ts.SyntaxKind.SlashToken]: G("qz.div", this.m.f64Div),

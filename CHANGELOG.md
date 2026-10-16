@@ -3,6 +3,11 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **fix(aot): 字符串不可变语义（此前原地追加会改写左操作数缓冲）+ 累加器逃逸分析**。
+  - 原 `qzs_append` 在缓冲位于 bump 顶时**原地追加** → `out += "a"` 会改写 `out` 旧值所在缓冲，随后再读 `out` 得到被改写内容（`out + "|" + out` 得 `a|a|`）。
+  - 现按**逃逸分析**分派：`x` 的每次出现都只是自身赋值目标 / 赋值给 x 的右侧 / 只读访问 → 视为**私有累加器**，走无条件原地追加 `qzs_append_ip`（`x += y` 累加仍 O(n)：70k 次追加实测 bump 70 KB）；否则先 `qz.str_dup` 复制再原地追加（不可变 ✓）。
+  - 修重复 `qzs_append` 声明（同名前向声明两次 → 函数索引错位）。
+- **feat(aot): 第四批差分语料** `audit_corpus4.js`（38 例，容器/类细节/可选调用/强制转换/数字字符串边界）：Map/Set/Date、toJSON/valueOf/toString 钩子（物化对象挂非枚举回调）、实例原型方法读（`typeof c.get` → function）、`super.v`（父类 getter/字段）、`new C(...args)`、标签块 break、Error 族 instanceof。当前 29/38。
 - **fix(aot): 内建类 instanceof 的原始值语义**（`"s" instanceof String` / `1 instanceof Number` 此前误判为 true；JS 语义为 false——原始值非装箱对象）。改按**物化后的 JS 语义**判定（`j instanceof C` / `Array.isArray` / `typeof`）。守门：`test_aot.js` 233 checks ALL PASS。
 - **test(aot): 语义回归入快速门**（`test_aot.js` +9：finally 穿透 / 字面量访问器 / 展开别名 / for-of 字符串 / 解构赋值 / 位运算混合 / 嵌套 new / 数组越界）。
 - **feat(aot): 对象字面量方法/访问器（宿主对象 + 闭包回调）**。

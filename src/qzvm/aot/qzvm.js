@@ -187,6 +187,27 @@ function makeQzvm(strings, opts) {
       if (jv !== undefined) o[k.slice(bar + 1)] = jv;
     }
     pojoOf.set(o, { off, mem });
+    // 类方法驱动的强制转换钩子（JSON.stringify 用 toJSON；String()/+ 用 toString/valueOf）——非枚举，不进 Object.keys/JSON
+    if (mem) {
+      const clsId = new DataView(mem.buffer).getInt32(off, true);
+      let c = classMeta && classMeta[clsId];
+      const hook = (nm) => {
+        let cc = c;
+        while (cc) { const m = cc.methods && cc.methods[nm]; if (m) return m; cc = cc.parent != null ? classMeta[cc.parent] : null; }
+        return null;
+      };
+      const mk = (nm) => {
+        const m = hook(nm);
+        if (!m) return null;
+        return function () { return toJS(exportsRef[m.name](TAG | BigInt(off), TAG, TAG, TAG, TAG)); };
+      };
+      const tj = mk("toJSON");
+      if (tj) Object.defineProperty(o, "toJSON", { value: tj, enumerable: false, configurable: true });
+      const vs = hook("valueOf") ? mk("valueOf") : null;
+      const ts2 = hook("toString") ? mk("toString") : null;
+      if (vs) Object.defineProperty(o, "valueOf", { value: vs, enumerable: false, configurable: true });
+      if (ts2) Object.defineProperty(o, "toString", { value: ts2, enumerable: false, configurable: true });
+    }
     return o;
   };
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
@@ -209,7 +230,7 @@ function makeQzvm(strings, opts) {
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   const bindBump = (g) => { bumpRef = g; };
   // 宿主侧 bump 分配：与 wasm 侧 STR_BASE(8MiB) 同界；越界抛错（绝不静默覆盖字面量段）。
-  const ARENA_END = 8 << 20;
+  const ARENA_END = 16 << 20;          // 与 emitter 的 STR_BASE 一致（bump 堆上限）
   const bumpAlloc = (nbytes) => {
     const off = bumpRef.value;
     if (off + nbytes > ARENA_END) throw new Error(`qzvm: bump arena 溢出（${off}+${nbytes} > ${ARENA_END}）；调用间未重置 __bump？`);
@@ -410,6 +431,7 @@ function makeQzvm(strings, opts) {
     object_get: (o, k) => ret(handles[idxOf(o)][strings[k]]),   // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）
     string_new: (id) => tagHandle(strings[id]),
     string_concat: (a, b) => strWriteback(String(toJS(a)) + String(toJS(b))),   // → 0x7FFA
+    str_dup: (a) => strWriteback(strRead(a)),     // 字符串私有副本（在 bump 顶，随后原地追加安全）
     str_len: (a) => box(strRead(a).length),
     add:  (a, b) => ret(toJS(a) + toJS(b)),   // JS + 可能产字符串 → ret（非固定数值）
     sub:  (a, b) => box(toJS(a) - toJS(b)),
@@ -475,10 +497,26 @@ function makeQzvm(strings, opts) {
           c = c.parent != null ? classMeta[c.parent] : null;
         }
         const e = fieldEntries.find(([n]) => n === name);
-        if (!e || new DataView(mem.buffer).getInt32(off + 4, true) < e[1] + 8) {
-          syncExtras(); const x = extras.get(off + "|" + name); return x === undefined ? TAG : x;
+        if (e && new DataView(mem.buffer).getInt32(off + 4, true) >= e[1] + 8) {
+          const v = new DataView(mem.buffer).getBigInt64(off + e[1], true);
+          if (BigInt.asUintN(64, v) !== TAG) return v;                    // 字段已赋值 → 自有属性（遮蔽原型方法）
         }
-        return new DataView(mem.buffer).getBigInt64(off + e[1], true);
+        syncExtras();
+        const x = extras.get(off + "|" + name);
+        if (x !== undefined) return x;
+        {
+          const clsId2 = mem ? new DataView(mem.buffer).getInt32(off, true) : -1;
+          let c2 = classMeta && classMeta[clsId2];
+          while (c2) {                                                    // 原型方法 → 绑定宿主函数
+            const m2 = c2.methods && c2.methods[name];
+            if (m2) {
+              const recv2 = recv;
+              return tagHandle(function (...args) { return toJS(exportsRef[m2.name](recv2, ...args.map(bitsOf), TAG, TAG, TAG)); });
+            }
+            c2 = c2.parent != null ? classMeta[c2.parent] : null;
+          }
+        }
+        return TAG;
       }
       if (hi === HOST_HI) { const o = handles[off]; return ret(o == null ? undefined : o[name]); }
       // 字符串/数组：方法名 → 绑定宿主函数（truthy + 可调用）；其余属性 → 值
@@ -521,6 +559,14 @@ function makeQzvm(strings, opts) {
         case "Number":   return (typeof j === "object" && j !== null && j instanceof Number) ? 1 : 0;
         case "Boolean":  return (typeof j === "object" && j !== null && j instanceof Boolean) ? 1 : 0;
         case "Error":    return (j instanceof Error) ? 1 : 0;
+        case "TypeError": case "RangeError": case "SyntaxError": case "ReferenceError":
+        case "EvalError": case "URIError":
+                         return (typeof globalThis[name] === "function" && j instanceof globalThis[name]) ? 1 : 0;
+        case "Map":      return (j instanceof Map) ? 1 : 0;
+        case "Set":      return (j instanceof Set) ? 1 : 0;
+        case "WeakMap":  return (j instanceof WeakMap) ? 1 : 0;
+        case "WeakSet":  return (j instanceof WeakSet) ? 1 : 0;
+        case "Promise":  return (j instanceof Promise) ? 1 : 0;
         case "RegExp":   return (j instanceof RegExp) ? 1 : 0;
         case "Date":     return (j instanceof Date) ? 1 : 0;
         default: throw new Error("instanceof_builtin: 未知内建类 " + name);
