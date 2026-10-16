@@ -40,7 +40,11 @@ const BUILTIN_FNS = {
   "isNaN": isNaN, "isFinite": isFinite,
   "JSON.stringify": JSON.stringify, "JSON.parse": JSON.parse,
   "Object.keys": Object.keys, "Object.values": Object.values, "Object.entries": Object.entries,
-  "Object.assign": Object.assign, "Object.freeze": Object.freeze,
+  "Object.freeze": Object.freeze, "Object.seal": Object.seal, "Object.isFrozen": Object.isFrozen, "Object.isSealed": Object.isSealed,
+  "Object.preventExtensions": Object.preventExtensions, "Object.isExtensible": Object.isExtensible,
+  "Object.getOwnPropertyNames": Object.getOwnPropertyNames, "Object.getPrototypeOf": Object.getPrototypeOf,
+  "Object.create": Object.create, "Object.defineProperty": Object.defineProperty,
+  // Object.assign 见 builtin 特殊分支（就地写 POJO/实例并返回目标）
   "Object.is": Object.is, "Object.fromEntries": Object.fromEntries,
   "Array.isArray": Array.isArray, "Array.from": Array.from, "Array.of": Array.of,
   "Number.isInteger": Number.isInteger, "Number.isNaN": Number.isNaN, "Number.isFinite": Number.isFinite,
@@ -231,6 +235,8 @@ function makeQzvm(strings, opts) {
   if (opts && opts.fields) bindFields(opts.fields);   // 便于宿主物化 POJO/实例（等价 bindFields）
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   // 跨函数 throw 的宿主侧出口：调用导出后若 __err≠0 → 取出并抛出，模拟 JS 异常
+  // 宿主侧抛出：设 __err（经导出的 __set_err），产物内调用点检查后转入其 catch（JS 可捕获）
+  const throwValue = (v) => { if (exportsRef && exportsRef.__set_err) exportsRef.__set_err(bitsOf(v)); };
   const takeErr = () => {
     if (!exportsRef || !exportsRef.__err) return;
     const v = exportsRef.__err.value;
@@ -340,10 +346,12 @@ function makeQzvm(strings, opts) {
     const cbv = (h, v, i, acc) => toJS(closureCall(h, bitsOf(v), box(i), acc === undefined ? recv : acc));
     let r;
     switch (name) {
-      case "indexOf":     r = arr().indexOf(toJS(a0)); break;
-      case "lastIndexOf": r = arr().lastIndexOf(toJS(a0)); break;
-      case "includes":    r = arr().some(x => x === toJS(a0)); break;
-      case "slice":       r = arr().slice(toJS(a0), a1 === undefined ? undefined : toJS(a1)); break;
+      case "indexOf":     r = givenSlot(a1) ? arr().indexOf(toJS(a0), toJS(a1)) : arr().indexOf(toJS(a0)); break;   // 未传 fromIndex 必须**省略实参**（传 undefined 语义不同）
+      case "lastIndexOf": r = givenSlot(a1) ? arr().lastIndexOf(toJS(a0), toJS(a1)) : arr().lastIndexOf(toJS(a0)); break;
+      case "includes":    { const v = toJS(a0); r = arr().some(x => x === v || (x !== x && v !== v)); break; }   // SameValueZero（NaN 命中）
+      case "findLast":    { const a2 = arr(); const v = toJS(a0); r = a2.slice().reverse().find((x, i) => !!toJS(closureCall(a0, bitsOf(x), box(a2.length - 1 - i), TAG))); break; }
+      case "findLastIndex": { const a2 = arr(); let idx = -1; for (let i = a2.length - 1; i >= 0; i--) { if (toJS(closureCall(a0, bitsOf(a2[i]), box(i), TAG))) { idx = i; break; } } r = idx; break; }
+      case "slice":       r = arr().slice(toJS(a0), givenSlot(a1) ? toJS(a1) : undefined); break;
       case "concat":      r = arr().concat(...extra(0)); break;
       case "join":        r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(toJS(a0) === undefined ? "," : String(toJS(a0))); break;
       case "reverse":     r = arrSetInPlace(recv, arr().reverse()); return recv;
@@ -353,6 +361,7 @@ function makeQzvm(strings, opts) {
       case "filter":      r = arr().filter((v, i) => !!cbv(a0, v, i)); break;
       case "reduce":      { const a = arr();
                             const rc = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
+                            if (a.length === 0 && toJS(a1) === undefined) { throwValue(new Error("Reduce of empty array with no initial value")); return TAG; }
                             r = toJS(a1) !== undefined ? a.reduce((acc, v, i) => rc(acc, v, i), toJS(a1))
                                                  : a.reduce((acc, v, i) => rc(acc, v, i)); break; }
       case "forEach":     arr().forEach((v, i) => cbv(a0, v, i)); r = undefined; break;
@@ -372,7 +381,7 @@ function makeQzvm(strings, opts) {
       case "copyWithin":   { const a3 = arr(); a3.copyWithin(toJS(a0), a1 === undefined ? 0 : toJS(a1), a2 === undefined ? a3.length : toJS(a2)); arrSetInPlace(recv, a3); return recv; }
       case "toString":     r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(","); break;
       case "toSorted":     r = a0 === undefined ? arr().slice().sort() : arr().slice().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), TAG))); break;
-      case "fill":        { const a = arr(); a.fill(toJS(a0)); arrSetInPlace(recv, a); return recv; }
+      case "fill":        { const a = arr(); const st = givenSlot(a1) ? toJS(a1) : 0, en = givenSlot(a2) ? toJS(a2) : a.length; a.fill(toJS(a0), st, en); arrSetInPlace(recv, a); return recv; }
       default: throw new Error("method_call: 数组无方法 " + name);
     }
     return ret(r);
@@ -390,8 +399,8 @@ function makeQzvm(strings, opts) {
       case "trimLeft":     r = s.trimStart(); break;
       case "trimRight":    r = s.trimEnd(); break;
       case "charCodeAt":   r = s.charCodeAt(arg(a0)); break;
-      case "indexOf":      r = s.indexOf(String(arg(a0))); break;
-      case "lastIndexOf":  r = s.lastIndexOf(String(arg(a0))); break;
+      case "indexOf":      r = s.indexOf(String(arg(a0)), a1 === undefined ? undefined : arg(a1)); break;
+      case "lastIndexOf":  r = s.lastIndexOf(String(arg(a0)), a1 === undefined ? undefined : arg(a1)); break;
       case "slice":        r = s.slice(arg(a0), a1 === undefined ? undefined : arg(a1)); break;
       case "substring":    r = s.substring(arg(a0), a1 === undefined ? undefined : arg(a1)); break;
       case "substr":       r = s.substr(arg(a0), a1 === undefined ? undefined : arg(a1)); break;
@@ -409,7 +418,8 @@ function makeQzvm(strings, opts) {
       case "replace":      { const pat = toJS(a0);   // 正则模式原样传（String() 会毁掉 RegExp）
                              r = s.replace(pat instanceof RegExp ? pat : String(pat), String(arg(a1))); break; }
       case "split":        { const sep = toJS(a0);
-                             r = s.split(sep instanceof RegExp ? sep : String(sep)); break; }   // 返回 JS 数组句柄（toJS = array）
+                             const lim = givenSlot(a1) ? toJS(a1) : undefined;
+                             r = s.split(sep instanceof RegExp ? sep : String(sep), lim); break; }
       case "concat":       r = s.concat(...extra().map(String)); break;
       case "at":           { const i = Math.trunc(arg(a0)); r = s[i < 0 ? s.length + i : i]; break; }
       case "localeCompare": r = s.localeCompare(String(arg(a0))); break;
@@ -713,6 +723,24 @@ function makeQzvm(strings, opts) {
               c = c.parent != null ? classMeta[c.parent] : null;
             }
           }
+        }
+      }
+      if (name === "Object.assign" && a0 !== undefined) {          // 就地合并（POJO/实例为目标）并返回目标句柄
+        const h = BigInt.asUintN(64, a0) >> 48n;
+        const off0 = Number(BigInt.asUintN(64, a0) & MASK32);
+        if ((h === TAG_HI && off0 >= 8) || h === INST_HI || h === HOST_HI) {
+          for (const src of [a1, a2, a3].filter(givenSlot)) {
+            const o = toJS(src);
+            if (o == null) continue;
+            for (const k of Object.keys(o)) {
+              if (h === HOST_HI) { handles[off0][k] = o[k]; continue; }
+              const e2 = fieldEntries.find(([n]) => n === k);
+              const v = bitsOf(o[k]);
+              if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(off0 + e2[1], v, true);
+              else { syncExtras(); extras.set(off0 + "|" + k, v); }
+            }
+          }
+          return a0;
         }
       }
       let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);

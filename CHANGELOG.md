@@ -3,6 +3,12 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 第六批语料 + 标准库边界修复**（语料 6 = 29/29）。
+  - 字符串 `split(sep, limit)`、`indexOf/lastIndexOf(v, fromIndex)`（**未传 fromIndex 必须省略实参**：传 undefined 语义不同）。
+  - 数组 `fill(v, start, end)` 区间、`includes` 用 SameValueZero（`[NaN].includes(NaN)`）、`findLast/findLastIndex`。
+  - `Object.assign(target, ...src)` **就地**写 POJO/实例/宿主对象并返回目标（此前返回物化副本）；恢复被误吞的 `Object.freeze/seal/isFrozen/...` 表项。
+  - 宿主侧「抛出」机制：导出 `__set_err`，宿主 `throwValue`（如空数组 reduce）设 `__err` → 调用点检查转异常路径（JS 可 catch）；每个 tagged 函数入口清 `__err`。
+  差分：语料 1~6 = 46/47、40/40、37/39、38/38、28/28、29/29（**218/221**；余 3 项为已记录限制：POJO 键序、`arguments`、稀疏数组 `Object.keys`）。
 - **feat(aot): 跨函数 throw 传播 + try-finally 重抛 + 对象字面量成员闭包捕获**（语料 3/5 全部对齐）。
   - `throw` 在本函数无 try → 跑完待执行 finally（若函数为 void 则不压值）后 `return`，`__err` 全局置位；调用点（直调/闭包调用/值调用/构造器）检查 `__err` 并跳到最近 `$err`（无 try 则立即向上返回）→ 跨函数抛出（含构造器内 throw）语义完整。导出 `__err` 全局 + 宿主 `qz.take_err()`：glue 调用导出后检查并抛出，模拟 JS 异常。
   - `try {…} finally {…}`（无 catch）在 finally 后**重新抛出**（此前静默吞掉）。

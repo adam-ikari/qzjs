@@ -1018,6 +1018,7 @@ class Emitter {
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
+        if (this.mode === "tagged") { this.m.i64Const(0n); this.m.globalSet(1); }   // 入口清 __err（跨函数 throw 标志）
         this._emitParamPrologue(f.parameters, 0);                        // 默认值 / 解构形参（先于写 env）
         if (capNames.length) {
             // 被捕获的参数初值写入 env（局部由声明语句经 _emitVarStore 写入）
@@ -1158,6 +1159,7 @@ class Emitter {
         M.startBody(fname, bodyLocals, localNames);
         this.envLocal = ownCap.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;   // blk+参数之后
         this.envRef = ownCap.length ? this.envLocal : this.blkLocal;   // 嵌套 lambda 的 env：自身 env（链到 blk）或直接 blk
+        M.i64Const(0n); M.globalSet(1);                     // 入口清 __err
         this._emitParamPrologue(lam.parameters, 1);         // 默认值 / 解构形参（先于写 env）
         if (ownCap.length) {
             M.localGet(0); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // parent = blk(0)
@@ -1364,6 +1366,7 @@ class Emitter {
             .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
+        this.m.i64Const(0n); this.m.globalSet(1);           // 入口清 __err
         this._emitParamPrologue(astParams || [], 1);        // 默认值 / 解构形参（先于写 env）
         this.envLocal = capNames.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;
         this.capMap = new Map(capNames.map(n => [n, this.envLocal]));
@@ -2254,6 +2257,11 @@ function compileTS(input, outWasm, opts = {}) {
         if (anyTagged) {
             m.exportGlobal("__bump", m.globalIdx());
             m.exportGlobal("__err", 1);                       // 跨函数 throw 出口：glue 调用后检查，非 0 则向宿主抛出
+            m.declareFunc("__set_err", ["i64"], []);          // 宿主侧抛出（如 reduce 空数组）：设 __err，调用点检查后转异常
+            m.startBody("__set_err", []);
+            m.localGet(0); m.globalSet(1);
+            m.endBody();
+            m.exportFn("__set_err", "__set_err");
             // __bump_reset()：把 bump 堆指针重置到起点。glue 在每次宿主 __call 前调用，
             // 使一次调用的 arena 占用与调用时长解耦（否则长循环累加耗尽 arena）。
             m.declareFunc("__bump_reset", [], []);
@@ -3981,6 +3989,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
     }
     M.call("qz.method_call");
+    this._emitErrCheck();          // 宿主方法可能抛出（如空数组 reduce）→ 转入本函数 catch
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
