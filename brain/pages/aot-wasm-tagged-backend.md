@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T18:24:16"
+updated: "2026-10-16T18:31:09"
 ---
 
 <!-- compiled_truth -->
@@ -296,4 +296,9 @@ updated: "2026-10-16T18:24:16"
 - time: 2026-10-16T18:24:16
   kind: evidence
   summary: "Symbol 元素访问/物化修复：502/512（98.0%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T18:31:09
+  kind: evidence
+  summary: "静态成员三修：静态私有写 / 静态 this≡定义类 / 派生类覆写 loud（503/512）"
   affects: [aot-wasm-tagged-backend]
