@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 运行时访问器（Object.defineProperty get/set）（2026-10-16）
+- **运行时访问器表**：`Object.defineProperty(o, k, {get, set})` 在 POJO/实例上 → 记入宿主访问器表（`dynAcc`，bump 失效），读/写经宿主分派调用闭包（`this` = 接收者）→ `o.v` / `o.v = x` 与 JS 一致；数据描述符路径不变。
+- **物化**：访问器按插入序定义到物化对象上（`Object.keys` 含该键、`JSON.stringify` 调 getter、`enumerable:false` 记入非枚举表）。
+- **发射策略**：程序内出现 `Object.defineProperty`/`defineProperties` 时，POJO/实例的属性读/写改走宿主（`prop_get`/`prop_set`）；否则仍走内存快路径（零开销）。
+- 顺带补齐 `prop_get`/`prop_set` 的 **POJO 分支**（此前只处理实例 → 该模式下 POJO 字段读写会静默丢）。
+- 结果：**338/345（98.0%）**；**残余 7 项全部为 loud（零静默错值）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿。
+
 ### String.raw + 类名作值报错（2026-10-16）
 - **`String.raw` 标签**：编译期按源码原文取 raw 段（去模板定界符）+ `ToString(插值)` 拼接 → 与 JS 一致（此前因 strings 数组无 `.raw` 表而运行时 loud）。
 - **类名作值**：给出明确编译期报错（此前为「未定义捕获变量: C」）；`new C()` / `c instanceof C` / `C.m()` / `C.x` 仍正常。

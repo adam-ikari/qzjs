@@ -198,6 +198,14 @@ function makeQzvm(strings, opts) {
     if (ord) {                                   // 插入序优先（JS 语义：键序 = 插入序；含赋值为 undefined 的键）
       for (const name of ord) {
         seen.add(name);
+        const acc2 = dynAcc.get(off + "|" + name);
+        if (acc2) {                                    // 运行时访问器 → 物化对象上定义 get/set（JSON.stringify 会调 getter）
+          const opt = { configurable: true, enumerable: !nonEnum.has(off + "|" + name) };
+          if (acc2.g !== undefined) { const gh = acc2.g, ugh = BigInt.asUintN(64, gh); opt.get = ugh >> 48n === CLO_HI ? (() => toJS(closureCall(gh, TAG | BigInt(off), TAG, TAG, TAG))) : (() => handles[idxOf(gh)].call(o)); }
+          if (acc2.s !== undefined) { const sh = acc2.s, ush = BigInt.asUintN(64, sh); opt.set = ush >> 48n === CLO_HI ? ((nv) => { closureCall(sh, TAG | BigInt(off), ret(nv), TAG, TAG); }) : ((nv) => handles[idxOf(sh)].call(o, nv)); }
+          Object.defineProperty(o, name, opt); setNow.add(name);
+          continue;
+        }
         const e2 = fieldEntries.find(([n]) => n === name);
         let v;
         if (e2) v = toJS(dv.getBigInt64(off + e2[1], true));
@@ -298,6 +306,9 @@ function makeQzvm(strings, opts) {
   const orderMap = new Map();              // POJO/实例偏移 → 插入序名字表（Object.keys/JSON/for-in 用）
   let orderAt = -1;
   const syncOrder = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < orderAt) orderMap.clear(); orderAt = v; };
+  const dynAcc = new Map();                // off|name → {g, s}（运行时 defineProperty 访问器的闭包/宿主函数句柄）
+  let dynAccAt = -1;
+  const syncDynAcc = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < dynAccAt) dynAcc.clear(); dynAccAt = v; };
   const symProps = new Map();                // off → Map<symbol, tagged>（POJO/实例的符号键属性）
   let symAt = -1;
   const syncSym = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < symAt) symProps.clear(); symAt = v; };
@@ -649,6 +660,27 @@ function makeQzvm(strings, opts) {
     prop_get: (recv, id) => {
       const name = strings[id];
       const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
+      if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {           // 运行时访问器（Object.defineProperty）
+        syncDynAcc();
+        const acc = dynAcc.get(off + "|" + name);
+        if (acc) {
+          if (acc.g === undefined) return TAG;
+          const uu = BigInt.asUintN(64, acc.g);
+          if (uu >> 48n === CLO_HI) return closureCall(acc.g, recv, TAG, TAG, TAG);
+          return ret(handles[idxOf(acc.g)].call(toJS(recv)));
+        }
+      }
+      if (hi === TAG_HI && off >= 8) {                              // POJO：字段/运行期新键（usesDynAcc 程序里 emitter 把内存直读改走此处）
+        const pe = fieldEntries.find(([n]) => n === name);
+        if (pe && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= pe[1] + 8) {
+          const pv = new DataView(mem.buffer).getBigInt64(off + pe[1], true);
+          if (BigInt.asUintN(64, pv) !== TAG) return pv;
+        }
+        syncExtras();
+        const px = extras.get(off + "|" + name);
+        if (px !== undefined) return px;
+        // 未命中 → 落到下方通用分支（Object.prototype 方法 / 访问器绑定等）
+      }
       if (hi === INST_HI && mem) {
         const clsId = new DataView(mem.buffer).getInt32(off, true);
         let c = classMeta && classMeta[clsId];
@@ -723,6 +755,24 @@ function makeQzvm(strings, opts) {
     prop_set: (recv, id, v) => {
       const name = strings[id];
       const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
+      if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {          // 运行时 setter（Object.defineProperty）优先于字段写
+        syncDynAcc();
+        const acc = dynAcc.get(off + "|" + name);
+        if (acc) {
+          if (acc.s === undefined) return;                          // 只读访问器：strict 下应抛错（此处静默忽略，见限制）
+          const us = BigInt.asUintN(64, acc.s);
+          if (us >> 48n === CLO_HI) closureCall(acc.s, recv, v, TAG, TAG);
+          else handles[idxOf(acc.s)].call(toJS(recv), toJS(v));
+          return;
+        }
+      }
+      if (hi === TAG_HI && off >= 8) {                 // POJO 字段写（usesDynAcc 程序里 emitter 把内存直写改走此处）
+        const e2 = fieldEntries.find(([n]) => n === name);
+        if (protGuard(off, name)) return;
+        if (!e2 || !mem || new DataView(mem.buffer).getInt32(off + 4, true) < e2[1] + 8) { syncExtras(); extras.set(off + "|" + name, v); return; }
+        new DataView(mem.buffer).setBigInt64(off + e2[1], v, true);
+        return;
+      }
       if (hi === INST_HI && mem) {
         const clsId = new DataView(mem.buffer).getInt32(off, true);
         let c = classMeta && classMeta[clsId];
@@ -820,10 +870,12 @@ function makeQzvm(strings, opts) {
     object_set_method: (o, k, v) => {
       const obj = handles[idxOf(o)];
       obj[strings[k]] = function (...args) { return toJS(closureCall(v, o, ret(args[0]), ret(args[1]), ret(args[2]))); };
+      obj[strings[k]].__qzClo = v;   // 原始闭包句柄（访问器调用需替换 this）
     },
     object_set_method_key: (o, keyHandle, v) => {   // 计算键名方法（Symbol.iterator 等）
       const obj = handles[idxOf(o)], key = toJS(keyHandle);
       obj[key] = function (...args) { return toJS(closureCall(v, o, ret(args[0]), ret(args[1]), ret(args[2]))); };
+      obj[key].__qzClo = v;
     },
     obj_accessor: (o, k, g, s2) => {
       const name = strings[k], obj = handles[idxOf(o)], opt = {};
@@ -896,6 +948,11 @@ function makeQzvm(strings, opts) {
         if (off < 8) { handles[off] = toJS(v); return; }
         { const kk = toJS(k); if (typeof kk === "symbol") { symBucket(off).set(kk, v); return; } }
         const name = String(toJS(k));
+        { syncDynAcc(); const acc = dynAcc.get(off + "|" + name);            // 运行时 setter（o[k] = v）
+          if (acc) { if (acc.s === undefined) return;
+            const us = BigInt.asUintN(64, acc.s);
+            if (us >> 48n === CLO_HI) closureCall(acc.s, o, v, TAG, TAG); else handles[idxOf(acc.s)].call(toJS(o), toJS(v));
+            return; } }
         if (protGuard(off, name)) return;
         const e = fieldEntries.find(([n]) => n === name);
         if (!e || !mem) { syncExtras(); extras.set(off + "|" + name, v); return; }   // 运行期新增字段
@@ -964,7 +1021,16 @@ function makeQzvm(strings, opts) {
         const key = toJS(a1), desc = toJS(a2) || {};
         if ((h === TAG_HI && off0 >= 8) || h === INST_HI || h === HOST_HI) {
           if (h === HOST_HI) { Object.defineProperty(handles[off0], key, desc); return a0; }
-          if (desc.get || desc.set) { throwValue(new TypeError("Object.defineProperty 访问器仅支持宿主对象（POJO/实例未实现）；见 ASSESSMENT 限制")); return TAG; }
+          if (desc.get || desc.set) {                     // 访问器描述符：记入访问器表（POJO/实例读/写走宿主）
+            syncDynAcc();
+            { let l = orderMap.get(off0); if (!l) { l = []; orderMap.set(off0, l); } if (l.indexOf(key) < 0) l.push(key); }
+            const gv = desc.get, sv = desc.set;
+            const gH = (gv && typeof gv === "function" && gv.__qzClo !== undefined) ? gv.__qzClo : (gv === undefined ? undefined : bitsOf(gv));
+            const sH = (sv && typeof sv === "function" && sv.__qzClo !== undefined) ? sv.__qzClo : (sv === undefined ? undefined : bitsOf(sv));
+            dynAcc.set(off0 + "|" + key, { g: gH, s: sH });
+            if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(off0 + "|" + key, true); }
+            return a0;
+          }
           const val = bitsOf(desc.value);
           const e2 = fieldEntries.find(([n]) => n === key);
           if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(off0 + e2[1], val, true);
