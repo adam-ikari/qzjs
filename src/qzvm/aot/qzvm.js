@@ -254,7 +254,11 @@ function makeQzvm(strings, opts) {
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
   const toJS = (b) => (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b), false) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b), true) : {}) : bitsToNum(b));
   // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
-  const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (HOST_TAG | BigInt(handles.push(x) - 1));
+  const hostOf = new WeakMap();   // JS 对象/函数 → 已有句柄（同一 JS 值恒等同一句柄 → === 语义正确）
+  const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n)
+      : (typeof x === "object" || typeof x === "function")
+        ? (hostOf.has(x) ? hostOf.get(x) : (() => { const h = HOST_TAG | BigInt(handles.push(x) - 1); hostOf.set(x, h); return h; })())
+      : (HOST_TAG | BigInt(handles.push(x) - 1));
   const box = (n) => numToBits(n);
   const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
   const bool = (b) => boxBool(b);
@@ -265,6 +269,9 @@ function makeQzvm(strings, opts) {
   const frozen = new Set(), sealed = new Set(), nonExt = new Set();   // 写保护（offset）
   let protAt = -1;
   const syncProt = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < protAt) { frozen.clear(); sealed.clear(); nonExt.clear(); } protAt = v; };
+  const arrMeta = new Map();               // header 偏移 → 附加自有属性（非数字键；正则 exec/match 的 index/input/groups）
+  let arrMetaAt = -1;
+  const syncArrMeta = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < arrMetaAt) arrMeta.clear(); arrMetaAt = v; };
   const symProps = new Map();                // off → Map<symbol, tagged>（POJO/实例的符号键属性）
   let symAt = -1;
   const syncSym = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < symAt) symProps.clear(); symAt = v; };
@@ -319,6 +326,10 @@ function makeQzvm(strings, opts) {
   // ?? 判 nullish 走宿主 qz.is_nullish（见 emitNullish），不靠 TAG|0 比对。
   // 原型污染防护：classMeta 的 methods/getters/setters 是对象字面量 → 必须只认自有键
   // （否则 methods["valueOf"] 会命中原型上的 Object.prototype.valueOf → m.name=undefined/"valueOf" 崩溃）
+  // Function.prototype.call 的 thisArg → JS 值（宿主对象原样；其它 undefined）
+  const thisArgOf = (h) => (h === undefined ? undefined : toJS(h));   // call/apply 的 thisArg：任意句柄 → JS 值（POJO/实例需物化）
+  // 闭包句柄 → 可重入宿主包装（带 length/name，便于宿主内省；调用即 closureCall）
+  const wrapCb = (f) => (f.__qzCb ? f.__qzCb : Object.defineProperty(f, "__qzCb", { value: (...xs) => f(...xs), enumerable: false }), f.__qzCb);
   const own = (o, k) => (o && Object.prototype.hasOwnProperty.call(o, k)) ? o[k] : undefined;
   const bitsOf = (e) => Array.isArray(e) && arrOf.has(e) ? arrOf.get(e)   // 来自 wasm 的数组 → 原句柄（别名）
                      : typeof e === "function" && cloOf.has(e) ? cloOf.get(e)
@@ -334,6 +345,8 @@ function makeQzvm(strings, opts) {
   const arrWriteback = (js) => {
     const N = js.length;
     const start = bumpAlloc((16 + N * 8 + 7) & ~7);
+    { const ks = Object.keys(js);                 // 数字索引之外的属性（exec 的 index/input…）→ 旁表
+      if (ks.some(k => !/^\d+$/.test(k))) { syncArrMeta(); const o2 = {}; for (const k of ks) if (!/^\d+$/.test(k)) o2[k] = js[k]; arrMeta.set(start, o2); } }
     const dataOff = start + 16;
     const dv = new DataView(mem.buffer);
     dv.setInt32(start, N, true);
@@ -464,7 +477,8 @@ function makeQzvm(strings, opts) {
       case "toLocaleLowerCase": r = s.toLocaleLowerCase(); break;
       case "localeCompare": r = s.localeCompare(String(arg(a0))); break;
       case "normalize":    r = s.normalize(arg(a0) === undefined ? "NFC" : String(arg(a0))); break;
-      case "replaceAll":   { const pat = toJS(a0); r = s.replaceAll(pat instanceof RegExp ? pat : String(pat), String(arg(a1))); break; }
+      case "replaceAll":   { const pat = toJS(a0); const rep2 = toJS(a1);
+                             r = s.replaceAll(pat instanceof RegExp ? pat : String(pat), typeof rep2 === "function" ? wrapCb(rep2) : String(rep2)); break; }
       case "search":       r = s.search(toJS(a0)); break;
       case "match":        { const x = s.match(toJS(a0)); r = x === null ? null : x; break; }
       case "at":           { const i = Math.trunc(arg(a0)); r = i < 0 ? s[s.length + i] : s[i]; break; }
@@ -477,8 +491,9 @@ function makeQzvm(strings, opts) {
       case "includes":     r = s.includes(String(arg(a0))); break;
       case "padStart":     r = s.padStart(arg(a0), arg(a1)); break;
       case "padEnd":       r = s.padEnd(arg(a0), arg(a1)); break;
-      case "replace":      { const pat = toJS(a0);   // 正则模式原样传（String() 会毁掉 RegExp）
-                             r = s.replace(pat instanceof RegExp ? pat : String(pat), String(arg(a1))); break; }
+      case "replace":      { const pat = toJS(a0);   // 正则模式原样传（String() 会毁掉 RegExp / 回调函数）
+                             const rep2 = toJS(a1);
+                             r = s.replace(pat instanceof RegExp ? pat : String(pat), typeof rep2 === "function" ? wrapCb(rep2) : String(rep2)); break; }
       case "split":        { const sep = toJS(a0);
                              const lim = givenSlot(a1) ? toJS(a1) : undefined;
                              r = s.split(sep instanceof RegExp ? sep : String(sep), lim); break; }
@@ -635,6 +650,23 @@ function makeQzvm(strings, opts) {
         return TAG;
       }
       if (hi === HOST_HI) { const o = handles[off]; return ret(o == null ? undefined : o[name]); }
+      if (hi === CLO_HI) {                                   // 闭包值：函数自身属性
+        const dv3 = mem ? new DataView(mem.buffer) : null;
+        const ar = dv3 && off + 12 <= mem.buffer.byteLength ? dv3.getInt32(off + 8, true) : 0;
+        const nid = dv3 && off + 16 <= mem.buffer.byteLength ? dv3.getInt32(off + 12, true) : -1;   // -1 = 匿名
+        const nm2 = (nid >= 0 && nid < strings.length) ? strings[nid] : "";
+        if (name === "length") return box(ar);
+        if (name === "name") return ret(nm2);
+        if (name === "valueOf") return recv;
+        if (name === "toString") return tagHandle(() => "function " + (nm2 || "anonymous") + "() { [native code] }");
+        if (name === "call" || name === "apply" || name === "bind") {
+          const cm = (this2, rest) => toJS(closureCall(recv, this2 === undefined ? TAG : this2, ...[0, 1, 2].map(i => rest[i] === undefined ? TAG : rest[i])));
+          if (name === "call") return tagHandle((this2, x0, x1, x2) => cm(bitsOf(this2), [bitsOf(x0), bitsOf(x1), bitsOf(x2)]));
+          if (name === "apply") return tagHandle((this2, arr3) => cm(bitsOf(this2), (arr3 === undefined ? [] : (toJS(arr3) || [])).map(bitsOf)));
+          return tagHandle((...xs) => (...ys) => cm(bitsOf(xs[0]), [...xs.slice(1), ...ys].slice(0, 3).map(bitsOf)));
+        }
+        return TAG;                                            // 其它属性：闭包值无自有属性
+      }
       // Object.prototype 方法（POJO/实例）：以接收者为 self 的绑定宿主函数
       if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {
         if (name === "hasOwnProperty") return tagHandle((k) => {
@@ -651,6 +683,7 @@ function makeQzvm(strings, opts) {
       }
       // 字符串/数组：方法名 → 绑定宿主函数（truthy + 可调用）；其余属性 → 值
       if (hi === STR_HI || hi === 0x7ffbn) {
+        if (hi === 0x7ffbn) { const am = arrMeta.get(off); if (am && Object.prototype.hasOwnProperty.call(am, name)) return ret(am[name]); }
         const v = toJS(recv);
         const m = v == null ? undefined : v[name];
         return typeof m === "function" ? tagHandle(m.bind(v)) : ret(m);
@@ -794,6 +827,7 @@ function makeQzvm(strings, opts) {
         return new DataView(mem.buffer).getBigInt64(off + e[1], true);
       }
       if (hi === HOST_HI) return ret(handles[off][toJS(k)]);
+      if (hi === 0x7ffbn && typeof toJS(k) === "string") { const am = arrMeta.get(off); const kk = toJS(k); if (am && Object.prototype.hasOwnProperty.call(am, kk)) return ret(am[kk]); }
       return ret(toJS(o)[toJS(k)]);
     },
 
@@ -912,6 +946,16 @@ function makeQzvm(strings, opts) {
         }
       }
       try {
+      // 宿主句柄原样参与的对象内省（物化会丢原型/附加属性）
+      if (/^Object\.(getPrototypeOf|setPrototypeOf|getOwnPropertyDescriptor|getOwnPropertyDescriptors|create)$/.test(name) && a0 !== undefined
+          && BigInt.asUintN(64, a0) >> 48n === HOST_HI) {
+        const o0 = handles[idxOf(a0)], fn0 = BUILTIN_FNS[name];
+        if (name === "Object.create") return ret(Object.create(o0, a1 !== undefined ? toJS(a1) : undefined));
+        if (name === "Object.setPrototypeOf") { Object.setPrototypeOf(o0, toJS(a1)); return a0; }
+        if (name === "Object.getPrototypeOf") return ret(Object.getPrototypeOf(o0));
+        if (name === "Object.getOwnPropertyDescriptor") return ret(Object.getOwnPropertyDescriptor(o0, toJS(a1)));
+        return ret(Object.getOwnPropertyDescriptors(o0));
+      }
       let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
       let arity = 0;                                  // 表项 [fn, arity] = 固定元数（调用点按此裁剪实参）
       if (Array.isArray(fn)) { arity = fn[1]; fn = fn[0]; }
@@ -970,6 +1014,33 @@ function makeQzvm(strings, opts) {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1, a2, a3);
       if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3);
       const name = strings[mid];
+      if ((BigInt.asUintN(64, recv) >> 48n) === CLO_HI && (name === "toString" || name === "valueOf")) {
+        const dv4 = mem ? new DataView(mem.buffer) : null;
+        const off4 = Number(BigInt.asUintN(64, recv) & MASK32);
+        const nid4 = dv4 && off4 + 16 <= mem.buffer.byteLength ? dv4.getInt32(off4 + 12, true) : -1;
+        const nm4 = (nid4 >= 0 && nid4 < strings.length) ? strings[nid4] : "";
+        if (name === "valueOf") return recv;
+        return ret("function " + (nm4 || "anonymous") + "() { [native code] }");
+      }
+      // 函数值接收者（闭包 0x7FFF / 宿主函数）：Function.prototype 三件套
+      const hiR = BigInt.asUintN(64, recv) >> 48n;
+      if (name === "call" || name === "apply" || name === "bind") {
+        const rawFn = hiR === HOST_HI ? handles[idxOf(recv)] : null;
+        if (hiR === CLO_HI || typeof rawFn === "function") {
+          const callIt = (self2, rest) => hiR === CLO_HI
+            ? toJS(closureCall(recv, self2 === undefined ? TAG : self2, ...[0, 1, 2].map(i => rest[i] === undefined ? TAG : rest[i])))
+            : rawFn.apply(thisArgOf(self2), rest.slice(0, 3).map(toJS));
+          if (name === "call") return ret(callIt(a0, [a1, a2, a3]));
+          if (name === "apply") { const arr2 = a1 === undefined ? [] : (toJS(a1) || []).map(bitsOf); return ret(callIt(a0, arr2)); }
+          // bind：返回宿主函数（thisArg 固定在前）——经 qz.call_value 可调用
+          const boundSelf = a0, boundPre = [a1, a2, a3];
+          return tagHandle(function (...xs) {
+            const rest = boundPre.filter(givenSlot).slice(0, 3);   // 只保留真正传入的实参（TAG = 未传）
+            const all = rest.concat(xs.map(bitsOf)).slice(0, 3);
+            return callIt(boundSelf, all);
+          });
+        }
+      }
       if (isHostH(recv)) {                                   // 宿主对象（JSON.parse 结果等）：调真实 JS 方法
         const obj = handles[idxOf(recv)];
         const fn = obj == null ? undefined : obj[name];
@@ -1183,7 +1254,17 @@ function makeQzvm(strings, opts) {
     // 落到 str_len 读垃圾，静默返回 0 / 丢操作数。修复后与 bitsOf/arrWriteback 语义一致。
     _toJS: toJS, _fromJS: (x) => bitsOf(x),
     _handles: handles, _TAG: TAG,
-    closure_call: (handle, a0, a1, a2, a3) => closureCall(handle, a0, a1, a2, a3),
+    // 闭包调用：闭包句柄 → wasm；宿主函数句柄（bind 结果/宿主回调）→ 直接调用（调用点无法静态区分）
+    closure_call: (handle, a0, a1, a2, a3) => {
+      if (BigInt.asUintN(64, handle) >> 48n === HOST_HI) {
+        const f = handles[idxOf(handle)];
+        if (typeof f !== "function") throw new Error("closure_call: 非函数值");
+        const as = [a0, a1, a2, a3].map(toJS);
+        while (as.length && as[as.length - 1] === undefined) as.pop();
+        return ret(f(...as));
+      }
+      return closureCall(handle, a0, a1, a2, a3);
+    },
     bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
   };
 }

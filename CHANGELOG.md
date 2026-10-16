@@ -4,6 +4,22 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十批差分审计（2026-10-16）
+- 新增 `audit_corpus10.js`（24 例：this 绑定 / Function.prototype 三件套 / 原型 / 访问器边界 / 数组洞 / 正则 / 异常边界 / 访问器抛错）。
+- **原型污染修复（classMeta 自有键）**：`methods["valueOf"]`/`["toString"]` 会命中原型链 → 宿主 `m.name` 失效、崩溃/错值（`own()` 查询）。
+- **`.length` 属性读取**：字符串/数组之外的接收者此前一律走 `qz.str_len`（把内存当字符串读 → 静默错值）；现走宿主属性读取（闭包值 `fn.length`、POJO/实例字段、宿主对象皆正确）。
+- **闭包值内省**：闭包块扩为 `[funcidx][envIdx][arity][nameStrId]` → `fn.length` / `fn.name` / `fn.toString()` 正确（此前读内存垃圾值）；`cloWrap` 包装同步带上。
+- **`Function.prototype.call/apply/bind`**（闭包句柄与宿主函数皆可），`call`/`apply` 的 thisArg 会物化 POJO/实例（此前传 undefined → `Object.prototype.toString.call(o)` 得 `[object Undefined]`）。
+- **`closure_call` 兼容宿主函数句柄**（bind 结果、宿主回调）：调用点无法静态区分闭包与宿主函数。
+- **`String.prototype.replace/replaceAll` 接受回调**（此前 `String(cb)` 把回调源码当替换串 → 静默错值）。
+- **宿主数组附加属性**：`RegExp.exec`/`String.match` 结果的 `index`/`input`/`groups` 经 `arrMeta` 保留（wasm 数组本体仍走 `.length`/索飞快路径）。
+- **宿主对象内省不再物化**：`Object.getPrototypeOf`/`setPrototypeOf`/`getOwnPropertyDescriptor(s)`/`create` 直接作用于真身；`tagHandle` 去重（同一 JS 对象 → 同一句柄 → `===` 语义正确）。
+- **getter 抛错可 catch**：属性读取后检查 `__err`（此前 getter 内 throw 逃逸出函数）。
+- **静态初始化保源码序**：字段与 `static { … }` 按源码顺序惰性执行一次（此前「先全部字段、后全部块」→ 跨引用得 NaN）。
+- **类方法/静态方法形参序言**：补默认值/解构形参处理（此前缺失）。
+- 已知 loud：闭包/lambda >4 形参；宿主↔wasm 递归约 300 层（`--stack-size` 可提高）。
+- 结果：**310/321（96.6%）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿。
+
 ### 第九批差分审计（2026-10-16）
 - 新增 `audit_corpus9.js`（25 例：ES2023/2024 新 API / `super` / ToPrimitive 强制转换 / `delete`·`in` / 迭代器·Map·Set / TS 类型擦除 / enum）。
 - **原型污染修复（重要）**：`classMeta` 的 `methods`/`getters`/`setters` 是对象字面量，`methods["valueOf"]`/`["toString"]` 会命中原型链上的 `Object.prototype` 方法 → `m.name` 失效、宿主崩溃/错值。改用自有键查询（`own()`）。

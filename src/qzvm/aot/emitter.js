@@ -531,6 +531,7 @@ class Emitter {
             || /^(hasOwnProperty|isPrototypeOf|propertyIsEnumerable|toLocaleString|valueOf)$/.test(name)) {   // 含 Object.prototype 方法
 
             M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
+            this._emitErrCheck();        // getter 抛错 → 转入本函数 catch
             return;
         }
         const foff = this._fieldIndex(name);
@@ -539,6 +540,8 @@ class Emitter {
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
         M.i32Or();
         this._emitIsHandle(base); M.i32Eqz();
+        M.i32Or();
+        M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();   // 闭包值（函数）→ 自身属性 length/name/toString/call…
         M.i32Or();
         M.ifBlock("i64");
         M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
@@ -757,6 +760,7 @@ class Emitter {
         }
         M.localGet(t.v);
         const cp = this._calleeParams(fn);
+        if (cp && cp.length > 4) throw new Error("[tagged] 闭包/lambda 调用暂不支持超过 4 个形参（顶层函数直调支持；见 ASSESSMENT 限制）");
         if (cp && cp.length > 0 && cp[cp.length - 1].dotDotDotToken && cp.length <= 4) {
             this._emitCallArgs(cp, args, fn);
             for (let i = cp.length; i < 4; i++) this._emitUndefined();
@@ -1223,15 +1227,15 @@ class Emitter {
             const parent = st.heritageClauses && st.heritageClauses.length
                 ? st.heritageClauses[0].types[0] : null;
             const parentName = parent ? parent.expression.text : null;
-            const fields = [], methods = [], staticMethods = [], staticFields = [], staticBlocks = [];
+            const fields = [], methods = [], staticMethods = [], staticFields = [], staticBlocks = [], staticInits = [];
             let ctor = null;
             const isStatic = (mem) => !!mem.modifiers && mem.modifiers.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
             for (const mem of st.members) {
                 if (ts.isPropertyDeclaration(mem) && ts.isIdentifier(mem.name)) {
-                    if (isStatic(mem)) staticFields.push({ name: mem.name.text, init: mem.initializer || null });
+                    if (isStatic(mem)) { staticFields.push({ name: mem.name.text, init: mem.initializer || null }); staticInits.push({ kind: "field", name: mem.name.text, init: mem.initializer || null }); }
                     else fields.push({ name: mem.name.text, init: mem.initializer || null });
                 } else if (ts.isClassStaticBlockDeclaration(mem)) {
-                    staticBlocks.push(mem);                                  // static { … }：首次访问静态时执行
+                    staticBlocks.push(mem); staticInits.push({ kind: "block", blk: mem });   // static { … }：首次访问静态时执行（保持源码序）
                 } else if (ts.isConstructorDeclaration(mem)) {
                     ctor = mem;
                 } else if (ts.isPropertyDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
@@ -1253,7 +1257,7 @@ class Emitter {
                     throw new Error("[tagged] 不支持的类成员: " + ts.SyntaxKind[mem.kind]);
                 }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, staticBlocks, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
@@ -1302,6 +1306,7 @@ class Emitter {
         const realParams = sm.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
+        this._emitParamPrologue(sm.node.parameters, 1);    // 静态方法形参同上
         this._curClassObj = this.classes.get(cname);
         this._emitFnDeclClosures(sm.node.body);
         this.emitTaggedBlock(sm.node.body);
@@ -1344,6 +1349,7 @@ class Emitter {
         const realParams = mth.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters);
+        this._emitParamPrologue(mth.node.parameters, 1);   // 方法形参：默认值/解构/>4 溢出解包
         this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);
         { const stmts = mth.node.body.statements; const last = stmts[stmts.length - 1];   // tagged：落空 → undefined
@@ -2459,13 +2465,15 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
     M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
     M.i32Eqz();
     M.ifBlock("void");
-    for (const f of c.staticFields) {
-        M.i32Const(this._strId(cname)); M.i32Const(this._strId(f.name));
-        if (f.init) this.emitTaggedExpr(f.init); else this._emitUndefined();
-        M.call("qz.static_set");
-    }
-    for (const blk of (c.staticBlocks || [])) {           // static { … }：与字段初始化同批惰性执行一次
-        for (const st of blk.body.statements) this.emitTaggedStmt(st);
+    // 静态初始化按**源码序**（字段与 static 块交错；JS 语义：类定义时按序求值一次）
+    for (const it of (c.staticInits || c.staticFields.map(f2 => ({ kind: "field", ...f2 })))) {
+        if (it.kind === "field") {
+            M.i32Const(this._strId(cname)); M.i32Const(this._strId(it.name));
+            if (it.init) this.emitTaggedExpr(it.init); else this._emitUndefined();
+            M.call("qz.static_set");
+        } else {
+            for (const st of it.blk.body.statements) this.emitTaggedStmt(st);
+        }
     }
     M.i32Const(this._strId(cname)); M.call("qz.statics_mark");
     M.end();
@@ -3314,7 +3322,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Load(2, 0);
         this.m.f64ConvertI32U(); this.m.i64ReinterpretF64();
         this.m.else_();
-        this.m.localGet(this.scratch); this.m.call("qz.str_len");
+        // 其余（POJO/实例/宿主对象/闭包值）：走宿主属性读取（此前一律 qz.str_len → 读内存当字符串长度，静默错值）
+        this.m.localGet(this.scratch); this.m.i32Const(this._strId("length")); this.m.call("qz.prop_get");
         this.m.end(); this.m.end();
         return;
     }
@@ -3974,11 +3983,13 @@ Emitter.prototype._emitLambdaNew = function (lam) {
         meta = this._lamById.get(lam);
     }
     const fidx = this.m._funcIdx[meta.fname];
-    // 闭包值 = [funcidx:i32][envIdx:i32]（envIdx=0 表示无捕获）；捕获值不再拷贝（共享环境）。
-    emitBumpAlloc(M, () => M.i32Const(8));            // → off(i32)（越界 trap）
+    // 闭包值 = [funcidx:i32][envIdx:i32][arity:i32][nameStrId:i32]（envIdx=0 表示无捕获）；捕获值不再拷贝（共享环境）。
+    emitBumpAlloc(M, () => M.i32Const(16));           // → off(i32)（越界 trap）
     M.localSet(this.cloOff);
     M.localGet(this.cloOff); M.i32Const(fidx); M.i32Store(2, 0);
     M.localGet(this.cloOff); (this.envRef !== undefined ? M.localGet(this.envRef) : M.i32Const(0)); M.i32Store(2, 4);
+    M.localGet(this.cloOff); M.i32Const(lam.parameters ? lam.parameters.length : 0); M.i32Store(2, 8);
+    M.localGet(this.cloOff); M.i32Const(lam.name && ts.isIdentifier(lam.name) ? this._strId(lam.name.text) : -1); M.i32Store(2, 12);
     M.localGet(this.cloOff); M.i64ExtendI32U();
     M.i64ConstBits(0, 0x7fff0000); M.i64Or();
 };
