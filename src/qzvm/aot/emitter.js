@@ -1080,6 +1080,7 @@ class Emitter {
             if (ts.isIdentifier(p.name)) continue;
             for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         }
+        this._lamThisParam = f.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this");   // 顶层函数：`this` 形参是 TS 注解（不占实参槽）
         const nLoc = f.parameters.length + locals.length;
         this.scratch = nLoc;                                 // scratch（后缀 ++/--）
         this.scratchA = nLoc + 1;                            // 暂存 a
@@ -1231,7 +1232,7 @@ class Emitter {
         this.mode = "tagged";
         this._fnVoid = false;                                  // lambda 恒返回 i64
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
-        this._lamThisParam = !lam._qzSynthThis && (astParams || lam.parameters).some(p => ts.isIdentifier(p.name) && p.name.text === "this");   // 仅**用户**写的 this 注解形参 → 运行时 this = undefined
+        this._lamThisParam = !lam._qzSynthThis && lam.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this");   // 用**原始**形参表（astParams 已剔除 this 注解）   // 仅**用户**写的 this 注解形参 → 运行时 this = undefined
         const locals = this._collectLocals(lam.body);
         for (const p of lam.parameters) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         const nParams = 1 + params.length;                 // blk + 参数
@@ -1461,6 +1462,7 @@ class Emitter {
         const locals = this._collectLocals(body);
         for (const p of (astParams || [])) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         const nLoc = nParams + locals.length;
+        this._lamThisParam = false;                       // 类方法/构造器：this 走 local 0（不受上一个 lambda 标记影响）
         this.varMap = new Map();
         this.varMap.set("this", 0);
         if (astParams) astParams.forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, 1 + i); });
