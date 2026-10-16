@@ -136,7 +136,11 @@ function makeQzvm(strings, opts) {
   const isH = (b) => (BigInt(b) >> 48n) === TAG_HI;
   const isCloH = (b) => (BigInt(b) >> 48n) === CLO_HI;
   // 闭包值 → JS 函数包装（宿主侧调用回调，如 sort(cmp)/map(fn)）
-  const cloWrap = (b) => (...args) => toJS(closureCall(b, ...args.map(ret)));
+  const cloWrap = (b) => {
+    const f = (...args) => toJS(closureCall(b, ...args.map(ret)));
+    cloOf.set(f, b);            // 往返：再交回 wasm 时还原闭包句柄
+    return f;
+  };
   const isStrH = (b) => (BigInt(b) >> 48n) === STR_HI;
   const idxOf = (b) => Number(BigInt(b) & MASK32);
   const strRead = (b) => {
@@ -162,6 +166,8 @@ function makeQzvm(strings, opts) {
   let fieldEntries = [];                  // [[name, byteOffset], ...]（bindFields 设；与 emitter _fieldIndex 一致）
   const bindFields = (fields) => { fieldEntries = (fields || []).map((n, i) => [n, (i + 1) * 8]); };
   // POJO/类实例（内存驻留）→ JS 对象物化：按 [0]=size 限定范围，逐字段读（undefined sentinel 跳过）。
+  const pojoOf = new WeakMap();   // 物化对象 → { off, mem }（往返还原 POJO 句柄）
+  const cloOf = new WeakMap();    // 闭包包装函数 → 闭包句柄
   const materialize = (off) => {
     syncExtras();
     // 每次新鲜物化：POJO/实例由 bump 分配，调用间 __bump_reset 会复用偏移 → 不可跨调用缓存。
@@ -180,6 +186,7 @@ function makeQzvm(strings, opts) {
       const jv = toJS(v);
       if (jv !== undefined) o[k.slice(bar + 1)] = jv;
     }
+    pojoOf.set(o, { off, mem });
     return o;
   };
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
@@ -232,7 +239,9 @@ function makeQzvm(strings, opts) {
   // undefined 走 tagHandle → handles[idx]（toJS 还原 undefined）。保留 null≠undefined 区分，
   // 使 + / Number / String 等运算按 JS 正确分支（Number(null)=0 ≠ Number(undefined)=NaN）。
   // ?? 判 nullish 走宿主 qz.is_nullish（见 emitNullish），不靠 TAG|0 比对。
-  const bitsOf = (e) => typeof e === "string" ? strWriteback(e)
+  const bitsOf = (e) => typeof e === "function" && cloOf.has(e) ? cloOf.get(e)
+                     : (e !== null && typeof e === "object" && pojoOf.has(e) && pojoOf.get(e).mem === mem) ? (TAG | BigInt(pojoOf.get(e).off))
+                     : typeof e === "string" ? strWriteback(e)
                      : typeof e === "number" ? numToBits(e)
                      : typeof e === "boolean" ? boxBool(e)
                      : Array.isArray(e) ? arrWriteback(e)
@@ -427,6 +436,8 @@ function makeQzvm(strings, opts) {
     // 闭包共享环境（链式）：env = 宿主对象 {__parent, <var>: tagged}；idx = handles 索引。
     // 外层本体与其闭包共享同一 env → 写回互相可见（不再是值快照）。
     env_new: (parentIdx) => ret({ __parent: parentIdx >= 0 ? handles[parentIdx] : null }),
+    // 直接写入指定环境层（每迭代新绑定的种子：不经 __parent 链查找）
+    env_def: (idx, kid, v) => { handles[idx][strings[kid]] = v; },
     env_get: (idx, kid) => {
       const name = strings[kid];
       let e = handles[idx];

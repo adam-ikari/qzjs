@@ -112,6 +112,7 @@ const QZ = {
   get_index: { params: ["i64", "i64"], results: ["i64"] },   // o[k]（动态键）：宿主按名/索引取值
   set_index: { params: ["i64", "i64", "i64"], results: [] }, // o[k] = v
   env_new: { params: ["i32"], results: ["i64"] },        // 闭包环境：parentIdx(-1=根) → 环境句柄
+  env_def: { params: ["i32", "i32", "i64"], results: [] },   // 直接写入该环境层（每迭代绑定种子）
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
@@ -592,6 +593,54 @@ class Emitter {
         M.call("qz.closure_call");
         this._expLeave();
     }
+    // JS `let`/`const` 循环绑定：闭包捕获循环变量时**每次迭代**一个新绑定。
+    // 机制：迭代体开头 envRef = env_new(旧 env)，把（被捕获的）循环头变量按当前值 env_def 进新层；
+    // 体内的 let/const 捕获名先 env_def 为 undefined（使声明写入本层而非上层）。
+    _emitPerIterEnv(headerNames, bodyNames) {
+        const M = this.m;
+        if (this.envLocal === undefined) return;                 // 本函数无 env（未捕获）
+        const t = this._expEnter();                                // t.a/t.b 为 i32（env 索引），t.v.. 为 i64
+        M.localGet(this.envLocal); M.localSet(t.a);                // oldEnv 索引（保留，供读取旧值）
+        M.localGet(t.a); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // 新一层（parent = oldEnv）
+        for (const n of headerNames) {
+            M.localGet(this.envLocal); M.i32Const(this._strId(n));
+            M.localGet(t.a); M.i32Const(this._strId(n)); M.call("qz.env_get");
+            M.call("qz.env_def");
+        }
+        for (const n of bodyNames) {
+            M.localGet(this.envLocal); M.i32Const(this._strId(n)); this._emitUndefined(); M.call("qz.env_def");
+        }
+        this._expLeave();
+    }
+    // 循环体（含嵌套 lambda）捕获的、属于该循环作用域的变量名 → 需要每迭代新绑定。
+    _loopCaptured(headerNames, body) {
+        if (this.envLocal === undefined) return null;
+        const lams = this._collectLambdas(body);
+        if (!lams.length) return null;
+        const bodyNames = this._collectLocals(body);
+        const headerSet = new Set(headerNames), bodySet = new Set(bodyNames);
+        const outH = [], outB = [];
+        for (const lam of lams) for (const c of this._capturesOf(lam)) {
+            if (headerSet.has(c) && !outH.includes(c)) outH.push(c);
+            else if (bodySet.has(c) && !outB.includes(c)) outB.push(c);
+        }
+        if (!outH.length && !outB.length) return null;
+        return { headerNames: outH, bodyNames: outB };
+    }
+    // 循环头声明的 let/const 名（for / for-of / for-in）；var 不参与每迭代绑定。
+    _headerNames(node) {
+        const out = [];
+        const add = (l) => {
+            if (!ts.isVariableDeclarationList(l)) return;
+            if (l.flags & ts.NodeFlags.Let || l.flags & ts.NodeFlags.Const) {
+                for (const d of l.declarations) for (const n of this._patternNames(d.name)) out.push(n);
+            }
+        };
+        if (ts.isForStatement(node)) add(node.initializer);
+        else if (ts.isForOfStatement(node) || ts.isForInStatement(node)) add(node.initializer);
+        return out;
+    }
+
     // 绑定模式（含嵌套）里绑定的所有名字。
     _patternNames(pat, out = []) {
         if (ts.isIdentifier(pat)) { out.push(pat.text); return out; }
@@ -2245,6 +2294,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.labels.push({ brk: this.depth - 1, cont: this.depth, label: this._curLabel() });
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         this.m.i32Eqz(); this.m.brIf(1);
+        { const cap = this._loopCaptured([], s.statement || s);                                 // let/const 每迭代绑定
+          if (cap) this._emitPerIterEnv(cap.headerNames, cap.bodyNames); }
         this.emitTaggedStmt(s.statement);
         this.m.br(0);
         this.labels.pop(); this.depth--; this.m.end(); this.depth--; this.m.end(); return;
@@ -2263,6 +2314,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
         this.depth--; this.m.end();                       // end cont block
+        { const neg = this._loopCaptured(this._headerNames(s), s.statement || s);               // for(let i…) 闭包捕获 → 增量前换新绑定
+          if (neg) this._emitPerIterEnv(neg.headerNames, neg.bodyNames); }
         if (s.incrementor) { this.emitTaggedExpr(s.incrementor); this.m.drop(); }
         this.m.br(0);
         this.depth--; this.m.end();                       // end loop
@@ -2301,6 +2354,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         M.block(); this.depth++;
         this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
         // 元素：字符串(0x7FFA) → 宿主 charAt（UTF-16 码元）；wasm 数组(0x7FFB) → 内存 dataOff + i*8
+        { const cap = this._loopCaptured(this._headerNames(s), s.statement || s);              // let/const 每迭代绑定
+          if (cap) this._emitPerIterEnv(cap.headerNames, cap.bodyNames); }
         M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
         M.ifBlock("i64");
         M.localGet(arrL); M.i32Const(this._strId("charAt"));
@@ -2796,6 +2851,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const fn = e.expression.text;
         // 内建全局函数调用 String(x) / parseInt(s) / isNaN(x) / JSON… → qz.builtin
         if (BUILTIN_GLOBALS.has(fn)) { this._emitBuiltinCall(fn, e.arguments); return; }
+        // JS 作用域：局部/捕获名遮蔽同名顶层函数（如参数 g 遮蔽顶层 g）→ 优先按闭包处理
+        if (this.capMap.has(fn) || this._local(fn) !== undefined) {
+            this._emitClosureCall(fn, e.arguments);
+            return;
+        }
         if (this.m._funcIdx[this._fnName(fn)] === undefined && !this.fnNames.has(this._fnName(fn))) {
             // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)。
             // 句柄来源：本层局部变量，或**捕获**（嵌套函数声明/上层局部闭包 → env_get）。
