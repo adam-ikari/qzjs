@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十四批差分审计（2026-10-16）
+- 新增 `audit_corpus14.js`（17 例：`this` 绑定矩阵 / undefined·null 访问 / 继承·原型 / 别名与共享 / ES2023 数组 / 字符串快照 / 数组方法于实例 / 键序 / try/catch 语义 / 闭包循环捕获 / 解构 / getter·setter 原型链 / typeof·instanceof / JSON 往返 / 数值边界 / 数组洞 / IIFE·作用域）。
+- 新发现的静默差异（已记 ASSESSMENT 待修）：(1) `undefined/null` **写属性**（读已抛 TypeError，写未接线）；(2) 块级 `let/const` 遮蔽（wasm 局部按名唯一 → 内层覆盖外层绑定）；(3) `Array.indexOf` 以实例句柄查找（物化副本身份不同）。
+- 结论：本轮未引入功能改动（块级遮蔽实现与 loud 检测尝试均因结构/假阳性风险回退），仅新增语料以**定位下一批修复目标**。
+- 结果：**386/398（97.0%）**；残余 = 9 loud + 3 新发现的静默差异；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### undefined 属性读抛错 + this 形参模型（2026-10-16）
 - **属性访问 undefined/null → TypeError**：内存快路径「未赋值/越界」分支改走宿主 `prop_get`（POJO 未赋值 → undefined；undefined/null → TypeError）；调用点在链外统一 `_emitErrCheck`（此前尝试在嵌套 if 内插入会破坏 else/end 平衡）。提取方法 `const f = o.m; f()` 因此与 JS 一致抛错。
 - **`this` 形参是注解（不占实参槽）**：`function (this: any, k)` 的 `k` 现映射到正确槽位（此前 `this` 占槽 → `k` 错位得 NaN）；`this` 在该函数内按 JS 为 undefined（访问属性抛 TypeError，loud）。
