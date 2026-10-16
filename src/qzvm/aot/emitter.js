@@ -30,6 +30,7 @@ const QZ = {
   object_get:   { params: ["i64", "i32"], results: ["i64"] },
   string_new:   { params: ["i32"],        results: ["i64"] },
   string_concat:{ params: ["i64", "i64"], results: ["i64"] },
+  to_string:{ params: ["i64"], results: ["i64"] },                 // ToString（string hint）
   add:  { params: ["i64", "i64"], results: ["i64"] },
   sub:  { params: ["i64", "i64"], results: ["i64"] },
   mul:  { params: ["i64", "i64"], results: ["i64"] },
@@ -153,6 +154,15 @@ function registerQz(m, only) { for (const k of Object.keys(QZ)) { if (only && !o
 // 类方法/构造器在函数名中的编码（内部前缀，避免与用户函数名冲突）。
 const MTH_PREFIX = "__m_";
 function ctorName(cls) { return MTH_PREFIX + cls + "$ctor"; }
+// [Symbol.<name>] 计算属性名 → "@@name"；非 well-known Symbol → null（暂不支持）
+function symbolNameOf(expr) {
+    if (!expr) return null;
+    if (ts.isPropertyAccessExpression(expr) && ts.isIdentifier(expr.expression) && expr.expression.text === "Symbol") {
+        const n = expr.name.text;
+        if (/^(iterator|asyncIterator|toPrimitive|toStringTag|hasInstance|isConcatSpreadable|species|unscopables|match|matchAll|replace|search|split)$/.test(n)) return n;
+    }
+    return null;
+}
 function methName(cls, m) { return MTH_PREFIX + cls + "$" + m; }
 function staticMethName(cls, m) { return "__sm_" + cls + "$" + m; }
 class Emitter {
@@ -517,7 +527,8 @@ class Emitter {
     _emitPropReadFromLocal(base, name) {
         const M = this.m;
         if (name === "stack") { M.localGet(base); M.call("qz.err_stack"); return; }   // Error 族 .stack → 宿主合成
-        if (this._hasAccessor(name, "get") || this._hasMethodName(name)) {   // getter/原型方法 → 宿主分派（实例经继承链）
+        if (this._hasAccessor(name, "get") || this._hasMethodName(name)
+            || /^(hasOwnProperty|isPrototypeOf|propertyIsEnumerable|toLocaleString|valueOf)$/.test(name)) {   // 含 Object.prototype 方法
 
             M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
             return;
@@ -1229,6 +1240,11 @@ class Emitter {
                     methods.push({ name: "#" + cname + "#" + mem.name.text, node: mem });                      // 私有方法
                 } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
                     (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
+                } else if (ts.isMethodDeclaration(mem) && ts.isComputedPropertyName(mem.name)) {
+                    // [Symbol.iterator] / [Symbol.toPrimitive] …：编译为 @@<symbol 名> 方法；物化时挂到真 Symbol 上
+                    const sx = symbolNameOf(mem.name.expression);
+                    if (!sx) throw new Error("[tagged] 类计算属性名方法仅支持 Symbol.<well-known>（如 [Symbol.iterator]）");
+                    (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem });
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isIdentifier(mem.name)) {
                     if (isStatic(mem)) { staticMethods.push({ name: mem.name.text, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" }); }
                     else
@@ -1442,6 +1458,8 @@ class Emitter {
         if (ts.isBlock(s)) { this.emitBlock(s); return; }
         if (ts.isExpressionStatement(s)) { this.emitExpr(s.expression); this.m.drop(); return; }
         if (ts.isEmptyStatement(s)) return;
+        if (ts.isInterfaceDeclaration(s) || ts.isTypeAliasDeclaration(s) || ts.isModuleDeclaration(s)
+            || s.kind === ts.SyntaxKind.ImportDeclaration) return;      // TS 类型层/导入：擦除（无运行期语义）
         throw new Error("不支持的语句: " + ts.SyntaxKind[s.kind]);
     }
 
@@ -1972,14 +1990,41 @@ function compileTS(input, outWasm, opts = {}) {
     const fns = [];
     const fnSf = new Map();          // 函数节点 → 源文件（逐函数设 em.sf，供行号/DWARF）
     const clsStmts = [];
+    const enumStmts = [];         // TS enum（值语义，非纯类型 → 编译期求值）
     // 递归收集：函数/类声明**任意深度**均提升到模块级（函数内定义的 class/function 亦可编译）。
     // 提升后不再深入其体（避免重复收集其内部声明）。
     // 顶层函数声明 → 模块级 wasm 函数；**嵌套**函数声明 → 闭包（lambda+env，见 _emitFnDeclClosures），
     // 否则其对外层局部的捕获会丢失（此前整树提升 → 编译期「未定义变量」）。
     const hoistedFns = new Set();
+    // enum 初值常量折叠（数字/字符串字面量、一元 +/-/~、四则、位运算、括号）
+    const enumConstValue = (node, self) => {
+        if (!node) return null;
+        if (ts.isParenthesizedExpression(node)) return enumConstValue(node.expression, self);
+        if (ts.isNumericLiteral(node)) return Number(node.text.replace(/_/g, ""));
+        if (ts.isStringLiteral(node)) return node.text;
+        if (ts.isPrefixUnaryExpression(node)) {
+            const v = enumConstValue(node.operand, self);
+            if (typeof v !== "number") return null;
+            switch (node.operator) { case ts.SyntaxKind.MinusToken: return -v; case ts.SyntaxKind.PlusToken: return v; case ts.SyntaxKind.TildeToken: return ~v; default: return null; }
+        }
+        if (ts.isBinaryExpression(node)) {
+            const l = enumConstValue(node.left, self), r2 = enumConstValue(node.right, self);
+            if (typeof l !== "number" || typeof r2 !== "number") return null;
+            switch (node.operatorToken.kind) {
+                case ts.SyntaxKind.PlusToken: return l + r2; case ts.SyntaxKind.MinusToken: return l - r2;
+                case ts.SyntaxKind.AsteriskToken: return l * r2; case ts.SyntaxKind.SlashToken: return l / r2;
+                case ts.SyntaxKind.PercentToken: return l % r2; case ts.SyntaxKind.LessThanLessThanToken: return l << r2;
+                case ts.SyntaxKind.GreaterThanGreaterThanToken: return l >> r2;
+                case ts.SyntaxKind.AmpersandToken: return l & r2; case ts.SyntaxKind.BarToken: return l | r2;
+                case ts.SyntaxKind.CaretToken: return l ^ r2; default: return null;
+            }
+        }
+        return null;
+    };
     const collectDecls = (f) => {
         const walkCls = (n) => {          // class 仍整树提升（含函数内 class）
             if (ts.isClassDeclaration(n)) clsStmts.push(n);
+            if (ts.isEnumDeclaration(n)) enumStmts.push(n);
             ts.forEachChild(n, walkCls);
         };
         for (const st of f.statements) {
@@ -2006,6 +2051,25 @@ function compileTS(input, outWasm, opts = {}) {
         for (const f of sfs) walkNames(f);
     }
     const hasClasses = clsStmts.length > 0;
+    // TS enum 编译期求值：{ 名字 → {fwd: 成员→值, rev: 值→成员名} }。字符串枚举无反向映射（与 TS 一致）。
+    const enums = new Map();
+    for (const st of enumStmts) {
+        if (!st.name) throw new Error("[tagged] 匿名 enum 不支持");
+        const fwd = new Map(), rev = new Map();
+        let nextIdx = 0, isStr = false;
+        for (const mem of st.members) {
+            if (!ts.isIdentifier(mem.name)) throw new Error("[tagged] enum 成员名须为标识符");
+            let val = nextIdx;
+            if (mem.initializer) {
+                const iv = enumConstValue(mem.initializer);
+                if (iv === null) throw new Error("[tagged] enum 初值仅支持数字/字符串字面量与简单算术：" + st.name.text + "." + mem.name.text);
+                val = iv;
+            }
+            fwd.set(mem.name.text, val);
+            if (typeof val === "string") isStr = true; else { rev.set(String(val), mem.name.text); nextIdx = (typeof val === "number" ? val : 0) + 1; }
+        }
+        enums.set(st.name.text, { fwd, rev, isStr });
+    }
     // import 绑定：{ 本地名 → 目标顶层函数名 }。模块图由 tsc 解析（createProgram），
     // 用 checker 穿透 re-export 链解析到最终目标——AST 级 `sp.propertyName` 只
     // 处理 `import { x as y }` 自身别名，穿不过 `export { x as y } from` 链。
@@ -2224,6 +2288,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.classAlias = classAlias;      // 导入类本地名 → 目标类名
         em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
         em.usesFreeze = usesFreeze;
+        em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
         em.protNameId = (n) => em._strId(n);
 
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
@@ -2738,6 +2803,8 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.emitTaggedExpr(ex); this.m.drop(); return;
     }
     if (ts.isEmptyStatement(s)) return;
+    if (ts.isInterfaceDeclaration(s) || ts.isTypeAliasDeclaration(s) || ts.isModuleDeclaration(s)
+        || s.kind === ts.SyntaxKind.ImportDeclaration || s.kind === ts.SyntaxKind.ExportDeclaration) return;   // TS 类型层/导入导出：擦除
     throw new Error("[tagged] 不支持的语句: " + ts.SyntaxKind[s.kind]);
 };
 // try/catch/finally：__err(global1) + 结构化 br。
@@ -2840,6 +2907,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._emitStrLitHandle(e.head.text);
         for (const span of e.templateSpans) {
             this.emitTaggedExpr(span.expression);
+            this.m.call("qz.to_string");     // 模板内插值 = ToString（string hint），不是 ToPrimitive(default)
             this._emitConcat();
             this._emitStrLitHandle(span.literal ? span.literal.text : "");
             this._emitConcat();
@@ -2856,18 +2924,19 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         // tag`a${1}b`：构造字面量数组 [a, b]（含 raw 省略）+ 值 1 → closure_call(tag, arr, a0, a1, a2)
         const M = this.m, t = this._expEnter();
         this.emitTaggedExpr(e.tag); M.localSet(t.v);                       // 标签（闭包句柄）
-        const quasis = e.template.getText ? e.template.templateSpans : [];
-        const parts = [ts.factory.createStringLiteral(e.template.head.text)]
-            .concat(e.template.templateSpans.map(sp => ts.factory.createStringLiteral(sp.literal.text)));
+        const noSub = ts.isNoSubstitutionTemplateLiteral(e.template);
+        const spans = noSub ? [] : e.template.templateSpans;
+        const parts = [ts.factory.createStringLiteral(noSub ? e.template.text : e.template.head.text)]
+            .concat(spans.map(sp => ts.factory.createStringLiteral(sp.literal.text)));
         const lit = ts.factory.createArrayLiteralExpression(parts);
         lit.pos = e.pos; lit.end = e.end;
         this.emitTaggedExpr(lit); M.localSet(t.w);                         // strings 数组
         M.localGet(t.v); M.localGet(t.w);
         for (let i = 0; i < 3; i++) {
-            if (i < e.template.templateSpans.length) this.emitTaggedExpr(e.template.templateSpans[i].expression);
+            if (i < spans.length) this.emitTaggedExpr(spans[i].expression);
             else this._emitUndefined();
         }
-        M.call("qz.closure_call");
+        M.call("qz.call_value");                 // 闭包或宿主函数（String.raw 等）皆可作 tag
         this._emitErrCheck();
         this._expLeave();
         return;
@@ -3139,6 +3208,22 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     // 内建全局成员读（非调用）：Math.PI / Number.MAX_SAFE_INTEGER / … → qz.builtin（常量表）
+    // TS enum：Color.Red → 编译期值；Color[0] → 反向成员名（字符串枚举无反向映射 → undefined）
+    if (this.enums && ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression) && this.enums.has(e.expression.text)) {
+        const en = this.enums.get(e.expression.text);
+        if (!en.fwd.has(e.name.text)) throw new Error(`[tagged] enum ${e.expression.text} 无成员 ${e.name.text}`);
+        const v = en.fwd.get(e.name.text);
+        if (typeof v === "string") this._emitStrLitHandle(v); else this.m.i64ConstBits(...f64Bits(v));
+        return;
+    }
+    if (this.enums && ts.isElementAccessExpression(e) && ts.isIdentifier(e.expression) && this.enums.has(e.expression.text)
+        && (ts.isNumericLiteral(e.argumentExpression) || ts.isStringLiteral(e.argumentExpression))) {
+        const en = this.enums.get(e.expression.text);
+        const k = e.argumentExpression.text;
+        const nm = en.rev.get(k);
+        if (nm === undefined) this._emitUndefined(); else this._emitStrLitHandle(nm);
+        return;
+    }
     if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && ts.isIdentifier(e.expression)
         && BUILTIN_GLOBALS.has(e.expression.text)) {
         // 常量（Math.PI）→ 值；函数（Math.expm1 / JSON.stringify）→ 宿主函数句柄（truthy、typeof function）

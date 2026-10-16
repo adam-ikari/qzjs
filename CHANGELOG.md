@@ -4,6 +4,20 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第九批差分审计（2026-10-16）
+- 新增 `audit_corpus9.js`（25 例：ES2023/2024 新 API / `super` / ToPrimitive 强制转换 / `delete`·`in` / 迭代器·Map·Set / TS 类型擦除 / enum）。
+- **原型污染修复（重要）**：`classMeta` 的 `methods`/`getters`/`setters` 是对象字面量，`methods["valueOf"]`/`["toString"]` 会命中原型链上的 `Object.prototype` 方法 → `m.name` 失效、宿主崩溃/错值。改用自有键查询（`own()`）。
+- **TS 类型层擦除**：`interface` / `type` / `declare` 命名空间 / `import`·`export` 声明不再报「不支持的语句」。
+- **模板字符串插值 = ToString（string hint）**：此前走 `+`（ToPrimitive default）→ 有 `valueOf` 的对象插值结果错误（静默）。
+- **标签模板**：改走 `qz.call_value`（闭包/宿主函数皆可作 tag）；修复无替换模板（`` tag`a` ``）编译期崩溃。
+- **`Object.prototype` 方法名的属性读取**：`typeof o.hasOwnProperty === "function"`（此前静默 undefined）；`hasOwnProperty`/`valueOf`/`toString`/`toLocaleString` 走宿主分派。
+- **ES2023/2024 API**：`Array.prototype.toSorted`（含比较器）/`toReversed`/`toSpliced`（原数组不变、`deleteCount` 省略 = 到末尾）/`with`；`Object.hasOwn`、`Object.groupBy`、`Map.groupBy`。
+- **字符串**：`toLocaleUpperCase`/`toLocaleLowerCase`/`localeCompare`/`normalize`/`replaceAll`/`search`/`match`。
+- **类 `[Symbol.*]` 成员**：`[Symbol.iterator]` / `[Symbol.toPrimitive]` / `[Symbol.toStringTag]` 等编译为 `@@<name>` 方法，物化时挂真 Symbol → 实例可迭代、可参与强制转换（如 `t + 0` 走 `[Symbol.toPrimitive]`）。
+- **TS enum**：数字/字符串成员、隐式递增、常量折叠（四则/位运算/一元）；`Color.Red` → 编译期值，`Color[0]` → 反向映射名。
+- 已知 loud：`String.raw`（strings 数组无 `.raw` 表）。
+- 结果：**289/297（97.3%）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿（含 test262）。
+
 ### 第八批差分审计（2026-10-16）
 - 新增 `audit_corpus8.js`（24 例：Date / JSON 深水 / String 扩展 / Array 扩展 / 描述符 / Error 子类 / 数字边界）。
 - **宿主方法实参**：尾随「未传」实参必须省略 —— `setFullYear(2021)` ≠ `setFullYear(2021, undefined)`（此前静默 Invalid Date / NaN）。

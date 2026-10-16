@@ -112,8 +112,8 @@
 ### 差分审计状态（2026-10-16，第五轮）
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
-语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24)。
-结果：**265/272 一致（97.4%）；7 项均为已记录限制（POJO 键序/arguments/稀疏数组 holes/generator/async/BigInt/class-as-value）**；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）全绿。
+语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25)。
+结果：**289/297 一致（97.3%）**；8 项均为已记录限制（POJO 键序 / `arguments` / 稀疏数组 holes / generator / async / BigInt / class-as-value / `String.raw`）。；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）全绿。
 
 已支持（本轮新增/完善）：形参默认值·解构形参·rest 形参（调用点按形参表拆包）、let/const **每迭代绑定**（for 在增量处换层，while/for-of 在体首换层）、闭包值独立 tag 0x7FFF、对象字面量方法/访问器（宿主对象 + defineProperty 回调 wasm 闭包，成员闭包纳入捕获分析）、私有字段/方法（`#类名#名`）、静态字段继承/遮蔽与静态块与静态访问器、标签模板、正则字面量、Map/Set/Date、for-of 解构与可迭代、值调用 `qz.call_value`、嵌套解构、**跨函数 throw 传播**（调用点查 `__err`）与 try-finally 重抛、类字段统一容量 + 运行期新键 extras、字符串不可变（逃逸分析决定原地追加 / `qz.str_dup`）、数组/POJO/闭包句柄往返还原、POJO 与实例 clsId 撞号修复。
 

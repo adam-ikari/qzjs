@@ -38,7 +38,7 @@ const BUILTIN_FNS = {
   "Date.now": [Date.now, 0], "Date.parse": [Date.parse, 1], "Date.UTC": Date.UTC,
   "Object.prototype": Object.prototype, "Array.prototype": Array.prototype, "String.prototype": String.prototype,
   "Number.prototype": Number.prototype, "Function.prototype": Function.prototype, "Object.getOwnPropertySymbols": Object.getOwnPropertySymbols,
-  "String": String, "Number": Number, "Boolean": Boolean,
+  "String": String, "Number": Number, "Boolean": Boolean, "String.raw": String.raw,
   "parseInt": parseInt, "parseFloat": parseFloat,
   "isNaN": isNaN, "isFinite": isFinite,
   "JSON.stringify": JSON.stringify, "JSON.parse": JSON.parse,
@@ -49,6 +49,8 @@ const BUILTIN_FNS = {
   "Object.create": Object.create, "Object.defineProperty": Object.defineProperty,
   // Object.assign 见 builtin 特殊分支（就地写 POJO/实例并返回目标）
   "Object.is": Object.is, "Object.fromEntries": Object.fromEntries,
+  "Object.hasOwn": Object.hasOwn, "Object.groupBy": Object.groupBy, "Map.groupBy": Map.groupBy,
+  "Object.getOwnPropertyDescriptor": Object.getOwnPropertyDescriptor, "Object.getOwnPropertyDescriptors": Object.getOwnPropertyDescriptors,
   "Array.isArray": Array.isArray, "Array.from": Array.from, "Array.of": Array.of,
   "Number.isInteger": Number.isInteger, "Number.isNaN": Number.isNaN, "Number.isFinite": Number.isFinite,
   "Number.isSafeInteger": Number.isSafeInteger,
@@ -207,7 +209,7 @@ function makeQzvm(strings, opts) {
       let c = classMeta && classMeta[clsId];
       const hook = (nm) => {
         let cc = c;
-        while (cc) { const m = cc.methods && cc.methods[nm]; if (m) return m; cc = cc.parent != null ? classMeta[cc.parent] : null; }
+        while (cc) { const m = own(cc.methods, nm); if (m) return m; cc = cc.parent != null ? classMeta[cc.parent] : null; }
         return null;
       };
       const mk = (nm) => {
@@ -217,6 +219,15 @@ function makeQzvm(strings, opts) {
       };
       const tj = mk("toJSON");
       if (tj) Object.defineProperty(o, "toJSON", { value: tj, enumerable: false, configurable: true });
+      // @@<Symbol>：类方法（[Symbol.iterator]/[Symbol.toPrimitive]…）→ 物化对象上挂真 Symbol
+      for (const sn of ["iterator", "toPrimitive", "toStringTag", "hasInstance", "isConcatSpreadable", "asyncIterator"]) {
+        const mm = hook("@@" + sn);
+        if (!mm) continue;
+        const val = (sn === "toStringTag")
+          ? toJS(exportsRef[mm.name](TAG | BigInt(off), TAG, TAG, TAG, TAG))
+          : function (...as2) { return toJS(exportsRef[mm.name](TAG | BigInt(off), ...as2.map(bitsOf), TAG, TAG, TAG)); };
+        Object.defineProperty(o, Symbol[sn], { value: val, enumerable: false, configurable: true, writable: true });
+      }
       const vs = hook("valueOf") ? mk("valueOf") : null;
       const ts2 = hook("toString") ? mk("toString") : null;
       if (vs) Object.defineProperty(o, "valueOf", { value: vs, enumerable: false, configurable: true });
@@ -306,6 +317,9 @@ function makeQzvm(strings, opts) {
   // undefined 走 tagHandle → handles[idx]（toJS 还原 undefined）。保留 null≠undefined 区分，
   // 使 + / Number / String 等运算按 JS 正确分支（Number(null)=0 ≠ Number(undefined)=NaN）。
   // ?? 判 nullish 走宿主 qz.is_nullish（见 emitNullish），不靠 TAG|0 比对。
+  // 原型污染防护：classMeta 的 methods/getters/setters 是对象字面量 → 必须只认自有键
+  // （否则 methods["valueOf"] 会命中原型上的 Object.prototype.valueOf → m.name=undefined/"valueOf" 崩溃）
+  const own = (o, k) => (o && Object.prototype.hasOwnProperty.call(o, k)) ? o[k] : undefined;
   const bitsOf = (e) => Array.isArray(e) && arrOf.has(e) ? arrOf.get(e)   // 来自 wasm 的数组 → 原句柄（别名）
                      : typeof e === "function" && cloOf.has(e) ? cloOf.get(e)
                      : (e !== null && typeof e === "object" && pojoOf.has(e) && pojoOf.get(e).mem === mem) ? (TAG | BigInt(pojoOf.get(e).off))
@@ -410,12 +424,17 @@ function makeQzvm(strings, opts) {
                              r = toJS(a1) !== undefined ? a2.reduceRight((acc, v, i) => rc2(acc, v, i), toJS(a1))
                                                          : a2.reduceRight((acc, v, i) => rc2(acc, v, i)); break; }
       case "at":           { const a2 = arr(); const i = Math.trunc(toJS(a0)); r = a2[i < 0 ? a2.length + i : i]; break; }
+      case "toReversed":   r = arr().slice().reverse(); break;
+      case "toSpliced":   { const src = arr(); const st2 = toJS(a0);                     // 原数组不变（返回新数组）
+                            const items = [a2, a3].slice(0, 2).filter(givenSlot).map(toJS);
+                            r = src.slice(); r.splice(st2, givenSlot(a1) ? toJS(a1) : src.length - (st2 < 0 ? Math.max(0, src.length + st2) : Math.min(st2, src.length)), ...items); break; }
+      case "with":         r = toJS(a0) < 0 ? arr().slice(0, arr().length + toJS(a0)).concat([toJS(a1)], arr().slice(arr().length + toJS(a0) + 1)) : arr().slice(0, toJS(a0)).concat([toJS(a1)], arr().slice(toJS(a0) + 1)); break;
       case "entries":      return tagHandle(arr().entries());
       case "keys":         return tagHandle(arr().keys());
       case "values":       return tagHandle(arr().values());
       case "copyWithin":   { const a3 = arr(); a3.copyWithin(toJS(a0), a1 === undefined ? 0 : toJS(a1), a2 === undefined ? a3.length : toJS(a2)); arrSetInPlace(recv, a3); return recv; }
       case "toString":     r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(","); break;
-      case "toSorted":     r = a0 === undefined ? arr().slice().sort() : arr().slice().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), TAG))); break;
+      case "toSorted":     r = givenSlot(a0) ? arr().slice().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv))) : arr().slice().sort(); break;
       case "fill":        { const a = arr(); const st = givenSlot(a1) ? toJS(a1) : 0, en = givenSlot(a2) ? toJS(a2) : a.length; a.fill(toJS(a0), st, en); arrSetInPlace(recv, a); return recv; }
       default: throw new Error("method_call: 数组无方法 " + name);
     }
@@ -441,6 +460,14 @@ function makeQzvm(strings, opts) {
       case "substr":       r = s.substr(arg(a0), a1 === undefined ? undefined : arg(a1)); break;
       case "toUpperCase":  r = s.toUpperCase(); break;
       case "toLowerCase":  r = s.toLowerCase(); break;
+      case "toLocaleUpperCase": r = s.toLocaleUpperCase(); break;
+      case "toLocaleLowerCase": r = s.toLocaleLowerCase(); break;
+      case "localeCompare": r = s.localeCompare(String(arg(a0))); break;
+      case "normalize":    r = s.normalize(arg(a0) === undefined ? "NFC" : String(arg(a0))); break;
+      case "replaceAll":   { const pat = toJS(a0); r = s.replaceAll(pat instanceof RegExp ? pat : String(pat), String(arg(a1))); break; }
+      case "search":       r = s.search(toJS(a0)); break;
+      case "match":        { const x = s.match(toJS(a0)); r = x === null ? null : x; break; }
+      case "at":           { const i = Math.trunc(arg(a0)); r = i < 0 ? s[s.length + i] : s[i]; break; }
       case "trim":         r = s.trim(); break;
       case "trimStart":    r = s.trimStart(); break;
       case "trimEnd":      r = s.trimEnd(); break;
@@ -495,7 +522,9 @@ function makeQzvm(strings, opts) {
     object_set: (o, k, v) => { handles[idxOf(o)][strings[k]] = toJS(v); },
     object_get: (o, k) => ret(handles[idxOf(o)][strings[k]]),   // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）
     string_new: (id) => tagHandle(strings[id]),
-    string_concat: (a, b) => strWriteback(toJS(a) + toJS(b)),   // JS "+" 语义（含 ToPrimitive(default)：对象优先 valueOf）
+    string_concat: (a, b) => strWriteback(toJS(a) + toJS(b)),
+    to_string: (v) => strWriteback(String(toJS(v))),           // ToString：对象走 string hint（toString 优先）
+    is_nan_host: (v) => toJS(v) !== toJS(v) ? 1 : 0,   // JS "+" 语义（含 ToPrimitive(default)：对象优先 valueOf）
     iter_array: (v) => {                          // 非数组可迭代（Map/Set/迭代器等）→ wasm 数组（元素经 toJS/bitsOf）
       const x = toJS(v);
       if (x == null || typeof x[Symbol.iterator] !== "function") throw new Error("for-of: 该值不可迭代");
@@ -579,7 +608,7 @@ function makeQzvm(strings, opts) {
         const clsId = new DataView(mem.buffer).getInt32(off, true);
         let c = classMeta && classMeta[clsId];
         while (c) {
-          const g = c.getters && c.getters[name];
+          const g = own(c.getters, name);
           if (g) return exportsRef[g.name](recv, TAG, TAG, TAG, TAG);
           c = c.parent != null ? classMeta[c.parent] : null;
         }
@@ -595,7 +624,7 @@ function makeQzvm(strings, opts) {
           const clsId2 = mem ? new DataView(mem.buffer).getInt32(off, true) : -1;
           let c2 = classMeta && classMeta[clsId2];
           while (c2) {                                                    // 原型方法 → 绑定宿主函数
-            const m2 = c2.methods && c2.methods[name];
+            const m2 = own(c2.methods, name);
             if (m2) {
               const recv2 = recv;
               return tagHandle(function (...args) { return toJS(exportsRef[m2.name](recv2, ...args.map(bitsOf), TAG, TAG, TAG)); });
@@ -606,6 +635,20 @@ function makeQzvm(strings, opts) {
         return TAG;
       }
       if (hi === HOST_HI) { const o = handles[off]; return ret(o == null ? undefined : o[name]); }
+      // Object.prototype 方法（POJO/实例）：以接收者为 self 的绑定宿主函数
+      if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {
+        if (name === "hasOwnProperty") return tagHandle((k) => {
+          const key = String(toJS(k));
+          const e2 = fieldEntries.find(([n]) => n === key);
+          if (e2 && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= e2[1] + 8) {
+            if (BigInt.asUintN(64, new DataView(mem.buffer).getBigInt64(off + e2[1], true)) !== TAG) return true;
+          }
+          syncExtras();
+          return extras.has(off + "|" + key);
+        });
+        if (name === "valueOf" || name === "toString" || name === "toLocaleString") return tagHandle(() => toJS(recv));
+        if (name === "isPrototypeOf" || name === "propertyIsEnumerable") return tagHandle(() => false);
+      }
       // 字符串/数组：方法名 → 绑定宿主函数（truthy + 可调用）；其余属性 → 值
       if (hi === STR_HI || hi === 0x7ffbn) {
         const v = toJS(recv);
@@ -621,7 +664,7 @@ function makeQzvm(strings, opts) {
         const clsId = new DataView(mem.buffer).getInt32(off, true);
         let c = classMeta && classMeta[clsId];
         while (c) {
-          const st = c.setters && c.setters[name];
+          const st = own(c.setters, name);
           if (st) { exportsRef[st.name](recv, v, v, v, v); return; }
           c = c.parent != null ? classMeta[c.parent] : null;
         }
@@ -793,7 +836,7 @@ function makeQzvm(strings, opts) {
             const clsId = new DataView(mem.buffer).getInt32(off2, true);
             let c = classMeta && classMeta[clsId];
             while (c) {
-              const m = c.methods && c.methods["toString"];
+              const m = own(c.methods, "toString");
               if (m) return exportsRef[m.name](a0, TAG, TAG, TAG, TAG);
               c = c.parent != null ? classMeta[c.parent] : null;
             }
@@ -988,7 +1031,7 @@ function makeQzvm(strings, opts) {
       const clsId = new DataView(mem.buffer).getInt32(off, true);   // 免 4 对齐
       let c = classMeta && classMeta[clsId];
       while (c) {
-        const m = c.methods[name];
+        const m = own(c.methods, name);
         if (m) {
           const fn = exportsRef[m.name];
           return fn(recv, a0, a1, a2, a3);
