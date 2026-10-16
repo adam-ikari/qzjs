@@ -631,8 +631,20 @@ class Emitter {
             const isNum = !!(this._calleeInfo(cx.text) && this._calleeInfo(cx.text).mode === "num");
             const cp2 = this._calleeParams(cx.text) || this._calleeParams(name);
             const hasRest2 = !!(cp2 && cp2.length > 0 && cp2[cp2.length - 1].dotDotDotToken);
+            if (hasRest2) {
+                // rest 收尾：按形参表拆包（固定形参取元素、rest 取 slice）→ 直调（元数天然匹配）
+                const nFix = cp2.length - 1;
+                for (let i = 0; i < nFix; i++) this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
+                M.localGet(t.v); M.i32Const(this._strId("slice"));
+                M.i64ConstBits(...f64Bits(nFix)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                M.call("qz.method_call");
+                M.call(this._fnName(name));
+                this._retFromCallee(cx.text);
+                this._expLeave();
+                return;
+            }
             M.i32Const(this._strId(name)); M.localGet(t.v); M.i32Const(isNum ? 1 : 0);
-            M.call(hasRest2 ? "qz.call_named_rest" : "qz.call_named");   // rest 收尾：实参数组即其唯一形参
+            M.call("qz.call_named");
             this._expLeave();
             return;
         }
@@ -643,7 +655,20 @@ class Emitter {
             if (hIdx === undefined) throw new Error("未定义函数: " + cx.text);
             M.localGet(hIdx); M.localSet(t.w);
         }
-        M.localGet(t.w); M.localGet(t.v); M.call("qz.closure_call_spread");
+        // rest 收尾的闭包：实参数组即其唯一形参（其余槽 undefined）
+        const cp3 = this._calleeParams(cx.text);
+        const hasRest3 = !!(cp3 && cp3.length > 0 && cp3[cp3.length - 1].dotDotDotToken);
+        M.localGet(t.w);
+        if (hasRest3) {
+            const nFix3 = cp3.length - 1;
+            for (let i = 0; i < nFix3; i++) this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
+            M.localGet(t.v); M.i32Const(this._strId("slice"));
+            M.i64ConstBits(...f64Bits(nFix3)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+            M.call("qz.method_call");
+            for (let i = cp3.length; i < 4; i++) this._emitUndefined();
+            M.call("qz.closure_call");
+        }
+        else { M.localGet(t.v); M.call("qz.closure_call_spread"); }
         this._expLeave();
     }
     // 被调函数（已解析到 AST）是否以 rest 形参收尾 → 返回其形参数组，否则 null。
@@ -3330,9 +3355,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 this.m.i64ConstBits(...f64Bits(1));
                 this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
                 this.m.localSet(this.scratch);
-                this.m.localGet(this.scratchObj); this.m.i32WrapI64();
-                this.m.localGet(this.scratch);
-                this.m.i64Store(3, off);
+                {   // 宿主对象(0x7FFD) → qz.prop_set（对象字面量方法里的 this.x++）；否则写内存字段
+                    const M2 = this.m, t2 = this._expEnter();
+                    M2.localGet(this.scratchObj); M2.localSet(t2.v);
+                    M2.localGet(t2.v); M2.i64Const(48n); M2.i64ShrU(); M2.i64Const(0x7ffdn); M2.i64Eq();
+                    M2.ifBlock("void");
+                    M2.localGet(t2.v); M2.i32Const(this._strId(e.operand.name.text)); M2.localGet(this.scratch); M2.call("qz.prop_set");
+                    M2.else_();
+                    M2.localGet(t2.v); M2.i32WrapI64(); M2.localGet(this.scratch); M2.i64Store(3, off);
+                    M2.end();
+                    this._expLeave();
+                }
                 this.m.localGet(this.scratch);   // 表达式结果=新值
                 return;
             }
@@ -3382,9 +3415,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.i64ConstBits(...f64Bits(1));
             this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
             this.m.localSet(this.scratchB);         // scratchB=新值
-            this.m.localGet(this.scratchObj); this.m.i32WrapI64();
-            this.m.localGet(this.scratchB);
-            this.m.i64Store(3, off);
+            {   // 宿主对象 → qz.prop_set；否则写内存字段
+                const M2 = this.m, t2 = this._expEnter();
+                M2.localGet(this.scratchObj); M2.localSet(t2.v);
+                M2.localGet(t2.v); M2.i64Const(48n); M2.i64ShrU(); M2.i64Const(0x7ffdn); M2.i64Eq();
+                M2.ifBlock("void");
+                M2.localGet(t2.v); M2.i32Const(this._strId(e.operand.name.text)); M2.localGet(this.scratchB); M2.call("qz.prop_set");
+                M2.else_();
+                M2.localGet(t2.v); M2.i32WrapI64(); M2.localGet(this.scratchB); M2.i64Store(3, off);
+                M2.end();
+                this._expLeave();
+            }
             this.m.localGet(this.scratch);          // 留旧值
             return;
         }

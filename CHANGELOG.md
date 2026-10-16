@@ -3,6 +3,9 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **fix(aot): 展开实参 + rest 形参（拆包调用）**：`g(1, ...a)` / `g(...a)` 现按形参表拆包（固定形参取数组元素、rest 取 `slice`）后直调/闭包调用，元数天然匹配；此前把整个实参数组塞给第一个形参。
+- **fix(aot): `++obj.a`/`obj.a++` 遇宿主对象**（对象字面量方法里的 `this.x++`）→ 走 `qz.prop_get/prop_set`（运行时按 tag 分派），不再误写内存偏移。
+  差分：语料 5 = 25/28。
 - **feat(aot): 第五批语料 + 值调用/嵌套解构/静态继承/数组句柄往返/纯数值属性读**。
   - 值调用 `(a.b[c])(…)`、`(cond ? f : g)(…)` → `qz.call_value`（闭包 → closure_call；宿主函数 → 调用）。
   - 嵌套解构 `[[a],[b]]` / `{a:{b}}`（`_emitBindingTarget` 递归）。
