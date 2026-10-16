@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十八批补充（2026-10-16）
+- **计算属性类字段**（`["d"+"yn"]: any = 1` / `[KEY + "2"]`）：编译期常量折叠为静态字段名（字面量 / 字面量拼接 / 模块级字面量 const / 括号 / as 断言）；无法折叠 → loud。
+- **类名解析跳过断言**：`(C as any).st` ≡ `C.st`（静态读/写/`typeof C` 一致）；类名**作值**仍 loud。
+- 结果：**464/474（97.9%）**；**残余 10 项全部为 loud（零静默错值）**。
+
 ### 第十八批差分审计（2026-10-16）
 - 新增 `audit_corpus18.js`（19 例：ToPrimitive 优先级 / spread 触发 getter / Map·Set 身份（NaN、-0、对象）/ JSON 与 Date·Symbol / RegExp 替换模式（`$&`、`$1`、`` $` ``、`$'`、`$$`、回调）/ 计算属性类成员 / 求值顺序 / 类型擦除边界 / 解构 spread getter / 嵌套闭包循环 / Array.from 空洞 / String.raw / JSON reviver / 标签跳转 / catch 解构 / 数值分隔符 / 数组解构交换 / super 方法链 / 描述符批量）。
 - **模块级 const/let → wasm 全局**（`__module_init` + start 段）：模块级 const/let（含对象/数组/类实例/闭包/`as`/类型注解）此前一律 loud「未定义捕获变量」，现改为分配 i64 全局、由合成的 `__module_init` 在实例化时（start 段）按源序初始化一次；读取/写入/闭包调用解析都优先局部、再全局（保持遮蔽语义）。

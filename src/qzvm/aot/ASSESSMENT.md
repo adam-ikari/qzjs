@@ -113,9 +113,9 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24)。
-结果：**463/474 一致（97.7%）**；残余 11 项**全部 loud**（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**464/474 一致（97.9%）**；残余 10 项**全部 loud**（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
-**残余 loud 清单（第十八批后，11 项）**：
+**残余 loud 清单（第十八批后，10 项）**：
 1. `arguments` 对象（建议 rest 形参）
 2. generator（`function*` / `yield`）
 3. async / await（需 Promise 运行时）
@@ -125,8 +125,7 @@
 7. 箭头函数内的 `super`
 8. 函数表达式带 `this` 形参作回调实参（receiver 无传递通道 → 运行时 `this` 为 undefined，访问属性抛 TypeError）
 9. 内建调用 >4 实参（内建 ABI 仅 4 槽；如 `Date.UTC(y,m,d,h,mi,s,ms)`）
-10. 计算属性类字段（`["d"+"yn"]: any = 1`；计算属性**方法**已支持）
-11. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
+10. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
 
 **另：窄面 loud（避免静默错值，非缺陷残留）**：`o[带副作用] op= v` / `o[带副作用] ??= v`（重复求值风险）、`o(带副作用).f = v`、catch 解构的默认值/嵌套/rest、`o.f?.()` 之外的复杂可选链组合。
 

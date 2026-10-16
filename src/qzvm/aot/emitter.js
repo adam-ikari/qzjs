@@ -1339,6 +1339,12 @@ class Emitter {
                     staticBlocks.push(mem); staticInits.push({ kind: "block", blk: mem });   // static { … }：首次访问静态时执行（保持源码序）
                 } else if (ts.isConstructorDeclaration(mem)) {
                     ctor = mem;
+                } else if (ts.isPropertyDeclaration(mem) && ts.isComputedPropertyName(mem.name)) {
+                    // ["d"+"yn"] / [KEY+"2"]：常量折叠为静态字段名（无法折叠 → loud，避免静默错名）
+                    const nm = this._foldPropName(mem.name.expression);
+                    if (nm === null) throw new Error("[tagged] 计算属性类字段名无法编译期求值（需字面量、字面量拼接或模块级字面量 const）");
+                    if (isStatic(mem)) { staticFields.push({ name: nm, init: mem.initializer || null }); staticInits.push({ kind: "field", name: nm, init: mem.initializer || null }); }
+                    else fields.push({ name: nm, init: mem.initializer || null });
                 } else if (ts.isPropertyDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
                     if (isStatic(mem)) {   // 私有静态字段：#类名#名（与访问点一致）
                         const pn = "#" + cname + "#" + mem.name.text;
@@ -2139,6 +2145,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         return null;
     };
+    const modConstLit = new Map();   // 模块级字面量 const（名字 → 字符串/数值），供计算属性名折叠
     const modVars = [];          // 模块级变量声明（含初值）
     const modStmts = [];         // 模块级变量语句（合成 __module_init 的函数体）
     const collectDecls = (f) => {
@@ -2157,7 +2164,12 @@ function compileTS(input, outWasm, opts = {}) {
         for (const st of f.statements) {
             if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
             if (ts.isVariableStatement(st)) {                       // 模块级 const/let → wasm 全局（模块初始化时赋值一次）
-                for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name) && d.initializer) modVars.push(d);
+                for (const d of st.declarationList.declarations) {
+                    if (!ts.isIdentifier(d.name) || !d.initializer) continue;
+                    modVars.push(d);
+                    if (ts.isStringLiteral(d.initializer)) modConstLit.set(d.name.text, d.initializer.text);   // 字面量 const → 计算属性名可折叠
+                    else if (ts.isNumericLiteral(d.initializer)) modConstLit.set(d.name.text, Number(d.initializer.text.replace(/_/g, "")));
+                }
                 modStmts.push(st);
             }
             walkCls(st);
@@ -2451,6 +2463,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.usesKeyOrder = usesKeyOrder;
         em.usesDynAcc = usesDynAcc;
         em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
+        em.modConstLit = modConstLit;    // 模块级字面量 const（计算属性名折叠用）
         em.protNameId = (n) => em._strId(n);
 
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
@@ -2567,6 +2580,24 @@ function compileTS(input, outWasm, opts = {}) {
 // 字段 8 字节。与宿主字长无关，32/64 位设备共用。
 const _fbuf = Buffer.alloc(8);
 function f64Bits(v) { _fbuf.writeDoubleLE(v); return [_fbuf.readUInt32LE(0), _fbuf.readUInt32LE(4)]; }   // [lo, hi]
+// 计算属性名（类字段）编译期折叠：字面量 / 字面量拼接 / 模块级字面量 const / 括号 / as 断言。
+// 无法求值 → null（调用点 loud，避免静默错名）。
+Emitter.prototype._foldPropName = function (n) {
+    const self = this;
+    const fold = (x) => {
+        if (x === undefined || x === null) return null;
+        if (ts.isStringLiteral(x) || ts.isNoSubstitutionTemplateLiteral(x)) return x.text;
+        if (ts.isNumericLiteral(x)) return String(Number(x.text.replace(/_/g, "")));
+        if (ts.isParenthesizedExpression(x) || ts.isAsExpression(x) || ts.isNonNullExpression(x) || ts.isTypeAssertionExpression(x) || ts.isSatisfiesExpression(x)) return fold(x.expression);
+        if (ts.isIdentifier(x)) { const v = self.modConstLit && self.modConstLit.get(x.text); return v === undefined ? null : String(v); }
+        if (ts.isBinaryExpression(x) && x.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+            const l = fold(x.left), r = fold(x.right);
+            return (l === null || r === null) ? null : l + r;
+        }
+        return null;
+    };
+    return fold(n);
+};
 Emitter.prototype._fieldIndex = function (name) {
     if (!this.fieldMap) this.fieldMap = new Map();
     let i = this.fieldMap.get(name);
@@ -2652,7 +2683,16 @@ Emitter.prototype._findStaticAccessor = function (cn, name, kind) {
     }
     return null;
 };
+// 类名判定：跳过括号 / as / 非空断言 / satisfies（(C as any).st ≡ C.st）；类名**作值**仍 loud
+// 类名（含继承别名）解析：跳过括号/as/非空断言/satisfies；非类名 → null
+Emitter.prototype._classOfExpr = function (node) {
+    while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)
+        || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node))) node = node.expression;
+    return (node && ts.isIdentifier(node) && this.classes.has(node.text)) ? this._className(node.text) : null;
+};
 Emitter.prototype._isClassName = function (node) {
+    while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)
+        || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node))) node = node.expression;
     return !!node && ts.isIdentifier(node) && this.classes.has(node.text);
 };
 // 字符串句柄 tag 测试：栈顶 i64 → i32（是字符串?）
@@ -3262,7 +3302,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitStrLitHandle("function");   // 函数值（顶层函数名 / 持有闭包的变量）
             return;
         }
-        if (ts.isIdentifier(e.expression) && this.classes.has(this._className(e.expression.text))) {
+        if (this._classOfExpr(e.expression) !== null) {
             this._emitStrLitHandle("function");   // typeof <类名> → "function"（class 是函数对象）
             return;
         }
@@ -3560,7 +3600,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._isClassName(e.expression)) {
-        const cn = this._className(e.expression.text);
+        const cn = this._classOfExpr(e.expression);
         const got = this._findStaticAccessor(cn, e.name.text, "get");
         if (got) {                                            // 静态 getter（含继承）→ 直调 __sm_<owner>$<name>
             this._emitStaticsGuard(got.cname);
@@ -4157,7 +4197,7 @@ Emitter.prototype._emitStoreProp = function (left) {
     }
     // 类静态字段写 C.x = v → 宿主 qz.static_set
     if (this._isClassName(left.expression)) {
-        const cn = this._className(left.expression.text);
+        const cn = this._classOfExpr(left.expression);
         const got = this._findStaticAccessor(cn, left.name.text, "set");
         M.localSet(t.w);                           // 值（i64）
         this._emitStaticsGuard(cn);
