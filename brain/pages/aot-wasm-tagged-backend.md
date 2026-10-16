@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T14:41:03"
+updated: "2026-10-16T14:53:08"
 ---
 
 <!-- compiled_truth -->
@@ -211,4 +211,9 @@ updated: "2026-10-16T14:41:03"
 - time: 2026-10-16T14:41:03
   kind: evidence
   summary: "第十三批（370/381）：修字符串+=静默错值、方法 this、delete、句柄身份"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T14:53:08
+  kind: evidence
+  summary: "提取方法 this + undefined 属性读：370/381（97.1%）"
   affects: [aot-wasm-tagged-backend]
