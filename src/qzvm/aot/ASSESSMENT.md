@@ -128,7 +128,10 @@
 9. 静态成员体内 `this.<name>` 经**派生类**调用且派生类**自有覆写**该名 → loud（本实现 `this` ≡ 定义类；未覆写时与 JS 一致，故不报错）
 
 **已知静默差异（1 项）**：
-- **`Object.assign` 多源键序**：多源合并时新键的追加位置与 JS 不同（JS：`a,b,d,c`；本实现 `a,b,c,d`）。单源/字面量场景已验证一致。
+- **`Object.assign` 多源键序**：多源合并时新键的追加位置与 JS 不同。最小复现（`/tmp/qzaux/corpus_oa3.js`）：
+  `const base={a:1,b:2}; const over={...base,b:99,c:3}; Object.assign({}, {d:4}, over)` → JS `{"d":4,"a":1,"b":99,"c":3}`，本实现 `{"a":1,"b":99,"c":3,"d":4}`（**源被按后置优先处理**）。
+  已排除：`_emitBuiltinCall` 按序压栈（非逆序）、宿主 `[a0..a3].slice(0, arity || n).map(toJS)` 参数顺序正确、双源/字面量源场景一致。
+  指向：emitter 侧对 `Object.assign({}, …)` 的**对象字面量+展开**路径（`emitter.js` 展开分支按**槽序**做内存级合并 → 键序退化为 fieldMap 槽序）；或该路径与 builtin 路径的选择条件。
 - 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏过滤（探针 /tmp/qzaux/corpus_p1.js 的 hasown-nonenum）。
 
 **已修（2026-10-16，第二十一批后）**：`JSON.parse` 结果里的数组字段此前每次读得到不同实例（wasm box 与宿主数组分离）→ 写入丢失；现宿主数组保持**宿主句柄**（`object_get`/`prop_get` 对 `Array.isArray` 值返回 `tagHandle`），元素读/写就地作用于真实 JS 数组 → 读值与 `JSON.stringify` 视图一致（探针 corpus_j1 3/3）。
