@@ -1166,7 +1166,7 @@ function makeQzvm(strings, opts) {
     // 内建全局调用/常量：nameId + n(实际参数个数) + a0..a3 → 宿主 JS 内建 → ret。
     // n 由调用点编译期已知：变参函数（Math.max/min/hypot/Array.of/fromCharCode）按 n 取参，
     // 不传 undefined 占位（否则 Math.max(2,5) 会变 Math.max(2,5,undefined,…)=NaN）。
-    builtin: (id, n, a0, a1, a2, a3) => {
+    builtin: (id, n, a0, a1, a2, a3, ovf) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
       if (name === "String" && a0 !== undefined) {                  // String(实例) → 调其 toString（JS ToPrimitive）
@@ -1318,7 +1318,6 @@ function makeQzvm(strings, opts) {
         if (name === "Object.getOwnPropertyDescriptor") return ret(Object.getOwnPropertyDescriptor(o0, toJS(a1)));
         return ret(Object.getOwnPropertyDescriptors(o0));
       }
-      if (n > 4) throw new Error("qz.builtin 调用超过 4 个实参未实现（" + name + "；内建 ABI 仅 4 槽）——请改用 ≤4 实参或先打包数组");   // 避免静默丢参
       let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
       if (fn === undefined && typeof globalThis[name] === "function") fn = globalThis[name];   // 内建全局函数作调用（Symbol/BigInt/Reflect/…）
       if (fn === undefined && name.indexOf(".") > 0) {                       // 点号成员（Symbol.for / Reflect.has / Number.isInteger…）
@@ -1329,7 +1328,9 @@ function makeQzvm(strings, opts) {
       let arity = 0;                                  // 表项 [fn, arity] = 固定元数（调用点按此裁剪实参）
       if (Array.isArray(fn)) { arity = fn[1]; fn = fn[0]; }
       if (typeof fn !== "function") throw new Error("qz.builtin 未实现: " + name);
-      const args = [a0, a1, a2, a3].slice(0, arity || n).map(toJS);
+      let flat = [a0, a1, a2, a3];
+      if (ovf !== undefined && ovf !== TAG) flat = flat.concat((toJS(ovf) || []).slice(1).map(bitsOf));   // ovf[0] = 实参 3（已在 a3）
+      const args = flat.slice(0, arity || n).map(toJS);
       return ret(BUILTIN_CTORS.has(name) ? Reflect.construct(fn, args) : fn.apply(null, args));
       } catch (e) {
         const msg = e && e.message ? String(e.message) : "";

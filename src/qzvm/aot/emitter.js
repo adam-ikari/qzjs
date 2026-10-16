@@ -114,7 +114,7 @@ const QZ = {
   // typeof 走 wasm 内联分类（见 emitTaggedExpr）：无法区分「宿主侧 handles 索引」与
   // 「POJO 内存 offset」（二者共用 0x7FF9 低 32 位空间），故不设宿主回退。
   // 内建全局：nameId(i32) + n(实际参数个数,i32) + a0..a3(i64) → i64（宿主按名分派）
-  builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // nameId, n, a0..a3, ovf（实参 3..）
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
@@ -4711,6 +4711,13 @@ Emitter.prototype._emitBuiltinCall = function (name, args) {
     M.i32Const(args.length);
     for (let i = 0; i < 4; i++) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+    }
+    {   // ovf：实参 3..（>4 实参的内建，如 Math.max(a,b,c,d,e)）；未超出时为空数组（宿主按 arity 截断）
+        const ovfA = args.length > 3 ? args.slice(3) : [];
+        if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] " + name + " 的溢出实参与展开混用暂不支持");
+        const lit = ts.factory.createArrayLiteralExpression(ovfA);
+        lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+        this.emitTaggedExpr(lit);
     }
     M.call("qz.builtin");
     this._emitErrCheck();          // 内建可能抛（JSON 循环引用/解析失败/类型错）→ 转入本函数 catch（try 内）

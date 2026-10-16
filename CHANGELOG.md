@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 内建调用 >4 实参（2026-10-16）
+- `qz.builtin` 增第 7 参 `ovf`（实参 3..，与 `call_value`/`method_call` 同款约定）；`_emitBuiltinCall` 统一「4 槽 + ovf」；宿主按 `[a0..a3].concat(ovf.slice(1))` 重建实参后按 `arity || n` 截断。
+- 移除「内建调用超过 4 个实参」loud：`Math.max(1,9,3,4,5)`、6 实参等与 JS 一致（探针 `corpus_b5.js` **3/3**）。
+- 结果：**522/530（98.5%）**；残余按**语料案例**计 8 例，全部 loud（零已知静默）。
+
 ### 键序（Key order）修复 —— 已知静默清零（2026-10-16）
 - **根因**：宿主 `qz.builtin` 的 `Object.assign` 专用**就地合并**分支逐个写槽/`extras`，但**从不登记键序** → 目标对象物化时键序退化为槽序（fieldMap 序）→ `Object.assign({}, {d:4}, over)` 得 `a,b,c,d`（JS `a,b,d,c`）。
 - **修复**：合并时按 JS 规则登记键序（已存在键保持原位、**新键追加**）。
