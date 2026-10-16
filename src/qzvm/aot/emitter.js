@@ -2555,7 +2555,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
     // 未实现的二元运算符：先于操作数求值报错（否则右操作数如类名 A 会先崩「未定义捕获变量: A」）
-    if (op === ts.SyntaxKind.InstanceOfKeyword) throw new Error("[tagged] instanceof 未实现");
+    if (op === ts.SyntaxKind.InstanceOfKeyword) throw new Error("[tagged] instanceof 未实现（类实例判定需新 tag 区分实例句柄与 POJO/宿主句柄）");
     if (op === ts.SyntaxKind.InKeyword) throw new Error("[tagged] in 未实现");
     if (op === ts.SyntaxKind.AsteriskAsteriskEqualsToken) throw new Error("[tagged] **= 未实现（用 x = x ** y）");
     if (op === ts.SyntaxKind.CommaToken) { this.emitTaggedExpr(e.left); this.m.drop(); this.emitTaggedExpr(e.right); return; }
