@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 稀疏数组洞（2026-10-16）
+- 新增洞哨兵 `HOLE`(0x7FF9|2)：`arrWriteback`/`arrSetInPlace` 保留 JS 空洞、数组按下标越界增长与 `delete a[i]` 写洞、`arrRead` 还原为**真稀疏 JS 数组** → `map/filter/reduce/indexOf/join/flat/Object.keys/JSON.stringify/for-of` 与 JS 语义一致；`Array.prototype.includes` 不跳洞（`[,].includes(undefined) === true`）。
+- 元素读快路径（下标 / for-of）对洞归一化为 `undefined`（此前 `typeof a[0]` 会得 `object`）；数组字面量 `[1,,3]` 的省略元素写洞。
+- `arguments` 对象改为**编译期 loud**（此前静默 undefined，`.length` 处宿主崩溃）。
+- 结果：**313/321（97.5%）**；**残余差异全部为 loud（无静默错值）**。
+
 ### 对象键序（插入序）支持（2026-10-16）
 - **插入序跟踪**：POJO/实例写属性时登记 `field_order`/`field_order_lit`（对象字面量按编译期名序一次登记、运行期下标写与 `delete` 同步移除），物化时按插入序建对象 → `Object.keys`/`values`/`entries`、`for-in`、`JSON.stringify`、对象展开的键序与 JS 一致（此前为「预登记字段序 + 运行期新键」）。
 - 代价：仅当程序出现顺序敏感 API（`Object.keys|values|entries|assign|fromEntries|getOwnPropertyNames`、`JSON.stringify`、`for-in`、对象展开）时才发射写前登记调用；常见程序零额外开销。

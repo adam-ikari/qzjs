@@ -113,13 +113,15 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24)。
-结果：**311/321 一致（96.9%）**；**仅剩 1 项静默差异（稀疏数组 holes）**，其余 9 项均为 loud（`arguments` / generator / async / BigInt / class-as-value / `String.raw` / 闭包 >4 形参 / 静态私有字段类名 / 宿主递归深度）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）全绿。
+结果：**313/321 一致（97.5%）**；**残余 8 项全部为 loud（编译期显式报错）——无静默错值**：`arguments` / generator / async / BigInt / class-as-value / `String.raw` / 闭包 >4 形参 / 静态私有字段类名（另注：宿主↔wasm 闭包递归约 300 层，`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）全绿。
 
 已支持（本轮新增/完善）：形参默认值·解构形参·rest 形参（调用点按形参表拆包）、let/const **每迭代绑定**（for 在增量处换层，while/for-of 在体首换层）、闭包值独立 tag 0x7FFF、对象字面量方法/访问器（宿主对象 + defineProperty 回调 wasm 闭包，成员闭包纳入捕获分析）、私有字段/方法（`#类名#名`）、静态字段继承/遮蔽与静态块与静态访问器、标签模板、正则字面量、Map/Set/Date、for-of 解构与可迭代、值调用 `qz.call_value`、嵌套解构、**跨函数 throw 传播**（调用点查 `__err`）与 try-finally 重抛、类字段统一容量 + 运行期新键 extras、字符串不可变（逃逸分析决定原地追加 / `qz.str_dup`）、数组/POJO/闭包句柄往返还原、POJO 与实例 clsId 撞号修复。
 
 已知限制（均已记录，loud 或窄面差异）：
 - （已修）**POJO/实例键序**：插入序表（`field_order`/`field_order_lit`，写/删同步）→ `Object.keys`/`for-in`/`JSON.stringify` 键序与 JS 一致。
-- **`arguments` 对象**与函数 **rest 形参之外**的变参 ABI 场景；稀疏数组 `Object.keys`（洞与 undefined 不可区分）。
+- **`arguments` 对象**未实现（编译期 loud，建议 rest 形参）；**闭包/lambda >4 形参**（wasm 闭包 ABI 仅 4 实参槽；顶层函数直调不限）。
+- （已修）**稀疏数组洞**：数据槽以 `HOLE`(0x7FF9|2) 标记，`arrRead` 还原为真 JS 稀疏数组 → `map/filter/reduce/indexOf/join/Object.keys/JSON/for-of` 与 JS 一致（`includes` 不跳洞）。
+- （已修）**POJO/实例键序**：插入序跟踪（见下）。
 - 跨函数 throw 需 glue 在调用导出后调用 `qz.take_err()` 才会向宿主 JS 抛出（wasm 无法直接抛出 JS 异常）。
 - 对象展开段与访问器混用、`with`/`eval`、`new.target`、`Proxy`/`Reflect`、TypedArray、`Intl`、`structuredClone` 等未支持（loud）。
 - **generator**（`yield`）、**async**（需 Promise 运行时）、**BigInt**（`BigIntLiteral`）→ 编译期 loud；**类对象作值**（静态方法返回类名）→ 编译期 loud。

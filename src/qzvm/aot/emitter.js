@@ -512,6 +512,10 @@ class Emitter {
         M.ifBlock("i64");
         M.localGet(base); M.i32WrapI64(); M.i32Load(2, 8);
         M.localGet(t.a); M.i32Const(8); M.i32Mul(); M.i32Add(); M.i64Load(3, 0);
+        { const th = this._expEnter(); M.localSet(th.v);                 // 洞 → undefined
+          M.localGet(th.v); M.i64ConstBits(2, 0x7ff90000); M.i64Eq();
+          M.ifBlock("i64"); this._emitUndefined(); M.else_(); M.localGet(th.v); M.end();
+          this._expLeave(); }
         M.else_();
         this._emitUndefined();                                      // 越界 → undefined（JS 语义）
         M.end();
@@ -2967,6 +2971,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isIdentifier(e)) {
+        if (e.text === "arguments") throw new Error("[tagged] `arguments` 对象未实现（用 rest 形参替代）；见 ASSESSMENT 限制");
         if (this.capMap.has(e.text)) { this._emitCapturedRead(e.text); return; }   // 捕获名优先走 env（与本体共享）
         const idx = this._local(e.text);
         if (idx !== undefined) { this.m.localGet(idx); return; }
@@ -3207,7 +3212,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         Mt.localGet(t.a); Mt.localGet(t.a); Mt.i32Const(16); Mt.i32Add(); Mt.i32Store(2, 8);   // dataOff = off+16
         for (let i = 0; i < N; i++) {
             Mt.localGet(t.a); Mt.i32Load(2, 8);            // dataOff
-            this.emitTaggedExpr(e.elements[i]);
+            if (ts.isOmittedExpression(e.elements[i])) Mt.i64ConstBits(2, 0x7ff90000);   // [1,,3] → 洞
+            else this.emitTaggedExpr(e.elements[i]);
             Mt.i64Store(3, i * 8);
         }
         Mt.localGet(t.a); Mt.i64ExtendI32U();

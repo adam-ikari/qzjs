@@ -23,6 +23,7 @@ const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低
 const INST_HI = 0x7ffen;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 const HOST_TAG = 0x7ffd_0000_0000_0000n;  // 宿主对象句柄标记（0x7FFD|低32=handles 索引）
 const CLO_HI = 0x7fffn;                   // 闭包值（函数）句柄高 16 位（0x7FFF|低32=cell offset）
+const HOLE = 0x7ff9000000000002n;         // 数组「洞」（稀疏）：读作 undefined，数组方法跳过，JSON → null                   // 闭包值（函数）句柄高 16 位（0x7FFF|低32=cell offset）
 const HOST_HI = 0x7ffdn;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 // 内建全局分派：名 → JS 函数（参数个数由调用点传入的 n 决定，见 builtin）。
 // AOT 产物经 qz.builtin(nameId, a0..a3) 调；未列出的报「未实现」。
@@ -169,7 +170,11 @@ function makeQzvm(strings, opts) {
     const len = dv.getInt32(off, true);
     const dataOff = dv.getInt32(off + 8, true);
     const out = new Array(len);
-    for (let i = 0; i < len; i++) out[i] = toJS(dv.getBigInt64(dataOff + i * 8, true));
+    for (let i = 0; i < len; i++) {
+      const raw = BigInt.asUintN(64, dv.getBigInt64(dataOff + i * 8, true));
+      if (raw === HOLE) continue;                          // 洞 → JS 侧保持空洞（方法跳过、无键）
+      out[i] = toJS(raw);
+    }
     arrOf.set(out, b);
     return out;
   };
@@ -263,7 +268,7 @@ function makeQzvm(strings, opts) {
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
   const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
-  const toJS = (b) => (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b), false) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b), true) : {}) : bitsToNum(b));
+  const toJS = (b) => (typeof b === "bigint" && BigInt.asUintN(64, b) === HOLE) ? undefined : (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b), false) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b), true) : {}) : bitsToNum(b));
   // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
   const hostOf = new WeakMap();   // JS 对象/函数 → 已有句柄（同一 JS 值恒等同一句柄 → === 语义正确）
   const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n)
@@ -367,7 +372,7 @@ function makeQzvm(strings, opts) {
     dv.setInt32(start + 4, N, true);
     dv.setInt32(start + 8, dataOff, true);
     dv.setInt32(start + 12, 0, true);
-    for (let i = 0; i < N; i++) dv.setBigInt64(dataOff + i * 8, BigInt.asIntN(64, bitsOf(js[i])), true);
+    for (let i = 0; i < N; i++) dv.setBigInt64(dataOff + i * 8, (i in js) ? BigInt.asIntN(64, bitsOf(js[i])) : BigInt.asIntN(64, HOLE), true);
     return (0x7ffbn << 48n) | BigInt(start);
   };
   // 原地改写既有数组（保持句柄不变，支持别名/传参）：容量不足则换 data 块（同 push 语义）。
@@ -384,7 +389,7 @@ function makeQzvm(strings, opts) {
       dv.setInt32(off + 4, cap, true);
     }
     dv.setInt32(off, N, true);
-    for (let i = 0; i < N; i++) dv.setBigInt64(dataOff + i * 8, BigInt.asIntN(64, bitsOf(js[i])), true);
+    for (let i = 0; i < N; i++) dv.setBigInt64(dataOff + i * 8, (i in js) ? BigInt.asIntN(64, bitsOf(js[i])) : BigInt.asIntN(64, HOLE), true);
     return recv;
   };
   // 闭包调用：handle → 堆对象 [funcidx:i32][nCaps:i32][cell×N i64]。
@@ -421,7 +426,7 @@ function makeQzvm(strings, opts) {
     switch (name) {
       case "indexOf":     r = givenSlot(a1) ? arr().indexOf(toJS(a0), toJS(a1)) : arr().indexOf(toJS(a0)); break;   // 未传 fromIndex 必须**省略实参**（传 undefined 语义不同）
       case "lastIndexOf": r = givenSlot(a1) ? arr().lastIndexOf(toJS(a0), toJS(a1)) : arr().lastIndexOf(toJS(a0)); break;
-      case "includes":    { const v = toJS(a0); r = arr().some(x => x === v || (x !== x && v !== v)); break; }   // SameValueZero（NaN 命中）
+      case "includes":    r = arr().includes(toJS(a0)); break;   // SameValueZero；**不跳过洞**（[,].includes(undefined) === true）
       case "findLast":    { const a2 = arr(); const v = toJS(a0); r = a2.slice().reverse().find((x, i) => !!toJS(closureCall(a0, bitsOf(x), box(a2.length - 1 - i), TAG))); break; }
       case "findLastIndex": { const a2 = arr(); let idx = -1; for (let i = a2.length - 1; i >= 0; i--) { if (toJS(closureCall(a0, bitsOf(a2[i]), box(i), TAG))) { idx = i; break; } } r = idx; break; }
       case "slice":       r = arr().slice(toJS(a0), givenSlot(a1) ? toJS(a1) : undefined); break;
@@ -1160,7 +1165,7 @@ function makeQzvm(strings, opts) {
       const a = arrRead(recv);
       const idx = Math.trunc(toJS(i));
       if (idx < 0 || !isFinite(idx)) return v;
-      while (a.length < idx) a.push(undefined);
+      if (a.length < idx) a.length = idx;      // JS 语义：跳过的下标是**洞**（不是 undefined）
       a[idx] = toJS(v);
       arrSetInPlace(recv, a);
       return v;
