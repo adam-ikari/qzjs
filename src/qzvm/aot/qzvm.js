@@ -1230,9 +1230,18 @@ function makeQzvm(strings, opts) {
       if (name === "call" || name === "apply" || name === "bind") {
         const rawFn = hiR === HOST_HI ? handles[idxOf(recv)] : null;
         if (hiR === CLO_HI || typeof rawFn === "function") {
-          const callIt = (self2, rest) => hiR === CLO_HI
-            ? toJS(closureCall(recv, self2 === undefined ? TAG : self2, ...[0, 1, 2].map(i => rest[i] === undefined ? TAG : rest[i])))
-            : rawFn.apply(thisArgOf(self2), rest.slice(0, 3).map(toJS));
+          const callIt = (self2, rest) => {
+            if (hiR === CLO_HI) {
+              const off0 = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
+              const mi = mem ? new DataView(mem.buffer).getUint32(off0, true) : -1;
+              const mm = lamMeta && lamMeta[mi];
+              const passSelf = !!(mm && mm.synthThis);            // 合成箭头（对象字面量方法/访问器）：this 为真实 receiver 槽
+              const a = rest.map(x => x === undefined ? TAG : x);
+              return toJS(passSelf ? closureCall(recv, self2 === undefined ? TAG : self2, a[0], a[1], a[2])
+                                   : closureCall(recv, a[0], a[1], a[2], TAG));
+            }
+            return rawFn.apply(thisArgOf(self2), rest.slice(0, 3).map(toJS));
+          };
           if (name === "call") return ret(callIt(a0, [a1, a2, a3]));
           if (name === "apply") { const arr2 = a1 === undefined ? [] : (toJS(a1) || []).map(bitsOf); return ret(callIt(a0, arr2)); }
           // bind：返回宿主函数（thisArg 固定在前）——经 qz.call_value 可调用

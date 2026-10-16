@@ -576,7 +576,8 @@ class Emitter {
         if (this.usesDynAcc) { M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get"); }   // 访问器表（运行时 defineProperty）
         else { M.localGet(t.a); M.i64Load(3, foff); }
         M.else_();
-        this._emitUndefined();
+        // 未赋值/越界/undefined|null：交宿主（POJO 未赋值 → undefined；undefined/null → TypeError）
+        M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
         M.end();
         this._expLeave();
         M.else_();
@@ -967,6 +968,7 @@ class Emitter {
         const ar = ts.factory.createArrowFunction(undefined, undefined, ps, undefined,
             ts.factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken), body);
         ar.pos = body.pos; ar.end = body.end;
+        ar._qzSynthThis = paramNames.length > 0 && paramNames[0] === "this";   // 合成 self 形参（真实槽位）
         return ar;
     }
 
@@ -1119,12 +1121,14 @@ class Emitter {
     // 捕获变量存在堆 cell 块（blk 指向 [i64 × captures]，对象布局），读经 capMap、写回 store。
     emitLambda(lam, id) {
         const fname = "__lam_" + id;
-        const params = lam.parameters.map(p => p.name.text);
+        const skipThis = !lam._qzSynthThis;                  // 用户函数表达式的 `this` 形参为 TS 注解 → 不占 ABI 槽
+        const astParams = lam.parameters.filter(p => !(skipThis && ts.isIdentifier(p.name) && p.name.text === "this"));
+        const params = astParams.map(p => p.name.text);
         // 捕获名先分析并记录（emitLambdaBody 内 identifier 读写用 capMap 路由）
         const caps = this._capturesOf(lam);
-        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(lam.parameters && lam.parameters.length && lam.parameters[lam.parameters.length - 1].dotDotDotToken) });
+        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(astParams.length && astParams[astParams.length - 1].dotDotDotToken), synthThis: !!lam._qzSynthThis });
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
-        this._pendingLambdas.push({ lam, fname, params, caps });
+        this._pendingLambdas.push({ lam, fname, params, caps, astParams });
         return { fname, caps };
     }
 
@@ -1176,7 +1180,7 @@ class Emitter {
         for (const p of this._pendingLambdas) this._emitLambdaBody(p);
         this._pendingLambdas = [];
     }
-    _emitLambdaBody({ lam, fname, params, caps }) {
+    _emitLambdaBody({ lam, fname, params, caps, astParams }) {
         const M = this.m;
         const savedMap = this.varMap, savedCap = this.capMap, savedBlk = this.blkLocal;
         const savedMode = this.mode, savedDepth = this.depth, savedStatic = this._staticVars;
@@ -1185,12 +1189,13 @@ class Emitter {
         this.mode = "tagged";
         this._fnVoid = false;                                  // lambda 恒返回 i64
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
+        this._lamThisParam = !lam._qzSynthThis && (astParams || lam.parameters).some(p => ts.isIdentifier(p.name) && p.name.text === "this");   // 仅**用户**写的 this 注解形参 → 运行时 this = undefined
         const locals = this._collectLocals(lam.body);
         for (const p of lam.parameters) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         const nParams = 1 + params.length;                 // blk + 参数
         const nLoc = nParams + locals.length;
         this.varMap = new Map();
-        lam.parameters.forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, 1 + i); });
+        (astParams || lam.parameters).forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, 1 + i); });   // 已剔除 TS `this` 注解形参
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map();
         for (const n of caps) this.capMap.set(n, 0);        // 外层捕获名 → 创建方 env 索引（= blk 参数 local 0）
@@ -1227,7 +1232,7 @@ class Emitter {
         this.envLocal = ownCap.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;   // blk+参数之后
         this.envRef = ownCap.length ? this.envLocal : this.blkLocal;   // 嵌套 lambda 的 env：自身 env（链到 blk）或直接 blk
         M.i64Const(0n); M.globalSet(1);                     // 入口清 __err
-        this._emitParamPrologue(lam.parameters, 1);         // 默认值 / 解构形参（先于写 env）
+        this._emitParamPrologue(astParams || lam.parameters, 1);   // 默认值 / 解构形参（先于写 env；已剔除 TS `this` 注解形参）
         if (ownCap.length) {
             M.localGet(0); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // parent = blk(0)
             for (const n of ownCap) this.capMap.set(n, this.envLocal);
@@ -2457,7 +2462,7 @@ function compileTS(input, outWasm, opts = {}) {
         params: f.parameters.length,
     }));
     const lamMeta = {};
-    for (const meta of em._lamById.values()) lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest };
+    for (const meta of em._lamById.values()) lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis };
     // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
     const classMeta = em._classList.map(cname => {
         const c = em.classes.get(cname);
@@ -3000,6 +3005,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isThis(e)) {
         if (this.capMap.has("this")) { this._emitCapturedRead("this"); return; }   // 方法内闭包捕获 this → 经 env
+        if (this._lamThisParam) { this._emitUndefined(); return; }   // 该函数声明了 this 形参（TS 注解）→ 运行时 this = undefined
         const idx = this._local("this");
         if (idx === undefined) throw new Error("[tagged] this 仅在类方法/构造器内可用");
         this.m.localGet(idx); return;
@@ -3470,6 +3476,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const M = this.m, t = this._expEnter();
         this.emitTaggedExpr(e.expression); M.localSet(t.v);
         this._emitPropReadFromLocal(t.v, e.name.text);
+        this._emitErrCheck();          // undefined/null 读属性 → TypeError（转入本函数 catch）
         this._expLeave();
         return;
     }

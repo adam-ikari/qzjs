@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### undefined 属性读抛错 + this 形参模型（2026-10-16）
+- **属性访问 undefined/null → TypeError**：内存快路径「未赋值/越界」分支改走宿主 `prop_get`（POJO 未赋值 → undefined；undefined/null → TypeError）；调用点在链外统一 `_emitErrCheck`（此前尝试在嵌套 if 内插入会破坏 else/end 平衡）。提取方法 `const f = o.m; f()` 因此与 JS 一致抛错。
+- **`this` 形参是注解（不占实参槽）**：`function (this: any, k)` 的 `k` 现映射到正确槽位（此前 `this` 占槽 → `k` 错位得 NaN）；`this` 在该函数内按 JS 为 undefined（访问属性抛 TypeError，loud）。
+- **对象字面量方法/访问器的合成箭头**：首个 `this` 参数是**真实 receiver 槽**（`lamMeta.synthThis`）→ `.call/.apply/.bind` 对合成方法传 receiver，对用户注解形参不传。
+- 结果：**372/381（97.6%）**；残余 9 项**全部为 loud**；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 数组迭代器惰性化（2026-10-16）
 - `values()` / `keys()` / `entries()` 改为**惰性读 wasm 内存**（`liveIter`）：每次 `next()` 读当前长度与元素 → 迭代期间的 `push`/长度变化可见（JS 迭代的是活数组；此前取的是取值时刻的副本快照），洞按 `undefined` 贡献。
 - 结果：**371/381（97.4%）**；残余 10 项 = 7 loud + 3 已知静默差异（提取方法不抛错、`this` 捕获 NaN、…）；test_aot 233 ALL PASS；ctest 32/32 全绿。
