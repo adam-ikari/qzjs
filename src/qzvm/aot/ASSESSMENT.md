@@ -128,7 +128,7 @@
 9. 静态成员体内 `this.<name>` 经**派生类**调用且派生类**自有覆写**该名 → loud（本实现 `this` ≡ 定义类；未覆写时与 JS 一致，故不报错）
 
 **已知静默差异（2 项，架构级；优先级最高）**：
-- **宿主对象上的数组元素写**：`JSON.parse(...)` 结果里的数组字段经 `o.list[0] = v` 写 → 该字段读时被**转成 wasm 数组**（拷贝），写入只落在拷贝上 → 下次读回原值（静默丢写）。机制：`prop_get` 对宿主数组做了表示转换。
+- **`JSON.parse` 结果的数组字段写入丢失**（已用最小探针定位到**可观测行为**，内部机制待查）：`const h = JSON.parse('{"c":[1,2]}'); const c = h.c; c[0] = 99;` → `c[0]` 得 99 ✓，但 `h.c[0]` 仍为 1、`JSON.stringify(h.c)` 仍为 `[1,2]` → **每次读 `h.c` 得到不同数组实例**（重新物化），写入不落回。对照：对象字面量里的嵌套数组（`const o = {c:[1,2]}; o.c[0]=99`）**完全正确**。桩验证：读/写全程未调用任何宿主入口（`prop_get`/`get_index`/`set_index`/`arr_set_index` 均无命中）→ 差异在 wasm 侧表示，而非宿主互操作。探针：`/tmp/qzaux/corpus_j1.js`（json-arr-write2 用例）。
 - **`Object.assign` 多源键序**：多源合并（如 `Object.assign({}, base, {d:4}, over)`）时新键的追加位置与 JS 不同（JS：`a,b,d,c`；本实现 `a,b,c,d`）。机制：内部走键拷贝而非 `Object.assign` 语义。
 - 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏 `enumerable:false` 过滤。
 
