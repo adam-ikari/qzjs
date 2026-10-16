@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 宿主数组句柄统一（2026-10-16）
+- **宿主数组保持宿主句柄**：`object_get` / `prop_get` 对宿主对象的数组字段改返回 `tagHandle(jsArray)`（此前经 `ret` → `arrWriteback` 转 wasm box）→ 元素读/写经 `get_index`/`set_index` **就地**作用于真实 JS 数组。
+- **宿主来源数组的句柄别名**：`ret` 对宿主数组按 `WeakMap`+bump 世代缓存（`arrOfHost`）→ 同一 JS 数组在同一 bump 世代恒同一句柄（此前每次读新建 box → 写入丢失）。
+- 效果：`const h = JSON.parse(...); const c = h.c; c[0] = 99;` → `c[0]`、`h.c[0]`、`h.c.join()`、`JSON.stringify(h)` 全部一致（此前三处不一致）；`deep-clone-and-compare` 转一致。
+- 结果：**521/530（98.3%）**；残余 9 项 = 8 loud + 1 已知静默（`Object.assign` 多源键序）。
+
 ### 第二十一批差分审计（2026-10-16）
 - 新增 `audit_corpus21.js`（18 例：构造器 super 参数链 / 闭包柯里化·记忆化·组合 / 高阶数组管道 / 对象展开与覆盖 / valueOf·toString 协议参与比较与算术 / 描述符 getter-setter 与自有属性判定 / 短路副作用 / 分发表与状态机 switch / 嵌套 try-catch-finally 与 return / 计数器闭包 / 模板字符串方法 / Map·Set 操作 / 整数与浮点边界 / 类字段箭头函数 this / 继承访问器在构造器内读 / 深拷贝比较 / for-in 与 Object.keys·entries）。
 - **一元 `-` 的 ToNumber**：`-a` 对对象/字符串此前直接翻转 f64 符号位 → **静默 NaN**；新增 `qz.neg` 与一元 guard（句柄走宿主 `-ToJS(a)`，纯数值内联 `f64.neg`）。

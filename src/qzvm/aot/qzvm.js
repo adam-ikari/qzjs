@@ -164,6 +164,8 @@ function makeQzvm(strings, opts) {
   const isArrH = (b) => (BigInt(b) >> 48n) === 0x7ffbn;
   // wasm 原生数组（0x7FFB）：header[0]=len，header[2]=dataOff，data = i64×len（元素解引用递归）。
   const arrOf = new WeakMap();   // JS 数组 → 原 wasm 数组句柄（往返还原，保持别名）
+  const arrOfHost = new WeakMap();   // **宿主来源**的 JS 数组 → {h, bump}：同一 bump 世代内同一数组恒同一句柄
+                                     // （否则 `h.c` 每次读都新建 box → `h.c[0]=v` 写入丢失；见 ASSESSMENT 已知静默项）
   const arrRead = (b) => {
     const off = Number(BigInt(b) & MASK32);
     const dv = new DataView(mem.buffer);
@@ -471,7 +473,13 @@ function makeQzvm(strings, opts) {
   // array→0x7FFB、null/undefined→固定槽、其它→0x7FF9 句柄。
   const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
                    : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
-                   : Array.isArray(r) ? (arrOf.has(r) ? arrOf.get(r) : arrWriteback(r))   // wasm 数组 → 原句柄（别名语义）
+                   : Array.isArray(r) ? (arrOf.has(r) ? arrOf.get(r)                        // wasm 数组回程 → 原句柄（别名语义）
+                     : (() => { const curB = bumpRef ? Number(bumpRef.value) : -1;
+                                const e0 = arrOfHost.get(r);
+                                if (e0 && e0.bump <= curB) return e0.h;                     // 同一世代：同一 JS 数组 → 同一句柄
+                                const h0 = arrWriteback(r);
+                                arrOfHost.set(r, { h: h0, bump: curB });
+                                return h0; })())
                    : (r !== null && typeof r === "object" && pojoOf.has(r) && pojoOf.get(r).mem === mem)
                      ? ((pojoOf.get(r).isInst ? (0x7ffen << 48n) : TAG) | BigInt(pojoOf.get(r).off))   // 物化过的 POJO/实例 → 还原原句柄（find/pop/at 等返回元素时保持身份）
                    : tagHandle(r);
@@ -690,7 +698,9 @@ function makeQzvm(strings, opts) {
     bindMem,
     object_new: () => tagHandle({}),
     object_set: (o, k, v) => { handles[idxOf(o)][strings[k]] = toJS(v); },
-    object_get: (o, k) => ret(handles[idxOf(o)][strings[k]]),   // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）
+    // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）；**数组保持宿主句柄** → 元素读/写就地作用于真实
+    // JS 数组（否则 wasm box 与宿主数组分离：h.c[0]=v 写入 box，JSON.stringify(h) 仍见旧值）。
+    object_get: (o, k) => { const v = handles[idxOf(o)][strings[k]]; return Array.isArray(v) ? tagHandle(v) : ret(v); },
     string_new: (id) => tagHandle(strings[id]),
     string_concat: (a, b) => strWriteback(toJS(a) + toJS(b)),
     to_string: (v) => strWriteback(String(toJS(v))),           // ToString：对象走 string hint（toString 优先）
@@ -846,7 +856,10 @@ function makeQzvm(strings, opts) {
         }
         return TAG;
       }
-      if (hi === HOST_HI) { const o = handles[off]; return ret(o == null ? undefined : o[name]); }
+      if (hi === HOST_HI) {
+        const o = handles[off], hv = o == null ? undefined : o[name];
+        return Array.isArray(hv) ? tagHandle(hv) : ret(hv);   // 宿主数组：保持宿主句柄（就地写，见 object_get 注释）
+      }
       if (hi === CLO_HI) {                                   // 闭包值：函数自身属性
         const dv3 = mem ? new DataView(mem.buffer) : null;
         const ar = dv3 && off + 12 <= mem.buffer.byteLength ? dv3.getInt32(off + 8, true) : 0;

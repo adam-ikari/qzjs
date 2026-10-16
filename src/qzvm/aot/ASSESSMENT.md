@@ -113,9 +113,9 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
-结果：**520/530 一致（98.1%）**；残余 10 项：8 项 loud + 2 项**已知静默**（见下，架构级）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**521/530 一致（98.3%）**；残余 9 项：**8 项 loud + 1 项已知静默**（`Object.assign` 多源键序）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
-**残余 loud 清单（第二十一批后，8 项 loud + 2 项已知静默）**：
+**残余 loud 清单（第二十一批后，8 项 loud + 1 项已知静默）**：
 1. `arguments` 对象（建议 rest 形参）
 2. generator（`function*` / `yield`）
 3. async / await（需 Promise 运行时）
@@ -127,17 +127,11 @@
 9. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
 9. 静态成员体内 `this.<name>` 经**派生类**调用且派生类**自有覆写**该名 → loud（本实现 `this` ≡ 定义类；未覆写时与 JS 一致，故不报错）
 
-**已知静默差异（2 项，架构级；优先级最高）**：
-- **`JSON.parse` 结果的数组字段写入丢失**（已用最小探针定位到**可观测行为**，内部机制待查）：`const h = JSON.parse('{"c":[1,2]}'); const c = h.c; c[0] = 99;` → `c[0]` 得 99 ✓，但 `h.c[0]` 仍为 1、`JSON.stringify(h.c)` 仍为 `[1,2]` → **每次读 `h.c` 得到不同数组实例**（重新物化），写入不落回。对照：对象字面量里的嵌套数组（`const o = {c:[1,2]}; o.c[0]=99`）**完全正确**。桩验证：读/写全程未调用任何宿主入口（`prop_get`/`get_index`/`set_index`/`arr_set_index` 均无命中）→ 差异在 wasm 侧表示，而非宿主互操作。探针：`/tmp/qzaux/corpus_j1.js`（json-arr-write2 用例）。
-- **`Object.assign` 多源键序**：多源合并（如 `Object.assign({}, base, {d:4}, over)`）时新键的追加位置与 JS 不同（JS：`a,b,d,c`；本实现 `a,b,c,d`）。机制：内部走键拷贝而非 `Object.assign` 语义。
-- 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏 `enumerable:false` 过滤。
+**已知静默差异（1 项）**：
+- **`Object.assign` 多源键序**：多源合并时新键的追加位置与 JS 不同（JS：`a,b,d,c`；本实现 `a,b,c,d`）。单源/字面量场景已验证一致。
+- 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏过滤（探针 /tmp/qzaux/corpus_p1.js 的 hasown-nonenum）。
 
-**receiver 通道（已完成 2026-10-16）**：带 `this` 形参的闭包/函数表达式现有真实 receiver 槽 —— `qz.closure_call` 增第 6 参 `recv`、`qz.call_value` 增第 7 参 `recv`，宿主在 `closureCall` 内对 `synthThis` 闭包把 `recv` 前置为槽 0；发射器所有调用点补 `recv`（普通调用 = undefined，与 JS 一致），`_calleeParams` 见首参为 `this` 即 `slice(1)`（receiver 不占实参槽）。三类宿主调用方（wasm 侧调用 / 物化包装器 `object_set_method`·`obj_accessor` / `call`·`apply`·`bind` 的 `callIt`·`cm`）全部改为经 `recv` 传 receiver。效果：`fn-call-apply-bind`、`callback-this-binding`、`this-arrow-vs-fn`、`closure-captures-this-method` 全部转为一致。
-现状约定：`synthThis` 闭包（对象字面量方法/访问器，`_synthArrow` 合成）期望 **槽 0 = receiver**，由三类调用方以 `a0` 传入：
-1) wasm 侧 `qz.closure_call` / `qz.call_value`（发射器 `_emitClosureCall` / `_emitValueCall`，共 6 处 `call_value` + 2 处 `closure_call` 发射点）；
-2) **宿主物化包装器**：`object_set_method`（`obj[strings[k]] = function(...args)`）、`obj_accessor`（`opt.get` / `opt.set`，含 `selfOf`）；
-3) `call/apply/bind`：`method_call` 内的 `callIt` 与宿主物化函数的 `cm`。
-重构方案（已实现过一版，含：QZ 表 `closure_call` 加 `recv` 第 6 参、`call_value` 加第 7 参；宿主 `closureCall(…, ovfArr, recv)` 内对 `synthThis` 前置 receiver；发射器 `_calleeParams` 见到 `this` 形参即 `slice(1)` 且所有调用点补 `recv = undefined`；`lamMeta.thisSlot`）。该版一度达到 test_aot ALL PASS / corpus17 18/18，但一次「从旧备份重建宿主文件」把宿主与发射器的补丁集合**弄不同步**，导致 `字面量.访问器+方法` 退化；已整体 `git restore` 回 HEAD。重做时**必须**同批改完上述三类调用方的**全部**站点，改完立即跑 `test_aot.js`（含 `字面量.访问器+方法` 用例）确认。
+**已修（2026-10-16，第二十一批后）**：`JSON.parse` 结果里的数组字段此前每次读得到不同实例（wasm box 与宿主数组分离）→ 写入丢失；现宿主数组保持**宿主句柄**（`object_get`/`prop_get` 对 `Array.isArray` 值返回 `tagHandle`），元素读/写就地作用于真实 JS 数组 → 读值与 `JSON.stringify` 视图一致（探针 corpus_j1 3/3）。
 
 **另：窄面 loud（避免静默错值，非缺陷残留）**：`o[带副作用] op= v` / `o[带副作用] ??= v`（重复求值风险）、`o(带副作用).f = v`、catch 解构的默认值/嵌套/rest、`o.f?.()` 之外的复杂可选链组合。
 
