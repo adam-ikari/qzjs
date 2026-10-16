@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T00:46:08"
+updated: "2026-10-16T01:39:28"
 ---
 
 <!-- compiled_truth -->
@@ -104,4 +104,10 @@ updated: "2026-10-16T00:46:08"
   kind: decision
   summary: "AOT 语义精度第二批（差分审计驱动）：①bool 独立 tag 0x7FFC（此前 tagged bool = f64 0/1，与 number 混淆 → 's'+true 得 's1'、typeof true 得 'number'、1==true 得 false）。②null/undefined 区分：null 用固定槽 handles[1]（0x7FF9|1）、undefined handles[0]（0x7FF9|0），此前统一 0x7FF9|0 → typeof null 得 'undefined'。③宽松 ==/!= 走宿主 qz.eq/qz.ne（此前与 === 同走严格 → 1=='1' 得 false）。④**（宿主 qz.math_pow/qz.pow）、??（qz.is_nullish）、~/+（qz.bnot/qz.to_num）。⑤% 精确到 JS Number::remainder（零余数符号随被除数——原 f64Neg 把 2%2 的 +0 翻成 -0；差溢出走宿主 fmod）。⑥+ 拼接 ToPrimitive（区分纯数/串/bool/句柄，双纯数走原生 f64 add 否则宿主）。⑦NaN truthy（num emitCond 从 x!=0 改 (x!=0)&&(x==x)，!x 同源）。守门 test_aot.js 135 ALL PASS。已知限制（loud 非静默）：位运算 NaN/Inf trap、instanceof/in/?./void/delete/**=/??= 未实现、typeof function 报 'object'。"
   source: "会话 2026-10-15：完成aot 目标下的差分审计"
+  affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
+
+- time: 2026-10-16T01:39:28
+  kind: decision
+  summary: "AOT 差分审计第三批（静默错修复 + 未实现显式报错）：①可选链 o?.x / o?.[i] / o?.length 静默返回 0 → 现 base 求值一次、nullish 短路 undefined（不求 index）。②数组方法默认参数：a0/a1 是 tagged 句柄非 JS undefined，'a0===undefined' 恒假 → join()/concat()/splice(i)/sort() 全错；改判 toJS(a0)。③sort() 无比较器改引擎默认字典序。④.length 返回 UTF-8 字节数应 UTF-16 码元数 → 新增 wasm helper qzs_utf16len。⑤numstr 截断小数（''+0.5 得 '0'）→ 整数走 wasm、小数/NaN/Inf 走宿主 String。⑥闭包写捕获变量值快照语义致外层读不到（静默错值）→ 新增静态检测 _closureWriteConflict，lambda 写+外层访问 → 编译期报错（loud 优于静默错；共享环境待实现）。⑦未实现特性显式报错：静态方法/解构/字段??=/内建全局(Math/JSON/String…)/instanceof/in/**=。守门 test_aot.js 146 ALL PASS。"
+  source: "会话 2026-10-15：完成aot 目标下的多轮差分审计"
   affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
