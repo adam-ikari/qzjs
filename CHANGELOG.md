@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十四批差分审计（2026-10-16）
+- 新增 `audit_corpus24.js`（21 例：Math 特殊值（无参 min/max、字符串/布尔参与）、数组方法链、**泛化数组方法**（Array.prototype.join/map/push/slice.call 于 array-like）、位运算边界、typeof 矩阵、解构进阶、in 运算符边界、展开实参 + rest、switch default 非尾、void/一元边界、类私有跨方法、matchAll/替换回调、对象键序与数组索引、JSON 嵌套转义、reduce 无初值、默认参数闭包、数组解构返回、字符串 Unicode 比较、方法链 fluent、对象展开字面量序、复合循环）。
+- **修复：`typeof <类表达式>` → "function"**（此前 loud「不支持的表达式: ClassExpression」）。
+- **已知窄面差异（已记录）**：`[].reduce(f, undefined)`（显式 undefined 初值）——ABI 无法区分「显式 undefined」与「缺参」，本实现按缺参处理抛 TypeError（JS 返回 undefined）；仅显式-undefined 场景偏差。
+- 结果：**577/590（97.8%）**；残余 13 例 = 12 loud + 1 窄面静默（for...of 快照）。
+
 ### 第二十三批差分审计（2026-10-16）
 - 新增 `audit_corpus23.js`（20 例：新数组方法 at/findLast/toReversed/toSorted/toSpliced/with、Object.fromEntries 与可迭代、**Map/Set 迭代期间并发修改**、getter 抛错传播、原型遮蔽、delete 与稀疏数组、深可选链/空值合并、字符串+数字混合运算、模板标签求值顺序、JSON 格式化细节、instanceof 边界、switch 表达式 case、Object.create 变体、Number 方法矩阵、复合 while、循环变量闭包、嵌套展开与修改、字符串转义、可变闭包单元格）。
 - **新发现静默差异（已记录）**：`for...of` 走 `qz.iter_array` 的**急切快照**（一次性转 wasm 数组）→ 迭代期间对 Map 的增删作用于快照；JS 迭代器惰性（删除项被跳过）。仅「迭代+并发修改」模式偏差（`map-mutate-during-iter`）。

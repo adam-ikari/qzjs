@@ -3501,8 +3501,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitStrLitHandle("function");   // 函数值（顶层函数名 / 持有闭包的变量）
             return;
         }
-        if (this._classOfExpr(e.expression) !== null) {
-            this._emitStrLitHandle("function");   // typeof <类名> → "function"（class 是函数对象）
+        if (this._classOfExpr(e.expression) !== null || ts.isClassExpression(e.expression)) {
+            this._emitStrLitHandle("function");   // typeof <类名>/<类表达式> → "function"（class 是函数对象）
             return;
         }
         // 内建全局：typeof Math/JSON → "object"；typeof Symbol/parseInt/… → "function"（JS 语义，免宿主调用）
