@@ -400,11 +400,14 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function ovals(): any { const o: any = { a: 7 }; return Object.values(o)[0]; }\n"
       + "export function tpo(): any { const o: any = { a: 1 }; return typeof o; }\n"
       + "export function ideq(): any { const o: any = { a: 1 }; return o === o; }\n"
-      + "export function mkeq(): any { return ({ a: 1 } as any) === ({ a: 1 } as any); }\n");
+      + "export function mkeq(): any { return ({ a: 1 } as any) === ({ a: 1 } as any); }\n"
+      + "export function inClass(): any { class L { v: number = 5; get(): number { return this.v; } } return new L().get(); }\n"
+      + "export function inFn(): any { function h(n: number): number { return n * 3; } return h(4); }\n");
     const rMs = compileTS(path.join(os.tmpdir(), "qz_aot_misc.ts"), path.join(os.tmpdir(), "qz_aot_misc.wasm"), {});
     const qzMs = makeQzvm(rMs.strings, { fields: rMs.fields });
     const { instance: instMs } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_misc.wasm")), { qz: qzMs });
     qzMs.bindMem(instMs.exports.memory); if (instMs.exports.__bump) qzMs.bindBump(instMs.exports.__bump);
+    qzMs.bindClosures(instMs.exports, rMs.lamMeta); qzMs.bindClasses(instMs.exports, rMs.classMeta);
     const callMs = (n) => { if (instMs.exports.__bump_reset) instMs.exports.__bump_reset(); return qzMs._toJS(instMs.exports[n]()); };
     check("void (n=5) 副作用保留", callMs("vd"), 5);
     check("x **= 3", callMs("pwe"), 8);
@@ -420,6 +423,8 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("typeof POJO", callMs("tpo"), "object");
     check("POJO === 自身", callMs("ideq"), true);
     check("不同 POJO !==", callMs("mkeq"), false);
+    check("函数内 class 声明", callMs("inClass"), 5);
+    check("函数内 function 声明", callMs("inFn"), 12);
     // in / delete
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_indel.ts"),
         "export function iin(): any { const o: any = { a: 1 }; return (\"a\" in o) + \":\" + (\"b\" in o); }\n"

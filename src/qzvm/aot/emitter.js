@@ -628,9 +628,9 @@ class Emitter {
     // self = 实例句柄（i64 tagged）；实例字段驻 wasm 内存（与 POJO 同 _fieldIndex 布局），
     // `this` 映射 local 0（self），`this.x` 复用 POJO 字段 load/store（零跨界）。
     // 静态分派：receiver 静态类型已知 → 沿父链直调导出 __m_<C>$<m>；动态 → qz.method_call。
-    collectClasses(sf) {
-        const firstNew = this._classList.length;   // 本文件新增类的起点（多文件时逐文件调用）
-        for (const st of sf.statements) {
+    collectClasses(clsNodes) {   // clsNodes: 已收集的 ClassDeclaration 列表（含嵌套，见 collectDecls）
+        const firstNew = this._classList.length;
+        for (const st of clsNodes) {
             if (!ts.isClassDeclaration(st)) continue;
             if (!st.name) throw new Error("[tagged] 匿名类不支持");
             const cname = st.name.text;
@@ -1365,12 +1365,17 @@ function compileTS(input, outWasm, opts = {}) {
     const fns = [];
     const fnSf = new Map();          // 函数节点 → 源文件（逐函数设 em.sf，供行号/DWARF）
     const clsStmts = [];
-    for (const f of sfs) {
-        for (const st of f.statements) {
-            if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); }
-            else if (ts.isClassDeclaration(st)) clsStmts.push(st);
-        }
-    }
+    // 递归收集：函数/类声明**任意深度**均提升到模块级（函数内定义的 class/function 亦可编译）。
+    // 提升后不再深入其体（避免重复收集其内部声明）。
+    const collectDecls = (f) => {
+        const walk = (n) => {
+            if (ts.isFunctionDeclaration(n) && n.name) { fns.push(n); fnSf.set(n, f); }
+            else if (ts.isClassDeclaration(n)) { clsStmts.push(n); }
+            ts.forEachChild(n, walk);   // 继续下探：函数内的 class/function 声明同样提升
+        };
+        for (const st of f.statements) walk(st);
+    };
+    for (const f of sfs) collectDecls(f);
     const hasClasses = clsStmts.length > 0;
     // import 绑定：{ 本地名 → 目标顶层函数名 }。模块图由 tsc 解析（createProgram），
     // 用 checker 穿透 re-export 链解析到最终目标——AST 级 `sp.propertyName` 只
@@ -1607,7 +1612,7 @@ function compileTS(input, outWasm, opts = {}) {
             m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
         }
         // 阶段1.5：收集类（登记方法/构造器签名）——须在发射体前
-        if (hasClasses) for (const s of sfs) em.collectClasses(s);
+        if (hasClasses) em.collectClasses(clsStmts);
         // 阶段1.5b：扫描 lambda（顶层函数体 + 类方法/构造器体 + 字段初值），登记 __lam_N 签名
         let lamSeq = 0;
         for (const st of fns) {
@@ -1774,6 +1779,7 @@ Emitter.prototype._emitStrParts = function () {
 Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
 Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));
+    if (ts.isClassDeclaration(s) || ts.isFunctionDeclaration(s)) return;   // 已提升为模块级（见 collectDecls）
     if (ts.isVariableStatement(s)) {
         for (const d of s.declarationList.declarations) this._emitBindingDecl(d);
         return;
