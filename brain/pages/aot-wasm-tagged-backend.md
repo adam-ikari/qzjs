@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T06:53:37"
+updated: "2026-10-16T10:42:35"
 ---
 
 <!-- compiled_truth -->
@@ -131,4 +131,14 @@ updated: "2026-10-16T06:53:37"
 - time: 2026-10-16T06:53:37
   kind: decision
   summary: "差分审计第二轮：闭包 tag/容量/访问器/展开/错误语义"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T10:26:24
+  kind: decision
+  summary: "第三轮差分审计：参数/循环绑定/容器/私有字段等"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T10:42:35
+  kind: evidence
+  summary: "第五轮差分审计：189/192 一致"
   affects: [aot-wasm-tagged-backend]
