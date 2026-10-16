@@ -2688,7 +2688,9 @@ Emitter.prototype._findStaticAccessor = function (cn, name, kind) {
 Emitter.prototype._classOfExpr = function (node) {
     while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)
         || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node))) node = node.expression;
-    return (node && ts.isIdentifier(node) && this.classes.has(node.text)) ? this._className(node.text) : null;
+    if (!node || !ts.isIdentifier(node)) return null;
+    const cn = this._className(node.text);            // 类表达式别名（const C = class {…}）：typeof/静态访问要按别名解析
+    return this.classes.has(cn) ? cn : null;
 };
 Emitter.prototype._isClassName = function (node) {
     while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)

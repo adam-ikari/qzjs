@@ -127,6 +127,13 @@
 9. 内建调用 >4 实参（内建 ABI 仅 4 槽；如 `Date.UTC(y,m,d,h,mi,s,ms)`）
 10. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
 
+**receiver 通道重构（已尝试，待重做）**：目标 = 带 `this` 形参的闭包获得真实 receiver（消除「函数表达式 `this` 形参作回调」loud + 恢复 `fn-call-apply-bind`）。
+现状约定：`synthThis` 闭包（对象字面量方法/访问器，`_synthArrow` 合成）期望 **槽 0 = receiver**，由三类调用方以 `a0` 传入：
+1) wasm 侧 `qz.closure_call` / `qz.call_value`（发射器 `_emitClosureCall` / `_emitValueCall`，共 6 处 `call_value` + 2 处 `closure_call` 发射点）；
+2) **宿主物化包装器**：`object_set_method`（`obj[strings[k]] = function(...args)`）、`obj_accessor`（`opt.get` / `opt.set`，含 `selfOf`）；
+3) `call/apply/bind`：`method_call` 内的 `callIt` 与宿主物化函数的 `cm`。
+重构方案（已实现过一版，含：QZ 表 `closure_call` 加 `recv` 第 6 参、`call_value` 加第 7 参；宿主 `closureCall(…, ovfArr, recv)` 内对 `synthThis` 前置 receiver；发射器 `_calleeParams` 见到 `this` 形参即 `slice(1)` 且所有调用点补 `recv = undefined`；`lamMeta.thisSlot`）。该版一度达到 test_aot ALL PASS / corpus17 18/18，但一次「从旧备份重建宿主文件」把宿主与发射器的补丁集合**弄不同步**，导致 `字面量.访问器+方法` 退化；已整体 `git restore` 回 HEAD。重做时**必须**同批改完上述三类调用方的**全部**站点，改完立即跑 `test_aot.js`（含 `字面量.访问器+方法` 用例）确认。
+
 **另：窄面 loud（避免静默错值，非缺陷残留）**：`o[带副作用] op= v` / `o[带副作用] ??= v`（重复求值风险）、`o(带副作用).f = v`、catch 解构的默认值/嵌套/rest、`o.f?.()` 之外的复杂可选链组合。
 
 已支持（本轮新增/完善）：形参默认值·解构形参·rest 形参（调用点按形参表拆包）、let/const **每迭代绑定**（for 在增量处换层，while/for-of 在体首换层）、闭包值独立 tag 0x7FFF、对象字面量方法/访问器（宿主对象 + defineProperty 回调 wasm 闭包，成员闭包纳入捕获分析）、私有字段/方法（`#类名#名`）、静态字段继承/遮蔽与静态块与静态访问器、标签模板、正则字面量、Map/Set/Date、for-of 解构与可迭代、值调用 `qz.call_value`、嵌套解构、**跨函数 throw 传播**（调用点查 `__err`）与 try-finally 重抛、类字段统一容量 + 运行期新键 extras、字符串不可变（逃逸分析决定原地追加 / `qz.str_dup`）、数组/POJO/闭包句柄往返还原、POJO 与实例 clsId 撞号修复。

@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 修复（2026-10-16）
+- **类表达式别名解析**：`const C = class { … }` 后 `typeof C` / `C.x` 经 `_classOfExpr` 按 `_className` 别名解析 → 此前 `typeof C` 静默给 `undefined`（应 `"function"`）。
+- 结果：**464/474（97.9%）**；残余 10 项全部 loud。
+- 记录：receiver 通道重构方案与三类调用方站点清单写入 `ASSESSMENT.md`（一次尝试因宿主/发射器补丁不同步而回退）。
+
 ### 第十八批补充（2026-10-16）
 - **计算属性类字段**（`["d"+"yn"]: any = 1` / `[KEY + "2"]`）：编译期常量折叠为静态字段名（字面量 / 字面量拼接 / 模块级字面量 const / 括号 / as 断言）；无法折叠 → loud。
 - **类名解析跳过断言**：`(C as any).st` ≡ `C.st`（静态读/写/`typeof C` 一致）；类名**作值**仍 loud。
