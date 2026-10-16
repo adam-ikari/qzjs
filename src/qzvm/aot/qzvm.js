@@ -501,7 +501,7 @@ function makeQzvm(strings, opts) {
     switch (name) {
       case "indexOf":     r = givenSlot(a1) ? arr().indexOf(toJS(a0), toJS(a1)) : arr().indexOf(toJS(a0)); break;   // 未传 fromIndex 必须**省略实参**（传 undefined 语义不同）
       case "lastIndexOf": r = givenSlot(a1) ? arr().lastIndexOf(toJS(a0), toJS(a1)) : arr().lastIndexOf(toJS(a0)); break;
-      case "includes":    r = arr().includes(toJS(a0)); break;   // SameValueZero；**不跳过洞**（[,].includes(undefined) === true）
+      case "includes":    r = givenSlot(a1) ? arr().includes(toJS(a0), toJS(a1)) : arr().includes(toJS(a0)); break;   // SameValueZero；不跳洞；支持 fromIndex
       case "findLast":    { const a2 = arr(); const v = toJS(a0); r = a2.slice().reverse().find((x, i) => !!toJS(closureCall(a0, bitsOf(x), box(a2.length - 1 - i), TAG))); break; }
       case "findLastIndex": { const a2 = arr(); let idx = -1; for (let i = a2.length - 1; i >= 0; i--) { if (toJS(closureCall(a0, bitsOf(a2[i]), box(i), TAG))) { idx = i; break; } } r = idx; break; }
       case "slice":       r = arr().slice(toJS(a0), givenSlot(a1) ? toJS(a1) : undefined); break;
@@ -624,6 +624,23 @@ function makeQzvm(strings, opts) {
       if (BigInt.asUintN(64, cur) === TAG) { throwValue(new TypeError("Cannot add property " + name + ", object is not extensible")); return true; }
     }
     return false;
+  };
+  // seal/freeze：把对象**既有**属性的 configurable/writable 写入标志表（描述符报告与写保护一致）
+  const markAllProps = (off, w, c) => {
+    syncPropFlags();
+    const size = mem ? new DataView(mem.buffer).getInt32(off + 4, true) : 0;
+    for (const [name, idx] of fieldEntries) {
+      if (idx + 8 > size) continue;
+      const cur = propFlags.get(off + "|" + name) || {};
+      propFlags.set(off + "|" + name, { w: w === undefined ? cur.w : w, c: c === undefined ? cur.c : c });
+    }
+    syncExtras();
+    for (const [k] of extras) {
+      const bar = k.indexOf("|");
+      if (Number(k.slice(0, bar)) !== off) continue;
+      const cur = propFlags.get(k) || {};
+      propFlags.set(k, { w: w === undefined ? cur.w : w, c: c === undefined ? cur.c : c });
+    }
   };
   return {
     // POJO 分配：返回 wasm 内存偏移（裸 i32），字段由 wasm i64.store 写入（零跨界）
@@ -1033,6 +1050,16 @@ function makeQzvm(strings, opts) {
     },
     set_index: (o, k, v) => {
       const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === 0x7ffbn) {                            // wasm 数组 + 数字形态字符串键 → 按索引写（JS：a["0"] ≡ a[0]）
+        const kk = toJS(k);
+        if (typeof kk === "string" && /^\d+$/.test(kk)) {
+          const a2 = arrRead(o), i2 = Number(kk);
+          while (a2.length <= i2) a2.push(undefined);
+          a2[i2] = toJS(v);
+          arrSetInPlace(o, a2);
+          return;
+        }
+      }
       if (hi === TAG_HI || hi === INST_HI) {
         if (off < 8) { handles[off] = toJS(v); return; }
         { const kk = toJS(k); if (typeof kk === "symbol") { symBucket(off).set(kk, v); return; } }
@@ -1099,8 +1126,8 @@ function makeQzvm(strings, opts) {
           if (op2 === "isFrozen") return boxBool(frozen.has(off0));
           if (op2 === "isSealed") return boxBool(frozen.has(off0) || sealed.has(off0));
           if (op2 === "isExtensible") return boxBool(!(frozen.has(off0) || sealed.has(off0) || nonExt.has(off0)));
-          if (op2 === "freeze") { frozen.add(off0); sealed.add(off0); nonExt.add(off0); return a0; }
-          if (op2 === "seal") { sealed.add(off0); nonExt.add(off0); return a0; }
+          if (op2 === "freeze") { frozen.add(off0); sealed.add(off0); nonExt.add(off0); markAllProps(off0, false, false); return a0; }   // 既有属性：writable/configurable = false
+          if (op2 === "seal") { sealed.add(off0); nonExt.add(off0); markAllProps(off0, undefined, false); return a0; }                     // 既有属性：configurable = false
           nonExt.add(off0); return a0;
         }
       }
@@ -1214,6 +1241,7 @@ function makeQzvm(strings, opts) {
         if (name === "Object.getOwnPropertyDescriptor") return ret(Object.getOwnPropertyDescriptor(o0, toJS(a1)));
         return ret(Object.getOwnPropertyDescriptors(o0));
       }
+      if (n > 4) throw new Error("qz.builtin 调用超过 4 个实参未实现（" + name + "；内建 ABI 仅 4 槽）——请改用 ≤4 实参或先打包数组");   // 避免静默丢参
       let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
       if (fn === undefined && typeof globalThis[name] === "function") fn = globalThis[name];   // 内建全局函数作调用（Symbol/BigInt/Reflect/…）
       if (fn === undefined && name.indexOf(".") > 0) {                       // 点号成员（Symbol.for / Reflect.has / Number.isInteger…）

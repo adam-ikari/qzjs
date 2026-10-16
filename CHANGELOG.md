@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十七批差分审计（2026-10-16）
+- 新增 `audit_corpus17.js`（18 例：数组全方法矩阵 / 字符串全方法矩阵 / seal·freeze 与描述符交互 / 错误形态 / WeakMap·WeakSet / 私有字段继承遮蔽 / 日期时区无关量 / 数字形态字符串索引 / 箭头 this 词法 / switch 复杂流 / 对象数组变异 / 数值边界 / 冻结键序 / 解构交换默认值 / 回调 this / 排序数值串 / Map 对象键 / 字符迭代）。
+- **`includes(v, fromIndex)`**：补 `fromIndex`（未传必须省略实参）。
+- **`Object.seal`/`freeze` 与描述符**：既有属性的 `configurable`/`writable` 同步写入标志表（`markAllProps`）→ `getOwnPropertyDescriptor` 报告正确 + 写保护生效。
+- **数组的「数字形态字符串」索引**：`a["0"] = x` 与 `a[0] = x` 等价（此前写到物化副本 → 静默丢失）。
+- **内建调用 >4 实参 → loud**：内建 ABI 仅 4 槽（`n > 4` 时显式报错），避免静默丢参（如 `Date.UTC(2024,0,15,12,30,45,123)`）。
+- 已知 loud（新增）：函数表达式带 `this` 形参作为**回调实参**传递时（`h.runWith(function (this) {...})`）仍报「this 仅在类方法/构造器内可用」。
+- 结果：**445/455（97.8%）**；**残余 10 项全部为 loud（零静默错值）**；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 第十六批差分审计（2026-10-16）
 - 新增 `audit_corpus16.js`（19 例：属性描述符全矩阵 / Date 方法矩阵 / RegExp lastIndex·sticky / 命名空间对象 / 私有静态跨类 / 排序稳定性 / 数值格式矩阵 / Unicode normalize / getOwnPropertyDescriptor / 数组拷贝语义 / entries·values 深水 / 闭包性能形态 / try-finally 值路径 / switch 穿透 / 数组方法返回类型 / 嵌套解构 / 布尔·数字强转 / 访问器继承混合 / JSON 嵌套）。
 - **`super.v = x`（父类属性写）**：此前未实现（`SuperKeyword` 表达式报错）→ 现优先调父类 setter，否则按父类字段槽直写（与 `super.v` 读对称）。
