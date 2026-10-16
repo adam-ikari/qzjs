@@ -206,8 +206,8 @@ function makeQzvm(strings) {
       case "lastIndexOf": r = arr().lastIndexOf(toJS(a0)); break;
       case "includes":    r = arr().some(x => x === toJS(a0)); break;
       case "slice":       r = arr().slice(toJS(a0), a1 === undefined ? undefined : toJS(a1)); break;
-      case "concat":      r = arr().concat(a0 === undefined ? [] : toJS(a0)); break;
-      case "join":        r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(a0 === undefined ? "," : String(toJS(a0))); break;
+      case "concat":      r = arr().concat(toJS(a0) === undefined ? [] : toJS(a0)); break;
+      case "join":        r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(toJS(a0) === undefined ? "," : String(toJS(a0))); break;
       case "reverse":     r = arrSetInPlace(recv, arr().reverse()); return recv;
       case "shift":       { const a = arr(); r = a.length ? a.shift() : undefined; arrSetInPlace(recv, a); return ret(r); }
       case "unshift":     { const a = arr(); a.unshift(toJS(a0)); arrSetInPlace(recv, a); return box(a.length); }
@@ -215,15 +215,15 @@ function makeQzvm(strings) {
       case "filter":      r = arr().filter((v, i) => !!cbv(a0, v, i)); break;
       case "reduce":      { const a = arr();
                             const rc = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
-                            r = a1 !== undefined ? a.reduce((acc, v, i) => rc(acc, v, i), toJS(a1))
+                            r = toJS(a1) !== undefined ? a.reduce((acc, v, i) => rc(acc, v, i), toJS(a1))
                                                  : a.reduce((acc, v, i) => rc(acc, v, i)); break; }
       case "forEach":     arr().forEach((v, i) => cbv(a0, v, i)); r = undefined; break;
       case "find":        r = arr().find((v, i) => !!cbv(a0, v, i)); break;
       case "findIndex":   r = arr().findIndex((v, i) => !!cbv(a0, v, i)); break;
       case "some":        r = arr().some((v, i) => !!cbv(a0, v, i)); break;
       case "every":       r = arr().every((v, i) => !!cbv(a0, v, i)); break;
-      case "sort":        r = arrSetInPlace(recv, arr().sort((x, y) => (a0 !== undefined ? toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv)) : (x > y) - (x < y)))); return recv;
-      case "splice":      { const a = arr(); const del = a.splice(toJS(a0), a1 === undefined ? a.length : toJS(a1)); arrSetInPlace(recv, a); r = del; break; }
+      case "sort":        r = arrSetInPlace(recv, toJS(a0) !== undefined ? arr().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv))) : arr().sort()); return recv;   // 无比较器 → JS 默认字典序
+      case "splice":      { const a = arr(); const del = a.splice(toJS(a0), toJS(a1) === undefined ? a.length : toJS(a1)); arrSetInPlace(recv, a); r = del; break; }
       case "fill":        { const a = arr(); a.fill(toJS(a0)); arrSetInPlace(recv, a); return recv; }
       default: throw new Error("method_call: 数组无方法 " + name);
     }

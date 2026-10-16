@@ -304,8 +304,30 @@ class Emitter {
         if (idx === undefined) throw new Error("未定义变量: " + name);
         M.localTee(idx);
     }
-
-    // 统计函数体内 for-of 数量（按嵌套层各分配独立 local 对）
+    // .length 计算（base 句柄在 local `base`）：字符串(0x7FFA) → qzs_utf16len（UTF-16 码元数）；
+    // 数组(0x7FFB) → 结构首 i32（元素数）；其余 → qz.str_len（跨界）。
+    _emitLengthOf(base) {
+        const M = this.m;
+        M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+        M.ifBlock("i64");
+        M.localGet(base); M.i32WrapI64(); M.call("qzs_utf16len"); M.f64ConvertI32U(); M.i64ReinterpretF64();
+        M.else_();
+        M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+        M.ifBlock("i64");
+        M.localGet(base); M.i32WrapI64(); M.i32Load(2, 0); M.f64ConvertI32U(); M.i64ReinterpretF64();
+        M.else_();
+        M.localGet(base); M.call("qz.str_len");
+        M.end(); M.end();
+    }
+    // 数组索引读 a[i]（base 句柄在 local `base`）：dataOff + i*8 → 元素。
+    _emitElemOf(base, idxExpr) {
+        const M = this.m;
+        this.emitTaggedExpr(idxExpr);
+        M.f64ReinterpretI64(); M.i32TruncF64S();
+        M.i32Const(8); M.i32Mul();
+        M.localGet(base); M.i32WrapI64(); M.i32Load(2, 8); M.i32Add();
+        M.i64Load(3, 0);
+    }
     _countForOf(node) {
         let n = 0;
         const walk = (x) => { if (ts.isForOfStatement(x)) n++; ts.forEachChild(x, walk); };
@@ -1880,6 +1902,23 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this.m.localGet(this.sT[0]); this.m.i64ExtendI32U();
         this.m.i64ConstBits(0, 0x7ffb0000); this.m.i64Or();               // 句柄
+        return;
+    }
+    // 可选链 `o?.x` / `o?.[i]` / `o?.length`：base 求值一次 → 若 null/undefined 则结果 undefined（短路，不求 index），否则按普通访问。
+    if ((ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) && e.questionDotToken) {
+        const M = this.m;
+        this.emitTaggedExpr(e.expression); M.localSet(this.scratchObj);
+        M.localGet(this.scratchObj); M.call("qz.is_nullish");
+        M.ifBlock("i64");
+        this._emitUndefined();
+        M.else_();
+        if (ts.isPropertyAccessExpression(e)) {
+            if (e.name.text === "length") this._emitLengthOf(this.scratchObj);
+            else { M.localGet(this.scratchObj); M.i32WrapI64(); M.i64Load(3, this._fieldIndex(e.name.text)); }
+        } else {
+            this._emitElemOf(this.scratchObj, e.argumentExpression);
+        }
+        M.end();
         return;
     }
     if (ts.isElementAccessExpression(e)) {

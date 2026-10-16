@@ -194,7 +194,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("闭包写捕获+外层访问 → 报错", closThrew, true);
     // 字符串参数（_fromJS 须 strWriteback 成 0x7FFA 句柄；此前仅 tagHandle → .length/concat 静默 0）。
     const stT = path.join(os.tmpdir(), "qz_aot_strparam.ts");
-    fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\nexport function tagPow(a: any, b: any): any { return a ** b; }\nexport function tagNN(a: any, b: any): any { return a ?? b; }\nexport function tagNNA(a: any): any { let x = a; x ??= 42; return x; }\nexport function semAdd(a: any, b: any): any { return a + b; }\nexport function semTypeof(a: any): any { return typeof a; }\nexport function semEq(a: any, b: any): any { return a == b; }\nexport function semSeq(a: any, b: any): any { return a === b; }\nexport function semNull(): any { return null; }\nexport function semUndef(): any { return undefined; }\nexport function semNot(a: any): any { return !a; }\nexport function semTnot(a: any): any { return ~a; }\n");
+    fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\nexport function tagPow(a: any, b: any): any { return a ** b; }\nexport function tagNN(a: any, b: any): any { return a ?? b; }\nexport function tagNNA(a: any): any { let x = a; x ??= 42; return x; }\nexport function semAdd(a: any, b: any): any { return a + b; }\nexport function semTypeof(a: any): any { return typeof a; }\nexport function semEq(a: any, b: any): any { return a == b; }\nexport function semSeq(a: any, b: any): any { return a === b; }\nexport function semNull(): any { return null; }\nexport function semUndef(): any { return undefined; }\nexport function semNot(a: any): any { return !a; }\nexport function semTnot(a: any): any { return ~a; }\nexport function semOpt(): any { const o: any = { x: 1 }; return o?.x; }\nexport function semOptN(): any { const o: any = null; return o?.x ?? 99; }\nexport function semJoin(a: any): any { return a.join(); }\nexport function semSort(a: any): any { return a.sort(); }\nexport function semSplice(a: any, i: any): any { return a.splice(i); }\n");
     const rst2 = compileTS(stT, path.join(os.tmpdir(), "qz_aot_strparam.wasm"), {});
     const qzsp = makeQzvm(rst2.strings);
     const { instance: instSp } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_strparam.wasm")), { qz: qzsp });
@@ -240,6 +240,13 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("strParam.len(cjk)", callSp("strLen", ["你好"]), 2);
     check("strParam.len(emoji)", callSp("strLen", ["😀"]), 2);
     check("strParam.len(utf8)", callSp("strLen", ["héllo"]), 5);
+    // 可选链 `?.`（base nullish → undefined，短路不求 index）
+    check("strParam.opt().x", callSp("semOpt", []), 1);
+    check("strParam.optN() null?.x??99", callSp("semOptN", []), 99);
+    // 数组方法默认参数（a0/a1 是 tagged 句柄，非 JS undefined）
+    check("strParam.join() 默认逗号", callSp("semJoin", [[1, 2, 3]]), "1,2,3");
+    check("strParam.sort() 默认字典序", JSON.stringify(callSp("semSort", [[3, 1, 2, 10]])), JSON.stringify([1, 10, 2, 3]));
+    check("strParam.splice(1)", JSON.stringify(callSp("semSplice", [[1, 2, 3, 4], 1])), JSON.stringify([2, 3, 4]));
 }
 
 async function runClasses() {
