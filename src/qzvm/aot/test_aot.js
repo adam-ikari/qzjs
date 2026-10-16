@@ -185,13 +185,23 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     qzw.bindClosures(instW.exports, rw.lamMeta);
     check("闭包写c++ (外层不访问)", qzw._toJS(instW.exports.c1()), 3);
     check("闭包写+= (外层不访问)", qzw._toJS(instW.exports.c2()), 20);
-    // 外层也访问被写变量 → 必须编译期报错（当前不实现共享环境）
-    let closThrew = false;
-
-    fs.writeFileSync(cwT, "export function bad(): any { let z = 5; const f = () => z--; f(); return z; }\n");
-    try { compileTS(cwT, path.join(os.tmpdir(), "qz_aot_bad.wasm"), {}); }
-    catch (e) { closThrew = /闭包写捕获变量/.test(e.message); }
-    check("闭包写捕获+外层访问 → 报错", closThrew, true);
+    // 闭包共享环境：外层与闭包共享同一 env → 写回对外层可见（不再是值快照）
+    fs.writeFileSync(cwT, "export function d2(): any { let z = 5; const f = () => z--; f(); return z; }\n"
+      + "export function d3(): any { let x = 1; const f = () => { x = 2; }; f(); return x; }\n"
+      + "export function two(): any { let c = 0; const inc = () => ++c; const get = () => c; inc(); inc(); return get(); }\n"
+      + "export function nest(): any { let a = 1; const f = () => { let b = 2; const g = () => { a += b; return a; }; g(); return a; }; f(); return a; }\n"
+      + "export function par(): any { const f = (n: number) => () => ++n; const g = f(7); g(); g(); return g(); }\n");
+    const rSh = compileTS(cwT, path.join(os.tmpdir(), "qz_aot_share.wasm"), {});
+    const qzSh = makeQzvm(rSh.strings, { fields: rSh.fields });
+    const { instance: instSh } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_share.wasm")), { qz: qzSh });
+    qzSh.bindMem(instSh.exports.memory); if (instSh.exports.__bump) qzSh.bindBump(instSh.exports.__bump);
+    qzSh.bindClosures(instSh.exports, rSh.lamMeta);
+    const callSh = (n) => { if (instSh.exports.__bump_reset) instSh.exports.__bump_reset(); return qzSh._toJS(instSh.exports[n]()); };
+    check("闭包写回对外层可见 (z--)", callSh("d2"), 4);
+    check("闭包赋值对外层可见 (x=2)", callSh("d3"), 2);
+    check("两闭包共享同一变量", callSh("two"), 2);
+    check("嵌套闭包链 (a+=b)", callSh("nest"), 3);
+    check("参数被闭包捕获 (++n)", callSh("par"), 10);
     // 字符串参数（_fromJS 须 strWriteback 成 0x7FFA 句柄；此前仅 tagHandle → .length/concat 静默 0）。
     const stT = path.join(os.tmpdir(), "qz_aot_strparam.ts");
     fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\nexport function tagPow(a: any, b: any): any { return a ** b; }\nexport function tagNN(a: any, b: any): any { return a ?? b; }\nexport function tagNNA(a: any): any { let x = a; x ??= 42; return x; }\nexport function semAdd(a: any, b: any): any { return a + b; }\nexport function semTypeof(a: any): any { return typeof a; }\nexport function semEq(a: any, b: any): any { return a == b; }\nexport function semSeq(a: any, b: any): any { return a === b; }\nexport function semNull(): any { return null; }\nexport function semUndef(): any { return undefined; }\nexport function semNot(a: any): any { return !a; }\nexport function semTnot(a: any): any { return ~a; }\nexport function semOpt(): any { const o: any = { x: 1 }; return o?.x; }\nexport function semOptN(): any { const o: any = null; return o?.x ?? 99; }\nexport function semJoin(a: any): any { return a.join(); }\nexport function semSort(a: any): any { return a.sort(); }\nexport function semSplice(a: any, i: any): any { return a.splice(i); }\n");

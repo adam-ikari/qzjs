@@ -3,6 +3,7 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 闭包共享环境实现 —— 消除「值快照」限制（`let z=5; const f=()=>z--; f(); z` 现得 4）**。此前闭包捕获是**值快照**（创建时拷贝进 cell），闭包写回对外层不可见 → 曾以编译期报错规避静默错值。现改为**链式共享环境**：每个含被捕获变量的函数/方法/lambda 建宿主对象 `env = {__parent, <var>: tagged值}`（`qz.env_new/env_get/env_set`），外层本体与其闭包共享同一 env（`__parent` 链支持嵌套闭包），写回互相可见且沿链写到「定义该变量」的层（内层不遮蔽）。lambda 值布局改为 `[funcidx][envIdx]`（捕获值不再拷贝）；箭头函数继承的 `this` 也纳入捕获（`_capturesOf` 认 ThisKeyword）。方法体（`_mEnter`）同样建 env。守门：`test_aot.js` +6（214 checks ALL PASS：z-- 可见/赋值可见/两闭包共享/嵌套链 a+=b/参数捕获 ++n/方法内 this 捕获）。
 - **feat(aot): `in` 运算符 + `delete`**。`k in o` → `qz.in_op`（宿主语义；POJO/实例经物化后判定）；`delete obj.k` → 宿主对象真删（`qz.object_delete`）、POJO 槽写 undefined sentinel（等价删除），均返回 `true`（JS 语义）。守门：`test_aot.js` +5（210 checks ALL PASS）。
 - **fix(aot): POJO/闭包句柄标签错位（重大静默错）+ 宿主对象 tag `0x7FFD` + POJO 物化 + 展开/void/**=/字段 ??=**。
   - **标签错位**：POJO 字面量与 lambda cell 的句柄常量写成 `i64ConstBits(0, 0x7ff9)`（= `0x7FF9<<32`，标签落在 48 位以下）而非 `0x7ff90000`（= `0x7FF9<<48`）→ 所有 hi16 判定（`typeof`/`_emitIsHandle`/`_emitIsPureNum`）对 POJO/闭包全部失效：`typeof {a:1}` 得 `"number"`、POJO 参与 `+` 走 f64 加法得垃圾。修后一致。

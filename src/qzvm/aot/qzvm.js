@@ -248,7 +248,8 @@ function makeQzvm(strings, opts) {
     const meta = lamMeta && lamMeta[funcidx];
     if (!meta) throw new Error("closure_call: 未知 funcidx " + funcidx);
     const fn = exportsRef[meta.name];
-    const args = [off + 8, a0, a1, a2, a3].slice(0, 1 + meta.n);
+    const blk = new DataView(mem.buffer).getInt32(off + 4, true);   // env 索引（0 = 无捕获）
+    const args = [blk, a0, a1, a2, a3].slice(0, 1 + meta.n);
     return fn(...args);
   };
   // JS 值 → tagged 位型（宿主回退返回用）：number→box、bool→boxBool、string→0x7FFA、
@@ -367,6 +368,21 @@ function makeQzvm(strings, opts) {
     },
     // 对象展开（{...o, a:1}）：Object.assign({}, ...pieces) → 宿主对象句柄。n = pieces 数。
     obj_assign: (n, a0, a1, a2, a3) => ret(Object.assign({}, ...[a0, a1, a2, a3].slice(0, n).map(toJS))),
+    // 闭包共享环境（链式）：env = 宿主对象 {__parent, <var>: tagged}；idx = handles 索引。
+    // 外层本体与其闭包共享同一 env → 写回互相可见（不再是值快照）。
+    env_new: (parentIdx) => ret({ __parent: parentIdx >= 0 ? handles[parentIdx] : null }),
+    env_get: (idx, kid) => {
+      const name = strings[kid];
+      let e = handles[idx];
+      while (e) { const v = e[name]; if (v !== undefined) return v; e = e.__parent; }
+      return TAG;   // 未定义 → undefined sentinel（0x7FF9|0）
+    },
+    env_set: (idx, kid, v) => {   // 沿 __parent 链写到「定义该变量」的层（否则内层环境会遮蔽外层写）
+      const name = strings[kid];
+      let e = handles[idx];
+      while (e) { if (Object.prototype.hasOwnProperty.call(e, name)) { e[name] = v; return; } e = e.__parent; }
+      handles[idx][name] = v;
+    },
     // k in o：宿主语义（POJO/实例先物化；数组/宿主对象直接 in）。
     in_op: (k, o) => boxBool(toJS(k) in toJS(o)),   // tagged bool（不可经 ret：BigInt 会被当宿主句柄）
     // delete o.k：宿主对象真删；POJO/实例由 emitter 直接把槽写成 undefined sentinel（本函数仅宿主）。

@@ -85,6 +85,9 @@ const QZ = {
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
+  env_new: { params: ["i32"], results: ["i64"] },        // 闭包环境：parentIdx(-1=根) → 环境句柄
+  env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
+  env_set: { params: ["i32", "i32", "i64"], results: [] },
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
   // 对象展开 {..o}：n(i32) + pieces(i64×4) → Object.assign({}, ...) → 宿主对象句柄
   obj_assign: { params: ["i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
@@ -191,7 +194,7 @@ class Emitter {
         const M = this.m;
         const name = d.name;
         if (ts.isIdentifier(name)) {
-            if (d.initializer) { this.emitTaggedExpr(d.initializer); M.localSet(this._local(name.text)); }
+            if (d.initializer) { this.emitTaggedExpr(d.initializer); this._emitVarStore(name.text, this.scratchB); this.m.drop(); }
             return;
         }
         if (!d.initializer) return;
@@ -232,11 +235,16 @@ class Emitter {
     // 闭包捕获分析：找 lambda 体内的自由标识符（非其参数/局部、非字符串/数字/对象属性名）。
     // 捕获的变量来自创建处（外层函数局部）。返回有序捕获名列表。
     _capturesOf(lam) {
+        const lambdaIsArrow = ts.isArrowFunction(lam);   // 箭头继承 this；function 表达式有自己的 this
         const local = new Set(lam.parameters.map(p => p.name.text));
         this._collectLocals(lam.body).forEach(n => local.add(n));
         const out = [];
         const seen = new Set();
         const walk = (n) => {
+            if (ts.isThis(n)) {   // 箭头函数继承 this → 视作捕获 "this"
+                if (!lambdaIsArrow ? false : !seen.has("this")) { seen.add("this"); out.push("this"); }
+                ts.forEachChild(n, walk); return;
+            }
             if (ts.isIdentifier(n)) {
                 // 跳过成员表达式右侧（obj.prop 的 prop 不是变量）
                 if (n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) return;
@@ -336,10 +344,7 @@ class Emitter {
     // 闭包体内的捕获读：name 在 capMap → [blk + slot*8]；否则本函数局部（经 varMap）。
     _emitCapturedRead(name) {
         const M = this.m;
-        if (this.capMap.has(name)) {
-            M.localGet(this.blkLocal); M.i64Load(3, this.capMap.get(name) * 8);
-            return;
-        }
+        if (this.capMap.has(name)) { M.localGet(this.capMap.get(name)); M.i32Const(this._strId(name)); M.call("qz.env_get"); return; }
         const idx = this._local(name);
         if (idx === undefined) throw new Error(BUILTIN_GLOBALS.has(name)
             ? `[tagged] 内建 ${name} 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
@@ -347,9 +352,9 @@ class Emitter {
         M.localGet(idx);
     }
 
-    // 变量读（含闭包捕获）：栈 += 值。捕获变量经 blk 指针 load。
+    // 变量读（含闭包捕获）：栈 += 值。
     _emitVarGet(name) {
-        if (this.capMap.has(name)) { this.m.localGet(this.blkLocal); this.m.i64Load(3, this.capMap.get(name) * 8); return; }
+        if (this.capMap.has(name)) { this.m.localGet(this.capMap.get(name)); this.m.i32Const(this._strId(name)); this.m.call("qz.env_get"); return; }
         const idx = this._local(name);
         if (idx === undefined) throw new Error("未定义变量: " + name);
         this.m.localGet(idx);
@@ -361,7 +366,7 @@ class Emitter {
         if (this.capMap.has(name)) {
             const t = tmp === undefined ? this.scratch : tmp;
             M.localSet(t);
-            M.localGet(this.blkLocal); M.localGet(t); M.i64Store(3, this.capMap.get(name) * 8);
+            M.localGet(this.capMap.get(name)); M.i32Const(this._strId(name)); M.localGet(t); M.call("qz.env_set");
             M.localGet(t);
             return;
         }
@@ -400,6 +405,15 @@ class Emitter {
         return n;
     }
 
+    // 本函数体（含嵌套）所有 lambda 捕获的、属于本函数参数/局部的变量名（去重，稳定序）。
+    _probeCaptured(body, paramNames, localNames) {
+        const lams = this._collectLambdas(body);
+        if (!lams.length) return [];
+        const own = new Set([...paramNames, ...localNames, "this"]);   // 方法的 this 亦可被箭头闭包捕获
+        const out = [], seen = new Set();
+        for (const lam of lams) for (const c of this._capturesOf(lam)) if (own.has(c) && !seen.has(c)) { seen.add(c); out.push(c); }
+        return out;
+    }
     emitFunc(f) {
         // 多文件编译：em.sf 由 compileTS 按「本函数所属源文件」设置（行号/DWARF 用）。
         const savedCurClass = this._curClass, savedCapActive = this.capListActive, savedStatic = this._staticVars;
@@ -441,17 +455,32 @@ class Emitter {
         const localNames = this.m.debug
             ? f.parameters.map(p => p.name.text).concat(locals)   // locals 是名字数组
             : null;
-        this.m.startBody(f.name.text, locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]), localNames, this._line(f));
+        // 闭包共享环境：本函数被（直接/嵌套）lambda 捕获的局部/参数 → 统一住宿主对象（env），闭包与本体共享。
+        const capNames = this.mode === "tagged"
+            ? this._probeCaptured(f.body, f.parameters.map(p => p.name.text), locals) : [];
+        const envDecls = capNames.length ? ["i32"] : [];
+        const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool)
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
+        this.m.startBody(f.name.text, decls, localNames, this._line(f));
+        this.envLocal = capNames.length ? f.parameters.length + decls.length - 1 : undefined;   // 参数在 local 0..n-1 之后
+        this.capMap = new Map(capNames.map(n => [n, this.envLocal]));   // 捕获名 → 所在 env 的 i32 local
+        this.envRef = this.envLocal;
+        if (capNames.length) {
+            const M = this.m;
+            M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // 根环境（parentIdx=-1）
+        }
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
+        if (capNames.length) {
+            // 被捕获的参数初值写入 env（局部由声明语句经 _emitVarStore 写入）
+            for (let i = 0; i < f.parameters.length; i++) {
+                const pn = f.parameters[i].name.text;
+                if (this.capMap.has(pn)) { this.m.localGet(this.envLocal); this.m.i32Const(this._strId(pn)); this.m.localGet(i); this.m.call("qz.env_set"); }
+            }
+        }
         this.depth = 0; this.labels = [];
         this._staticVars = this.mode === "tagged" ? this._computeStaticVars(f.body, f.parameters.map(p => p.name.text)) : new Map();
-        if (this.mode === "tagged") {
-            // 闭包写捕获变量 + 外层也访问 → 未实现共享环境会静默错值 → 显式报错（loud 优于静默错）
-            const conflict = this._closureWriteConflict(f, this._collectLambdas(f.body));
-            if (conflict) throw new Error(`[tagged] 闭包写捕获变量 "${conflict}" 且外层也访问 —— 未实现共享环境（会静默错值）`);
-        }
         if (this.mode === "tagged") this.emitTaggedBlock(f.body);
         else this.emitBlock(f.body);
         // 末尾非 return 且函数有返回值 → fallthrough 路径缺值（穷尽 switch/if-else 全 return）。
@@ -531,6 +560,7 @@ class Emitter {
         const M = this.m;
         const savedMap = this.varMap, savedCap = this.capMap, savedBlk = this.blkLocal;
         const savedMode = this.mode, savedDepth = this.depth, savedStatic = this._staticVars;
+        const savedEnvRef = this.envRef;
         this.mode = "tagged";
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
         const locals = this._collectLocals(lam.body);
@@ -540,8 +570,8 @@ class Emitter {
         lam.parameters.forEach((p, i) => this.varMap.set(p.name.text, 1 + i));
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map();
-        caps.forEach((n, i) => this.capMap.set(n, i));     // 捕获名 → blk 内 i64 槽序
-        this.blkLocal = 0;                                 // local 0 = blk 指针
+        for (const n of caps) this.capMap.set(n, 0);        // 外层捕获名 → 创建方 env 索引（= blk 参数 local 0）
+        this.blkLocal = 0;                                 // local 0 = env 索引（创建方环境）
         this.scratch = nLoc;
         this.scratchA = nLoc + 1;
         this.scratchB = nLoc + 2;
@@ -564,18 +594,32 @@ class Emitter {
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
         this.cloSlotsLen = cloSlots.length;
-        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]);
+        // 本 lambda 的局部若被（嵌套）lambda 捕获 → 建自身 env（__parent 链到 blk）
+        const ownCap = this._probeCaptured(lam.body, params, locals);
+        const envDecls = ownCap.length ? ["i32"] : [];
+        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool)
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
         const localNames = this.m.debug ? ["blk"].concat(params).concat(locals) : null;
         M.startBody(fname, bodyLocals, localNames);
+        this.envLocal = ownCap.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;   // blk+参数之后
+        this.envRef = ownCap.length ? this.envLocal : this.blkLocal;   // 嵌套 lambda 的 env：自身 env（链到 blk）或直接 blk
+        if (ownCap.length) {
+            M.localGet(0); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // parent = blk(0)
+            for (const n of ownCap) this.capMap.set(n, this.envLocal);
+            for (let i = 0; i < params.length; i++) {
+                if (this.capMap.get(params[i]) === this.envLocal) { M.localGet(this.envLocal); M.i32Const(this._strId(params[i])); M.localGet(1 + i); M.call("qz.env_set"); }
+            }
+        }
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
         this._staticVars = this._computeStaticVars(lam.body, params);
         // 箭头表达式体：表达式即返回值；块体：语句
         if (ts.isExpression(lam.body)) { this.emitTaggedExpr(lam.body); M.return_(); }
         else this.emitTaggedBlock(lam.body);
         const last = ts.isBlock(lam.body) ? lam.body.statements[lam.body.statements.length - 1] : null;
-        if (!(last && ts.isReturnStatement(last))) M.unreachable();
+        if (!(last && ts.isReturnStatement(last))) this._emitUndefined();   // 无显式 return → undefined（JS 语义；不是 unreachable）
         M.endBody();
         this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
+        this.envLocal = undefined; this.envRef = savedEnvRef;
         this.mode = savedMode; this.depth = savedDepth; this._staticVars = savedStatic;
     }
     // ---------- 语句 ----------
@@ -717,7 +761,7 @@ class Emitter {
     _mEnter(fname, cname, params, body, isVoid) {
         this._mSaved = {
             mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
-            blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars,
+            blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef,
         };
         this.mode = "tagged";
         const nParams = 1 + params.length;
@@ -748,10 +792,24 @@ class Emitter {
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
         this.cloSlotsLen = cloSlots.length;
+        // 方法体内被（嵌套）lambda 捕获的 this/参数/局部 → 共享环境（同 emitFunc）
+        const capNames = this._probeCaptured(body, params, locals);
+        const envDecls = capNames.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
-            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]);
+            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
+        this.envLocal = capNames.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;
+        this.capMap = new Map(capNames.map(n => [n, this.envLocal]));
+        this.envRef = this.envLocal;
+        if (capNames.length) {
+            const M = this.m;
+            M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);
+            for (const n of capNames) {
+                if (n === "this") { M.localGet(this.envLocal); M.i32Const(this._strId("this")); M.localGet(0); M.call("qz.env_set"); }
+                else { const pi = params.indexOf(n); if (pi >= 0) { M.localGet(this.envLocal); M.i32Const(this._strId(n)); M.localGet(1 + pi); M.call("qz.env_set"); } }
+            }
+        }
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
         this._curClass = cname;
         this._staticVars = this._computeStaticVars(body, params);
@@ -761,7 +819,7 @@ class Emitter {
         this.mode = s.mode; this.varMap = s.varMap; this.capMap = s.capMap; this.capList = s.capList; this.capListActive = s.capListActive;
         this.blkLocal = s.blkLocal; this.depth = s.depth; this.labels = s.labels;
         this._labelStack = s.labelStack; this._curClass = s.curClass; this._curClassObj = s.curClassObj;
-        this._staticVars = s.staticVars;
+        this._staticVars = s.staticVars; this.envLocal = s.envLocal; this.envRef = s.envRef;
     }
     emitBlock(node) { for (const s of node.statements) this.emitStmt(s); }
 
@@ -1752,7 +1810,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isForStatement(s)) {
         if (s.initializer) {
             if (ts.isVariableDeclarationList(s.initializer)) {
-                for (const d of s.initializer.declarations) if (d.initializer) { this.emitTaggedExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
+                for (const d of s.initializer.declarations) if (d.initializer) { this.emitTaggedExpr(d.initializer); this._emitVarStore(d.name.text, this.scratchB); this.m.drop(); }
             } else { this.emitTaggedExpr(s.initializer); this.m.drop(); }
         }
         // block(brk) loop block(cont) body end; incr; br 0 end end（continue 跳 incr 前）
@@ -1790,7 +1848,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
         M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 8);       // dataOff
         M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // dataOff + i*8
-        M.i64Load(3, 0); M.localSet(varIdx);                     // x = arr[i]
+        M.i64Load(3, 0); this._emitVarStore(s.initializer.declarations[0].name.text, this.scratchB); this.m.drop();   // x = arr[i]（被捕获则写 env）
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
         this.depth--; M.end();                                   // end cont
@@ -1900,11 +1958,13 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isThis(e)) {
+        if (this.capMap.has("this")) { this._emitCapturedRead("this"); return; }   // 方法内闭包捕获 this → 经 env
         const idx = this._local("this");
         if (idx === undefined) throw new Error("[tagged] this 仅在类方法/构造器内可用");
         this.m.localGet(idx); return;
     }
     if (ts.isIdentifier(e)) {
+        if (this.capMap.has(e.text)) { this._emitCapturedRead(e.text); return; }   // 捕获名优先走 env（与本体共享）
         const idx = this._local(e.text);
         if (idx !== undefined) { this.m.localGet(idx); return; }
         this._emitCapturedRead(e.text); return;
@@ -2510,19 +2570,11 @@ Emitter.prototype._emitLambdaNew = function (lam) {
     const meta = this._lamById.get(lam);
     if (!meta) throw new Error("未登记的 lambda");
     const fidx = this.m._funcIdx[meta.fname];
-    const caps = meta.caps.filter(n => this.varMap.has(n) || this.capMap.has(n));
-    const total = 8 + caps.length * 8;
-    emitBumpAlloc(M, () => M.i32Const(total));               // → off(i32)（越界 trap）
-    M.localSet(this.cloOff);                          // cloOff = off
-    M.localGet(this.cloOff); M.i32Const(fidx); M.i32Store(2, 0);    // [off]=funcidx
-    M.localGet(this.cloOff); M.i32Const(caps.length); M.i32Store(2, 4);  // [off+4]=nCaps
-    for (let i = 0; i < caps.length; i++) {
-        this._emitCapturedRead(caps[i]);              // [val]
-        M.localSet(this.cloArgs[0]);                  // 暂存
-        M.localGet(this.cloOff); M.i32Const(8 + i * 8); M.i32Add();   // [addr]
-        M.localGet(this.cloArgs[0]);                  // [addr, val]
-        M.i64Store(3, 0);
-    }
+    // 闭包值 = [funcidx:i32][envIdx:i32]（envIdx=0 表示无捕获）；捕获值不再拷贝（共享环境）。
+    emitBumpAlloc(M, () => M.i32Const(8));            // → off(i32)（越界 trap）
+    M.localSet(this.cloOff);
+    M.localGet(this.cloOff); M.i32Const(fidx); M.i32Store(2, 0);
+    M.localGet(this.cloOff); (this.envRef !== undefined ? M.localGet(this.envRef) : M.i32Const(0)); M.i32Store(2, 4);
     M.localGet(this.cloOff); M.i64ExtendI32U();
     M.i64ConstBits(0, 0x7ff90000); M.i64Or();
 };
