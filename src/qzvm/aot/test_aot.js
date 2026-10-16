@@ -425,6 +425,26 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("不同 POJO !==", callMs("mkeq"), false);
     check("函数内 class 声明", callMs("inClass"), 5);
     check("函数内 function 声明", callMs("inFn"), 12);
+    // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
+        "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"
+      + "export function fisum(): any { const o: any = { a: 1, b: 2, c: 3 }; let t = 0; for (const k in o) t = t + o[k]; return t; }\n"
+      + "export function fihost(): any { const o: any = JSON.parse(\"{\\\"x\\\":1,\\\"y\\\":2}\"); let s = \"\"; for (const k in o) s = s + k; return s; }\n"
+      + "export function fiarr(): any { const a: any = [10, 20]; let s = 0; for (const i in a) s = s + a[i]; return s; }\n"
+      + "export function fow(): any { const a: any = [1,2,3]; let s = 0; for (const v of a) s = s + v; return s; }\n"
+      + "export function fostr(): any { const a: any = [\"x\",\"y\"]; let out = \"\"; for (const k of a) out = out + \"<\" + k + \">\"; return out; }\n");
+    const rFi = compileTS(path.join(os.tmpdir(), "qz_aot_forin.ts"), path.join(os.tmpdir(), "qz_aot_forin.wasm"), {});
+    const qzFi = makeQzvm(rFi.strings, { fields: rFi.fields });
+    const { instance: instFi } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_forin.wasm")), { qz: qzFi });
+    qzFi.bindMem(instFi.exports.memory); if (instFi.exports.__bump) qzFi.bindBump(instFi.exports.__bump);
+    qzFi.bindClosures(instFi.exports, rFi.lamMeta); qzFi.bindClasses(instFi.exports, rFi.classMeta);
+    const callFi = (n) => { if (instFi.exports.__bump_reset) instFi.exports.__bump_reset(); return qzFi._toJS(instFi.exports[n]()); };
+    check("for-in 键", callFi("fi"), "abc");
+    check("for-in 动态键取值", callFi("fisum"), 6);
+    check("for-in 宿主对象", callFi("fihost"), "xy");
+    check("for-in 数组", callFi("fiarr"), 30);
+    check("for-of 求和", callFi("fow"), 6);
+    check("for-of 字符串拼接", callFi("fostr"), "<x><y>");
     // in / delete
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_indel.ts"),
         "export function iin(): any { const o: any = { a: 1 }; return (\"a\" in o) + \":\" + (\"b\" in o); }\n"

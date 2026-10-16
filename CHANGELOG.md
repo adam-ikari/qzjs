@@ -3,6 +3,11 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): `for...in` + 动态字符串键 `o[k]` / 修 for-of 长度被复用槽覆盖**。
+  - **for-of 修复（既有静默 bug）**：循环长度原先存在 `sT[0]`，会被循环体内的字符串拼接/数组操作复用覆盖 → 第二次迭代条件读垃圾值 → 循环体只执行一次或零次（`for (const v of [1,2,3]) s+=v` 得 0）。现每层 for-of 用 3 个专用 local（句柄/索引/长度）。
+  - **`for...in`**：改写为 `for (const k of Object.keys(o))` 复用 for-of 机制。
+  - **动态字符串键**：`o[k]`（k 为字符串）→ 宿主 `qz.get_index`/`qz.set_index`（POJO/实例按字段名表定位、宿主对象按索引、数组/字符串走 toJS）；数值键仍走 wasm 内存快路径。
+  守门：`test_aot.js` +6（222 checks ALL PASS）。
 - **feat(aot): 函数内 `class`/`function` 声明提升**。声明收集改为**递归**（任意深度），嵌套类/函数提升到模块级编译；`collectClasses` 改用收集到的 ClassDeclaration 列表（不再只看文件顶层）；语句发射跳过已提升的声明。守门：`test_aot.js` +2（216 checks ALL PASS）。
 - **feat(aot): 闭包共享环境实现 —— 消除「值快照」限制（`let z=5; const f=()=>z--; f(); z` 现得 4）**。此前闭包捕获是**值快照**（创建时拷贝进 cell），闭包写回对外层不可见 → 曾以编译期报错规避静默错值。现改为**链式共享环境**：每个含被捕获变量的函数/方法/lambda 建宿主对象 `env = {__parent, <var>: tagged值}`（`qz.env_new/env_get/env_set`），外层本体与其闭包共享同一 env（`__parent` 链支持嵌套闭包），写回互相可见且沿链写到「定义该变量」的层（内层不遮蔽）。lambda 值布局改为 `[funcidx][envIdx]`（捕获值不再拷贝）；箭头函数继承的 `this` 也纳入捕获（`_capturesOf` 认 ThisKeyword）。方法体（`_mEnter`）同样建 env。守门：`test_aot.js` +6（214 checks ALL PASS：z-- 可见/赋值可见/两闭包共享/嵌套链 a+=b/参数捕获 ++n/方法内 this 捕获）。
 - **feat(aot): `in` 运算符 + `delete`**。`k in o` → `qz.in_op`（宿主语义；POJO/实例经物化后判定）；`delete obj.k` → 宿主对象真删（`qz.object_delete`）、POJO 槽写 undefined sentinel（等价删除），均返回 `true`（JS 语义）。守门：`test_aot.js` +5（210 checks ALL PASS）。

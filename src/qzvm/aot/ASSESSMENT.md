@@ -97,7 +97,7 @@
 3. qzvm 补全（对象方法/数组）。**数组方法已补**（2026-10-12）：`split` 返 wasm 原生数组（句柄 `0x7FFB`）；宿主 `doArrMethod` 覆盖 20 方法，回调经 `closure_call`。见 README「数组方法」条。
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
 5. **能力边界（2026-10-15 审计；未实现的均显式报错非静默错）**：
-   - 运算符：**`instanceof`/`void`/`**=`/`??=`（含字段/索引）已支持**；`in`/`delete` 已支持（2026-10-15）。原 `instanceof` 说明：（2026-10-15：类实例用**专用 tag `0x7FFE|memoff`**（`[off:i32]=clsId`）与 POJO `0x7FF9`/宿主句柄区分，`qz.instanceof_op` 沿「实例类 → 父链」查目标 clsId；非实例一律 false）。`in`/`void`/`delete`/`**=` 未实现；`??=` 仅 identifier（字段/索引上报错）。
+   - 运算符：**`instanceof`/`void`/`**=`/`??=`（含字段/索引）已支持**；`in`/`delete`/`for...in`/动态字符串键 `o[k]` 已支持（2026-10-15）。原 `instanceof` 说明：（2026-10-15：类实例用**专用 tag `0x7FFE|memoff`**（`[off:i32]=clsId`）与 POJO `0x7FF9`/宿主句柄区分，`qz.instanceof_op` 沿「实例类 → 父链」查目标 clsId；非实例一律 false）。`in`/`void`/`delete`/`**=` 未实现；`??=` 仅 identifier（字段/索引上报错）。
    - 语法：**展开 `[...a]`/`{...o}` 已支持**（数组 wasm 内 concat 折叠；对象 `Object.assign`）；**解构声明单层已支持**（2026-10-15：`const [a,b]=arr` / `const {x,y}=obj` / `{a:z}` 重命名 / `[,b]` 跳过；数组元素 = wasm 数组索引、对象属性 = wasm POJO 字段）；**静态方法已支持**（含继承链）；**嵌套解构**（`[[a],[b]]`/`{a:{b}}`）报错；展开 `[...a]`/`{...o}` 未实现；静态字段/访问器未实现；函数内的 `class`/`function` 声明已支持（递归提升至模块级）。
    - 宿主对象 tag `0x7FFD`（2026-10-15）：`tagHandle` 值（`JSON.parse` 结果/函数/内建类实例）与 POJO `0x7FF9` 分离 → 字段读/写按 tag 分派（宿主走 `qz.object_get/set`）。
    - 内建**类**：**已支持**（2026-10-15，宿主构造）——`new Error/TypeError/RangeError/SyntaxError/ReferenceError/Map/Set/WeakMap/WeakSet/Date/Array/Object/RegExp` → 宿主句柄（0x7FFD），方法经 `method_call` 宿主分支。

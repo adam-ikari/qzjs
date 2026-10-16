@@ -383,6 +383,32 @@ function makeQzvm(strings, opts) {
       while (e) { if (Object.prototype.hasOwnProperty.call(e, name)) { e[name] = v; return; } e = e.__parent; }
       handles[idx][name] = v;
     },
+    // 动态键取值/赋值 o[k]：POJO/实例按字段名表（fieldEntries）定位；宿主对象直接索引；数组/字符串走 toJS。
+    get_index: (o, k) => {
+      const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === TAG_HI || hi === INST_HI) {
+        if (off < 8) return handles[off];
+        const name = String(toJS(k));
+        const e = fieldEntries.find(([n]) => n === name);
+        if (!e || !mem) return TAG;
+        return new DataView(mem.buffer).getBigInt64(off + e[1], true);
+      }
+      if (hi === HOST_HI) return ret(handles[off][toJS(k)]);
+      return ret(toJS(o)[toJS(k)]);
+    },
+    set_index: (o, k, v) => {
+      const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === TAG_HI || hi === INST_HI) {
+        if (off < 8) { handles[off] = toJS(v); return; }
+        const name = String(toJS(k));
+        const e = fieldEntries.find(([n]) => n === name);
+        if (!e || !mem) throw new Error("set_index: POJO 无字段 " + name);
+        new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
+        return;
+      }
+      if (hi === HOST_HI) { handles[off][toJS(k)] = toJS(v); return; }
+      toJS(o)[toJS(k)] = toJS(v);
+    },
     // k in o：宿主语义（POJO/实例先物化；数组/宿主对象直接 in）。
     in_op: (k, o) => boxBool(toJS(k) in toJS(o)),   // tagged bool（不可经 ret：BigInt 会被当宿主句柄）
     // delete o.k：宿主对象真删；POJO/实例由 emitter 直接把槽写成 undefined sentinel（本函数仅宿主）。

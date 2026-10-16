@@ -85,6 +85,8 @@ const QZ = {
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
+  get_index: { params: ["i64", "i64"], results: ["i64"] },   // o[k]（动态键）：宿主按名/索引取值
+  set_index: { params: ["i64", "i64", "i64"], results: [] }, // o[k] = v
   env_new: { params: ["i32"], results: ["i64"] },        // 闭包环境：parentIdx(-1=根) → 环境句柄
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
@@ -400,7 +402,7 @@ class Emitter {
     }
     _countForOf(node) {
         let n = 0;
-        const walk = (x) => { if (ts.isForOfStatement(x)) n++; ts.forEachChild(x, walk); };
+        const walk = (x) => { if (ts.isForOfStatement(x) || ts.isForInStatement(x)) n++; ts.forEachChild(x, walk); };
         walk(node);
         return n;
     }
@@ -443,10 +445,10 @@ class Emitter {
         this.forOfBase = this.swIdx + 1;
         this.forOfCount = 0;
         const forOfLocals = [];
-        for (let i = 0; i < nForOf; i++) forOfLocals.push(vt, "i32");
+        for (let i = 0; i < nForOf; i++) forOfLocals.push(vt, "i32", "i32");
         // 闭包保留槽（仅 tagged）：cloHandle(i64 存闭包句柄) + cloOff/cloBlk/cloFn(3×i32)。
         const cloSlots = this.mode === "tagged" ? ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"] : [];
-        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
+        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 3;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;                 // ++/-- 成员接收者句柄临时（i64）
@@ -589,7 +591,7 @@ class Emitter {
         const forOfLocals = [];
         for (let i = 0; i < nForOf; i++) forOfLocals.push("i64", "i32");
         const cloSlots = ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"];
-        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
+        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 3;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
@@ -787,7 +789,7 @@ class Emitter {
         const forOfLocals = [];
         for (let i = 0; i < nForOf; i++) forOfLocals.push("i64", "i32");
         const cloSlots = ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"];
-        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 2;
+        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 3;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
@@ -1832,6 +1834,16 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.depth--; this.m.end();                       // end loop
         this.depth--; this.m.end(); return;               // end brk block
     }
+    if (ts.isForInStatement(s)) {
+        // for (k in o) → for (k of Object.keys(o))（复用 for-of 机制；键为字符串）
+        const withPos = (n, p) => { n.pos = p.pos; n.end = p.end; return n; };
+        const obj = withPos(ts.factory.createIdentifier("Object"), s.expression);
+        const keysProp = withPos(ts.factory.createPropertyAccessExpression(obj, "keys"), s.expression);
+        const keysCall = withPos(ts.factory.createCallExpression(keysProp, undefined, [s.expression]), s.expression);
+        const forOf = withPos(ts.factory.createForOfStatement(undefined, s.initializer, keysCall, s.statement), s);
+        this.emitTaggedStmt(forOf);
+        return;
+    }
     if (ts.isForOfStatement(s)) {
         // for (let x of arr) body：每嵌套层独立 local 对（arrL=i64 句柄, idxL=i32 索引）。
         // 结构同 for：block(brk) loop block(cont) body end; i++; br 0 end end。
@@ -1841,14 +1853,16 @@ Emitter.prototype.emitTaggedStmt = function (s) {
             throw new Error("[tagged] for-of 仅支持 let x of arr");
         const varIdx = this._local(s.initializer.declarations[0].name.text);
         if (varIdx === undefined) throw new Error("未定义 for-of 变量");
-        const arrL = this.forOfBase + this.forOfCount * 2;       // 本层数组句柄 local
+        const arrL = this.forOfBase + this.forOfCount * 3;       // 本层数组句柄 local
         const idxL = arrL + 1;                                   // 本层索引 local
+        const lenL = arrL + 2;                                   // 本层长度 local（专用，避免被 sT 复用覆盖）
         this.forOfCount++;
         this.emitTaggedExpr(s.expression); M.localSet(arrL);     // 数组句柄（i64）
+        this._emitLengthOf(arrL); M.f64ReinterpretI64(); M.i32TruncF64S(); M.localSet(lenL);   // len（专用 local）
         M.i32Const(0); M.localSet(idxL);                         // i = 0
         M.block(); this.depth++; M.loop(); this.depth++;
         M.localGet(idxL);
-        M.localGet(arrL); M.i32WrapI64(); M.i32Const(0); M.i32Load(2, 0);   // header[0] = len
+        M.localGet(lenL);
         M.i32GeS(); M.brIf(1);                                   // i >= len → 退出
         M.block(); this.depth++;
         this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
@@ -2121,13 +2135,20 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._emitBuiltinCall(e.expression.text + "." + e.name.text, []); return;
     }
     if (ts.isElementAccessExpression(e)) {
-        // a[i]：数组句柄(0x7FFB) → header[+8]=dataOff → load [dataOff + i*8]；i 须 number。
-        this.emitTaggedExpr(e.expression); this.m.localSet(this.scratch);   // scratch = 数组值
-        this.emitTaggedExpr(e.argumentExpression);                          // [i_value:i64]
-        this.m.f64ReinterpretI64(); this.m.i32TruncF64S();                  // → i32 index
-        this.m.i32Const(8); this.m.i32Mul();
-        this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Load(2, 8); this.m.i32Add();   // dataOff + i*8
-        this.m.i64Load(3, 0);
+        // o[k]：字符串键（动态）→ 宿主 qz.get_index（POJO 按字段名表 / 宿主对象按索引）；
+        //       数值键 → wasm 内存快路径（数组 dataOff + i*8）。
+        const Mi = this.m;
+        this.emitTaggedExpr(e.argumentExpression); Mi.localSet(this.scratch);   // 键
+        Mi.localGet(this.scratch); this._emitIsStr();
+        Mi.ifBlock("i64");
+        this.emitTaggedExpr(e.expression); Mi.localGet(this.scratch); Mi.call("qz.get_index");
+        Mi.else_();
+        this.emitTaggedExpr(e.expression); Mi.localSet(this.scratchObj);        // 数组值
+        Mi.localGet(this.scratch); Mi.f64ReinterpretI64(); Mi.i32TruncF64S();   // → i32 index
+        Mi.i32Const(8); Mi.i32Mul();
+        Mi.localGet(this.scratchObj); Mi.i32WrapI64(); Mi.i32Load(2, 8); Mi.i32Add();   // dataOff + i*8
+        Mi.i64Load(3, 0);
+        Mi.end();
         return;
     }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
@@ -2505,15 +2526,20 @@ Emitter.prototype._emitStoreLength = function (left) {
 };
 Emitter.prototype._emitStoreElem = function (left) {
     const M = this.m;
-    M.localSet(this.scratch);                     // 值 → scratch（i64）
-    this.emitTaggedExpr(left.expression);         // 数组句柄
-    M.i32WrapI64(); M.localSet(this.sT[0]);       // headerOff
-    this.emitTaggedExpr(left.argumentExpression); // i（number）
-    M.f64ReinterpretI64(); M.i32TruncF64S();
+    M.localSet(this.scratchB);                    // 值 → scratchB（i64）
+    this.emitTaggedExpr(left.argumentExpression); M.localSet(this.scratch);   // 键
+    // 字符串键 → 宿主 qz.set_index（POJO 按字段名 / 宿主对象按索引）；数值键 → wasm 内存
+    M.localGet(this.scratch); this._emitIsStr();
+    M.ifBlock("void");
+    this.emitTaggedExpr(left.expression); M.localGet(this.scratch); M.localGet(this.scratchB); M.call("qz.set_index");
+    M.else_();
+    this.emitTaggedExpr(left.expression); M.i32WrapI64(); M.localSet(this.sT[0]);   // headerOff
+    M.localGet(this.scratch); M.f64ReinterpretI64(); M.i32TruncF64S();
     M.i32Const(8); M.i32Mul();
     M.localGet(this.sT[0]); M.i32Load(2, 8); M.i32Add();   // dataOff + i*8
-    M.localGet(this.scratch); M.i64Store(3, 0);
-    M.localGet(this.scratch);                     // 返回所赋之值
+    M.localGet(this.scratchB); M.i64Store(3, 0);
+    M.end();
+    M.localGet(this.scratchB);                    // 返回所赋之值
 };
 // undefined = 句柄 0x7FF9|0（qzvm handles[0]=undefined）
 Emitter.prototype._emitUndefined = function () { this.m.i64ConstBits(0, 0x7ff90000); };
