@@ -64,7 +64,7 @@ const OP = {
 };
 
 class Module {
-    constructor(opts) { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null;
+    constructor(opts) { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this.startIdx = null; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null;
         this.debug = !!(opts && opts.debug);   // 生成 name 段（函数名）→ wat/wasm 可读，DAP 友好
         this._fnNames = [];                    // funcidx(全局) → 名（导入在前，本地函数在后）
         this.debugLine = !!(opts && opts.debugLine); // 生成 DWARF 调试段（.debug_info/line/abbrev/str）
@@ -208,6 +208,7 @@ class Module {
     i64Store32(align, offset) { this._emit(OP.i64_store32, ...uleb(align), ...uleb(offset)); }
     i64Load(align, offset) { this._emit(OP.i64_load, ...uleb(align), ...uleb(offset)); }
     // export
+    setStart(fnName) { this.startIdx = this._funcIdx[fnName]; }   // start 段：实例化时自动执行（模块级初始化）
     exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName], kind: 0x00 }); }
     exportMemory() { this.exports.push({ name: "memory", idx: this.memoryIdx(), kind: 0x02 }); }
     exportGlobal(name, gidx) { this.exports.push({ name, idx: gidx, kind: 0x03 }); }   // mutable global 导出
@@ -266,6 +267,11 @@ class Module {
                 e.kind === undefined ? 0x00 : e.kind, ...uleb(e.idx)   // 0x00=func 0x02=memory
             ]));
             out.push(7, ...uleb(body.length), ...body);
+        }
+        // start 段（8）：模块级初始化函数，实例化时自动执行
+        if (this.startIdx !== null && this.startIdx !== undefined) {
+            const b = uleb(this.startIdx);
+            out.push(8, ...uleb(b.length), ...b);
         }
         let dwarfPayload = null;   // { entries:[{c, low, size}], payloadLen }
         if (this.codes.length) {

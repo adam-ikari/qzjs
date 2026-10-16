@@ -113,7 +113,22 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24)。
-结果：**445/455 一致（97.8%）**；残余 10 项：**全部 loud**（`arguments` / generator / async / BigInt / class-as-value / 类与对象方法 >4 形参 / 箭头内 `super` / 函数声明 `this` 形参无 receiver 槽 / `Symbol` 作值未支持）——**零静默错值**（`arguments` / generator / async / BigInt / class-as-value / 类与对象方法 >4 形参 / 箭头内 `super`）、**4 项已知静默差异**（见下）；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）全绿。
+结果：**463/474 一致（97.7%）**；残余 11 项**全部 loud**（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+
+**残余 loud 清单（第十八批后，11 项）**：
+1. `arguments` 对象（建议 rest 形参）
+2. generator（`function*` / `yield`）
+3. async / await（需 Promise 运行时）
+4. BigInt 值语义
+5. 类名作值（`const C = class {}` 之外：类标识符当值传递）
+6. 类方法/对象方法 >4 形参（方法调用 ABI 仅 4 槽）
+7. 箭头函数内的 `super`
+8. 函数表达式带 `this` 形参作回调实参（receiver 无传递通道 → 运行时 `this` 为 undefined，访问属性抛 TypeError）
+9. 内建调用 >4 实参（内建 ABI 仅 4 槽；如 `Date.UTC(y,m,d,h,mi,s,ms)`）
+10. 计算属性类字段（`["d"+"yn"]: any = 1`；计算属性**方法**已支持）
+11. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
+
+**另：窄面 loud（避免静默错值，非缺陷残留）**：`o[带副作用] op= v` / `o[带副作用] ??= v`（重复求值风险）、`o(带副作用).f = v`、catch 解构的默认值/嵌套/rest、`o.f?.()` 之外的复杂可选链组合。
 
 已支持（本轮新增/完善）：形参默认值·解构形参·rest 形参（调用点按形参表拆包）、let/const **每迭代绑定**（for 在增量处换层，while/for-of 在体首换层）、闭包值独立 tag 0x7FFF、对象字面量方法/访问器（宿主对象 + defineProperty 回调 wasm 闭包，成员闭包纳入捕获分析）、私有字段/方法（`#类名#名`）、静态字段继承/遮蔽与静态块与静态访问器、标签模板、正则字面量、Map/Set/Date、for-of 解构与可迭代、值调用 `qz.call_value`、嵌套解构、**跨函数 throw 传播**（调用点查 `__err`）与 try-finally 重抛、类字段统一容量 + 运行期新键 extras、字符串不可变（逃逸分析决定原地追加 / `qz.str_dup`）、数组/POJO/闭包句柄往返还原、POJO 与实例 clsId 撞号修复。
 

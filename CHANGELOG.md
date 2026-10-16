@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十八批差分审计（2026-10-16）
+- 新增 `audit_corpus18.js`（19 例：ToPrimitive 优先级 / spread 触发 getter / Map·Set 身份（NaN、-0、对象）/ JSON 与 Date·Symbol / RegExp 替换模式（`$&`、`$1`、`` $` ``、`$'`、`$$`、回调）/ 计算属性类成员 / 求值顺序 / 类型擦除边界 / 解构 spread getter / 嵌套闭包循环 / Array.from 空洞 / String.raw / JSON reviver / 标签跳转 / catch 解构 / 数值分隔符 / 数组解构交换 / super 方法链 / 描述符批量）。
+- **模块级 const/let → wasm 全局**（`__module_init` + start 段）：模块级 const/let（含对象/数组/类实例/闭包/`as`/类型注解）此前一律 loud「未定义捕获变量」，现改为分配 i64 全局、由合成的 `__module_init` 在实例化时（start 段）按源序初始化一次；读取/写入/闭包调用解析都优先局部、再全局（保持遮蔽语义）。
+- **catch 解构**（`catch ({code, msg})` / `catch ([a, b])`）：此前静默不绑定（分量恒 0）→ 现从 `__err` 读出各分量绑定；默认值/嵌套/rest 仍 loud。
+- **元素赋值求值顺序**：`o[带副作用] = v` 现按 JS 顺序（obj → key → v）求值（此前先求 v → 静默错序）。
+- 已知 loud（新增）：计算属性类字段（`["d"+"yn"]: any = 1`）；`o[带副作用] op= v` / `o[带副作用] ??= v`（重复求值风险）；`o(带副作用).f = v`。
+- 结果：**463/474（97.7%）**；**残余 11 项全部为 loud（零静默错值）**；test_aot 233 ALL PASS。
+
 ### 第十七批差分审计（2026-10-16）
 - 新增 `audit_corpus17.js`（18 例：数组全方法矩阵 / 字符串全方法矩阵 / seal·freeze 与描述符交互 / 错误形态 / WeakMap·WeakSet / 私有字段继承遮蔽 / 日期时区无关量 / 数字形态字符串索引 / 箭头 this 词法 / switch 复杂流 / 对象数组变异 / 数值边界 / 冻结键序 / 解构交换默认值 / 回调 this / 排序数值串 / Map 对象键 / 字符迭代）。
 - **`includes(v, fromIndex)`**：补 `fromIndex`（未传必须省略实参）。

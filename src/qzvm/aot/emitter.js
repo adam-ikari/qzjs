@@ -231,6 +231,7 @@ class Emitter {
 
     // 收集函数体里的 let/const（分配 local 索引）；支持解构绑定（数组/对象，含嵌套）。
     _collectLocals(node) {
+        const skip = this._inModInit ? this._modInitNames : null;   // 模块初始化函数：模块级名归全局，不建局部
         const names = [];
         const bindName = (bn) => {
             if (ts.isIdentifier(bn)) { names.push(bn.text); return; }
@@ -248,6 +249,7 @@ class Emitter {
             ts.forEachChild(n, walk);
         };
         walk(node);
+        if (skip) { for (let i = names.length - 1; i >= 0; i--) if (skip.has(names[i])) names.splice(i, 1); }   // 模块初始化函数：模块级名归全局
         for (let i = 0; i < 32; i++) names.push("$sh" + i);            // 块级遮蔽保存槽（i64 值局部区，索引可经 _local 取得）
         // 精确检测：嵌套块里声明的名字若已在外层可见 → 记为「遮蔽块」（进入该块前后保存/恢复外层同名局部）
         if (node && node.statements) {
@@ -485,6 +487,8 @@ class Emitter {
         if (this.capMap.has(name)) { M.localGet(this.capMap.get(name)); M.i32Const(this._strId(name)); M.call("qz.env_get"); return; }
         const idx = this._local(name);
         if (idx === undefined) {
+            const g = this.moduleGlobals && this.moduleGlobals.get(name);
+            if (g !== undefined) { M.globalGet(g); return; }   // 模块级变量
             if (BUILTIN_GLOBALS.has(name)) { M.i32Const(this._strId(name)); M.call("qz.builtin_member"); return; }   // 内建全局作值（Symbol/Math/JSON…）
             throw new Error("未定义捕获变量: " + name);
         }
@@ -496,6 +500,8 @@ class Emitter {
         if (this.capMap.has(name)) { this.m.localGet(this.capMap.get(name)); this.m.i32Const(this._strId(name)); this.m.call("qz.env_get"); return; }
         const idx = this._local(name);
         if (idx === undefined) {
+            const g = this.moduleGlobals && this.moduleGlobals.get(name);
+            if (g !== undefined) { this.m.globalGet(g); return; }   // 模块级变量
             if (BUILTIN_GLOBALS.has(name)) { this.m.i32Const(this._strId(name)); this.m.call("qz.builtin_member"); return; }
             throw new Error("未定义变量: " + name);
         }
@@ -513,7 +519,14 @@ class Emitter {
             return;
         }
         const idx = this._local(name);
-        if (idx === undefined) throw new Error("未定义变量: " + name);
+        if (idx === undefined) {
+            const g = this.moduleGlobals && this.moduleGlobals.get(name);
+            if (g !== undefined) {                 // 模块级变量：写全局并保留值（赋值表达式结果，无需临时槽）
+                M.globalSet(g); M.globalGet(g);
+                return;
+            }
+            throw new Error("未定义变量: " + name);
+        }
         M.localTee(idx);
     }
     // .length 计算（base 句柄在 local `base`）：字符串(0x7FFA) → qzs_utf16len（UTF-16 码元数）；
@@ -818,10 +831,12 @@ class Emitter {
         if (this.capMap.has(fn)) { M.localGet(this.capMap.get(fn)); M.i32Const(this._strId(fn)); M.call("qz.env_get"); M.localSet(t.v); }
         else {
             const hIdx = this._local(fn);
-            if (hIdx === undefined) throw new Error(BUILTIN_GLOBALS.has(fn)
+            const gIdx = this.moduleGlobals && this.moduleGlobals.get(fn);
+            if (hIdx === undefined && gIdx === undefined) throw new Error(BUILTIN_GLOBALS.has(fn)
                 ? `[tagged] 内建 ${fn}() 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
                 : "未定义函数: " + fn);
-            M.localGet(hIdx); M.localSet(t.v);
+            if (hIdx !== undefined) M.localGet(hIdx); else M.globalGet(gIdx);   // 模块级变量持闭包值
+            M.localSet(t.v);
         }
         M.localGet(t.v);
         const cp = this._calleeParams(fn);
@@ -1072,7 +1087,8 @@ class Emitter {
             throw new Error("[tagged] async 函数未实现（需 Promise 运行时）");
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this._fnVoid = isVoid;
-        this.mode = funcMode(f);
+        this._inModInit = f.name !== undefined && f.name.text === "__module_init";
+        this.mode = this._inModInit ? "tagged" : funcMode(f);   // 模块初始化：值恒 tagged（模块级名字是 i64 全局）
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
         const locals = this._collectLocals(f.body);
@@ -2123,6 +2139,8 @@ function compileTS(input, outWasm, opts = {}) {
         }
         return null;
     };
+    const modVars = [];          // 模块级变量声明（含初值）
+    const modStmts = [];         // 模块级变量语句（合成 __module_init 的函数体）
     const collectDecls = (f) => {
         const walkCls = (n) => {          // class 仍整树提升（含函数内 class）
             if (ts.isClassDeclaration(n)) clsStmts.push(n);
@@ -2138,10 +2156,23 @@ function compileTS(input, outWasm, opts = {}) {
         };
         for (const st of f.statements) {
             if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
+            if (ts.isVariableStatement(st)) {                       // 模块级 const/let → wasm 全局（模块初始化时赋值一次）
+                for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name) && d.initializer) modVars.push(d);
+                modStmts.push(st);
+            }
             walkCls(st);
         }
     };
     for (const f of sfs) collectDecls(f);
+    if (modStmts.length) {
+        // 合成模块初始化函数：体 = 模块级变量语句（按源序），返回值 void；实例化时由 start 段自动执行。
+        const initFn = ts.factory.createFunctionDeclaration(undefined, undefined, "__module_init", undefined, [],
+            ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword), ts.factory.createBlock(modStmts, true));
+        const anchor = modStmts[0];                 // 合成节点需真实位置（DWARF/行号），借用首条语句范围
+        initFn.pos = anchor.pos; initFn.end = anchor.end; initFn.parent = sf;
+        initFn.body.pos = anchor.pos; initFn.body.end = anchor.end; initFn.body.parent = initFn;
+        fns.push(initFn); fnSf.set(initFn, sf); hoistedFns.add(initFn);
+    }
     // 预登记所有属性名（POJO/实例容量统一；否则「运行期新增字段」会越界写、静态读会错位）。
     const preNames = [];
     let usesFreeze = false;
@@ -2427,6 +2458,8 @@ function compileTS(input, outWasm, opts = {}) {
         for (const st of fns) em._fnNodes.set(st.name.text, st);
         for (const st of fns) { em.fnNames.add(st.name.text); em._fnParams.set(st.name.text, st.parameters.length); }
         for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
+        em.moduleGlobals = em.moduleGlobals || new Map();
+        em._inModInit = false;
         if (!m.collect) {
             if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
             if (contract) registerQz(m, contract);
@@ -2435,6 +2468,9 @@ function compileTS(input, outWasm, opts = {}) {
             m.addMemory(640);                                // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
             m.addGlobal("i32", STR_BUMP);                    // global0 = bump 堆（字符串/对象）
             m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
+            em.moduleGlobals = new Map();                    // 模块级变量名 → wasm 全局索引（i64 tagged，索引 2 起）
+            em._modInitNames = new Set(modVars.map(v => v.name.text));
+            for (const v of modVars) em.moduleGlobals.set(v.name.text, m.addGlobal("i64", 0));
             emitStringHelpers(m);
         }
         for (const st of fns) {
@@ -2486,7 +2522,9 @@ function compileTS(input, outWasm, opts = {}) {
             m.endBody();
             m.exportFn("__bump_reset", "__bump_reset");
         }
+        em.emitLambdaBodies();                                // __module_init 体内惰性登记的闭包
         for (const meta of em._lamById.values()) m.exportFn(meta.fname, meta.fname);
+        if (modStmts.length && anyTagged) m.setStart("__module_init");
         return em;
     };
 
@@ -2980,9 +3018,40 @@ Emitter.prototype.emitTry = function (s, tagged) {
     this.depth--; M.end();                         // end $err → catch 入口
     const c = s.catchClause;
     if (c) {
-        if (c.variableDeclaration && ts.isIdentifier(c.variableDeclaration.name)) {
-            const idx = this._local(c.variableDeclaration.name.text);
+        const cv = c.variableDeclaration && c.variableDeclaration.name;
+        if (cv && ts.isIdentifier(cv)) {
+            const idx = this._local(cv.text);
             if (idx !== undefined) { M.globalGet(1); M.localSet(idx); }   // catch 变量 = __err
+        } else if (cv) {
+            // catch 解构（{a, b} / [x, y]）：从 __err 读出各分量并绑定（此前静默不绑定 → 全 0）
+            const t = this._expEnter();
+            M.globalGet(1); M.localSet(t.x);
+            if (ts.isObjectBindingPattern(cv)) {
+                for (const el of cv.elements) {
+                    if (!ts.isIdentifier(el.name)) throw new Error("[tagged] catch 对象解构仅支持标识符（含改名）");
+                    if (el.dotDotDotToken) throw new Error("[tagged] catch 解构暂不支持 rest");
+                    if (el.initializer) throw new Error("[tagged] catch 解构暂不支持默认值");
+                    const key = ts.isIdentifier(el.propertyName || el.name) ? (el.propertyName || el.name).text : null;
+                    if (key === null) throw new Error("[tagged] catch 解构键必须为标识符");
+                    this._emitPropReadFromLocal(t.x, key);
+                    const idx = this._local(el.name.text);
+                    if (idx !== undefined) M.localSet(idx); else M.drop();
+                }
+            } else if (ts.isArrayBindingPattern(cv)) {
+                let i = 0;
+                for (const el of cv.elements) {
+                    if (ts.isOmittedExpression(el)) { i++; continue; }
+                    if (!ts.isIdentifier(el.name)) throw new Error("[tagged] catch 数组解构仅支持标识符");
+                    if (el.initializer) throw new Error("[tagged] catch 解构暂不支持默认值");
+                    this._emitElemOf(t.x, ts.factory.createNumericLiteral(i));
+                    const idx = this._local(el.name.text);
+                    if (idx !== undefined) M.localSet(idx); else M.drop();
+                    i++;
+                }
+            } else {
+                throw new Error("[tagged] 不支持的 catch 绑定模式");
+            }
+            this._expLeave();
         }
         M.i64Const(0n); M.globalSet(1);                          // catch 入口即清 __err（否则 catch 体内调用点的 err 检查会重复触发）
         if (tagged) this.emitTaggedBlock(c.block); else this.emitBlock(c.block);
@@ -4161,18 +4230,29 @@ Emitter.prototype._emitStoreLength = function (left) {
     M.end();
     M.localGet(this.scratch);                       // 赋值表达式返回所赋之值
 };
-Emitter.prototype._emitStoreElem = function (left) {
+Emitter.prototype._hasSideEffects = function (n) {
+    if (n === undefined || n === null) return false;
+    if (ts.isIdentifier(n) || ts.isLiteralExpression(n)) return false;
+    if (n.kind === ts.SyntaxKind.SuperKeyword) return false;   // super 是静态引用（无副作用）
+    if (n.kind === ts.SyntaxKind.ThisKeyword || n.kind === ts.SyntaxKind.TrueKeyword || n.kind === ts.SyntaxKind.FalseKeyword || n.kind === ts.SyntaxKind.NullKeyword) return false;
+    if (ts.isPropertyAccessExpression(n)) return this._hasSideEffects(n.expression);
+    if (ts.isElementAccessExpression(n)) return this._hasSideEffects(n.expression) || this._hasSideEffects(n.argumentExpression);
+    if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isTypeAssertionExpression(n) || ts.isSatisfiesExpression(n)) return this._hasSideEffects(n.expression);
+    if (ts.isPrefixUnaryExpression(n) && (n.operator === ts.SyntaxKind.PlusToken || n.operator === ts.SyntaxKind.MinusToken)) return this._hasSideEffects(n.operand);
+    return true;
+};
+Emitter.prototype._emitStoreElem = function (left, preObj, preKey) {
     const M = this.m, t = this._expEnter();       // 值/键/接收者须存活于嵌套求值
     M.localSet(t.w);                              // 值（i64）
-    this.emitTaggedExpr(left.argumentExpression); M.localSet(t.v);   // 键
+    if (preKey !== undefined) { M.localGet(preKey); M.localSet(t.v); } else { this.emitTaggedExpr(left.argumentExpression); M.localSet(t.v); }   // 键
     M.localGet(t.v); this._emitIsStr();
     M.ifBlock("void");
-    this.emitTaggedExpr(left.expression); M.localSet(t.x);
+    if (preObj !== undefined) { M.localGet(preObj); M.localSet(t.x); } else { this.emitTaggedExpr(left.expression); M.localSet(t.x); }
     if (this.usesKeyOrder) { M.localGet(t.x); M.localGet(t.v); M.call("qz.field_order"); }   // 插入序登记
     M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.set_index");   // 字符串键 → 宿主
     this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
     M.else_();
-    this.emitTaggedExpr(left.expression); M.localSet(t.x);
+    if (preObj !== undefined) { M.localGet(preObj); M.localSet(t.x); } else { this.emitTaggedExpr(left.expression); M.localSet(t.x); }
     M.localGet(t.x); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
     M.ifBlock("void");                                             // wasm 数组 + 数值键
     this._emitInt32Safe(t.v);
@@ -4474,9 +4554,23 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         }
         if (ts.isPropertyAccessExpression(e.left)) {
             if (e.left.name.text === "length") { this.emitTaggedExpr(e.right); this._emitStoreLength(e.left); return; }
+            if (!ts.isSuperKeyword(e.left.expression) && this._hasSideEffects(e.left.expression))
+                throw new Error("[tagged] 属性赋值 o.f = v 中 o 带副作用：求值顺序未实现（JS 先 obj 后 v）");
             this.emitTaggedExpr(e.right); this._emitStoreProp(e.left); return;
         }
-        if (ts.isElementAccessExpression(e.left)) { this.emitTaggedExpr(e.right); this._emitStoreElem(e.left); return; }
+        if (ts.isElementAccessExpression(e.left)) {
+            const M = this.m;
+            if (this._hasSideEffects(e.left.expression) || this._hasSideEffects(e.left.argumentExpression)) {
+                const t1 = this._expEnter(), t2 = this._expEnter();          // 分层槽：与 _emitStoreElem 内部的临时槽互不重叠
+                this.emitTaggedExpr(e.left.expression); M.localSet(t1.x);     // JS 顺序：obj → key → v
+                this.emitTaggedExpr(e.left.argumentExpression); M.localSet(t2.x);
+                this.emitTaggedExpr(e.right);
+                this._emitStoreElem(e.left, t1.x, t2.x);
+                this._expLeave(); this._expLeave();
+                return;
+            }
+            this.emitTaggedExpr(e.right); this._emitStoreElem(e.left); return;
+        }
         this.emitTaggedExpr(e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;   // 含闭包捕获
     }
@@ -4501,6 +4595,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         }
         if (ts.isElementAccessExpression(e.left)) {
             this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this._emitBinOp(COMPOUND[op]);
+            if (this._hasSideEffects(e.left.expression) || this._hasSideEffects(e.left.argumentExpression))
+                throw new Error("[tagged] 元素复合赋值 o[带副作用] op= v 的求值顺序未实现");
             this._emitStoreElem(e.left); return;
         }
         if (COMPOUND[op] === ts.SyntaxKind.PlusToken) this._concatInPlace = this._concatSafe(e.left);
@@ -4528,7 +4624,11 @@ Emitter.prototype.emitTaggedBinary = function (e) {
             if (e.left.name.text === "length") { this.emitNullish(e.left, e.right); this._emitStoreLength(e.left); return; }
             this.emitNullish(e.left, e.right); this._emitStoreProp(e.left); return;
         }
-        if (ts.isElementAccessExpression(e.left)) { this.emitNullish(e.left, e.right); this._emitStoreElem(e.left); return; }
+        if (ts.isElementAccessExpression(e.left)) {
+            if (this._hasSideEffects(e.left.expression) || this._hasSideEffects(e.left.argumentExpression))
+                throw new Error("[tagged] 元素空值合并赋值 o[带副作用] ??= v 的求值顺序未实现");
+            this.emitNullish(e.left, e.right); this._emitStoreElem(e.left); return;
+        }
         this.emitNullish(e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
     }
