@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 方法 >4 形参 / rest（对象字面量方法，2026-10-16）
+- **宿主对象方法分支**：`method_call` 的宿主对象路径把 `ovf` 的实参 4.. 接在 4 槽之后（`fn.apply(obj, as)`）——此前只传 4 槽，第 5 个实参丢失（rest 求和少一项）。
+- **物化方法包装器**：`object_set_method` 的 `obj[k] = function(...args)` 现转发 `ovf`（`args.slice(3)` → 第 6 参）→ 否则 `closureCall` 收到 `hasEx=false`，rest 数组缺失、`for...of` 报「该值不可迭代」。
+- 验证：探针 `corpus_rest.js` **4/4**；`test_aot` 233 ALL PASS；21 批语料无回归。
+- 残余 loud 由 8 项降为 **7 项**（类与方法 >4 形参已支持）。
+
 ### 方法 >4 形参 / rest 形参（类路径，2026-10-16）
 - **方法签名**：类方法与静态方法在形参 >4 时追加第 6 槽 `ovf`（实参 3.. 数组，与闭包 ABI 同款约定）；`_emitMethodArgs` 统一「前 4 槽 + ovf + rest 打包」。
 - **关键修复**：`params` 计算须为「前 4 个实参形参 + 补位 + `$ovf`」（此前把实参 4.. 的名字也留在参数表 → `nParams` 多 1 → scratch/sT/objPool 全体错位，wasm 校验报 `expected [f64] but got [i64]`）。

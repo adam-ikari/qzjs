@@ -115,7 +115,7 @@
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
 结果：**521/530 一致（98.3%）**；残余 9 项：**8 项 loud + 1 项已知静默**（`Object.assign` 多源键序）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
-**残余 loud 清单（第二十一批后，8 项 loud + 1 项已知静默）**
+**残余 loud 清单（方法 >4 形参/rest 打通后，7 项 loud + 1 项已知静默）**
 
 **方法/对象方法 >4 形参 / rest（类路径已通，对象字面量 rest 未通）**：ABI 铺路已提交（`qz.method_call` 增第 7 参 `ovf`=实参 4..，7 处发射点补位，行为中性）。剩余补丁见 `/tmp/qzaux/patch_mo2.js`（方法/静态方法签名 +`i64` 槽、`$ovf` 形参槽、`_mEnter` 的 `$ovfArg` 预留 local 与 varMap `i<4?1+i:1+params.length+(i-4)`、`_emitOvfParamUnpack` 解包、动态分派传真实溢出数组、删「方法最多 4 参」守卫）。**第二轮尝试的结论（重要，可直接复用）**：
 - **local 布局 bug 已定位并修复**：`params` 必须是「前 4 个实参形参 + 补位 + `$ovf`」，即 `realParams.slice(0, 4).concat(["$p1"..].slice(0, max(0,4-len))).concat(len>4?["$ovf"]:[])`；此前写成 `realParams.concat(补位)` 导致 `params.length` 比 wasm 形参数多 1 → 之后所有 local（scratch/sT/objPool）错位 → 校验报 `expected [f64] but got [i64]`。修好后 wasm-validate 通过。
@@ -129,11 +129,52 @@
 3. async / await（需 Promise 运行时）
 4. BigInt 值语义
 5. 类名作值（`const C = class {}` 之外：类标识符当值传递）
-6. 类方法/对象方法 >4 形参（方法调用 ABI 仅 4 槽）
 7. 箭头函数内的 `super`
 8. 内建调用 >4 实参（内建 ABI 仅 4 槽；如 `Date.UTC(y,m,d,h,mi,s,ms)`）
 9. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
 9. 静态成员体内 `this.<name>` 经**派生类**调用且派生类**自有覆写**该名 → loud（本实现 `this` ≡ 定义类；未覆写时与 JS 一致，故不报错）
+
+**已知静默差异（1 项）**：
+- **`Object.assign` 多源键序**：多源合并时新键的追加位置与 JS 不同。最小复现（`/tmp/qzaux/corpus_oa3.js`）：
+  `const base={a:1,b:2}; const over={...base,b:99,c:3}; Object.assign({}, {d:4}, over)` → JS `{"d":4,"a":1,"b":99,"c":3}`，本实现 `{"a":1,"b":99,"c":3,"d":4}`（**源被按后置优先处理**）。
+  已排除：`_emitBuiltinCall` 按序压栈（非逆序）、宿主 `[a0..a3].slice(0, arity || n).map(toJS)` 参数顺序正确、双源/字面量源场景一致。
+  指向：emitter 侧对 `Object.assign({}, …)` 的**对象字面量+展开**路径（`emitter.js` 展开分支按**槽序**做内存级合并 → 键序退化为 fieldMap 槽序）；或该路径与 builtin 路径的选择条件。
+- 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏过滤（探针 /tmp/qzaux/corpus_p1.js 的 hasown-nonenum）。
+
+**已修（2026-10-16，第二十一批后）**：`JSON.parse` 结果里的数组字段此前每次读得到不同实例（wasm box 与宿主数组分离）→ 写入丢失；现宿主数组保持**宿主句柄**（`object_get`/`prop_get` 对 `Array.isArray` 值返回 `tagHandle`），元素读/写就地作用于真实 JS 数组 → 读值与 `JSON.stringify` 视图一致（探针 corpus_j1 3/3）。
+
+**另：窄面 loud（避免静默错值，非缺陷残留）**：`o[带副作用] op= v` / `o[带副作用] ??= v`（重复求值风险）、`o(带副作用).f = v`、catch 解构的默认值/嵌套/rest、`o.f?.()` 之外的复杂可选链组合。
+
+已支持（本轮新增/完善）：形参默认值·解构形参·rest 形参（调用点按形参表拆包）、let/const **每迭代绑定**（for 在增量处换层，while/for-of 在体首换层）、闭包值独立 tag 0x7FFF、对象字面量方法/访问器（宿主对象 + defineProperty 回调 wasm 闭包，成员闭包纳入捕获分析）、私有字段/方法（`#类名#名`）、静态字段继承/遮蔽与静态块与静态访问器、标签模板、正则字面量、Map/Set/Date、for-of 解构与可迭代、值调用 `qz.call_value`、嵌套解构、**跨函数 throw 传播**（调用点查 `__err`）与 try-finally 重抛、类字段统一容量 + 运行期新键 extras、字符串不可变（逃逸分析决定原地追加 / `qz.str_dup`）、数组/POJO/闭包句柄往返还原、POJO 与实例 clsId 撞号修复。
+
+已知限制（均已记录，loud 或窄面差异）：
+- （已修）**POJO/实例键序**：插入序表（`field_order`/`field_order_lit`，写/删同步）→ `Object.keys`/`for-in`/`JSON.stringify` 键序与 JS 一致。
+- （已修）**属性访问 undefined/null → TypeError**：内存快路径的「未赋值/越界」分支改走宿主 `prop_get`（POJO 未赋值 → undefined；undefined/null → TypeError），调用点在**链外**统一检查 `__err`（避免破坏嵌套 if 平衡）；提取方法（`const f = o.m; f()`）因此按 JS 抛错。
+- （已修）**`this` 形参模型**：TS 的 `this` 形参是**注解**（不占实参槽）→ `function (this: any, k)` 的 `k` 落在正确槽位（此前错位得 NaN）；对象字面量方法/访问器为合成箭头，其首个 `this` 参数是真实 receiver 槽（`lamMeta.synthThis`），`.call/.apply/.bind` 按此决定是否传 receiver。
+- **旧**（保留说明）：（2）`Object.create` 之外的原型链方法调用 `this`、`delete` 已按接收者修正，但 `this` 未定义时不抛错；（已修）**数组迭代器**改为**惰性读内存**（`liveIter`）→ 迭代中 `push`/`length` 变化可见（JS 迭代活数组）、洞按 undefined 贡献；（4）方法内经 `this` 捕获的嵌套函数（`function` 表达式带 this 参数）个别场景捕获值为 NaN。
+- **`arguments` 对象**未实现（编译期 loud，建议 rest 形参）；**闭包/lambda >4 形参**（wasm 闭包 ABI 仅 4 实参槽；顶层函数直调不限）。
+- （已修）**稀疏数组洞**：数据槽以 `HOLE`(0x7FF9|2) 标记，`arrRead` 还原为真 JS 稀疏数组 → `map/filter/reduce/indexOf/join/Object.keys/JSON/for-of` 与 JS 一致（`includes` 不跳洞）。
+- （已修）**POJO/实例键序**：插入序跟踪（见下）。
+- 跨函数 throw 需 glue 在调用导出后调用 `qz.take_err()` 才会向宿主 JS 抛出（wasm 无法直接抛出 JS 异常）。
+- 对象展开段与访问器混用、`with`/`eval`、`new.target`、`Proxy`/`Reflect`、TypedArray、`Intl`、`structuredClone` 等未支持（loud）。
+- （已修）**私有成员**：私有字段不再出现在 `Object.keys`/`JSON`（JS 私有槽语义）；`P.#s` 静态私有字段读走静态路径（`statics_has`/`static_get` 键同 `#类名#名`）；`this.#m()` 私有方法调用按 `_curClass` 限定。
+- **generator**（`yield`）、**async**（需 Promise 运行时）、**BigInt**（`BigIntLiteral`）→ 编译期 loud；**类对象作值**（静态方法返回类名）→ 编译期 loud。
+- （已修）**类表达式**：`const C = class {…}` / `class Named {…}` 作为表达式 → 合成类名（`new C()` / `c instanceof C` 生效）；作为值使用仍 loud。
+- （已修）**私有静态字段/方法**：`static #n` / `static #m()`（键 `#类名#名`，访问点同键）+ `typeof <类名>` → `"function"`。
+- （已修）**闭包/函数表达式/IIFE >4 形参**：调用点 a0..a3 = 实参 0..3，第 6 参 `ovf` = 实参 3.. 数组 → 宿主按 `lamMeta.n`/`rest` 还原（固定参 + rest 打包）；值调用（变量/参数持闭包）同约定。
+- **类方法与对象字面量方法 >4 形参**仍为编译期 loud（方法 ABI 只有 `self + 4` 槽；见 ASSESSMENT 限制）。
+- **宿主↔wasm 闭包递归深度**：每层经 `qz.closure_call` 往返，约 300 层触 JS 栈上限（`node --stack-size` 可提高；真解是自递归直调优化）。
+- （已修）**`String.raw`**：编译期按源码原文（raw 段）与 `ToString(插值)` 拼接 —— 无需 `strings.raw` 表。
+- 标签模板的 **`strings.raw`**（自定义 tag 读取）仍无 `.raw` 表（wasm 数组无附加属性）→ 宿主 TypeError（loud）。
+
+- （已修）**第 14 批发现的三项静默差异**：(1) `undefined/null` **写属性** → 走宿主 `prop_set`（TypeError）+ 链外 `_emitErrCheck`；(2) **块级 `let/const` 遮蔽** → 进入遮蔽块前把外层同名局部存入 `$shN` 槽，退出后恢复（`_collectLocals` 精确扫描遮蔽块）；(3) `find`/`pop`/`at` 等返回**元素**的方法 → `ret` 依据 `pojoOf` 还原原始 POJO/实例句柄（此前返回物化快照 → 方法调用报「无方法」、身份丢失）。**方法/静态方法 >4 形参 + rest 形参（已完整支持，2026-10-16）**：
+- **签名**：方法/静态方法形参 >4 时追加第 6 槽 `ovf`（实参 3.. 数组，与闭包 ABI 同款约定：`ovf[0]` = 实参 3）。
+- **关键 bug（local 布局）**：`params` 必须「前 4 个实参形参 + 补位 + `$ovf`」（`realParams.slice(0,4).concat(...)`）——此前把实参 4.. 的名字也留下 → `nParams` 多 1 → 其后所有 local（scratch/sT/objPool）错位，校验报 `expected [f64] but got [i64]`。
+- **实参装配**：新增 `_emitMethodArgs(params, args)`（4 槽 + rest 打包 + >4 时 `args.slice(3)` 数组）；`_emitClosureCall` 对已知形参表同用它。
+- **宿主四处**：① 类方法路径按 `m.n`/`m.rest` 重建平坦实参（`flat` 统一 tagged；`arrWriteback` 只收 JS 值 → `.map(toJS)`）；② rest 数组落在其形参槽（`[recv].concat(head,[restArray])` 补足 5 槽）；③ **宿主对象方法分支**把 `ovf` 的实参 4.. 接在 4 槽之后（`fn.apply(obj, as)`）；④ **物化方法包装器** `object_set_method` 转发 `ovf`（`args.slice(3)`）→ 否则 `closureCall` 收到 `hasEx=false`，rest 数组缺失。
+- **合成方法箭头**：`_memberLambda` 显式标 `f._qzRest`（合成形参表丢 `dotDotDotToken`）→ `lamMeta.rest` 认它。
+- `classMeta.methods[name]` 增 `rest` 字段。
+- 验证：探针 `corpus_rest.js` **4/4**（类方法 5 形参、类方法 rest+5 实参、对象字面量方法 rest、4 形参）。
 
 **已知静默差异（1 项）**：
 - **`Object.assign` 多源键序**：多源合并时新键的追加位置与 JS 不同。最小复现（`/tmp/qzaux/corpus_oa3.js`）：

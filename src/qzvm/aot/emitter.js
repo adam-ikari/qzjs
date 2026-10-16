@@ -888,9 +888,8 @@ class Emitter {
             this._expLeave();
             return;
         }
-        if (cp && cp.length > 0 && cp[cp.length - 1].dotDotDotToken && cp.length <= 4) {
-            this._emitCallArgs(cp, args, fn);
-            for (let i = cp.length; i < 4; i++) this._emitUndefined();
+        if (cp) {
+            this._emitMethodArgs(cp, args);        // 已知形参表：4 槽（含 rest 打包；>4 的 ovf 分支在上方 call_value 路径已处理）
         } else {
             for (let i = 0; i < 4; i++) {
                 if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
@@ -4750,6 +4749,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
     }
     {   // ovf：实参 4..（被调形参 >4 时由宿主按其 arity 解包；否则忽略）
         const ovfA = args.slice(3);   // 与闭包 ABI 同款：ex[0] = 实参 3（已在 a3）
+        if (process.env.QZDBG) console.error("[dbg] dynOvf argsLen=", args.length, "ovfLen=", ovfA.length);
         if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 方法调用的溢出实参与展开混用暂不支持");
         const lit = ts.factory.createArrayLiteralExpression(ovfA);
         lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;

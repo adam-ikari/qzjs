@@ -1023,7 +1023,10 @@ function makeQzvm(strings, opts) {
       const obj = handles[idxOf(o)];
       obj[strings[k]] = function (...args) {
         const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG;   // 实际接收者；提取后调用 this=undefined（JS 语义）
-        return toJS(closureCall(v, ret(args[0]), ret(args[1]), ret(args[2]), TAG, undefined, selfH));   // receiver 走 recv
+        const aa = args.slice(0, 4).map(ret);
+        while (aa.length < 4) aa.push(TAG);                       // 未传实参 = TAG
+        const ovfA = args.length > 3 ? ret(args.slice(3)) : undefined;   // 闭包 ABI：ovf = 实参 3..（rest/>4 形参由 callee 侧解包）
+        return toJS(closureCall(v, aa[0], aa[1], aa[2], aa[3], ovfA, selfH));   // receiver 走 recv
       };
       obj[strings[k]].__qzClo = v;   // 原始闭包句柄（访问器调用需替换 this）
     },
@@ -1031,7 +1034,10 @@ function makeQzvm(strings, opts) {
       const obj = handles[idxOf(o)], key = toJS(keyHandle);
       obj[key] = function (...args) {
         const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG;
-        return toJS(closureCall(v, ret(args[0]), ret(args[1]), ret(args[2]), TAG, undefined, selfH));   // receiver 走 recv
+        const aa = args.slice(0, 4).map(ret);
+        while (aa.length < 4) aa.push(TAG);                       // 未传实参 = TAG
+        const ovfA = args.length > 3 ? ret(args.slice(3)) : undefined;   // 闭包 ABI：ovf = 实参 3..（rest/>4 形参由 callee 侧解包）
+        return toJS(closureCall(v, aa[0], aa[1], aa[2], aa[3], ovfA, selfH));   // receiver 走 recv
       };
       obj[key].__qzClo = v;
     },
@@ -1385,6 +1391,7 @@ function makeQzvm(strings, opts) {
         const fn = obj == null ? undefined : obj[name];
         if (typeof fn !== "function") throw new Error("method_call: 宿主对象无方法 " + name);
         const as = [a0, a1, a2, a3].map(toJS);
+        if (ovf !== undefined && ovf !== TAG) as.push(...(toJS(ovf) || []).slice(1));   // ovf[0] = 实参 3（已在 a3）；其余接在 4 槽之后（rest/>4 形参）
         while (as.length && as[as.length - 1] === undefined) as.pop();   // 未传实参必须省略（否则 setFullYear(2021,undefined) → Invalid Date）
         return ret(fn.apply(obj, as));
       }
