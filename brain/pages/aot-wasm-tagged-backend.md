@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T14:53:08"
+updated: "2026-10-16T15:01:01"
 ---
 
 <!-- compiled_truth -->
@@ -216,4 +216,9 @@ updated: "2026-10-16T14:53:08"
 - time: 2026-10-16T14:53:08
   kind: evidence
   summary: "提取方法 this + undefined 属性读：370/381（97.1%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T15:01:01
+  kind: evidence
+  summary: "数组迭代器惰性化：371/381（97.4%）"
   affects: [aot-wasm-tagged-backend]
