@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T15:01:01"
+updated: "2026-10-16T15:17:52"
 ---
 
 <!-- compiled_truth -->
@@ -221,4 +221,9 @@ updated: "2026-10-16T15:01:01"
 - time: 2026-10-16T15:01:01
   kind: evidence
   summary: "数组迭代器惰性化：371/381（97.4%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T15:17:52
+  kind: evidence
+  summary: "undefined 属性读抛错 + this 形参注解模型：372/381（97.6%），残余 9 项全部 loud"
   affects: [aot-wasm-tagged-backend]
