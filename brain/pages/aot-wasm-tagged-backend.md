@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T18:00:29"
+updated: "2026-10-16T18:05:20"
 ---
 
 <!-- compiled_truth -->
@@ -276,4 +276,9 @@ updated: "2026-10-16T18:00:29"
 - time: 2026-10-16T18:00:29
   kind: evidence
   summary: "类表达式别名修复 + receiver 通道重构方案落档（464/474）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T18:05:20
+  kind: evidence
+  summary: "receiver 通道完成：466/474（98.3%），fn-call-apply-bind / callback-this-binding / this-arrow-vs-fn / closure-captures-this-method 转为一致"
   affects: [aot-wasm-tagged-backend]
