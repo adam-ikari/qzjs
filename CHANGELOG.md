@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十批补充 2（2026-10-16）
+- **静态私有字段写 `C.#n = v`**：`_emitStoreProp` 顶部新增类名接收者 + 私有名分支（`qz.static_set(cn, "#类名#名")`，与读路径 `_staticKey` 一致）——此前落到实例私有分支 → 把 `C` 当值 → 编译期 loud。
+- **静态方法/getter/setter 内 `this` ≡ 定义类**：`_isClassName`/`_classOfExpr` 在静态方法体内把 `this` 解析为当前类，`_inStaticMethod` 逐函数显式复位（顶层函数/方法/构造器/lambda 均置 false）；**静态方法直调**（`_emitDynMethod`）改用 `_isClassName(rx)` 识别接收者，支持 `(C as any).m()`、括号、静态方法内的 `this.m()`。
+- **精确 loud（避免静默错值）**：静态成员体内 `this.<name>` 经**派生类**调用、且该派生类链上**自有**覆写 `name` 时 → 编译期 loud（此前静默按定义类解析得错值）；未覆写时与 JS 一致，不报错。
+- 结果：**503/512（98.2%）**；残余 9 项全部 loud（零静默错值）。
+
 ### 第二十批补充（2026-10-16）
 - **`Symbol.<wellknown>` 元素访问规范化**：`o[Symbol.iterator]` / `o[Symbol.iterator]()` ≡ `o["@@iterator"]`（读走 `_emitPropReadFromLocal`、调用走 `_emitDynMethod`）——此前按运行期 symbol 句柄查表 → 取到 undefined → 调用报 `call_value: 被调值不是函数`。
 - **`@@<Symbol>` 物化回调参数补位**：物化对象上挂的 `[Symbol.x]` 包装器恒按 wasm 方法签名 `(self, a0..a3)` 传 5 个实参（不足补 TAG）——此前实参不足 5 个 → `Cannot convert undefined to a BigInt`。

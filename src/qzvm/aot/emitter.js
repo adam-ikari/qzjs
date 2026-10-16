@@ -467,6 +467,23 @@ class Emitter {
         return null;
     }
     // 接收者静态类：标识符 → _staticVars；叶类方法体/构造器内的 `this` → _curClass。否则 null。
+    // 静态方法/getter/setter 内 `this` 在本实现中按**定义类**解析。仅当调用类到定义类之间某层**自有**静态成员
+    // 命中体内 `this.<name>` 访问集时才可能偏差（JS 的 this = 调用类）→ 此时 loud（避免静默错值）。
+    _checkStaticThis(owner, callCls, sm, label) {
+        if (!sm || !sm.thisNames || !sm.thisNames.size || owner === callCls) return;
+        let x = callCls, hop = 0;
+        while (x && x !== owner && hop++ < 100) {
+            const c = this.classes.get(x);
+            if (!c) break;
+            const own = (arr2, nm) => (arr2 || []).some(k => k.name === nm);
+            for (const nm of sm.thisNames) {
+                if (own(c.staticFields, nm) || own(c.staticMethods, nm)) {
+                    throw new Error(`[tagged] 静态成员 ${owner}.${label} 体内 \`this.${nm}\` 经派生类 ${callCls} 调用：this 应为派生类对象，未实现`);
+                }
+            }
+            x = c.parent;
+        }
+    }
     _staticRecvClass(rx) {
         if (ts.isIdentifier(rx) && this._staticVars && this._staticVars.has(rx.text)) return this._staticVars.get(rx.text);
         if (rx.kind === ts.SyntaxKind.ThisKeyword && this._curClass && this._leafClasses.has(this._curClass)) return this._curClass;
@@ -1108,6 +1125,7 @@ class Emitter {
             if (ts.isIdentifier(p.name)) continue;
             for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         }
+        this._inStaticMethod = false;
         this._lamThisParam = f.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this");   // 顶层函数：`this` 形参是 TS 注解（不占实参槽）
         const nLoc = f.parameters.length + locals.length;
         this.scratch = nLoc;                                 // scratch（后缀 ++/--）
@@ -1264,6 +1282,7 @@ class Emitter {
         this.mode = "tagged";
         this._fnVoid = false;                                  // lambda 恒返回 i64
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
+        this._inStaticMethod = false;
         const thisSlotB = lam.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this");
         this._lamThisParam = !(lam._qzSynthThis || thisSlotB) && thisSlotB;   // 用**原始**形参表（astParams 已剔除 this 注解）   // 仅**用户**写的 this 注解形参 → 运行时 this = undefined
         const locals = this._collectLocals(lam.body);
@@ -1398,6 +1417,40 @@ class Emitter {
                 }
                 fields.unshift.apply(fields, props);             // TS：参数属性先于字段初值赋值
             }
+            {   // 静态方法/getter/setter 体内是否出现 `this`（≡ 类）：派生类经类名调用时 `this` 应为**派生类**对象，
+                // 本实现按定义类解析 → 静默偏差；此处标记以便调用点 loud。
+                const usesThis = (node) => {
+                    let hit = false;
+                    const walk = (n2) => {
+                        if (hit) return;
+                        if (ts.isThis(n2)) { hit = true; return; }
+                        if (n2 !== node && (ts.isFunctionDeclaration(n2) || ts.isFunctionExpression(n2) || ts.isArrowFunction(n2))) return;   // 内层函数的 this 另算
+                        ts.forEachChild(n2, walk);
+                    };
+                    if (node) walk(node);
+                    return hit;
+                };
+                const thisNames = (node) => {
+                    const names = new Set();
+                    const walk = (n2) => {
+                        if (ts.isPropertyAccessExpression(n2) && ts.isThis(n2.expression)) {
+                            if (ts.isIdentifier(n2.name)) names.add(n2.name.text);   // 私有名不参与（私有静态不继承）
+                        } else if (ts.isElementAccessExpression(n2) && ts.isThis(n2.expression)
+                            && (ts.isStringLiteral(n2.argumentExpression) || ts.isNumericLiteral(n2.argumentExpression))) {
+                            names.add(n2.argumentExpression.text);
+                        }
+                        if (n2 !== node && (ts.isFunctionDeclaration(n2) || ts.isFunctionExpression(n2) || ts.isArrowFunction(n2))) return;
+                        ts.forEachChild(n2, walk);
+                    };
+                    if (node) walk(node);
+                    for (let x = this.classes.get(cname) && this.classes.get(cname).parent; x; x = this.classes.get(x) && this.classes.get(x).parent) {
+                        const cl2 = this.classes.get(x);   // 基类链上的静态名 → 若派生类覆写才可能偏差（扫描时统一记入，调用点再判）
+                        if (!cl2) break;
+                    }
+                    return names;
+                };
+                for (const sm of staticMethods) { sm.usesThis = usesThis(sm.node && sm.node.body); sm.thisNames = thisNames(sm.node && sm.node.body); }
+            }
             this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }
@@ -1447,6 +1500,7 @@ class Emitter {
         const realParams = sm.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
+        this._inStaticMethod = true;                       // 静态方法体内 this ≡ 类（_classOfExpr）
         this._emitParamPrologue(sm.node.parameters, 1);    // 静态方法形参同上
         this._curClassObj = this.classes.get(cname);
         this._emitFnDeclClosures(sm.node.body);
@@ -1463,6 +1517,7 @@ class Emitter {
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         const body = ctor ? ctor.body : { statements: [] };
         this._mEnter(ctorName(c.name), c.name, params, body, true, ctor ? ctor.parameters : []);
+        this._inStaticMethod = false;
         this._curClassObj = c;
         // 派生类：字段默认值须在 super(...) 之后写（同名遮蔽字段父写后子覆写）；
         // super 语句处 _emitSuperCall 负责调用父 ctor 后回写本类默认值。基类：此处直接写。
@@ -1493,6 +1548,7 @@ class Emitter {
         const realParams = mth.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters);
+        this._inStaticMethod = false;
         this._emitParamPrologue(mth.node.parameters, 1);   // 方法形参：默认值/解构/>4 溢出解包
         this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);
@@ -2718,6 +2774,7 @@ Emitter.prototype._findStaticAccessor = function (cn, name, kind) {
 Emitter.prototype._classOfExpr = function (node) {
     while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)
         || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node))) node = node.expression;
+    if (node && ts.isThis(node) && this._inStaticMethod && this._curClassObj) return this._curClassObj.name;   // 静态方法内 this ≡ 类
     if (!node || !ts.isIdentifier(node)) return null;
     const cn = this._className(node.text);            // 类表达式别名（const C = class {…}）：typeof/静态访问要按别名解析
     return this.classes.has(cn) ? cn : null;
@@ -2725,6 +2782,7 @@ Emitter.prototype._classOfExpr = function (node) {
 Emitter.prototype._isClassName = function (node) {
     while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)
         || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node))) node = node.expression;
+    if (node && ts.isThis(node) && this._inStaticMethod && this._curClassObj) return true;   // 静态方法内 this ≡ 类
     return !!node && ts.isIdentifier(node) && this.classes.has(node.text);
 };
 // 字符串句柄 tag 测试：栈顶 i64 → i32（是字符串?）
@@ -3655,6 +3713,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._isClassName(e.expression)) {
         const cn = this._classOfExpr(e.expression);
         const got = this._findStaticAccessor(cn, e.name.text, "get");
+        if (got && got.acc) this._checkStaticThis(got.cname, cn, got.acc, e.name.text);
         if (got) {                                            // 静态 getter（含继承）→ 直调 __sm_<owner>$<name>
             this._emitStaticsGuard(got.cname);
             this._emitUndefined();
@@ -4244,6 +4303,16 @@ Emitter.prototype._emitStoreProp = function (left) {
         this._expLeave();
         return;
     }
+    if (ts.isPropertyAccessExpression(left) && ts.isPrivateIdentifier(left.name) && this._isClassName(left.expression)) {
+        // 静态私有字段写 C.#n = v（类名接收者）→ 宿主 static_set（键 = #类名#名，与读路径 _staticKey 一致）
+        const cn = this._classOfExpr(left.expression);
+        M.localSet(t.w);
+        this._emitStaticsGuard(cn);
+        M.i32Const(this._strId(cn)); M.i32Const(this._strId(this._staticKey(cn, left.name))); M.localGet(t.w); M.call("qz.static_set");
+        M.localGet(t.w);
+        this._expLeave();
+        return;
+    }
     const privName = ts.isPrivateIdentifier(left.name) && this._curClass ? "#" + this._curClass + "#" + left.name.text : null;
     if (privName) {                               // 私有字段写：类名限定名（普通字段槽）
         M.localSet(t.w);
@@ -4258,6 +4327,7 @@ Emitter.prototype._emitStoreProp = function (left) {
     if (this._isClassName(left.expression)) {
         const cn = this._classOfExpr(left.expression);
         const got = this._findStaticAccessor(cn, left.name.text, "set");
+        if (got && got.acc) this._checkStaticThis(got.cname, cn, got.acc, left.name.text);
         M.localSet(t.w);                           // 值（i64）
         this._emitStaticsGuard(cn);
         if (got) {                                 // 静态 setter（含继承）→ 直调 __sm_<owner>$<name>$set
@@ -4559,11 +4629,13 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
     }
     // 静态方法 C.m(...)：类名不是变量 → 沿继承链找 static 方法 owner，直调 __sm_<Owner>$<m>
     // （self 传 undefined 占位；静态方法体不用 this）。
-    if (ts.isIdentifier(rx) && this.classes.has(this._className(rx.text))) {
-        let owner = this._className(rx.text);
+    if (this._isClassName(rx)) {                                  // 显式类名（含 as/括号/静态方法内 this）→ 静态方法直调
+        const cnS = this._classOfExpr(rx);
+        let owner = cnS;
         while (owner && !(this.classes.get(owner).staticMethods || []).some(s => s.name === method)) owner = this.classes.get(owner).parent;
-        if (!owner) throw new Error(`[tagged] 静态方法 ${rx.text}.${method}() 未定义`);
-        this._emitStaticsGuard(rx.text);
+        if (!owner) throw new Error(`[tagged] 静态方法 ${cnS}.${method}() 未定义`);
+        this._checkStaticThis(owner, cnS, (this.classes.get(owner).staticMethods || []).find(s => s.name === method), method);
+        this._emitStaticsGuard(cnS);
         this._emitUndefined();
         for (let i = 0; i < 4; i++) {
             if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
