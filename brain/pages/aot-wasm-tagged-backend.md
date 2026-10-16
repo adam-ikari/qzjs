@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T19:29:49"
+updated: "2026-10-16T19:36:57"
 ---
 
 <!-- compiled_truth -->
@@ -326,4 +326,9 @@ updated: "2026-10-16T19:29:49"
 - time: 2026-10-16T19:29:49
   kind: evidence
   summary: "Object.assign/展开键序根因定位：start 段 mem 未绑定，键序登记不可用"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T19:36:57
+  kind: evidence
+  summary: "键序类问题闭环：Object.assign 登记键序 + order_note（start 段可用）→ 零已知静默（522/530）"
   affects: [aot-wasm-tagged-backend]
