@@ -19,7 +19,8 @@
 const TAG = 0x7ff9_0000_0000_0000n;      // 句柄标记（高 16 位 0x7FF9）
 const TAG_HI = 0x7ff9n;                   // 高 16 位比较值
 const STR_HI = 0x7ffan;                   // 字符串句柄高 16 位
-const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低32=0/-1：与字符串/数组同族 arith-inert NaN）
+const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低32=0/1）
+const INST_HI = 0x7ffen;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 // 内建全局分派：名 → JS 函数（参数个数由调用点传入的 n 决定，见 builtin）。
 // AOT 产物经 qz.builtin(nameId, a0..a3) 调；未列出的报「未实现」。
 const BUILTIN_FNS = {
@@ -135,7 +136,11 @@ function makeQzvm(strings) {
     return out;
   };
   const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
-  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : bitsToNum(b));
+  const instCache = new Map();
+  const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
+  // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
+  const instObj = (b) => { const off = Number(BigInt(b) & MASK32); let o = instCache.get(off); if (o === undefined) { o = { __wasmInstance: off }; instCache.set(off, o); } return o; };
+  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? instObj(b) : bitsToNum(b));
   const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (TAG | BigInt(handles.push(x) - 1));   // undefined/null 用固定槽 0/1
   const box = (n) => numToBits(n);
   const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
@@ -320,6 +325,21 @@ function makeQzvm(strings) {
     math_pow: (a, b) => Math.pow(a, b),
     math_rem: (a, b) => a % b,
     is_nullish: (a) => { const v = toJS(a); return (v === null || v === undefined) ? 1 : 0; },
+    // instanceof：obj 须为类实例句柄（专用 tag 0x7FFE|off，[off]=clsId）；沿「实例类 → 父链」查目标 clsId。
+    // 非实例（数字/字符串/bool/null/数组/POJO/宿主对象）→ false。需 bindClasses 提供 classMeta。
+    instanceof_op: (obj, clsId) => {
+      const u = BigInt.asUintN(64, obj);
+      if ((u >> 48n) !== INST_HI) return boxBool(false);
+      const off = Number(u & MASK32);
+      if (!mem || off + 4 > mem.buffer.byteLength) return boxBool(false);
+      let c = new DataView(mem.buffer).getInt32(off, true);   // 实例的 clsId
+      while (c !== null && c !== undefined) {
+        if (c === clsId) return boxBool(true);
+        const m = classMeta && classMeta[c];
+        c = m ? m.parent : null;
+      }
+      return boxBool(false);
+    },
     // 内建全局调用/常量：nameId + n(实际参数个数) + a0..a3 → 宿主 JS 内建 → ret。
     // n 由调用点编译期已知：变参函数（Math.max/min/hypot/Array.of/fromCharCode）按 n 取参，
     // 不传 undefined 占位（否则 Math.max(2,5) 会变 Math.max(2,5,undefined,…)=NaN）。
@@ -356,6 +376,7 @@ function makeQzvm(strings) {
       if (hi === STR_HI) return strRead(v).length ? 1 : 0;          // 0x7FFA：字符串
       if (hi === 0x7ffbn) return 1;                                 // 0x7FFB：wasm 原生数组（恒真；Boolean([])=true）
       if (hi === BOOL_HI) return Number(u & 1n);                    // 0x7FFC：布尔（复用低 32 = 0/1）
+      if (hi === INST_HI) return 1;                                 // 0x7FFE：类实例（恒真）
       return bitsToNum(v) ? 1 : 0;
     },
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),

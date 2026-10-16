@@ -97,7 +97,7 @@
 3. qzvm 补全（对象方法/数组）。**数组方法已补**（2026-10-12）：`split` 返 wasm 原生数组（句柄 `0x7FFB`）；宿主 `doArrMethod` 覆盖 20 方法，回调经 `closure_call`。见 README「数组方法」条。
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
 5. **能力边界（2026-10-15 审计；未实现的均显式报错非静默错）**：
-   - 运算符：`instanceof`/`in`/`void`/`delete`/`**=`/`??=`（仅 identifier，字段/索引上 `??=` 报错）。`instanceof` 的实现障碍：类实例句柄 `0x7FF9|memoff` 与 POJO（同 tag 同空间）/宿主对象句柄（`handles` 索引）**无法区分**，宿主或 wasm 内读 `mem[off]` 都可能有歧义 → 需新 tag（如 `0x7FFE`）标记实例，属架构改动，未做（试实现后回退，避免不可靠判定）。
+   - 运算符：**`instanceof` 已支持**（2026-10-15：类实例用**专用 tag `0x7FFE|memoff`**（`[off:i32]=clsId`）与 POJO `0x7FF9`/宿主句柄区分，`qz.instanceof_op` 沿「实例类 → 父链」查目标 clsId；非实例一律 false）。`in`/`void`/`delete`/`**=` 未实现；`??=` 仅 identifier（字段/索引上报错）。
    - 语法：**解构声明单层已支持**（2026-10-15：`const [a,b]=arr` / `const {x,y}=obj` / `{a:z}` 重命名 / `[,b]` 跳过；数组元素 = wasm 数组索引、对象属性 = wasm POJO 字段）；**静态方法已支持**（含继承链）；**嵌套解构**（`[[a],[b]]`/`{a:{b}}`）报错；展开 `[...a]`/`{...o}` 未实现；静态字段/访问器未实现；函数内局部 `class` 声明未实现。
    - 内建全局：**已支持**（2026-10-15）——`Math.*`（floor/ceil/round/trunc/sign/abs/sqrt/cbrt/exp/log/log2/log10/sin/cos/tan/asin/acos/atan/atan2/pow/hypot/max/min + 常量 PI/E/…）、`String`/`Number`/`Boolean`/`parseInt`/`parseFloat`/`isNaN`/`isFinite`、`JSON.stringify`/`parse`、`Object.keys`/`values`/`entries`/`assign`/`freeze`/`is`/`fromEntries`、`Array.isArray`/`from`/`of`、`Number.isInteger`/`isNaN`/`isFinite`、`String.fromCharCode`/`fromCodePoint`。实现：`qz.builtin(nameId, n, a0..a3)` 通用宿主入口（`n` = 实际参数数，变参函数不传 undefined 占位）；未列出者报「qz.builtin 未实现」。内建**类**（`new Map()`/`Set`/`Date`/`Error` 等）仍需 import 对象，未实现。
    - 位运算遇 NaN/Infinity/超 2^31 走 `i32TruncF64S` trap（JS ToInt32 应给 0/回绕）；`typeof` 对 function 值报 `"object"`（0x7FF9 低 32 位对宿主 handles 索引与 POJO 内存 offset 同空间，wasm 内无法区分）。

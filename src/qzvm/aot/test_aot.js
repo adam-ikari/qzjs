@@ -321,6 +321,35 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("static U.sq(5)", callSt("sq"), 25);
     check("static U.tag()", callSt("tag"), "u");
     check("static 继承 V.sq(3)", callSt("inh"), 9);
+    // instanceof（实例专用 tag 0x7FFE + 内存 [0]=clsId + classMeta 父链）
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_instof.ts"),
+        "class IA { v: number = 1; }\n"
+      + "class IB extends IA {}\n"
+      + "class IC {}\n"
+      + "export function i1(): any { return new IB() instanceof IB; }\n"
+      + "export function i2(): any { return new IB() instanceof IA; }\n"
+      + "export function i3(): any { return new IB() instanceof IC; }\n"
+      + "export function i4(): any { return new IA() instanceof IB; }\n"
+      + "export function i5(): any { return (5 as any) instanceof IA; }\n"
+      + "export function i6(): any { return (null as any) instanceof IA; }\n"
+      + "export function i7(): any { const o: any = { x: 1 }; return o instanceof IA; }\n"
+      + "export function i8(): any { const a: any[] = [1]; return a instanceof IA; }\n"
+      + "export function i9(): any { const b = new IB(); return b === b && b.v; }\n");
+    const rIo = compileTS(path.join(os.tmpdir(), "qz_aot_instof.ts"), path.join(os.tmpdir(), "qz_aot_instof.wasm"), {});
+    const qzIo = makeQzvm(rIo.strings);
+    const { instance: instIo } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_instof.wasm")), { qz: qzIo });
+    qzIo.bindMem(instIo.exports.memory); if (instIo.exports.__bump) qzIo.bindBump(instIo.exports.__bump);
+    qzIo.bindClasses(instIo.exports, rIo.classMeta);
+    const callIo = (n) => { if (instIo.exports.__bump_reset) instIo.exports.__bump_reset(); return qzIo._toJS(instIo.exports[n]()); };
+    check("instanceof 自身", callIo("i1"), true);
+    check("instanceof 父类", callIo("i2"), true);
+    check("instanceof 无关类", callIo("i3"), false);
+    check("父实例 instanceof 子类", callIo("i4"), false);
+    check("5 instanceof 类", callIo("i5"), false);
+    check("null instanceof 类", callIo("i6"), false);
+    check("POJO instanceof 类", callIo("i7"), false);
+    check("数组 instanceof 类", callIo("i8"), false);
+    check("实例 === 自身 && 字段", callIo("i9"), 1);
 }
 
 async function runClasses() {

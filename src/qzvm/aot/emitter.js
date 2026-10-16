@@ -82,6 +82,8 @@ const QZ = {
   // 「POJO 内存 offset」（二者共用 0x7FF9 低 32 位空间），故不设宿主回退。
   // 内建全局：nameId(i32) + n(实际参数个数,i32) + a0..a3(i64) → i64（宿主按名分派）
   builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
+  instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
 };
 
 // JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。
@@ -1920,6 +1922,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
         M.i32Or();
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();   // 类实例 → "object"
+        M.i32Or();
         M.ifBlock("i64");
         // 0x7FF9|0 → "undefined"（null 亦映射 0x7FF9|0；JS typeof null="object" —— null 字面量
         // 由 emitTaggedExpr 直接产 0x7FF9|0，与 undefined 同表示，故 null 也报 "undefined"。
@@ -2200,16 +2204,17 @@ const CMP_GUARD = {
 // 仅靠 0x7FF9 会漏字符串句柄，导致字符串比较回落 f64（两 NaN eq → 恒 false）。
 Emitter.prototype._emitIsHandle = function (scratch) {
     const M = this.m;
-    // 非「纯 f64 数值」判定 = 句柄(0x7FF9) | 字符串(0x7FFA) | 布尔(0x7FFC)。
-    // bool 也是非数值：guard 命中须回退宿主（toJS 还原真布尔 → JS 算术/比较语义），
-    // 否则 f64ReinterpretI64(bool) 是 NaN 位型 → 原生 f64 运算全错。
+    // 非「纯 f64 数值」判定 = 句柄(0x7FF9) | 字符串(0x7FFA) | 布尔(0x7FFC) | 类实例(0x7FFE)。
+    // 均须回退宿主（f64ReinterpretI64 对它们是 NaN 位型 → 原生 f64 运算全错）。
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
     M.i32Or();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffcn); M.i64Eq();
     M.i32Or();
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
+    M.i32Or();
 };
-// 纯数字判定 = 非句柄(0x7FF9)/字符串(0x7FFA)/数组(0x7FFB)/布尔(0x7FFC)。
+// 纯数字判定 = 非句柄(0x7FF9)/字符串(0x7FFA)/数组(0x7FFB)/布尔(0x7FFC)/实例(0x7FFE)。
 // 用于 _emitConcat 区分「数值」与「须走宿主 ToPrimitive/ToNumber 的值」。
 Emitter.prototype._emitIsPureNum = function (scratch) {
     const M = this.m;
@@ -2218,6 +2223,7 @@ Emitter.prototype._emitIsPureNum = function (scratch) {
     M.localGet(this.sT[0]); M.i32Const(0x7ffa); M.i32Eq(); M.i32Or();
     M.localGet(this.sT[0]); M.i32Const(0x7ffb); M.i32Eq(); M.i32Or();
     M.localGet(this.sT[0]); M.i32Const(0x7ffc); M.i32Eq(); M.i32Or();
+    M.localGet(this.sT[0]); M.i32Const(0x7ffe); M.i32Eq(); M.i32Or();
     M.i32Eqz();
 };
 Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
@@ -2471,7 +2477,7 @@ Emitter.prototype._emitNewCall = function (e) {
     emitBumpSet(M, () => { M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Add(); });   // bump = off+size（越界 trap）
     M.localGet(this.sT[0]);
     M.i32Const(c.id); M.i32Store(2, 0);                     // [off]=clsId
-    M.localGet(this.sT[0]); M.i64ExtendI32U(); M.i64ConstBits(0, 0x7ff9); M.i64Or();
+    M.localGet(this.sT[0]); M.i64ExtendI32U(); M.i64ConstBits(0, 0x7ffe0000); M.i64Or();   // 实例句柄 = 0x7FFE|offset（专用 tag，与 POJO 0x7FF9 区分，供 instanceof）
     M.localSet(this.scratch);                               // self 句柄
     M.localGet(this.scratch);
     for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);
@@ -2555,7 +2561,19 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
     // 未实现的二元运算符：先于操作数求值报错（否则右操作数如类名 A 会先崩「未定义捕获变量: A」）
-    if (op === ts.SyntaxKind.InstanceOfKeyword) throw new Error("[tagged] instanceof 未实现（类实例判定需新 tag 区分实例句柄与 POJO/宿主句柄）");
+    if (op === ts.SyntaxKind.InstanceOfKeyword) {
+        // a instanceof C：C 须为用户类（内建类不支持）→ qz.instanceof_op(a, clsId) → tagged bool
+        const right = e.right;
+        if (!ts.isIdentifier(right) || !this.classes.has(this._className(right.text))) {
+            throw new Error(right && BUILTIN_GLOBALS.has(right.text)
+                ? `[tagged] 内建类 ${right.text} 的 instanceof 未实现`
+                : "[tagged] instanceof 右操作数须为用户类");
+        }
+        this.emitTaggedExpr(e.left);
+        this.m.i32Const(this.classes.get(this._className(right.text)).id);
+        this.m.call("qz.instanceof_op");
+        return;
+    }
     if (op === ts.SyntaxKind.InKeyword) throw new Error("[tagged] in 未实现");
     if (op === ts.SyntaxKind.AsteriskAsteriskEqualsToken) throw new Error("[tagged] **= 未实现（用 x = x ** y）");
     if (op === ts.SyntaxKind.CommaToken) { this.emitTaggedExpr(e.left); this.m.drop(); this.emitTaggedExpr(e.right); return; }
