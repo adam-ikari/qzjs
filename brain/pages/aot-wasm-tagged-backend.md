@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T19:36:57"
+updated: "2026-10-16T19:39:47"
 ---
 
 <!-- compiled_truth -->
@@ -331,4 +331,9 @@ updated: "2026-10-16T19:36:57"
 - time: 2026-10-16T19:36:57
   kind: evidence
   summary: "键序类问题闭环：Object.assign 登记键序 + order_note（start 段可用）→ 零已知静默（522/530）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T19:39:47
+  kind: evidence
+  summary: "内建调用 >4 实参支持（qz.builtin 增 ovf）"
   affects: [aot-wasm-tagged-backend]
