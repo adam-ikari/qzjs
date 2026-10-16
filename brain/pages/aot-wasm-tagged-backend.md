@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T19:26:20"
+updated: "2026-10-16T19:29:49"
 ---
 
 <!-- compiled_truth -->
@@ -321,4 +321,9 @@ updated: "2026-10-16T19:26:20"
 - time: 2026-10-16T19:26:20
   kind: evidence
   summary: "方法 >4 形参 / rest 形参 完整支持（探针 4/4，残余 loud 8→7）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T19:29:49
+  kind: evidence
+  summary: "Object.assign/展开键序根因定位：start 段 mem 未绑定，键序登记不可用"
   affects: [aot-wasm-tagged-backend]
