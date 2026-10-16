@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T13:10:41"
+updated: "2026-10-16T13:32:55"
 ---
 
 <!-- compiled_truth -->
@@ -191,4 +191,9 @@ updated: "2026-10-16T13:10:41"
 - time: 2026-10-16T13:10:41
   kind: evidence
   summary: "String.raw 落地：337/345（97.7%），残余 8 项全部 loud"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T13:32:55
+  kind: evidence
+  summary: "运行时访问器落地：338/345（98.0%），残余 7 项全部 loud"
   affects: [aot-wasm-tagged-backend]
