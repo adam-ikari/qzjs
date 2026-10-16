@@ -68,6 +68,8 @@ const BUILTIN_CTORS = new Set(["Error", "TypeError", "RangeError", "SyntaxError"
   "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp", "Promise"]);
 
 const BUILTIN_CONSTS = {
+  "Symbol.iterator": Symbol.iterator, "Symbol.asyncIterator": Symbol.asyncIterator, "Symbol.hasInstance": Symbol.hasInstance,
+  "Symbol.isConcatSpreadable": Symbol.isConcatSpreadable, "Symbol.toPrimitive": Symbol.toPrimitive, "Symbol.toStringTag": Symbol.toStringTag,
   "Math.PI": Math.PI, "Math.E": Math.E, "Math.LN2": Math.LN2, "Math.LN10": Math.LN10,
   "Math.LOG2E": Math.LOG2E, "Math.LOG10E": Math.LOG10E, "Math.SQRT2": Math.SQRT2, "Math.SQRT1_2": Math.SQRT1_2,
   "Number.MAX_SAFE_INTEGER": Number.MAX_SAFE_INTEGER, "Number.MIN_SAFE_INTEGER": Number.MIN_SAFE_INTEGER,
@@ -181,8 +183,10 @@ function makeQzvm(strings, opts) {
     if (!mem) return o;
     const dv = new DataView(mem.buffer);
     const size = dv.getInt32(off + 4, true);
+    syncNonEnum(bumpRef ? Number(bumpRef.value) : -1);
     for (const [name, idx] of fieldEntries) {
       if (idx >= size) continue;
+      if (nonEnum.has(off + "|" + name)) continue;   // defineProperty enumerable:false
       const v = toJS(dv.getBigInt64(off + idx, true));
       if (v !== undefined) o[name] = v;
     }
@@ -229,6 +233,9 @@ function makeQzvm(strings, opts) {
   // 运行期新增字段（POJO/实例上静态未预登记的名字，如 o[k] 中 k 由运行期决定）：
   // 存宿主侧旁表，键 = 内存偏移 + "|" + 字段名；bump 复位（偏移复用）时整体清空。
   const extras = new Map();
+  const nonEnum = new Map();                 // 键 = 偏移 + "|" + 字段名（defineProperty enumerable:false）
+  let nonEnumAt = -1;
+  const syncNonEnum = (v) => { if (v < nonEnumAt) nonEnum.clear(); nonEnumAt = v; };
   let extrasAt = -1;
   // bump 复位（值变小）→ 偏移被复用 → 旁表整体失效；仅「变小」才清（同一次调用内 bump 单调增）
   const syncExtras = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < extrasAt) extras.clear(); extrasAt = v; };
@@ -378,6 +385,9 @@ function makeQzvm(strings, opts) {
                              r = toJS(a1) !== undefined ? a2.reduceRight((acc, v, i) => rc2(acc, v, i), toJS(a1))
                                                          : a2.reduceRight((acc, v, i) => rc2(acc, v, i)); break; }
       case "at":           { const a2 = arr(); const i = Math.trunc(toJS(a0)); r = a2[i < 0 ? a2.length + i : i]; break; }
+      case "entries":      return tagHandle(arr().entries());
+      case "keys":         return tagHandle(arr().keys());
+      case "values":       return tagHandle(arr().values());
       case "copyWithin":   { const a3 = arr(); a3.copyWithin(toJS(a0), a1 === undefined ? 0 : toJS(a1), a2 === undefined ? a3.length : toJS(a2)); arrSetInPlace(recv, a3); return recv; }
       case "toString":     r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(","); break;
       case "toSorted":     r = a0 === undefined ? arr().slice().sort() : arr().slice().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), TAG))); break;
@@ -654,6 +664,10 @@ function makeQzvm(strings, opts) {
       const obj = handles[idxOf(o)];
       obj[strings[k]] = function (...args) { return toJS(closureCall(v, o, ret(args[0]), ret(args[1]), ret(args[2]))); };
     },
+    object_set_method_key: (o, keyHandle, v) => {   // 计算键名方法（Symbol.iterator 等）
+      const obj = handles[idxOf(o)], key = toJS(keyHandle);
+      obj[key] = function (...args) { return toJS(closureCall(v, o, ret(args[0]), ret(args[1]), ret(args[2]))); };
+    },
     obj_accessor: (o, k, g, s2) => {
       const name = strings[k], obj = handles[idxOf(o)], opt = {};
       if (BigInt.asUintN(64, g) >> 48n === CLO_HI) opt.get = () => toJS(closureCall(g, o, TAG, TAG, TAG));
@@ -697,7 +711,7 @@ function makeQzvm(strings, opts) {
         new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
         return;
       }
-      if (hi === HOST_HI) { handles[off][toJS(k)] = toJS(v); return; }
+      if (hi === HOST_HI) { handles[off][toJS(k)] = toJS(v); return; }   // 键原样（符号键可用）
       toJS(o)[toJS(k)] = toJS(v);
     },
     // k in o：宿主语义（POJO/实例先物化；数组/宿主对象直接 in）。
@@ -723,6 +737,42 @@ function makeQzvm(strings, opts) {
               c = c.parent != null ? classMeta[c.parent] : null;
             }
           }
+        }
+      }
+      // 展开实参 + 内建函数：Math.max(...a) 等
+      if (name === "builtin_spread") {
+        const fn2 = BUILTIN_FNS[strings[a0]] || (BUILTIN_CTORS.has(strings[a0]) ? globalThis[strings[a0]] : undefined);
+        if (typeof fn2 !== "function") throw new Error("builtin_spread: 非函数 " + strings[a0]);
+        return ret(fn2.apply(null, toJS(a1)));
+      }
+      // Object.defineProperty(target, key, desc)：就地定义；enumerable:false 记入 nonEnum（物化/keys 跳过）
+      if (name === "Object.defineProperty" && a0 !== undefined) {
+        const h = BigInt.asUintN(64, a0) >> 48n, off0 = Number(BigInt.asUintN(64, a0) & MASK32);
+        const key = toJS(a1), desc = toJS(a2) || {};
+        if ((h === TAG_HI && off0 >= 8) || h === INST_HI || h === HOST_HI) {
+          if (h === HOST_HI) { Object.defineProperty(handles[off0], key, desc); return a0; }
+          const val = bitsOf(desc.value);
+          const e2 = fieldEntries.find(([n]) => n === key);
+          if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(off0 + e2[1], val, true);
+          else { syncExtras(); extras.set(off0 + "|" + key, val); }
+          if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(off0 + "|" + key, true); }
+          return a0;
+        }
+      }
+      // Object.getOwnPropertyNames(o)：预登记字段（已赋值）+ extras（含非枚举）
+      if (name === "Object.getOwnPropertyNames" && a0 !== undefined) {
+        const h = BigInt.asUintN(64, a0) >> 48n, off0 = Number(BigInt.asUintN(64, a0) & MASK32);
+        if ((h === TAG_HI && off0 >= 8) || h === INST_HI) {
+          syncExtras(); syncNonEnum(bumpRef ? Number(bumpRef.value) : -1);
+          const dv2 = mem ? new DataView(mem.buffer) : null;
+          const size2 = dv2 ? dv2.getInt32(off0 + 4, true) : 0;
+          const out2 = [];
+          for (const [n, idx] of fieldEntries) {
+            if (idx >= size2) continue;
+            if (BigInt.asUintN(64, dv2.getBigInt64(off0 + idx, true)) !== TAG) out2.push(n);
+          }
+          for (const [k] of extras) { const bar = k.indexOf("|"); if (Number(k.slice(0, bar)) === off0) out2.push(k.slice(bar + 1)); }
+          return ret(out2);
         }
       }
       if (name === "Object.assign" && a0 !== undefined) {          // 就地合并（POJO/实例为目标）并返回目标句柄
@@ -931,6 +981,21 @@ function makeQzvm(strings, opts) {
       const e = BUILTIN_FNS[name];
       const f = Array.isArray(e) ? e[0] : (e || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
       return typeof f === "function" ? tagHandle(f) : TAG;
+    },
+    // 内建函数 + 展开实参（Math.max(...a) 等）
+    // [...x]：按迭代协议并入（数组/字符串/迭代器/Map/Set）
+    spread_into: (acc, x) => {
+      const a2 = arrRead(acc);
+      for (const v of toJS(x)) a2.push(v);
+      arrSetInPlace(acc, a2);
+      return acc;
+    },
+    builtin_spread: (id, arr) => {
+      const name = strings[id];
+      const e2 = BUILTIN_FNS[name];
+      const f = Array.isArray(e2) ? e2[0] : (e2 || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
+      if (typeof f !== "function") throw new Error("builtin_spread: 非函数 " + name);
+      return ret(f.apply(null, toJS(arr) || []));
     },
     builtin_fn: (id) => {
       const name = strings[id];

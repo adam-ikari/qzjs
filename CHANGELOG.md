@@ -3,7 +3,17 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
-- **feat(aot): 第六批语料 + 标准库边界修复**（语料 6 = 29/29）。
+- 
+### 第七批差分审计（2026-10-16）
+- 新增 `audit_corpus7.js`（27 例，迭代协议 / 描述符 / 数字字符串深水区 / 控制流收尾）。
+- **展开走迭代协议**：`[...x]` 经宿主 `qz.spread_into`（替换 `[].concat(x)` 语义），支持数组/字符串/迭代器/Map/Set。
+- **well-known Symbol**：`Symbol.iterator` 等计算键名 → 真符号值；对象字面量计算键名方法经 `qz.object_set_method_key`（宿主对象支持符号键）。
+- **数组迭代器**：`entries()`/`keys()`/`values()` 返回 JS 迭代器（for-of/展开经 `iter_array`）。
+- **内建展开调用**：`Math.max(...a)` 等经宿主 `qz.builtin_spread`。
+- **Object.defineProperty**：POJO/实例/宿主就地定义；`enumerable:false` 记入 `nonEnum` 表（物化/`Object.keys` 跳过）；`Object.getOwnPropertyNames` 列已赋值字段 + extras（含非枚举）。
+- **async 函数显式 loud**：编译期 `throw`（此前被当同步函数编译 → 静默返回非 Promise 值）。
+- 结果：**241/248（97.2%）**；test_aot 233 ALL PASS；ctest 全绿。
+**feat(aot): 第六批语料 + 标准库边界修复**（语料 6 = 29/29）。
   - 字符串 `split(sep, limit)`、`indexOf/lastIndexOf(v, fromIndex)`（**未传 fromIndex 必须省略实参**：传 undefined 语义不同）。
   - 数组 `fill(v, start, end)` 区间、`includes` 用 SameValueZero（`[NaN].includes(NaN)`）、`findLast/findLastIndex`。
   - `Object.assign(target, ...src)` **就地**写 POJO/实例/宿主对象并返回目标（此前返回物化副本）；恢复被误吞的 `Object.freeze/seal/isFrozen/...` 表项。

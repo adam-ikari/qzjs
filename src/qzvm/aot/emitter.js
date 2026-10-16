@@ -82,6 +82,7 @@ const QZ = {
   obj_new: { params: [], results: ["i64"] },                    // 新宿主对象（含方法/访问器的字面量）
   obj_accessor: { params: ["i64", "i32", "i64", "i64"], results: [] },   // defineProperty(get/set 闭包回调)
   object_set_method: { params: ["i64", "i32", "i64"], results: [] },     // 对象方法（闭包 + self 转发）
+  object_set_method_key: { params: ["i64", "i64", "i64"], results: [] }, // 计算键名方法（Symbol.iterator 等）
   typeof_host: { params: ["i64"], results: ["i32"] },                    // 宿主值是否 JS 函数 → 0/1
   elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
@@ -122,6 +123,8 @@ const QZ = {
   regex: { params: ["i32"], results: ["i64"] },                        // 正则字面量 → 宿主 RegExp
   str_dup: { params: ["i64"], results: ["i64"] },                     // 字符串私有副本（不可变语义）
   iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组
+  builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
+  spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
   call_value: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 值调用（闭包/宿主函数）
   call_named_rest: { params: ["i32", "i64", "i32"], results: ["i64"] },             // 展开实参 + rest 收尾被调函数
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
@@ -646,7 +649,13 @@ class Emitter {
             this._expLeave();
             return;
         }
-        if (!ts.isIdentifier(cx)) throw new Error("[tagged] 展开实参仅支持顶层函数/闭包/静态方法调用");
+        if (ts.isPropertyAccessExpression(cx) && ts.isIdentifier(cx.expression) && BUILTIN_GLOBALS.has(cx.expression.text)) {
+            M.i32Const(this._strId(cx.expression.text + "." + cx.name.text)); M.localGet(t.v);
+            M.call("qz.builtin_spread");
+            this._expLeave();
+            return;
+        }
+        if (!ts.isIdentifier(cx)) throw new Error("[tagged] 展开实参仅支持顶层函数/闭包/静态方法/内建调用");
         const name = this._fnName(cx.text);
         if (this.m._funcIdx[name] !== undefined || this.fnNames.has(name)) {
             const isNum = !!(this._calleeInfo(cx.text) && this._calleeInfo(cx.text).mode === "num");
@@ -959,6 +968,8 @@ class Emitter {
         const savedBody = this._curBody; this._curBody = f.body;
         const savedVoid = this._fnVoid;
         this._curClass = undefined; this.capListActive = false;
+        if (f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword))
+            throw new Error("[tagged] async 函数未实现（需 Promise 运行时）");
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this._fnVoid = isVoid;
         this.mode = funcMode(f);
@@ -2952,9 +2963,15 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);
                 M.call("qz.object_set");
             } else if (ts.isMethodDeclaration(p)) {
-                M.localGet(t.v); M.i32Const(this._strId(nm));
-                this.emitTaggedExpr(this._memberLambda(p));
-                M.call("qz.object_set_method");   // 宿主侧调用时把接收者作为 self 传入
+                if (nm !== undefined) {                                   // 字符串名
+                    M.localGet(t.v); M.i32Const(this._strId(nm));
+                    this.emitTaggedExpr(this._memberLambda(p));
+                    M.call("qz.object_set_method");
+                } else if (p.name && ts.isComputedPropertyName(p.name)) { // 计算键名（Symbol.iterator 等）
+                    M.localGet(t.v); this.emitTaggedExpr(p.name.expression);
+                    this.emitTaggedExpr(this._memberLambda(p));
+                    M.call("qz.object_set_method_key");
+                } else throw new Error("[tagged] 对象字面量方法名不支持");
             } else if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
                 if (doneA.has(nm)) continue;
                 doneA.add(nm);
@@ -3060,10 +3077,13 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             // [..a, x] → ([] concat a) concat [x]；concat 由宿主 doArrMethod 处理（返回新数组句柄）
             this.emitTaggedExpr(ts.factory.createArrayLiteralExpression([])); Mt.localSet(t.v);
             for (const el of e.elements) {
-                Mt.localGet(t.v);
+                if (ts.isSpreadElement(el)) {                         // [...x]：迭代协议（数组/字符串/迭代器/Map/Set）
+                    Mt.localGet(t.v); this.emitTaggedExpr(el.expression); Mt.call("qz.spread_into"); Mt.localSet(t.v);
+                    continue;
+                }
+                Mt.localGet(t.v);                                     // [..a, x]：把单元素数组 concat 进去
                 Mt.i32Const(this._strId("concat"));
-                if (ts.isSpreadElement(el)) this.emitTaggedExpr(el.expression);
-                else this.emitTaggedExpr(ts.factory.createArrayLiteralExpression([el]));
+                this.emitTaggedExpr(ts.factory.createArrayLiteralExpression([el]));
                 this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
                 Mt.call("qz.method_call");
                 Mt.localSet(t.v);
