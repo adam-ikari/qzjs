@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T18:19:19"
+updated: "2026-10-16T18:24:16"
 ---
 
 <!-- compiled_truth -->
@@ -291,4 +291,9 @@ updated: "2026-10-16T18:19:19"
 - time: 2026-10-16T18:19:19
   kind: evidence
   summary: "第二十批语料：501/512（97.9%）；修复 TS 参数属性（静默 undefined）与 for-of 迭代协议"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T18:24:16
+  kind: evidence
+  summary: "Symbol 元素访问/物化修复：502/512（98.0%）"
   affects: [aot-wasm-tagged-backend]
