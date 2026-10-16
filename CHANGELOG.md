@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十四批的 3 项静默差异已修（2026-10-16）
+- **`undefined/null` 写属性 → TypeError**：`_emitStoreProp` 先用「TAG|0/1」判定接收者 → 走宿主 `prop_set`（host 抛 TypeError）；err 检查放在整条 if 链**之外**（链内插入会破坏嵌套深度/平衡）。
+- **块级 `let/const` 遮蔽外层同名变量**：`_collectLocals` 按作用域精确扫描遮蔽块（`_shadowBlocks`）；进入遮蔽块前把外层同名局部保存进 `$shN`（i64 值局部），退出后恢复 → `{ let x = 10 }` 不再污染外层 `x`。
+- **返回元素的方法保持身份**：`ret` 对「已物化的 POJO/实例」依据 `pojoOf` 还原原句柄（实例还原为 `0x7FFE|off`）→ `find/pop/at/slice` 等返回的元素仍具方法与身份（此前是物化快照 → 调用报「无方法」）。
+- 结果：**389/398（97.7%）**；**残余 9 项全部为 loud（零静默错值）**；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 第十四批差分审计（2026-10-16）
 - 新增 `audit_corpus14.js`（17 例：`this` 绑定矩阵 / undefined·null 访问 / 继承·原型 / 别名与共享 / ES2023 数组 / 字符串快照 / 数组方法于实例 / 键序 / try/catch 语义 / 闭包循环捕获 / 解构 / getter·setter 原型链 / typeof·instanceof / JSON 往返 / 数值边界 / 数组洞 / IIFE·作用域）。
 - 新发现的静默差异（已记 ASSESSMENT 待修）：(1) `undefined/null` **写属性**（读已抛 TypeError，写未接线）；(2) 块级 `let/const` 遮蔽（wasm 局部按名唯一 → 内层覆盖外层绑定）；(3) `Array.indexOf` 以实例句柄查找（物化副本身份不同）。

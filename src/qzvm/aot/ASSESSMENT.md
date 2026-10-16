@@ -113,7 +113,7 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24)。
-结果：**386/398 一致（97.0%）**；残余 12 项：**9 loud**（`arguments` / generator / async / BigInt / class-as-value / 类与对象方法 >4 形参 / 箭头内 `super` / 函数声明 `this` 形参无 receiver 槽 / `Symbol` 作值未支持）+ 3 新发现的静默差异（下）（`arguments` / generator / async / BigInt / class-as-value / 类与对象方法 >4 形参 / 箭头内 `super`）、**4 项已知静默差异**（见下）；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）全绿。
+结果：**389/398 一致（97.7%）**；残余 9 项：**全部 loud**（`arguments` / generator / async / BigInt / class-as-value / 类与对象方法 >4 形参 / 箭头内 `super` / 函数声明 `this` 形参无 receiver 槽 / `Symbol` 作值未支持）——**零静默错值**（`arguments` / generator / async / BigInt / class-as-value / 类与对象方法 >4 形参 / 箭头内 `super`）、**4 项已知静默差异**（见下）；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）全绿。
 
 已支持（本轮新增/完善）：形参默认值·解构形参·rest 形参（调用点按形参表拆包）、let/const **每迭代绑定**（for 在增量处换层，while/for-of 在体首换层）、闭包值独立 tag 0x7FFF、对象字面量方法/访问器（宿主对象 + defineProperty 回调 wasm 闭包，成员闭包纳入捕获分析）、私有字段/方法（`#类名#名`）、静态字段继承/遮蔽与静态块与静态访问器、标签模板、正则字面量、Map/Set/Date、for-of 解构与可迭代、值调用 `qz.call_value`、嵌套解构、**跨函数 throw 传播**（调用点查 `__err`）与 try-finally 重抛、类字段统一容量 + 运行期新键 extras、字符串不可变（逃逸分析决定原地追加 / `qz.str_dup`）、数组/POJO/闭包句柄往返还原、POJO 与实例 clsId 撞号修复。
 
@@ -137,4 +137,4 @@
 - （已修）**`String.raw`**：编译期按源码原文（raw 段）与 `ToString(插值)` 拼接 —— 无需 `strings.raw` 表。
 - 标签模板的 **`strings.raw`**（自定义 tag 读取）仍无 `.raw` 表（wasm 数组无附加属性）→ 宿主 TypeError（loud）。
 
-- **第 14 批新发现的静默差异（待修）**：(1) `undefined/null` 上的**写属性**（`u.a = 1`）——读路径已抛 TypeError，写路径尚未接线（尝试改动破坏了 `_emitStoreProp` 嵌套 if 平衡，已回退）；(2) 块级 `let/const` **遮蔽外层同名变量**（`{ let x = 1 }` 在已有外层 `x` 时）——wasm 局部按名唯一，内层声明会覆盖外层绑定（值静默错）；检测方案的假阳性过高（拒绝合法代码），已回退为静默；(3) 数组方法 `indexOf` 以**实例句柄**为查找值时命中失败（物化副本身份不同）。
+- （已修）**第 14 批发现的三项静默差异**：(1) `undefined/null` **写属性** → 走宿主 `prop_set`（TypeError）+ 链外 `_emitErrCheck`；(2) **块级 `let/const` 遮蔽** → 进入遮蔽块前把外层同名局部存入 `$shN` 槽，退出后恢复（`_collectLocals` 精确扫描遮蔽块）；(3) `find`/`pop`/`at` 等返回**元素**的方法 → `ret` 依据 `pojoOf` 还原原始 POJO/实例句柄（此前返回物化快照 → 方法调用报「无方法」、身份丢失）。

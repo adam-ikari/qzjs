@@ -246,6 +246,31 @@ class Emitter {
             ts.forEachChild(n, walk);
         };
         walk(node);
+        for (let i = 0; i < 32; i++) names.push("$sh" + i);            // 块级遮蔽保存槽（i64 值局部区，索引可经 _local 取得）
+        // 精确检测：嵌套块里声明的名字若已在外层可见 → 记为「遮蔽块」（进入该块前后保存/恢复外层同名局部）
+        if (node && node.statements) {
+            this._shadowBlocks = this._shadowBlocks || new WeakMap();
+            const base = new Set(names);
+            const scan = (n, visible) => {
+                if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) return;
+                if (ts.isBlock(n)) {
+                    const inner = new Set(visible);
+                    for (const st of n.statements) {
+                        if (!ts.isVariableStatement(st)) continue;
+                        for (const d of st.declarationList.declarations) {
+                            const dn = [];
+                            const bn = (x) => { if (ts.isIdentifier(x)) dn.push(x.text); else if (ts.isArrayBindingPattern(x) || ts.isObjectBindingPattern(x)) for (const el of x.elements) if (ts.isBindingElement(el)) bn(el.name); };
+                            bn(d.name);
+                            for (const nm of dn) { if (visible.has(nm)) this._shadowBlocks.set(n, nm); inner.add(nm); }
+                        }
+                    }
+                    for (const st of n.statements) scan(st, inner);
+                    return;
+                }
+                ts.forEachChild(n, (c) => scan(c, visible));
+            };
+            for (const st of node.statements) scan(st, base);
+        }
         return names;
     }
 
@@ -2880,7 +2905,29 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.depth--; this.m.end();
         return;
     }
-    if (ts.isBlock(s)) { this.emitTaggedBlock(s); return; }
+    if (ts.isBlock(s)) {
+        if (this._shadowBlocks && this._shadowBlocks.has(s)) {
+            const M0 = this.m, saved = [];
+            let n0 = 0;
+            for (const st of s.statements) {
+                if (!ts.isVariableStatement(st)) continue;
+                for (const d of st.declarationList.declarations) {
+                    const nm = ts.isIdentifier(d.name) ? d.name.text : null;
+                    if (!nm) continue;
+                    const li = this._local(nm);                       // 外层同名局部
+                    const slot = this._local("$sh" + n0);              // 保存槽（本函数 i64 值局部）
+                    if (li === undefined || slot === undefined) continue;
+                    n0++;
+                    M0.localGet(li); M0.localSet(slot);
+                    saved.push([li, slot]);
+                }
+            }
+            this.emitTaggedBlock(s);
+            for (let i = saved.length - 1; i >= 0; i--) { M0.localGet(saved[i][1]); M0.localSet(saved[i][0]); }   // 恢复外层绑定（块级 let/const 遮蔽）
+            return;
+        }
+        this.emitTaggedBlock(s); return;
+    }
     if (ts.isExpressionStatement(s)) {
         // console.log(x) → qz.log（边界输出）
         const ex = s.expression;
@@ -4008,6 +4055,12 @@ Emitter.prototype._emitStoreProp = function (left) {
         M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.call("qz.prot_check");
         this._emitErrCheck(false);
     }
+    // undefined/null 接收者写属性 → 走 prop_set（host 抛 TypeError，JS 语义）
+    M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
+    M.localGet(t.v); M.i32WrapI64(); M.i32Const(8); M.i32LtU(); M.i32And();
+    M.ifBlock("void");
+    M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set");   // undefined/null → host 抛 TypeError
+    M.else_();
     // 宿主对象(0x7FFD) → qz.object_set（写 handles[idx][name]）；POJO → wasm 内存 store
     M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
     M.ifBlock("void");
@@ -4016,6 +4069,8 @@ Emitter.prototype._emitStoreProp = function (left) {
     if (this.usesDynAcc) { M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set"); }   // 访问器表
     else { M.localGet(t.v); M.i32WrapI64(); M.localGet(t.w); M.i64Store(3, this._fieldIndex(left.name.text)); }
     M.end();
+    M.end();
+    this._emitErrCheck(false);                    // undefined/null 写属性 → TypeError（转入本函数 catch；链外检查避免嵌套深度问题）
     M.localGet(t.w);                              // 赋值表达式返回所赋之值
     this._expLeave();
 };

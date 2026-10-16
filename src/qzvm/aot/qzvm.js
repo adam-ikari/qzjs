@@ -453,7 +453,10 @@ function makeQzvm(strings, opts) {
   // array→0x7FFB、null/undefined→固定槽、其它→0x7FF9 句柄。
   const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
                    : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
-                   : Array.isArray(r) ? (arrOf.has(r) ? arrOf.get(r) : arrWriteback(r)) : tagHandle(r);   // wasm 数组 → 原句柄（别名语义）
+                   : Array.isArray(r) ? (arrOf.has(r) ? arrOf.get(r) : arrWriteback(r))   // wasm 数组 → 原句柄（别名语义）
+                   : (r !== null && typeof r === "object" && pojoOf.has(r) && pojoOf.get(r).mem === mem)
+                     ? ((pojoOf.get(r).isInst ? (0x7ffen << 48n) : TAG) | BigInt(pojoOf.get(r).off))   // 物化过的 POJO/实例 → 还原原句柄（find/pop/at 等返回元素时保持身份）
+                   : tagHandle(r);
   // 数组方法（recv=0x7FFB 原生数组）。回调（map/filter/reduce/…）为闭包句柄，
   // 经 closure_call(handle, v, i, arr) 调用 wasm 侧箭头函数。
   // 4 参槽中未传的实参由 emitter 填 undefined 句柄（0x7FF9|0）；变参方法（concat）据此过滤。
@@ -810,6 +813,7 @@ function makeQzvm(strings, opts) {
     prop_set: (recv, id, v) => {
       const name = strings[id];
       const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === TAG_HI && off < 8) { throwValue(new TypeError("Cannot set properties of " + (off === 1 ? "null" : "undefined") + " (setting '" + name + "')")); return; }   // undefined/null 写属性 → TypeError（JS 语义）
       if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {          // 运行时 setter（Object.defineProperty）优先于字段写
         syncDynAcc();
         const acc = dynAcc.get(off + "|" + name);
