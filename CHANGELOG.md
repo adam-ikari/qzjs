@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 用户标签模板 strings.raw（2026-10-16）
+- 新增 `qz.tagged_strings(cooked, raw)`：把标签模板的 strings 参数由 wasm 数组换成**带 `.raw` 的宿主数组**（cooked 索引 + 非枚举 `raw`）→ 用户标签里的 `strings.raw` 可用（此前 undefined → `.raw.join` 抛错）。
+- 发射：raw 文本用与 `String.raw` 相同的「源码原文去定界符」提取（`rawOf` 提升为分支级 helper）；已知形参标签按形参表落栈（`strings` 手工压入 + 其余走 `_emitCallArgs`，rest 仍打包）；通用标签走 `tagged_strings` + 第 6 参 ovf。
+- 结果：**409/418（97.8%）**；**残余 9 项全部为 loud（零静默错值）**；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 第十五批差分审计 + 内建全局/Symbol/Reflect/可选调用（2026-10-16）
 - 新增 audit_corpus15.js（20 例：Symbol 值/Reflect/Map·Set 深水/Date/RegExp 命名组/Array.from 迭代/String.raw 变体/类表达式继承/switch TDZ/标签 break/数组 delete/Number·String 静态/JSON replacer·reviver/Error 子类链/自定义迭代器/getter 返回对象/WeakMap 身份/可选链调用）。
 - 内建全局作值（Symbol/BigInt/Reflect/Math/JSON）：builtin_member + builtin + builtin_spread 补 globalThis 回退与点号路径解析（Symbol.for / Reflect.has / Number.isInteger）。

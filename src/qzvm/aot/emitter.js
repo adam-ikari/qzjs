@@ -87,6 +87,7 @@ const QZ = {
   typeof_host: { params: ["i64"], results: ["i32"] },                    // 宿主值是否 JS 函数 → 0/1
   is_symbol_host: { params: ["i64"], results: ["i32"] },                  // 宿主值是否 JS symbol → 0/1
   err_stack: { params: ["i64"], results: ["i64"] },                      // Error 族实例的 .stack（合成）
+  tagged_strings: { params: ["i64", "i64"], results: ["i64"] },          // 用户标签模板：cooked+raw → 带 .raw 的 strings 对象
   field_order: { params: ["i64", "i64"], results: [] },                  // 属性写入登记插入序
   field_order_lit: { params: ["i64", "i32"], results: [] },
   field_order_del: { params: ["i64", "i64"], results: [] },              // 删除属性时同步插入序名单              // 批量登记（\u0000 分隔的名单，编译期常量）
@@ -778,10 +779,21 @@ class Emitter {
         return node ? node.parameters : null;
     }
     // 落栈实参：rest 收尾 → 固定参 + 打包数组；否则按元数补 undefined / 截断。
-    _emitCallArgs(params, args, fnName) {
+    _emitCallArgs(params, args, fnName, allowOverflow) {
         const M = this.m;
         const nPar = params.length;
         const hasRest = nPar > 0 && !!params[nPar - 1].dotDotDotToken;
+        if (allowOverflow && !hasRest && nPar > 4) {
+            for (let i = 0; i < 3; i++) {
+                if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+            }
+            const ovfA = args.slice(3);
+            if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error(`[tagged] ${fnName} 的溢出实参与展开混用暂不支持`);
+            const litA = ts.factory.createArrayLiteralExpression(ovfA);
+            litA.pos = args.length ? args[0].pos : 0; litA.end = args.length ? args[args.length - 1].end : 0;
+            this.emitTaggedExpr(litA);
+            return;
+        }
         if (!hasRest) {
             for (let i = 0; i < nPar; i++) {
                 if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
@@ -3065,16 +3077,16 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isTaggedTemplateExpression(e)) {
         // tag`a${1}b`：构造字面量数组 [a, b]（含 raw 省略）+ 值 1 → closure_call(tag, arr, a0, a1, a2)
         const M = this.m, t = this._expEnter();
+        // rawOf：从模板字面量节点取源码原文（去定界符）——String.raw 与用户标签共用
+        const rawOf = (lit) => {
+            let txt = lit.getText();
+            if (txt.startsWith("`") || txt.startsWith("}")) txt = txt.slice(1);
+            if (txt.endsWith("${")) txt = txt.slice(0, -2);
+            else if (txt.endsWith("`")) txt = txt.slice(0, -1);
+            return txt;
+        };
         // String.raw`…`：raw 文本 = 各段源码原文（去定界符）→ 直接按 ToString 拼接（无需 strings.raw 表）
         if (ts.isPropertyAccessExpression(e.tag) && ts.isIdentifier(e.tag.expression) && e.tag.expression.text === "String" && e.tag.name.text === "raw") {
-            const rawOf = (lit) => {
-                let txt = lit.getText();
-                if (txt.startsWith("`") || txt.startsWith("}")) txt = txt.slice(1);
-                if (txt.endsWith("${")) txt = txt.slice(0, -2);
-                else if (txt.endsWith("`")) txt = txt.slice(0, -1);
-                return txt;
-            };
-            const M = this.m, t = this._expEnter();
             const noSub = ts.isNoSubstitutionTemplateLiteral(e.template);
             const spans = noSub ? [] : e.template.templateSpans;
             this._emitStrLitHandle(noSub ? rawOf(e.template) : rawOf(e.template.head));   // 首段 raw
@@ -3098,12 +3110,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const lit0 = ts.factory.createArrayLiteralExpression(parts0);
             lit0.pos = e.pos; lit0.end = e.end;
             const argNodes = [lit0].concat((noSub0 ? [] : e.template.templateSpans).map(sp => sp.expression));
+            // raw strings 数组 → tagged_strings(cooked, raw) → 带 .raw 的 strings 对象
+            const rawParts0 = [ts.factory.createStringLiteral(noSub0 ? rawOf(e.template) : rawOf(e.template.head))]
+                .concat((noSub0 ? [] : e.template.templateSpans).map(sp => ts.factory.createStringLiteral(rawOf(sp.literal))));
+            const rawLit0 = ts.factory.createArrayLiteralExpression(rawParts0);
+            rawLit0.pos = e.pos; rawLit0.end = e.end;
+            const tStrings = this._expEnter();
+            this.emitTaggedExpr(lit0); this.emitTaggedExpr(rawLit0); M.call("qz.tagged_strings"); M.localSet(tStrings.v);
+            this._expLeave();
             this.emitTaggedExpr(e.tag); M.localSet(t.v);
             M.localGet(t.v);
-            this._emitCallArgs(cp0, argNodes, tagName0);
-            const pushed = cp0.length > 4 ? 4 : cp0.length;            // call_value ABI 固定 4 个实参槽
+            M.localGet(tStrings.v);                                   // 第 1 参：strings 对象（含 .raw）
+            this._emitCallArgs(cp0.slice(1), argNodes.slice(1), tagName0, true);   // 其余按形参表（rest 打包/元数补齐）
+            const pushed = 1 + (cp0.length > 4 ? 3 : cp0.length - 1);
             for (let i = pushed; i < 4; i++) this._emitUndefined();
-            if (cp0.length > 4 || argNodes.length > 4) {                // 第 6 参：溢出实参数组
+            if (cp0.length > 4) {                                    // 第 6 参：溢出实参数组
                 const ovfT = ts.factory.createArrayLiteralExpression(argNodes.slice(3));
                 ovfT.pos = e.pos; ovfT.end = e.end;
                 this.emitTaggedExpr(ovfT);
@@ -3120,13 +3141,18 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             .concat(spans.map(sp => ts.factory.createStringLiteral(sp.literal.text)));
         const lit = ts.factory.createArrayLiteralExpression(parts);
         lit.pos = e.pos; lit.end = e.end;
-        this.emitTaggedExpr(lit); M.localSet(t.w);                         // strings 数组
+        const rawParts = [ts.factory.createStringLiteral(noSub ? rawOf(e.template) : rawOf(e.template.head))]
+            .concat(spans.map(sp => ts.factory.createStringLiteral(rawOf(sp.literal))));
+        const rawLit = ts.factory.createArrayLiteralExpression(rawParts);
+        rawLit.pos = e.pos; rawLit.end = e.end;
+        this.emitTaggedExpr(lit); this.emitTaggedExpr(rawLit); M.call("qz.tagged_strings"); M.localSet(t.w);   // strings = {cooked..., raw}
         M.localGet(t.v); M.localGet(t.w);
         for (let i = 0; i < 3; i++) {
             if (i < spans.length) this.emitTaggedExpr(spans[i].expression);
             else this._emitUndefined();
         }
-        M.call("qz.call_value");                 // 闭包或宿主函数（String.raw 等）皆可作 tag
+        this._emitUndefined();   // 第 6 参（ovf）
+        M.call("qz.call_value");
         this._emitErrCheck();
         this._expLeave();
         return;

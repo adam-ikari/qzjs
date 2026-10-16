@@ -1466,6 +1466,13 @@ function makeQzvm(strings, opts) {
       const nm2 = String(rd("name") === undefined ? "Error" : rd("name")), ms = rd("message");
       return ret(ms === undefined || ms === "" ? nm2 : nm2 + ": " + ms);
     },
+    // 用户标签模板 strings 对象：cooked 数组 + .raw = raw 数组（tag(s, ...v) 的 s.raw 可用）
+    tagged_strings: (cooked, raw) => {
+      const c = toJS(cooked) || [], r = toJS(raw) || [];
+      const o = Array.from(c);
+      Object.defineProperty(o, "raw", { value: r, enumerable: false, configurable: true, writable: true });
+      return tagHandle(o);
+    },
     spread_into: (acc, x) => {
       const a2 = arrRead(acc);
       for (const v of toJS(x)) a2.push(v);
