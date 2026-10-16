@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十三批差分审计（2026-10-16）
+- 新增 `audit_corpus23.js`（20 例：新数组方法 at/findLast/toReversed/toSorted/toSpliced/with、Object.fromEntries 与可迭代、**Map/Set 迭代期间并发修改**、getter 抛错传播、原型遮蔽、delete 与稀疏数组、深可选链/空值合并、字符串+数字混合运算、模板标签求值顺序、JSON 格式化细节、instanceof 边界、switch 表达式 case、Object.create 变体、Number 方法矩阵、复合 while、循环变量闭包、嵌套展开与修改、字符串转义、可变闭包单元格）。
+- **新发现静默差异（已记录）**：`for...of` 走 `qz.iter_array` 的**急切快照**（一次性转 wasm 数组）→ 迭代期间对 Map 的增删作用于快照；JS 迭代器惰性（删除项被跳过）。仅「迭代+并发修改」模式偏差（`map-mutate-during-iter`）。
+- 结果：**557/569（97.9%）**；残余按语料案例 12 例（含 1 项新建静默差异、其余 loud）。
+
 ### 顶层函数作值 —— 收尾（2026-10-16）
 - `fn.prop = 5` 读回 0 的根因：`_emitStoreProp` 的顶层函数分支读取值槽 `t.w` 前**未先 `localSet(t.w)`**（值入槽只发生在其它分支）→ 写入宿主属性的值是残留的 0/undefined。补一行后探针 `corpus_fv.js` **3/3**（`arr.map(namedFn)` / 别名 / `fn.prop` 全一致）。
 

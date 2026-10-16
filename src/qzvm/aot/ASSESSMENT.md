@@ -113,9 +113,13 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
-结果：**539/549 一致（98.2%）**；残余 10 项（按语料案例计）：**全部 loud**（零已知静默）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**557/569 一致（97.9%）**；残余 12 项（按语料案例计）：11 项 loud + **1 项新发现静默差异**（`for...of` 急切快照 vs JS 惰性迭代，见「残余 loud 清单」注释）。（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
 **残余 loud 清单（键序修复后，按类别 7 项 / 按语料案例 8 例，全部 loud）**
+
+**第二十三批新增（2026-10-16）**：
+- **新发现静默差异**：`for...of` 经 `qz.iter_array` **急切**快照式转 wasm 数组再迭代 → 迭代期间对 Map 的 `delete`/增删对**快照**生效（JS 迭代器是惰性的：删除项被跳过）。语义差异仅出现在「迭代 + 并发修改」模式（窄）；已记录（`map-mutate-during-iter`：wasm `abc` vs JS `ab`）。
+- 其余 19/20 例通过（新数组方法/fromEntries/getter 抛错/原型遮蔽/delete 稀疏/深可选链/混合运算/模板求值序/JSON 格式/instanceof 边界/switch 表达式 case/Object.create/Number 方法/复合 while/循环变量闭包/嵌套展开/转义/可变闭包单元格）。
 
 **第二十二批后新能力/修复（2026-10-16）**
 - **顶层函数作值**（已支持，探针 2/3）：`arr.map(namedFn)`、`const h = fn; h()`、`fn.call/apply/bind` 与 JS 一致。实现：`qz.fn_value(nameId, arity)`（包装为宿主函数句柄、按 arity 补 TAG、同名缓存 `fnCacheMap`）+ 值位置发射 + `closureCall` 宿主函数句柄分支（只传真传实参）+ 函数名接收者的属性写走 `qz.prop_set`（内存快路径会把句柄低 32 位当地址 → 静默越界）。**已完成 3/3**：`fn.prop` 读回问题的根因 = `_emitStoreProp` 的 fn-value 分支在读取 `t.w`（值槽）前**未先 `localSet(t.w)`**（该函数的值入槽只发生在其它分支内）→ 写到宿主属性的值是 B 残留的 0/undefined；补一行 `M.localSet(t.w)` 即修复。
