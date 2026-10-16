@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T17:07:33"
+updated: "2026-10-16T17:16:05"
 ---
 
 <!-- compiled_truth -->
@@ -251,4 +251,9 @@ updated: "2026-10-16T17:07:33"
 - time: 2026-10-16T17:07:33
   kind: evidence
   summary: "第十六批：428/437（97.9%），残余 9 项全 loud（零静默错值）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T17:16:05
+  kind: evidence
+  summary: "第十七批：445/455（97.8%），残余 10 项全 loud（零静默错值）"
   affects: [aot-wasm-tagged-backend]
