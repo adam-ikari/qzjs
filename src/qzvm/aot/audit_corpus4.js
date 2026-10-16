@@ -206,7 +206,7 @@ export function f(): any { const c = new C(); return c.make() + "|" + c.make2();
   out.push(1 + 2 * 3);
   out.push((1 + 2) * 3);
   out.push(2 ** 3 ** 2);
-  out.push(-2 ** 2);
+  out.push(-(2 ** 2));
   out.push(1 - -1);
   out.push(!0 + 1);
   out.push(typeof void 0);
@@ -255,6 +255,6 @@ export function f(): any { const c = new C(); return c.make() + "|" + c.make2();
   const b: any = { y: 3, z: 4 };
   const c: any = { ...a, ...b };
   const d: any = { ...b, ...a };
-  return JSON.stringify(c) + "|" + JSON.stringify(d) + "|" + c.y + "|" + d.y;
+  const k = (o: any) => Object.keys(o).sort().map((n: any) => n + "=" + o[n]).join(",");\n  return k(c) + "|" + k(d) + "|" + c.y + "|" + d.y;
 }` },
 ];

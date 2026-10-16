@@ -430,7 +430,7 @@ function makeQzvm(strings, opts) {
     object_set: (o, k, v) => { handles[idxOf(o)][strings[k]] = toJS(v); },
     object_get: (o, k) => ret(handles[idxOf(o)][strings[k]]),   // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）
     string_new: (id) => tagHandle(strings[id]),
-    string_concat: (a, b) => strWriteback(String(toJS(a)) + String(toJS(b))),   // → 0x7FFA
+    string_concat: (a, b) => strWriteback(toJS(a) + toJS(b)),   // JS "+" 语义（含 ToPrimitive(default)：对象优先 valueOf）
     str_dup: (a) => strWriteback(strRead(a)),     // 字符串私有副本（在 bump 顶，随后原地追加安全）
     str_len: (a) => box(strRead(a).length),
     add:  (a, b) => ret(toJS(a) + toJS(b)),   // JS + 可能产字符串 → ret（非固定数值）

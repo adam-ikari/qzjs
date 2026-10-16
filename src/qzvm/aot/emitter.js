@@ -1081,6 +1081,10 @@ class Emitter {
                     else fields.push({ name: mem.name.text, init: mem.initializer || null });
                 } else if (ts.isConstructorDeclaration(mem)) {
                     ctor = mem;
+                } else if (ts.isPropertyDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
+                    fields.push({ name: "#" + cname + "#" + mem.name.text, init: mem.initializer || null });   // 私有字段：类名限定
+                } else if (ts.isMethodDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
+                    methods.push({ name: "#" + cname + "#" + mem.name.text, node: mem });                      // 私有方法
                 } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
                     (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isIdentifier(mem.name)) {
@@ -2659,6 +2663,25 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (idx === undefined) throw new Error("[tagged] this 仅在类方法/构造器内可用");
         this.m.localGet(idx); return;
     }
+    if (ts.isTaggedTemplateExpression(e)) {
+        // tag`a${1}b`：构造字面量数组 [a, b]（含 raw 省略）+ 值 1 → closure_call(tag, arr, a0, a1, a2)
+        const M = this.m, t = this._expEnter();
+        this.emitTaggedExpr(e.tag); M.localSet(t.v);                       // 标签（闭包句柄）
+        const quasis = e.template.getText ? e.template.templateSpans : [];
+        const parts = [ts.factory.createStringLiteral(e.template.head.text)]
+            .concat(e.template.templateSpans.map(sp => ts.factory.createStringLiteral(sp.literal.text)));
+        const lit = ts.factory.createArrayLiteralExpression(parts);
+        lit.pos = e.pos; lit.end = e.end;
+        this.emitTaggedExpr(lit); M.localSet(t.w);                         // strings 数组
+        M.localGet(t.v); M.localGet(t.w);
+        for (let i = 0; i < 3; i++) {
+            if (i < e.template.templateSpans.length) this.emitTaggedExpr(e.template.templateSpans[i].expression);
+            else this._emitUndefined();
+        }
+        M.call("qz.closure_call");
+        this._expLeave();
+        return;
+    }
     if (ts.isRegularExpressionLiteral(e)) {
         this.m.i32Const(this._strId(e.text));        // 含定界符与 flags 的原文（宿主解析）
         this.m.call("qz.regex");
@@ -2934,6 +2957,20 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     // 类静态字段 C.x（C 为已收集类名）→ 确保静态已初始化 + 宿主 static_get
+    // 私有成员访问 this.#v / obj.#m()：名字按「当前类」限定（JS 私有名仅同类可访问）
+    if (ts.isPropertyAccessExpression(e) && ts.isPrivateIdentifier(e.name) && this._curClass) {
+        const pn = "#" + this._curClass + "#" + e.name.text;
+        const c = this.classes.get(this._curClass);
+        if (c && (c.methods || []).some(m => m.name === pn)) {   // 私有方法：同名按类名限定
+            this._emitDynMethod(e.expression, pn, []);
+            return;
+        }
+        const tp = this._expEnter();                              // 私有字段：类名限定名读字段槽
+        this.emitTaggedExpr(e.expression); this.m.localSet(tp.v);
+        this._emitPropReadFromLocal(tp.v, pn);
+        this._expLeave();
+        return;
+    }
     if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._isClassName(e.expression)) {
         const cn = this._className(e.expression.text);
         const got = this._findStaticAccessor(cn, e.name.text, "get");
@@ -3173,7 +3210,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     return;
                 }
                 // ++this.n / --obj.a：接收者求值一次 → 读字段 ± 1 → 写回；结果=新值
-                const off = this._fieldIndex(e.operand.name.text);
+                const off = this._fieldIndex(ts.isPrivateIdentifier(e.operand.name) && this._curClass ? "#" + this._curClass + "#" + e.operand.name.text : e.operand.name.text);
                 this.emitTaggedExpr(e.operand.expression);
                 this.m.localSet(this.scratchObj);
                 this.m.localGet(this.scratchObj); this.m.i32WrapI64(); this.m.i64Load(3, off);
@@ -3223,7 +3260,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 return;
             }
             // this.n++ / obj.a--：接收者求值一次 → 旧值留栈为结果，字段写回 ±1
-            const off = this._fieldIndex(e.operand.name.text);
+            const off = this._fieldIndex(ts.isPrivateIdentifier(e.operand.name) && this._curClass ? "#" + this._curClass + "#" + e.operand.name.text : e.operand.name.text);
             this.emitTaggedExpr(e.operand.expression);
             this.m.localSet(this.scratchObj);
             this.m.localGet(this.scratchObj); this.m.i32WrapI64(); this.m.i64Load(3, off);
@@ -3427,6 +3464,16 @@ Emitter.prototype.emitTaggedRem = function () {
 // 属性/索引赋值：值已在栈（i64）。注意会重新求值 receiver（读+写各一次；无副作用表达式安全）。
 Emitter.prototype._emitStoreProp = function (left) {
     const M = this.m, t = this._expEnter();       // 值/接收者须存活于嵌套求值
+    const privName = ts.isPrivateIdentifier(left.name) && this._curClass ? "#" + this._curClass + "#" + left.name.text : null;
+    if (privName) {                               // 私有字段写：类名限定名（普通字段槽）
+        M.localSet(t.w);
+        M.localGet(t.w);                          // 占位顺序修正（值已存）
+        this.emitTaggedExpr(left.expression); M.localSet(t.v);
+        M.localGet(t.v); M.i32WrapI64(); M.localGet(t.w); M.i64Store(3, this._fieldIndex(privName));
+        M.localGet(t.w);
+        this._expLeave();
+        return;
+    }
     // 类静态字段写 C.x = v → 宿主 qz.static_set
     if (this._isClassName(left.expression)) {
         const cn = this._className(left.expression.text);
