@@ -84,6 +84,8 @@ const QZ = {
   object_set_method: { params: ["i64", "i32", "i64"], results: [] },     // 对象方法（闭包 + self 转发）
   object_set_method_key: { params: ["i64", "i64", "i64"], results: [] }, // 计算键名方法（Symbol.iterator 等）
   typeof_host: { params: ["i64"], results: ["i32"] },                    // 宿主值是否 JS 函数 → 0/1
+  err_stack: { params: ["i64"], results: ["i64"] },                      // Error 族实例的 .stack（合成）
+  prot_check: { params: ["i64", "i32"], results: [] },                       // 写保护检查（freeze/seal）
   elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
   // wasm 侧仅用于 0x7FFB 数组；字符串/其它不适用。
@@ -514,6 +516,7 @@ class Emitter {
     // 其余（数组/字符串/数字上的普通属性）→ undefined。
     _emitPropReadFromLocal(base, name) {
         const M = this.m;
+        if (name === "stack") { M.localGet(base); M.call("qz.err_stack"); return; }   // Error 族 .stack → 宿主合成
         if (this._hasAccessor(name, "get") || this._hasMethodName(name)) {   // getter/原型方法 → 宿主分派（实例经继承链）
 
             M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
@@ -591,6 +594,7 @@ class Emitter {
         M.localGet(t.v); M.i32Const(this._strId(pname)); M.localGet(t.w); M.call("qz.object_set");
         M.else_();
         M.localGet(t.v); this._emitStrLitHandle(pname); M.localGet(t.w); M.call("qz.set_index");
+        this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
         M.end();
         M.localGet(t.w);
         this._expLeave();
@@ -1986,9 +1990,12 @@ function compileTS(input, outWasm, opts = {}) {
     for (const f of sfs) collectDecls(f);
     // 预登记所有属性名（POJO/实例容量统一；否则「运行期新增字段」会越界写、静态读会错位）。
     const preNames = [];
+    let usesFreeze = false;                  // 程序内是否出现 freeze/seal/preventExtensions（写保护检查只在需要时发射）
     {
         const seenN = new Set(), push = (t) => { if (t !== undefined && t !== null && !seenN.has(t)) { seenN.add(t); preNames.push(t); } };
         const walkNames = (n) => {
+            if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
+                && n.expression.expression.text === "Object" && /^(freeze|seal|preventExtensions)$/.test(n.expression.name.text)) usesFreeze = true;
             if (ts.isPropertyAccessExpression(n)) push(n.name.text);
             else if (ts.isPropertyAssignment(n) || ts.isPropertyDeclaration(n)) push(n.name.text);
             else if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)) push(n.name.text);
@@ -2216,6 +2223,8 @@ function compileTS(input, outWasm, opts = {}) {
         em.nsAlias = nsAlias;            // 命名空间导入解析表
         em.classAlias = classAlias;      // 导入类本地名 → 目标类名
         em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
+        em.usesFreeze = usesFreeze;
+        em.protNameId = (n) => em._strId(n);
 
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
         em._fnNodes = new Map();         // 顶层函数名 → 声明节点（rest 形参打包用）
@@ -2313,7 +2322,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
 
-        return { id: c.id, parent: p ? p.id : null, methods, getters, setters };
+        return { id: c.id, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters };
     });
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs };
 }
@@ -2753,6 +2762,7 @@ Emitter.prototype.emitTry = function (s, tagged) {
             const idx = this._local(c.variableDeclaration.name.text);
             if (idx !== undefined) { M.globalGet(1); M.localSet(idx); }   // catch 变量 = __err
         }
+        M.i64Const(0n); M.globalSet(1);                          // catch 入口即清 __err（否则 catch 体内调用点的 err 检查会重复触发）
         if (tagged) this.emitTaggedBlock(c.block); else this.emitBlock(c.block);
         M.i64Const(0n); M.globalSet(1);                          // catch 处理完：清 __err
     }
@@ -3406,6 +3416,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         } else if (ts.isPropertyAccessExpression(op)) {
             // 宿主对象 → object_delete；POJO/实例 → 槽写 undefined（经宿主，越界即报错，不静默越界写）
             M.localGet(t.v); this._emitStrLitHandle(op.name.text); this._emitUndefined(); M.call("qz.set_index");
+            this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
         } else throw new Error("[tagged] delete 仅支持属性/下标（delete obj.k / delete a[i]）");
         this._expLeave();
         M.i64ConstBits(1, 0x7ffc0000);   // true（tagged bool）
@@ -3441,6 +3452,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     M2.localGet(t2.v); M2.i64Const(48n); M2.i64ShrU(); M2.i64Const(0x7ffdn); M2.i64Eq();
                     M2.ifBlock("void");
                     M2.localGet(t2.v); M2.i32Const(this._strId(e.operand.name.text)); M2.localGet(this.scratch); M2.call("qz.prop_set");
+                    this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
                     M2.else_();
                     M2.localGet(t2.v); M2.i32WrapI64(); M2.localGet(this.scratch); M2.i64Store(3, off);
                     M2.end();
@@ -3501,6 +3513,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 M2.localGet(t2.v); M2.i64Const(48n); M2.i64ShrU(); M2.i64Const(0x7ffdn); M2.i64Eq();
                 M2.ifBlock("void");
                 M2.localGet(t2.v); M2.i32Const(this._strId(e.operand.name.text)); M2.localGet(this.scratchB); M2.call("qz.prop_set");
+                this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
                 M2.else_();
                 M2.localGet(t2.v); M2.i32WrapI64(); M2.localGet(this.scratchB); M2.i64Store(3, off);
                 M2.end();
@@ -3733,12 +3746,17 @@ Emitter.prototype._emitStoreProp = function (left) {
     if (this._hasAccessor(left.name.text, "set")) {   // 程序内有该名 setter → 宿主分派（实例经继承链）
         this.emitTaggedExpr(left.expression); M.localSet(t.v);
         M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set");
+        this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
         M.localGet(t.w);
         this._expLeave();
         return;
     }
     this.emitTaggedExpr(left.expression);         // obj 句柄
     M.localSet(t.v);
+    if (this.usesFreeze) {                        // freeze/seal/preventExtensions 出现在程序内 → 写前查写保护（strict：抛 TypeError）
+        M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.call("qz.prot_check");
+        this._emitErrCheck(false);
+    }
     // 宿主对象(0x7FFD) → qz.object_set（写 handles[idx][name]）；POJO → wasm 内存 store
     M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
     M.ifBlock("void");
@@ -3776,6 +3794,7 @@ Emitter.prototype._emitStoreElem = function (left) {
     M.ifBlock("void");
     this.emitTaggedExpr(left.expression); M.localSet(t.x);
     M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.set_index");   // 字符串键 → 宿主
+    this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
     M.else_();
     this.emitTaggedExpr(left.expression); M.localSet(t.x);
     M.localGet(t.x); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
@@ -3796,6 +3815,7 @@ Emitter.prototype._emitStoreElem = function (left) {
     M.end();
     M.else_();
     M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.set_index");       // 其它接收者 → 宿主
+    this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
     M.end();
     M.end();
     M.localGet(t.w);                              // 返回所赋之值
@@ -3966,6 +3986,7 @@ Emitter.prototype._emitBuiltinCall = function (name, args) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
     }
     M.call("qz.builtin");
+    this._emitErrCheck();          // 内建可能抛（JSON 循环引用/解析失败/类型错）→ 转入本函数 catch（try 内）
 };
 // 动态方法分派：method_call(recv, mid, a0..a3) → i64（qz 侧按 recv 类型派发：字符串→str_method；
 // 类实例（内存[0]=__cls）→ classMeta 沿继承链调 wasm 导出方法）。未知类型/无方法 → 宿主抛错。

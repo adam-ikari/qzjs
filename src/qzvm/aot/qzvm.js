@@ -35,6 +35,9 @@ const BUILTIN_FNS = {
   "Math.asin": Math.asin, "Math.acos": Math.acos, "Math.atan": Math.atan,
   "Math.atan2": [Math.atan2, 2], "Math.pow": Math.pow, "Math.hypot": Math.hypot,
   "Math.max": Math.max, "Math.min": Math.min,
+  "Date.now": [Date.now, 0], "Date.parse": [Date.parse, 1], "Date.UTC": Date.UTC,
+  "Object.prototype": Object.prototype, "Array.prototype": Array.prototype, "String.prototype": String.prototype,
+  "Number.prototype": Number.prototype, "Function.prototype": Function.prototype, "Object.getOwnPropertySymbols": Object.getOwnPropertySymbols,
   "String": String, "Number": Number, "Boolean": Boolean,
   "parseInt": parseInt, "parseFloat": parseFloat,
   "isNaN": isNaN, "isFinite": isFinite,
@@ -176,10 +179,9 @@ function makeQzvm(strings, opts) {
   // POJO/类实例（内存驻留）→ JS 对象物化：按 [0]=size 限定范围，逐字段读（undefined sentinel 跳过）。
   const pojoOf = new WeakMap();   // 物化对象 → { off, mem }（往返还原 POJO 句柄）
   const cloOf = new WeakMap();    // 闭包包装函数 → 闭包句柄
-  const materialize = (off, isInst) => {
+  const materializeUncached = (off, isInst, o) => {
     syncExtras();
     // 每次新鲜物化：POJO/实例由 bump 分配，调用间 __bump_reset 会复用偏移 → 不可跨调用缓存。
-    const o = {};
     if (!mem) return o;
     const dv = new DataView(mem.buffer);
     const size = dv.getInt32(off + 4, true);
@@ -196,6 +198,8 @@ function makeQzvm(strings, opts) {
       const jv = toJS(v);
       if (jv !== undefined) o[k.slice(bar + 1)] = jv;
     }
+    { const m = symProps.get(off);                       // 符号键属性（own enumerable symbol）
+      if (m) for (const [sy, tv] of m) Object.defineProperty(o, sy, { value: toJS(tv), enumerable: true, writable: true, configurable: true }); }
     pojoOf.set(o, { off, mem });
     // 类方法驱动的强制转换钩子（JSON.stringify 用 toJSON；String()/+ 用 toString/valueOf）——非枚举，不进 Object.keys/JSON
     if (mem && isInst) {                             // 仅实例才有类方法钩子（POJO 的 clsId 恒为 0，会撞第一个类的 id）
@@ -220,6 +224,20 @@ function makeQzvm(strings, opts) {
     }
     return o;
   };
+  // 循环结构：同一次物化树内同一 offset 复用同一 JS 对象（否则 o.self=o 会无限递归 → 栈溢出；
+  // JS 侧 JSON.stringify 才能抛真实 TypeError("Converting circular structure to JSON")）
+  let matDepth = 0;
+  const matCache = new Map();
+  const materialize = (off, isInst) => {
+    if (matDepth === 0) matCache.clear();          // 顶层调用：偏移会被 __bump_reset 复用 → 不可跨调用缓存
+    const hit = matCache.get(off);
+    if (hit !== undefined) return hit;
+    const o = {};
+    matCache.set(off, o);                          // 先登记再填充 → 自引用得到同一对象
+    matDepth++;
+    try { return materializeUncached(off, isInst, o); }
+    finally { matDepth--; }
+  };
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
   const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
@@ -233,6 +251,13 @@ function makeQzvm(strings, opts) {
   // 运行期新增字段（POJO/实例上静态未预登记的名字，如 o[k] 中 k 由运行期决定）：
   // 存宿主侧旁表，键 = 内存偏移 + "|" + 字段名；bump 复位（偏移复用）时整体清空。
   const extras = new Map();
+  const frozen = new Set(), sealed = new Set(), nonExt = new Set();   // 写保护（offset）
+  let protAt = -1;
+  const syncProt = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < protAt) { frozen.clear(); sealed.clear(); nonExt.clear(); } protAt = v; };
+  const symProps = new Map();                // off → Map<symbol, tagged>（POJO/实例的符号键属性）
+  let symAt = -1;
+  const syncSym = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < symAt) symProps.clear(); symAt = v; };
+  const symBucket = (off) => { syncSym(); let m = symProps.get(off); if (!m) { m = new Map(); symProps.set(off, m); } return m; };
   const nonEnum = new Map();                 // 键 = 偏移 + "|" + 字段名（defineProperty enumerable:false）
   let nonEnumAt = -1;
   const syncNonEnum = (v) => { if (v < nonEnumAt) nonEnum.clear(); nonEnumAt = v; };
@@ -368,7 +393,7 @@ function makeQzvm(strings, opts) {
       case "filter":      r = arr().filter((v, i) => !!cbv(a0, v, i)); break;
       case "reduce":      { const a = arr();
                             const rc = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
-                            if (a.length === 0 && toJS(a1) === undefined) { throwValue(new Error("Reduce of empty array with no initial value")); return TAG; }
+                            if (a.length === 0 && toJS(a1) === undefined) { throwValue(new TypeError("Reduce of empty array with no initial value")); return TAG; }
                             r = toJS(a1) !== undefined ? a.reduce((acc, v, i) => rc(acc, v, i), toJS(a1))
                                                  : a.reduce((acc, v, i) => rc(acc, v, i)); break; }
       case "forEach":     arr().forEach((v, i) => cbv(a0, v, i)); r = undefined; break;
@@ -450,6 +475,17 @@ function makeQzvm(strings, opts) {
     if (typeof r === "boolean") return boxBool(r);   // startsWith/endsWith/includes 等 → 真布尔 tag
     if (Array.isArray(r)) return arrWriteback(r);
     return tagHandle(r);
+  };
+  // 写保护（Object.freeze/seal/preventExtensions）：strict 语义抛 TypeError（经 __err 转入 wasm catch）
+  const protGuard = (off, name) => {
+    syncProt();
+    if (frozen.has(off) || sealed.has(off) || nonExt.has(off)) {
+      if (frozen.has(off)) { throwValue(new TypeError("Cannot assign to read only property '" + name + "' of object")); return true; }
+      const e = fieldEntries.find(([n]) => n === name);
+      const cur = e && mem ? new DataView(mem.buffer).getBigInt64(off + e[1], true) : TAG;
+      if (BigInt.asUintN(64, cur) === TAG) { throwValue(new TypeError("Cannot add property " + name + ", object is not extensible")); return true; }
+    }
+    return false;
   };
   return {
     // POJO 分配：返回 wasm 内存偏移（裸 i32），字段由 wasm i64.store 写入（零跨界）
@@ -589,6 +625,7 @@ function makeQzvm(strings, opts) {
           if (st) { exportsRef[st.name](recv, v, v, v, v); return; }
           c = c.parent != null ? classMeta[c.parent] : null;
         }
+        if (protGuard(off, name)) return;
         const e = fieldEntries.find(([n]) => n === name);
         if (!e || new DataView(mem.buffer).getInt32(off + 4, true) < e[1] + 8) { syncExtras(); extras.set(off + "|" + name, v); return; }
         new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
@@ -601,6 +638,20 @@ function makeQzvm(strings, opts) {
     instanceof_builtin: (x, id) => {
       const name = strings[id];
       const u = BigInt.asUintN(64, x), hi = u >> 48n;
+      if (hi === INST_HI && classMeta && mem) {                 // wasm 类实例：沿类链查内建父类（extends Error 族）
+        const off0 = Number(u & MASK32);
+        if (off0 + 4 <= mem.buffer.byteLength) {
+          let c = classMeta[new DataView(mem.buffer).getInt32(off0, true)];
+          while (c) {
+            if (c.builtinParent) {
+              const bp = c.builtinParent;
+              if (bp === name || (name === "Error" && /Error$/i.test(bp) && bp !== "URIError" && /^(Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError)$/.test(bp))) return 1;
+              break;
+            }
+            c = c.parent != null ? classMeta[c.parent] : null;
+          }
+        }
+      }
       const j = toJS(x);
       switch (name) {
         case "Array":    return (hi === 0x7ffbn || Array.isArray(j)) ? 1 : 0;
@@ -693,6 +744,7 @@ function makeQzvm(strings, opts) {
       const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
       if (hi === TAG_HI || hi === INST_HI) {
         if (off < 8) return handles[off];
+        { const kk = toJS(k); if (typeof kk === "symbol") { syncSym(); const m = symProps.get(off); const v = m && m.get(kk); return v === undefined ? TAG : v; } }
         const name = String(toJS(k));
         const e = fieldEntries.find(([n]) => n === name);
         if (!e || !mem) { syncExtras(); const x = extras.get(off + "|" + name); return x === undefined ? TAG : x; }
@@ -701,11 +753,20 @@ function makeQzvm(strings, opts) {
       if (hi === HOST_HI) return ret(handles[off][toJS(k)]);
       return ret(toJS(o)[toJS(k)]);
     },
+
+
+    // 写前写保护检查（仅在程序使用 freeze/seal/preventExtensions 时由产物调用）：冻结/不可扩展对象写入 → 抛 TypeError
+    prot_check: (v, nameId) => {
+      const u = BigInt.asUintN(64, v), hi = u >> 48n;
+      if ((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI) protGuard(Number(u & MASK32), strings[nameId]);
+    },
     set_index: (o, k, v) => {
       const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
       if (hi === TAG_HI || hi === INST_HI) {
         if (off < 8) { handles[off] = toJS(v); return; }
+        { const kk = toJS(k); if (typeof kk === "symbol") { symBucket(off).set(kk, v); return; } }
         const name = String(toJS(k));
+        if (protGuard(off, name)) return;
         const e = fieldEntries.find(([n]) => n === name);
         if (!e || !mem) { syncExtras(); extras.set(off + "|" + name, v); return; }   // 运行期新增字段
         new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
@@ -744,6 +805,20 @@ function makeQzvm(strings, opts) {
         const fn2 = BUILTIN_FNS[strings[a0]] || (BUILTIN_CTORS.has(strings[a0]) ? globalThis[strings[a0]] : undefined);
         if (typeof fn2 !== "function") throw new Error("builtin_spread: 非函数 " + strings[a0]);
         return ret(fn2.apply(null, toJS(a1)));
+      }
+      // Object.freeze/seal/preventExtensions/isFrozen/isSealed/isExtensible：就地作用于 POJO/实例（旁表写保护）
+      if (/^Object\.(freeze|seal|preventExtensions|isFrozen|isSealed|isExtensible)$/.test(name) && a0 !== undefined) {
+        const h = BigInt.asUintN(64, a0) >> 48n, off0 = Number(BigInt.asUintN(64, a0) & MASK32);
+        if ((h === TAG_HI && off0 >= 8) || h === INST_HI) {
+          syncProt();
+          const op2 = name.slice(7);
+          if (op2 === "isFrozen") return boxBool(frozen.has(off0));
+          if (op2 === "isSealed") return boxBool(frozen.has(off0) || sealed.has(off0));
+          if (op2 === "isExtensible") return boxBool(!(frozen.has(off0) || sealed.has(off0) || nonExt.has(off0)));
+          if (op2 === "freeze") { frozen.add(off0); sealed.add(off0); nonExt.add(off0); return a0; }
+          if (op2 === "seal") { sealed.add(off0); nonExt.add(off0); return a0; }
+          nonExt.add(off0); return a0;
+        }
       }
       // Object.defineProperty(target, key, desc)：就地定义；enumerable:false 记入 nonEnum（物化/keys 跳过）
       if (name === "Object.defineProperty" && a0 !== undefined) {
@@ -793,12 +868,19 @@ function makeQzvm(strings, opts) {
           return a0;
         }
       }
+      try {
       let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
       let arity = 0;                                  // 表项 [fn, arity] = 固定元数（调用点按此裁剪实参）
       if (Array.isArray(fn)) { arity = fn[1]; fn = fn[0]; }
       if (typeof fn !== "function") throw new Error("qz.builtin 未实现: " + name);
       const args = [a0, a1, a2, a3].slice(0, arity || n).map(toJS);
       return ret(BUILTIN_CTORS.has(name) ? Reflect.construct(fn, args) : fn.apply(null, args));
+      } catch (e) {
+        const msg = e && e.message ? String(e.message) : "";
+        if (!(e instanceof Error) || /^(qz\.|builtin_spread|未定义)/.test(msg)) throw e;
+        throwValue(e);        // JSON.stringify 循环引用等 → 设 __err，调用点的 _emitErrCheck 转入 catch
+        return TAG;
+      }
     },
     band: (a, b) => box((toJS(a) | 0) & (toJS(b) | 0)),
     bor:  (a, b) => box((toJS(a) | 0) | (toJS(b) | 0)),
@@ -841,6 +923,7 @@ function makeQzvm(strings, opts) {
     // 通用方法调用：字符串 → doStrMethod；数组(0x7FFB) → doArrMethod；类实例（内存 [0]=__cls id）
     // → 沿继承链查 classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
     method_call: (recv, mid, a0, a1, a2, a3) => {
+      try {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1, a2, a3);
       if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3);
       const name = strings[mid];
@@ -848,7 +931,9 @@ function makeQzvm(strings, opts) {
         const obj = handles[idxOf(recv)];
         const fn = obj == null ? undefined : obj[name];
         if (typeof fn !== "function") throw new Error("method_call: 宿主对象无方法 " + name);
-        return ret(fn.call(obj, ...[a0, a1, a2, a3].slice(0, 4).map(toJS)));
+        const as = [a0, a1, a2, a3].map(toJS);
+        while (as.length && as[as.length - 1] === undefined) as.pop();   // 未传实参必须省略（否则 setFullYear(2021,undefined) → Invalid Date）
+        return ret(fn.apply(obj, as));
       }
       // POJO/实例：Object.prototype 内建方法（hasOwnProperty / toString / valueOf …）
       {
@@ -911,6 +996,12 @@ function makeQzvm(strings, opts) {
         c = c.parent != null ? classMeta[c.parent] : null;
       }
       throw new Error("method_call: 类 " + clsId + " 无方法 " + name);
+      } catch (e) {
+        const msg = e && e.message ? String(e.message) : "";
+        if (!(e instanceof Error) || /^(method_call|qz\.|for-of|instanceof_builtin|arr_|str_|call_value|closure|未定义)/.test(msg)) throw e;
+        throwValue(e);        // 标准库语义错误（RangeError/TypeError…）→ 设 __err，调用点的 _emitErrCheck 转入 catch
+        return TAG;
+      }
     },
     // 数组 .length= 赋值：截断或扩容（扩容量不足换 data 块，新槽补 undefined 句柄 0x7FF9|0）。
     // a[i] = v（越界：JS 扩容并补 undefined 槽）；返回所赋之值
@@ -980,10 +1071,25 @@ function makeQzvm(strings, opts) {
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
       const e = BUILTIN_FNS[name];
       const f = Array.isArray(e) ? e[0] : (e || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
-      return typeof f === "function" ? tagHandle(f) : TAG;
+      return f === undefined ? TAG : tagHandle(f);    // 函数/原型对象/其它值皆返回句柄
     },
     // 内建函数 + 展开实参（Math.max(...a) 等）
     // [...x]：按迭代协议并入（数组/字符串/迭代器/Map/Set）
+    // 实例的 .stack：Error 族（extends Error）→ 按当前 name/message 合成（栈文本实现定义，这里给同一格式）
+    err_stack: (v) => {
+      const u = BigInt.asUintN(64, v), hi2 = u >> 48n;
+      if (hi2 === HOST_HI) { const o = handles[idxOf(v)]; return ret(o == null ? undefined : o.stack); }
+      if (hi2 !== INST_HI || !mem || !classMeta) return TAG;
+      const off = Number(u & MASK32);
+      const dv = new DataView(mem.buffer);
+      let c = classMeta[dv.getInt32(off, true)], isErr = false;
+      while (c) { if (c.builtinParent && /Error$/.test(c.builtinParent)) { isErr = true; break; } c = c.parent != null ? classMeta[c.parent] : null; }
+      if (!isErr) return TAG;
+      const rd = (nm) => { const e = fieldEntries.find(([n]) => n === nm); if (!e) return undefined;
+        const t = dv.getBigInt64(off + e[1], true); return BigInt.asUintN(64, t) === TAG ? undefined : toJS(t); };
+      const nm2 = String(rd("name") === undefined ? "Error" : rd("name")), ms = rd("message");
+      return ret(ms === undefined || ms === "" ? nm2 : nm2 + ": " + ms);
+    },
     spread_into: (acc, x) => {
       const a2 = arrRead(acc);
       for (const v of toJS(x)) a2.push(v);

@@ -4,6 +4,17 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第八批差分审计（2026-10-16）
+- 新增 `audit_corpus8.js`（24 例：Date / JSON 深水 / String 扩展 / Array 扩展 / 描述符 / Error 子类 / 数字边界）。
+- **宿主方法实参**：尾随「未传」实参必须省略 —— `setFullYear(2021)` ≠ `setFullYear(2021, undefined)`（此前静默 Invalid Date / NaN）。
+- **循环引用物化**：同一次物化树内同 offset 复用同一 JS 对象（此前 `o.self = o` → 栈溢出；现 `JSON.stringify` 抛真实 TypeError 且可被 catch）。
+- **宿主异常可 catch**：`qz.method_call` / `qz.builtin` 的宿主语义错误（RangeError / TypeError）经 `throwValue` 置 `__err`，调用点 err 检查转入本函数 catch（如 `String.prototype.repeat(-1)`）；catch 入口即清 `__err`（否则 catch 体内调用点会重复触发）。
+- **符号键属性**：POJO/实例的符号键（`Symbol.iterator` / `Symbol.toStringTag` …）存旁表，物化时按 own enumerable symbol 定义 → 不进 `Object.keys` / JSON，但 `Object.prototype.toString` 可见；`Object.prototype` 等原型对象可作为值读取（`Object.prototype.toString.call(o)`）。
+- **写保护**：`Object.freeze` / `seal` / `preventExtensions` 就地作用于 POJO/实例（旁表），`isFrozen` / `isSealed` / `isExtensible` 如实；**strict 语义**：冻结/不可扩展对象写入抛 TypeError（仅当程序内出现 freeze/seal 时才发射写前检查 → 常见程序零额外开销）。
+- **`extends Error`**：类元数据记录 `builtinParent` → `x instanceof Error` 及错误族判定正确；`.stack` 读取经宿主按当前 name/message 合成（栈文本实现定义）。
+- **Date**：补 `Date.now` / `Date.parse` / `Date.UTC`。
+- 结果：**265/272（97.4%）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿（含 test262）。
+
 ### 第七批差分审计（2026-10-16）
 - 新增 `audit_corpus7.js`（27 例，迭代协议 / 描述符 / 数字字符串深水区 / 控制流收尾）。
 - **展开走迭代协议**：`[...x]` 经宿主 `qz.spread_into`（替换 `[].concat(x)` 语义），支持数组/字符串/迭代器/Map/Set。
