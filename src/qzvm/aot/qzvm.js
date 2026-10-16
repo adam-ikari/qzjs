@@ -20,6 +20,38 @@ const TAG = 0x7ff9_0000_0000_0000n;      // 句柄标记（高 16 位 0x7FF9）
 const TAG_HI = 0x7ff9n;                   // 高 16 位比较值
 const STR_HI = 0x7ffan;                   // 字符串句柄高 16 位
 const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低32=0/-1：与字符串/数组同族 arith-inert NaN）
+// 内建全局分派：名 → JS 函数（参数个数由调用点传入的 n 决定，见 builtin）。
+// AOT 产物经 qz.builtin(nameId, a0..a3) 调；未列出的报「未实现」。
+const BUILTIN_FNS = {
+  "Math.floor": Math.floor, "Math.ceil": Math.ceil, "Math.round": Math.round,
+  "Math.trunc": Math.trunc, "Math.sign": Math.sign, "Math.abs": Math.abs,
+  "Math.sqrt": Math.sqrt, "Math.cbrt": Math.cbrt, "Math.exp": Math.exp,
+  "Math.log": Math.log, "Math.log2": [Math.log2, 1], "Math.log10": [Math.log10, 1],
+  "Math.sin": Math.sin, "Math.cos": Math.cos, "Math.tan": Math.tan,
+  "Math.asin": Math.asin, "Math.acos": Math.acos, "Math.atan": Math.atan,
+  "Math.atan2": [Math.atan2, 2], "Math.pow": Math.pow, "Math.hypot": Math.hypot,
+  "Math.max": Math.max, "Math.min": Math.min,
+  "String": String, "Number": Number, "Boolean": Boolean,
+  "parseInt": parseInt, "parseFloat": parseFloat,
+  "isNaN": isNaN, "isFinite": isFinite,
+  "JSON.stringify": JSON.stringify, "JSON.parse": JSON.parse,
+  "Object.keys": Object.keys, "Object.values": Object.values, "Object.entries": Object.entries,
+  "Object.assign": Object.assign, "Object.freeze": Object.freeze,
+  "Object.is": Object.is, "Object.fromEntries": Object.fromEntries,
+  "Array.isArray": Array.isArray, "Array.from": Array.from, "Array.of": Array.of,
+  "Number.isInteger": Number.isInteger, "Number.isNaN": Number.isNaN, "Number.isFinite": Number.isFinite,
+  "Number.parseInt": Number.parseInt, "Number.parseFloat": Number.parseFloat,
+  "String.fromCharCode": String.fromCharCode, "String.fromCodePoint": String.fromCodePoint,
+};
+// 内建全局常量（属性读非调用）：Math.PI 等。
+const BUILTIN_CONSTS = {
+  "Math.PI": Math.PI, "Math.E": Math.E, "Math.LN2": Math.LN2, "Math.LN10": Math.LN10,
+  "Math.LOG2E": Math.LOG2E, "Math.LOG10E": Math.LOG10E, "Math.SQRT2": Math.SQRT2, "Math.SQRT1_2": Math.SQRT1_2,
+  "Number.MAX_SAFE_INTEGER": Number.MAX_SAFE_INTEGER, "Number.MIN_SAFE_INTEGER": Number.MIN_SAFE_INTEGER,
+  "Number.MAX_VALUE": Number.MAX_VALUE, "Number.MIN_VALUE": Number.MIN_VALUE,
+  "Number.EPSILON": Number.EPSILON, "Number.POSITIVE_INFINITY": Number.POSITIVE_INFINITY,
+  "Number.NEGATIVE_INFINITY": Number.NEGATIVE_INFINITY, "Number.NaN": Number.NaN,
+};
 const MASK32 = 0xffff_ffffn;
 const _ab = new ArrayBuffer(8);
 const _dvw = new DataView(_ab);
@@ -190,15 +222,16 @@ function makeQzvm(strings) {
     const args = [off + 8, a0, a1, a2, a3].slice(0, 1 + meta.n);
     return fn(...args);
   };
+  // JS 值 → tagged 位型（宿主回退返回用）：number→box、bool→boxBool、string→0x7FFA、
+  // array→0x7FFB、null/undefined→固定槽、其它→0x7FF9 句柄。
+  const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
+                   : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
+                   : Array.isArray(r) ? arrWriteback(r) : tagHandle(r);
   // 数组方法（recv=0x7FFB 原生数组）。回调（map/filter/reduce/…）为闭包句柄，
-  // 经 closure_call(handle, v, i, arr) 调用 wasm 侧箭头函数。返回：number/bool→box、
-  // string→strWriteback、array→arrWriteback、null/undefined/其它→JS 句柄。
+  // 经 closure_call(handle, v, i, arr) 调用 wasm 侧箭头函数。
   const doArrMethod = (recv, mid, a0, a1) => {
     const name = strings[mid];
     const arr = () => arrRead(recv);
-    const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
-                     : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
-                     : Array.isArray(r) ? arrWriteback(r) : tagHandle(r);
     const cbv = (h, v, i, acc) => toJS(closureCall(h, bitsOf(v), box(i), acc === undefined ? recv : acc));
     let r;
     switch (name) {
@@ -287,6 +320,17 @@ function makeQzvm(strings) {
     math_pow: (a, b) => Math.pow(a, b),
     math_rem: (a, b) => a % b,
     is_nullish: (a) => { const v = toJS(a); return (v === null || v === undefined) ? 1 : 0; },
+    // 内建全局调用/常量：nameId + n(实际参数个数) + a0..a3 → 宿主 JS 内建 → ret。
+    // n 由调用点编译期已知：变参函数（Math.max/min/hypot/Array.of/fromCharCode）按 n 取参，
+    // 不传 undefined 占位（否则 Math.max(2,5) 会变 Math.max(2,5,undefined,…)=NaN）。
+    builtin: (id, n, a0, a1, a2, a3) => {
+      const name = strings[id];
+      if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
+      const fn = BUILTIN_FNS[name];
+      if (!fn) throw new Error("qz.builtin 未实现: " + name);
+      const args = [a0, a1, a2, a3].slice(0, n).map(toJS);
+      return ret(fn.apply(null, args));
+    },
     band: (a, b) => box((toJS(a) | 0) & (toJS(b) | 0)),
     bor:  (a, b) => box((toJS(a) | 0) | (toJS(b) | 0)),
     bxor: (a, b) => box((toJS(a) | 0) ^ (toJS(b) | 0)),

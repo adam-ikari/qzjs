@@ -96,10 +96,10 @@
 2. **~~字符串后端~~ 已完成**（2026-10-11，wasm 内表示 + 原地追加，无跨界；见 STR_BACKEND_DESIGN.md 状态标记）。
 3. qzvm 补全（对象方法/数组）。**数组方法已补**（2026-10-12）：`split` 返 wasm 原生数组（句柄 `0x7FFB`）；宿主 `doArrMethod` 覆盖 20 方法，回调经 `closure_call`。见 README「数组方法」条。
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
-5. **未实现特性（2026-10-15 审计，均显式报错非静默错）**：
+5. **能力边界（2026-10-15 审计；未实现的均显式报错非静默错）**：
    - 运算符：`instanceof`/`in`/`void`/`delete`/`**=`/`??=`（仅 identifier，字段/索引上 `??=` 报错）。
    - 语法：数组/对象解构声明、展开 `[...a]`/`{...o}`、静态方法 `C.m()`。
-   - 内建全局：`Math`/`JSON`/`String`/`Number`/`Boolean`/`Array`/`Object`/`Map`/`Set`/`Date`/`RegExp`/`Promise`/`parseInt`/`isNaN` 等一律报「内建 X 未实现」（AOT 只编译用户代码 + `qz.*` 契约面；`Math_floor` 等走宿主约定名）。
+   - 内建全局：**已支持**（2026-10-15）——`Math.*`（floor/ceil/round/trunc/sign/abs/sqrt/cbrt/exp/log/log2/log10/sin/cos/tan/asin/acos/atan/atan2/pow/hypot/max/min + 常量 PI/E/…）、`String`/`Number`/`Boolean`/`parseInt`/`parseFloat`/`isNaN`/`isFinite`、`JSON.stringify`/`parse`、`Object.keys`/`values`/`entries`/`assign`/`freeze`/`is`/`fromEntries`、`Array.isArray`/`from`/`of`、`Number.isInteger`/`isNaN`/`isFinite`、`String.fromCharCode`/`fromCodePoint`。实现：`qz.builtin(nameId, n, a0..a3)` 通用宿主入口（`n` = 实际参数数，变参函数不传 undefined 占位）；未列出者报「qz.builtin 未实现」。内建**类**（`new Map()`/`Set`/`Date`/`Error` 等）仍需 import 对象，未实现。
    - 位运算遇 NaN/Infinity/超 2^31 走 `i32TruncF64S` trap（JS ToInt32 应给 0/回绕）；`typeof` 对 function 值报 `"object"`（0x7FF9 低 32 位对宿主 handles 索引与 POJO 内存 offset 同空间，wasm 内无法区分）。
    - 闭包写捕获变量且外层也访问 → 编译期报错（未实现共享环境，避免静默错值）。
    - 以上均 **loud**（用户裁决：静默错优先修，loud 可暂留——故未改用 `trunc_sat`，避免引入新的静默饱和误差）。

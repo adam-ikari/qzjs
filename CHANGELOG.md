@@ -3,6 +3,7 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 内建全局支持 —— `Math.*`/`String`/`Number`/`JSON`/`Object`/`Array` 等经通用宿主入口 `qz.builtin`**。此前 `Math.floor(x)`/`String(x)`/`JSON.stringify(x)` 一律编译报「内建 X 未实现」（AOT 只编译用户代码）。现新增单一通用 import `qz.builtin(nameId:i32, n:i32, a0..a3:i64) → i64`：宿主按名分派 JS 内建，`n` = 实际参数个数（变参函数如 `Math.max(1,2,3)` 按 n 取参，不传 undefined 占位 → 否则 NaN）。覆盖：`Math.*`（floor/ceil/round/trunc/sign/abs/sqrt/cbrt/exp/log/log2/log10/三角/atan2/pow/hypot/max/min）+ 常量（PI/E/LN2/…）、`String`/`Number`/`Boolean`/`parseInt`/`parseFloat`/`isNaN`/`isFinite`、`JSON.stringify`/`parse`、`Object.keys`/`values`/`entries`/`assign`/`freeze`/`is`/`fromEntries`、`Array.isArray`/`from`/`of`、`Number.isInteger`/`isNaN`/`isFinite`、`String.fromCharCode`/`fromCodePoint`、`Number.MAX_SAFE_INTEGER` 等常量。返回值经统一 `ret`（number/bool/string/array/句柄）。未列出者仍报「未实现」。守门：`test_aot.js` +18 内建项（164 checks ALL PASS）。
 - **fix(aot): 差分审计第三批 —— 可选链 `?.`、数组方法默认参数、`sort()` 字典序、`.length` UTF-16、数字转串小数、闭包写捕获检测、内建/未实现显式报错**。续修静默语义错：
   - **可选链 `o?.x` / `o?.[i]` / `o?.length`**：此前静默返回 0（当普通访问，读 null 句柄偏移 0 → 内存 0）。现 base 求值一次，null/undefined 短路返回 undefined（不计算 index）。
   - **数组方法默认参数**：`a0/a1` 是 tagged 句柄（非 JS undefined），`a0 === undefined` 恒假 → `join()` 得 "1undefined2"、`concat()` 掺 undefined、`splice(i)` 删 0 个、`sort()` 无比较器崩。改判 `toJS(a0) === undefined`。

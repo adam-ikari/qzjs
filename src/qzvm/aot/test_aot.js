@@ -247,6 +247,43 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("strParam.join() 默认逗号", callSp("semJoin", [[1, 2, 3]]), "1,2,3");
     check("strParam.sort() 默认字典序", JSON.stringify(callSp("semSort", [[3, 1, 2, 10]])), JSON.stringify([1, 10, 2, 3]));
     check("strParam.splice(1)", JSON.stringify(callSp("semSplice", [[1, 2, 3, 4], 1])), JSON.stringify([2, 3, 4]));
+    // 内建全局（2026-10-15）：Math/String/Number/JSON/Object/Array… 经 qz.builtin 宿主分派
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_builtin.ts"),
+        "export function fl(a: any): any { return Math.floor(a); }\n"
+      + "export function ma(a: any, b: any): any { return Math.max(a, b); }\n"
+      + "export function mm(a: any, b: any, c: any): any { return Math.max(a, b, c); }\n"
+      + "export function st(a: any): any { return String(a); }\n"
+      + "export function nm(a: any): any { return Number(a); }\n"
+      + "export function pi(): any { return Math.PI; }\n"
+      + "export function isN(a: any): any { return isNaN(a); }\n"
+      + "export function js(a: any): any { return JSON.stringify(a); }\n"
+      + "export function ok(a: any): any { return Object.keys(a); }\n"
+      + "export function isArr(a: any): any { return Array.isArray(a); }\n"
+      + "export function isInt(a: any): any { return Number.isInteger(a); }\n"
+      + "export function sfcc(a: any, b: any): any { return String.fromCharCode(a, b); }\n");
+    const rbi = compileTS(path.join(os.tmpdir(), "qz_aot_builtin.ts"), path.join(os.tmpdir(), "qz_aot_builtin.wasm"), {});
+    const qzb = makeQzvm(rbi.strings);
+    const { instance: instBi } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_builtin.wasm")), { qz: qzb });
+    qzb.bindMem(instBi.exports.memory); if (instBi.exports.__bump) qzb.bindBump(instBi.exports.__bump);
+    const callB = (n, a) => { if (instBi.exports.__bump_reset) instBi.exports.__bump_reset(); return qzb._toJS(instBi.exports[n](...a.map(x => qzb._fromJS(x)))); };
+    check("Math.floor(3.7)", callB("fl", [3.7]), 3);
+    check("Math.max(2,5)", callB("ma", [2, 5]), 5);
+    check("Math.max(1,2,3)", callB("mm", [1, 2, 3]), 3);   // 变参：n=3 不传 undefined 占位
+    check("String(5)", callB("st", [5]), "5");
+    check("String(true)", callB("st", [true]), "true");
+    check("String(null)", callB("st", [null]), "null");
+    check("Number(\"7\")", callB("nm", ["7"]), 7);
+    check("Math.PI", callB("pi", []), Math.PI);
+    check("isNaN(\"x\")", callB("isN", ["x"]), true);
+    check("isNaN(0)", callB("isN", [0]), false);
+    check("JSON.stringify(5)", callB("js", [5]), "5");
+    check("JSON.stringify(null)", callB("js", [null]), "null");
+    check("Object.keys", JSON.stringify(callB("ok", [{ a: 1, b: 2 }])), JSON.stringify(["a", "b"]));
+    check("Array.isArray([1])", callB("isArr", [[1]]), true);
+    check("Array.isArray(\"x\")", callB("isArr", ["x"]), false);
+    check("Number.isInteger(3)", callB("isInt", [3]), true);
+    check("Number.isInteger(3.5)", callB("isInt", [3.5]), false);
+    check("String.fromCharCode(65,66)", callB("sfcc", [65, 66]), "AB");
 }
 
 async function runClasses() {

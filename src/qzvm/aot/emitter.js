@@ -80,6 +80,8 @@ const QZ = {
   ne:  { params: ["i64", "i64"], results: ["i64"] },
   // typeof 走 wasm 内联分类（见 emitTaggedExpr）：无法区分「宿主侧 handles 索引」与
   // 「POJO 内存 offset」（二者共用 0x7FF9 低 32 位空间），故不设宿主回退。
+  // 内建全局：nameId(i32) + n(实际参数个数,i32) + a0..a3(i64) → i64（宿主按名分派）
+  builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
 };
 
 // JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。
@@ -1931,6 +1933,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         M.end();
         return;
     }
+    // 内建全局成员读（非调用）：Math.PI / Number.MAX_SAFE_INTEGER / … → qz.builtin（常量表）
+    if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && ts.isIdentifier(e.expression)
+        && BUILTIN_GLOBALS.has(e.expression.text)) {
+        this._emitBuiltinCall(e.expression.text + "." + e.name.text, []); return;
+    }
     if (ts.isElementAccessExpression(e)) {
         // a[i]：数组句柄(0x7FFB) → header[+8]=dataOff → load [dataOff + i*8]；i 须 number。
         this.emitTaggedExpr(e.expression); this.m.localSet(this.scratch);   // scratch = 数组值
@@ -1975,6 +1982,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isCallExpression(e)) {
         if (ts.isPropertyAccessExpression(e.expression)) {
+            // 内建全局成员调用 Math.floor(x) / JSON.stringify(x) / Object.keys(o) → qz.builtin
+            if (ts.isIdentifier(e.expression.expression) && BUILTIN_GLOBALS.has(e.expression.expression.text)) {
+                this._emitBuiltinCall(e.expression.expression.text + "." + e.expression.name.text, e.arguments); return;
+            }
             const rx = e.expression.expression, method = e.expression.name.text;
             // 命名空间成员 `ns.foo(...)`：解析为目标顶层函数直调（非动态方法派发）。
             if (ts.isIdentifier(rx)) {
@@ -1993,6 +2004,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
         const fn = e.expression.text;
+        // 内建全局函数调用 String(x) / parseInt(s) / isNaN(x) / JSON… → qz.builtin
+        if (BUILTIN_GLOBALS.has(fn)) { this._emitBuiltinCall(fn, e.arguments); return; }
         if (this.m._funcIdx[this._fnName(fn)] === undefined && !this.fnNames.has(this._fnName(fn))) {
             // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)
             const hIdx = this._local(fn);
@@ -2413,6 +2426,16 @@ Emitter.prototype._emitSuperCallForward = function (c) {
     for (let i = 1; i <= 4; i++) M.localGet(i);
     M.call(ctorName(c.parent));
     this._emitFieldDefaults(c);
+};
+// 内建全局调用/常量：nameId + n(实际参数个数) + a0..a3（缺省 undefined）→ qz.builtin → i64。
+Emitter.prototype._emitBuiltinCall = function (name, args) {
+    const M = this.m;
+    M.i32Const(this._strId(name));
+    M.i32Const(args.length);
+    for (let i = 0; i < 4; i++) {
+        if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+    }
+    M.call("qz.builtin");
 };
 // 动态方法分派：method_call(recv, mid, a0..a3) → i64（qz 侧按 recv 类型派发：字符串→str_method；
 // 类实例（内存[0]=__cls）→ classMeta 沿继承链调 wasm 导出方法）。未知类型/无方法 → 宿主抛错。
