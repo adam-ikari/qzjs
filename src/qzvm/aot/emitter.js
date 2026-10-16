@@ -99,6 +99,7 @@ function registerQz(m, only) { for (const k of Object.keys(QZ)) { if (only && !o
 const MTH_PREFIX = "__m_";
 function ctorName(cls) { return MTH_PREFIX + cls + "$ctor"; }
 function methName(cls, m) { return MTH_PREFIX + cls + "$" + m; }
+function staticMethName(cls, m) { return "__sm_" + cls + "$" + m; }
 class Emitter {
     constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this._tryStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set();
         this.capMap = new Map();      // 捕获变量名 → blk 内偏移（i64 槽序号），闭包体内有效
@@ -583,22 +584,25 @@ class Emitter {
             const parent = st.heritageClauses && st.heritageClauses.length
                 ? st.heritageClauses[0].types[0] : null;
             const parentName = parent ? parent.expression.text : null;
-            const fields = [], methods = [];
+            const fields = [], methods = [], staticMethods = [];
             let ctor = null;
+            const isStatic = (mem) => !!mem.modifiers && mem.modifiers.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
             for (const mem of st.members) {
                 if (ts.isPropertyDeclaration(mem) && ts.isIdentifier(mem.name)) {
+                    if (isStatic(mem)) throw new Error(`[tagged] 静态字段未实现（${cname}.${mem.name.text}）`);
                     fields.push({ name: mem.name.text, init: mem.initializer || null });
                 } else if (ts.isConstructorDeclaration(mem)) {
                     ctor = mem;
                 } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
-                    methods.push({ name: mem.name.text, node: mem });
+                    (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isIdentifier(mem.name)) {
+                    if (isStatic(mem)) throw new Error(`[tagged] 静态访问器未实现（${cname}.${mem.name.text}）`);
                     methods.push({ name: mem.name.text, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" });
                 } else {
                     throw new Error("[tagged] 不支持的类成员: " + ts.SyntaxKind[mem.kind]);
                 }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
@@ -624,6 +628,10 @@ class Emitter {
                                    mth.accessor === "set" || voidRet ? [] : ["i64"]);
             }
             this.m.declareFunc(ctorName(cname), ["i64", "i64", "i64", "i64", "i64"], []);
+            for (const sm of c.staticMethods) {
+                const voidRet = !!sm.node.type && sm.node.type.kind === ts.SyntaxKind.VoidKeyword;
+                this.m.declareFunc(staticMethName(cname, sm.name), ["i64", "i64", "i64", "i64", "i64"], voidRet ? [] : ["i64"]);
+            }
         }
     }
     emitClassBodies() {
@@ -632,7 +640,25 @@ class Emitter {
             if (!c.ctor && c.fields.some(f => !f.init)) throw new Error(`[tagged] 类 ${cname} 字段需初值或显式 constructor`);
             this._emitCtorBody(c, c.ctor);
             for (const mth of c.methods) this._emitMethodBody(cname, mth);
+            for (const sm of c.staticMethods) this._emitStaticMethodBody(cname, sm);
         }
+    }
+    // 静态方法 __sm_<C>$<m>(self占位:i64, a0..a3:i64)：无 this（local0 占位 undefined）。
+    _emitStaticMethodBody(cname, sm) {
+        const M = this.m;
+        const isVoid = !!sm.node.type && sm.node.type.kind === ts.SyntaxKind.VoidKeyword;
+        const realParams = sm.node.parameters.map(p => p.name.text);
+        const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
+        this._mEnter(staticMethName(cname, sm.name), cname, params, sm.node.body, isVoid);
+        this._curClassObj = this.classes.get(cname);
+        this.emitTaggedBlock(sm.node.body);
+        if (!isVoid) {
+            const stmts = sm.node.body.statements;
+            const last = stmts[stmts.length - 1];
+            if (!(last && ts.isReturnStatement(last))) M.unreachable();
+        }
+        M.endBody();
+        this._mExit();
     }
     // 构造器 __m_<C>$ctor(self:i64, a0..a3:i64) → 无返回：self 由调用方 _emitNewCall 内联 bump 分配后传入
     _emitCtorBody(c, ctor) {
@@ -1532,6 +1558,7 @@ function compileTS(input, outWasm, opts = {}) {
         for (const cname of em._classList) {
             const c = em.classes.get(cname);
             for (const mth of c.methods) m.exportFn(methName(cname, mth.name), methName(cname, mth.name));
+            for (const sm of c.staticMethods) m.exportFn(staticMethName(cname, sm.name), staticMethName(cname, sm.name));
             m.exportFn(ctorName(cname), ctorName(cname));
         }
         if (m.memory !== null) m.exportMemory();
@@ -2483,10 +2510,18 @@ Emitter.prototype._emitBuiltinCall = function (name, args) {
 Emitter.prototype._emitDynMethod = function (rx, method, args) {
     const M = this.m;
     if (args.length > 4) throw new Error("[tagged] 方法最多 4 参");
-    // 静态方法（C.m()）：类名 C 不是变量 → _staticRecvClass 返回 null → 走动态路径会读「未定义捕获变量 C」。
-    // 静态方法尚未实现（需收集 static 成员并导出 __m_<C>$<m>）→ 显式报错（loud 优于误导性「未定义捕获变量」）。
+    // 静态方法 C.m(...)：类名不是变量 → 沿继承链找 static 方法 owner，直调 __sm_<Owner>$<m>
+    // （self 传 undefined 占位；静态方法体不用 this）。
     if (ts.isIdentifier(rx) && this.classes.has(this._className(rx.text))) {
-        throw new Error(`[tagged] 静态方法 ${rx.text}.${method}() 未实现（类静态成员暂不支持）`);
+        let owner = this._className(rx.text);
+        while (owner && !(this.classes.get(owner).staticMethods || []).some(s => s.name === method)) owner = this.classes.get(owner).parent;
+        if (!owner) throw new Error(`[tagged] 静态方法 ${rx.text}.${method}() 未定义`);
+        this._emitUndefined();
+        for (let i = 0; i < 4; i++) {
+            if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        }
+        M.call(staticMethName(owner, method));
+        return;
     }
     const cls = this._staticRecvClass(rx);
     if (cls) {

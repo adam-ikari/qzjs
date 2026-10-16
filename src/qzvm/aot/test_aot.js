@@ -306,6 +306,21 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     try { compileTS(path.join(os.tmpdir(), "qz_aot_destr.ts"), path.join(os.tmpdir(), "qz_aot_destr.wasm"), {}); }
     catch (e) { nestThrew = /嵌套解构未实现/.test(e.message); }
     check("嵌套解构 → 报错", nestThrew, true);
+    // 静态方法（含继承）
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_static.ts"),
+        "class U { static sq(n: number): number { return n * n; } static tag(): any { return \"u\"; } }\n"
+      + "class V extends U {}\n"
+      + "export function sq(): any { return U.sq(5); }\n"
+      + "export function tag(): any { return U.tag(); }\n"
+      + "export function inh(): any { return V.sq(3); }\n");
+    const rSt = compileTS(path.join(os.tmpdir(), "qz_aot_static.ts"), path.join(os.tmpdir(), "qz_aot_static.wasm"), {});
+    const qzSt = makeQzvm(rSt.strings);
+    const { instance: instSt } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_static.wasm")), { qz: qzSt });
+    qzSt.bindMem(instSt.exports.memory); if (instSt.exports.__bump) qzSt.bindBump(instSt.exports.__bump);
+    const callSt = (n) => { if (instSt.exports.__bump_reset) instSt.exports.__bump_reset(); return qzSt._toJS(instSt.exports[n]()); };
+    check("static U.sq(5)", callSt("sq"), 25);
+    check("static U.tag()", callSt("tag"), "u");
+    check("static 继承 V.sq(3)", callSt("inh"), 9);
 }
 
 async function runClasses() {
