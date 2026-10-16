@@ -188,8 +188,19 @@ function makeQzvm(strings, opts) {
     const dv = new DataView(mem.buffer);
     const size = dv.getInt32(off + 4, true);
     syncNonEnum(bumpRef ? Number(bumpRef.value) : -1);
+    syncOrder();
+    const ord = orderMap.get(off);
+    const seen = new Set();
+    if (ord) {                                   // 插入序优先（JS 语义：键序 = 插入序；含赋值为 undefined 的键）
+      for (const name of ord) {
+        seen.add(name);
+        const idx = fieldEntries.find(([n]) => n === name);
+        const v = idx ? toJS(dv.getBigInt64(off + idx[1], true)) : undefined;
+        if (!nonEnum.has(off + "|" + name)) o[name] = v;
+      }
+    }
     for (const [name, idx] of fieldEntries) {
-      if (idx >= size) continue;
+      if (idx >= size || seen.has(name)) continue;
       if (nonEnum.has(off + "|" + name)) continue;   // defineProperty enumerable:false
       const v = toJS(dv.getBigInt64(off + idx, true));
       if (v !== undefined) o[name] = v;
@@ -272,6 +283,9 @@ function makeQzvm(strings, opts) {
   const arrMeta = new Map();               // header 偏移 → 附加自有属性（非数字键；正则 exec/match 的 index/input/groups）
   let arrMetaAt = -1;
   const syncArrMeta = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < arrMetaAt) arrMeta.clear(); arrMetaAt = v; };
+  const orderMap = new Map();              // POJO/实例偏移 → 插入序名字表（Object.keys/JSON/for-in 用）
+  let orderAt = -1;
+  const syncOrder = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < orderAt) orderMap.clear(); orderAt = v; };
   const symProps = new Map();                // off → Map<symbol, tagged>（POJO/实例的符号键属性）
   let symAt = -1;
   const syncSym = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < symAt) symProps.clear(); symAt = v; };
@@ -832,6 +846,29 @@ function makeQzvm(strings, opts) {
     },
 
 
+    // 插入序登记（程序观察键序时才由产物调用）：Object.keys/for-in/JSON.stringify/对象展开 依赖插入序
+    field_order: (v, nameHandle) => {
+      const u = BigInt.asUintN(64, v), hi = u >> 48n;
+      if (!((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI)) return;
+      syncOrder(); const off = Number(u & MASK32); let l = orderMap.get(off);
+      if (!l) { l = []; orderMap.set(off, l); }
+      const nm = toJS(nameHandle); if (typeof nm !== "string") return;   // 符号键不进插入序（Object.keys 不含符号）
+      if (l.indexOf(nm) < 0) l.push(nm);
+    },
+    field_order_del: (v, nameHandle) => {           // delete o.k → 从插入序名单移除
+      const u = BigInt.asUintN(64, v), hi = u >> 48n;
+      if (!((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI)) return;
+      syncOrder(); const nm = toJS(nameHandle); if (typeof nm !== "string") return;
+      const l = orderMap.get(Number(u & MASK32)); if (!l) return;
+      const ix = l.indexOf(nm); if (ix >= 0) l.splice(ix, 1);
+    },
+    field_order_lit: (v, sid) => {                 // 编译期常量名单（\u0000 分隔，i32 字符串 id）
+      const u = BigInt.asUintN(64, v), hi = u >> 48n;
+      if (!((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI)) return;
+      syncOrder(); const off = Number(u & MASK32); let l = orderMap.get(off);
+      if (!l) { l = []; orderMap.set(off, l); }
+      for (const nm of strings[sid].split("\u0000")) { if (nm && l.indexOf(nm) < 0) l.push(nm); }
+    },
     // 写前写保护检查（仅在程序使用 freeze/seal/preventExtensions 时由产物调用）：冻结/不可扩展对象写入 → 抛 TypeError
     prot_check: (v, nameId) => {
       const u = BigInt.asUintN(64, v), hi = u >> 48n;
@@ -1131,6 +1168,11 @@ function makeQzvm(strings, opts) {
     // delete a[i] → 槽置 undefined（长度不变；JS 的「洞」在本表示里等同 undefined）
     // delete o[k]（数组 → 槽置 undefined；POJO/实例 → 字段置 undefined；宿主对象 → delete）
     delete_index: (o, k) => {
+      { const u = BigInt.asUintN(64, o), h = u >> 48n;                 // 插入序名单同步移除（否则 keys/for-in 仍列出已删属性）
+        if ((h === TAG_HI && Number(u & MASK32) >= 8) || h === INST_HI) {
+          syncOrder(); const l = orderMap.get(Number(u & MASK32));
+          if (l) { const nm = String(toJS(k)), ix = l.indexOf(nm); if (ix >= 0) l.splice(ix, 1); }
+        } }
       const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
       if (hi === 0x7ffbn) {                                  // wasm 数组：槽置 undefined（长度不变）
         const a = arrRead(o);

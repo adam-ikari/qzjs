@@ -86,6 +86,9 @@ const QZ = {
   object_set_method_key: { params: ["i64", "i64", "i64"], results: [] }, // 计算键名方法（Symbol.iterator 等）
   typeof_host: { params: ["i64"], results: ["i32"] },                    // 宿主值是否 JS 函数 → 0/1
   err_stack: { params: ["i64"], results: ["i64"] },                      // Error 族实例的 .stack（合成）
+  field_order: { params: ["i64", "i64"], results: [] },                  // 属性写入登记插入序
+  field_order_lit: { params: ["i64", "i32"], results: [] },
+  field_order_del: { params: ["i64", "i64"], results: [] },              // 删除属性时同步插入序名单              // 批量登记（\u0000 分隔的名单，编译期常量）
   prot_check: { params: ["i64", "i32"], results: [] },                       // 写保护检查（freeze/seal）
   elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
@@ -1336,6 +1339,9 @@ class Emitter {
     // 若 ctor 首句为 `super(...)`，则字段默认值改在 super 调用点写（子类字段不得覆写父类构造设置的字段）。
     _emitFieldDefaults(c) {
         const M = this.m;
+        if (this.usesKeyOrder && c.fields.length) {   // 实例字段插入序 = 类字段声明序（派生类在 super 之后登记）
+            M.localGet(0); M.i32Const(this._strId(c.fields.map(f2 => f2.name).join("\u0000"))); M.call("qz.field_order_lit");
+        }
         for (const f of c.fields) {
             M.localGet(0); M.i32WrapI64();
             if (f.init) this.emitTaggedExpr(f.init);
@@ -2041,10 +2047,15 @@ function compileTS(input, outWasm, opts = {}) {
     for (const f of sfs) collectDecls(f);
     // 预登记所有属性名（POJO/实例容量统一；否则「运行期新增字段」会越界写、静态读会错位）。
     const preNames = [];
-    let usesFreeze = false;                  // 程序内是否出现 freeze/seal/preventExtensions（写保护检查只在需要时发射）
+    let usesFreeze = false;
+    let usesKeyOrder = false;          // 程序是否观察对象键序（Object.keys/for-in/JSON/spread）→ 需要插入序跟踪                  // 程序内是否出现 freeze/seal/preventExtensions（写保护检查只在需要时发射）
     {
         const seenN = new Set(), push = (t) => { if (t !== undefined && t !== null && !seenN.has(t)) { seenN.add(t); preNames.push(t); } };
         const walkNames = (n) => {
+            if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
+                && /^(Object|JSON)$/.test(n.expression.expression.text)
+                && /^(keys|values|entries|assign|fromEntries|getOwnPropertyNames|stringify)$/.test(n.expression.name.text)) usesKeyOrder = true;
+            if (ts.isForInStatement(n) || ts.isSpreadAssignment(n)) usesKeyOrder = true;
             if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
                 && n.expression.expression.text === "Object" && /^(freeze|seal|preventExtensions)$/.test(n.expression.name.text)) usesFreeze = true;
             if (ts.isPropertyAccessExpression(n)) push(n.name.text);
@@ -2294,6 +2305,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.classAlias = classAlias;      // 导入类本地名 → 目标类名
         em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
         em.usesFreeze = usesFreeze;
+        em.usesKeyOrder = usesKeyOrder;
         em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
         em.protNameId = (n) => em._strId(n);
 
@@ -3143,6 +3155,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const p = e.properties[i];
             if (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)) {
                 // {[k]: v}：运行期键 → 宿主按名写入（预登记槽命中走内存，未命中进 extras）
+                if (this.usesKeyOrder) { this.m.localGet(slot); this.emitTaggedExpr(p.name.expression); this.m.call("qz.field_order"); }
                 this.m.localGet(slot);
                 this.emitTaggedExpr(p.name.expression);
                 this.emitTaggedExpr(p.initializer);
@@ -3153,6 +3166,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.i32WrapI64();                      // 低32位=offset
             this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);   // 简写 {x} ≡ {x: x}
             this.m.i64Store(3, this._fieldIndex(p.name.text));   // memory[off + 字段字节偏移] = val
+        }
+        if (this.usesKeyOrder) {                       // 插入序：字面量名序（编译期常量，一次登记）
+            const nmList = e.properties.map(p => (p.name && p.name.text ? p.name.text : "")).filter(x => x !== "");
+            if (nmList.length) { this.m.localGet(slot); this.m.i32Const(this._strId(nmList.join("\u0000"))); this.m.call("qz.field_order_lit"); }
         }
         this.m.localGet(slot);
         this._objDepth--;
@@ -3509,6 +3526,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             M.drop();
         } else if (ts.isPropertyAccessExpression(op)) {
             // 宿主对象 → object_delete；POJO/实例 → 槽写 undefined（经宿主，越界即报错，不静默越界写）
+            if (this.usesKeyOrder) { M.localGet(t.v); this._emitStrLitHandle(op.name.text); M.call("qz.field_order_del"); }   // 插入序名单同步移除
             M.localGet(t.v); this._emitStrLitHandle(op.name.text); this._emitUndefined(); M.call("qz.set_index");
             this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
         } else throw new Error("[tagged] delete 仅支持属性/下标（delete obj.k / delete a[i]）");
@@ -3847,6 +3865,9 @@ Emitter.prototype._emitStoreProp = function (left) {
     }
     this.emitTaggedExpr(left.expression);         // obj 句柄
     M.localSet(t.v);
+    if (this.usesKeyOrder) {                      // 插入序登记（Object.keys/for-in/JSON 依赖）
+        M.localGet(t.v); this._emitStrLitHandle(left.name.text); M.call("qz.field_order");
+    }
     if (this.usesFreeze) {                        // freeze/seal/preventExtensions 出现在程序内 → 写前查写保护（strict：抛 TypeError）
         M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.call("qz.prot_check");
         this._emitErrCheck(false);
@@ -3887,6 +3908,7 @@ Emitter.prototype._emitStoreElem = function (left) {
     M.localGet(t.v); this._emitIsStr();
     M.ifBlock("void");
     this.emitTaggedExpr(left.expression); M.localSet(t.x);
+    if (this.usesKeyOrder) { M.localGet(t.x); M.localGet(t.v); M.call("qz.field_order"); }   // 插入序登记
     M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.set_index");   // 字符串键 → 宿主
     this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
     M.else_();

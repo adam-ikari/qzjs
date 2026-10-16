@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 对象键序（插入序）支持（2026-10-16）
+- **插入序跟踪**：POJO/实例写属性时登记 `field_order`/`field_order_lit`（对象字面量按编译期名序一次登记、运行期下标写与 `delete` 同步移除），物化时按插入序建对象 → `Object.keys`/`values`/`entries`、`for-in`、`JSON.stringify`、对象展开的键序与 JS 一致（此前为「预登记字段序 + 运行期新键」）。
+- 代价：仅当程序出现顺序敏感 API（`Object.keys|values|entries|assign|fromEntries|getOwnPropertyNames`、`JSON.stringify`、`for-in`、对象展开）时才发射写前登记调用；常见程序零额外开销。
+- `Object.keys` 现包含「已赋值为 undefined」的键（插入序名单即写入记录）。
+- 结果：**311/321（96.9%）**；**仅剩 1 项静默差异**（稀疏数组 holes），其余 9 项均为 loud。
+
 ### 第十批差分审计（2026-10-16）
 - 新增 `audit_corpus10.js`（24 例：this 绑定 / Function.prototype 三件套 / 原型 / 访问器边界 / 数组洞 / 正则 / 异常边界 / 访问器抛错）。
 - **原型污染修复（classMeta 自有键）**：`methods["valueOf"]`/`["toString"]` 会命中原型链 → 宿主 `m.name` 失效、崩溃/错值（`own()` 查询）。
