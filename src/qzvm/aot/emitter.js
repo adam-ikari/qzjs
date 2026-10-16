@@ -492,6 +492,13 @@ class Emitter {
             return;
         }
         const foff = this._fieldIndex(name);
+        // 字符串/数组：方法名读取 → 宿主返回**绑定的 JS 函数**（truthy + 可调用；JS 里 s.at 也是函数）
+        M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+        M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+        M.i32Or();
+        M.ifBlock("i64");
+        M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
+        M.else_();
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
         M.ifBlock("i64");
         M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.object_get");
@@ -515,6 +522,7 @@ class Emitter {
         this._emitUndefined();
         M.end();
         M.end();
+        M.end();   // 关「str/arr 方法读取」外层 if
     }
     _countForOf(node) {
         let n = 0;

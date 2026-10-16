@@ -44,7 +44,18 @@ const BUILTIN_FNS = {
   "Object.is": Object.is, "Object.fromEntries": Object.fromEntries,
   "Array.isArray": Array.isArray, "Array.from": Array.from, "Array.of": Array.of,
   "Number.isInteger": Number.isInteger, "Number.isNaN": Number.isNaN, "Number.isFinite": Number.isFinite,
+  "Number.isSafeInteger": Number.isSafeInteger,
   "Number.parseInt": Number.parseInt, "Number.parseFloat": Number.parseFloat,
+  "Object.isFrozen": Object.isFrozen, "Object.isSealed": Object.isSealed, "Object.isExtensible": Object.isExtensible,
+  "Object.getOwnPropertyNames": Object.getOwnPropertyNames, "Object.getPrototypeOf": Object.getPrototypeOf,
+  "Object.seal": Object.seal, "Object.preventExtensions": Object.preventExtensions,
+  "Object.create": Object.create, "Object.defineProperty": Object.defineProperty,
+  "encodeURIComponent": encodeURIComponent, "decodeURIComponent": decodeURIComponent,
+  "encodeURI": encodeURI, "decodeURI": decodeURI,
+  "Math.expm1": Math.expm1, "Math.log1p": Math.log1p, "Math.clz32": Math.clz32, "Math.imul": Math.imul,
+  "Math.fround": Math.fround, "Math.sinh": Math.sinh, "Math.cosh": Math.cosh, "Math.tanh": Math.tanh,
+  "Math.asinh": Math.asinh, "Math.acosh": Math.acosh, "Math.atanh": Math.atanh,
+  "String.raw": (t, ...v) => String.raw(t, ...v),
   "String.fromCharCode": String.fromCharCode, "String.fromCodePoint": String.fromCodePoint,
 };
 // 内建全局常量（属性读非调用）：Math.PI 等。
@@ -312,6 +323,16 @@ function makeQzvm(strings, opts) {
       case "every":       r = arr().every((v, i) => !!cbv(a0, v, i)); break;
       case "sort":        r = arrSetInPlace(recv, toJS(a0) !== undefined ? arr().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv))) : arr().sort()); return recv;   // 无比较器 → JS 默认字典序
       case "splice":      { const a = arr(); const del = a.splice(toJS(a0), toJS(a1) === undefined ? a.length : toJS(a1)); arrSetInPlace(recv, a); r = del; break; }
+      case "flat":         r = arr().flat(toJS(a0) === undefined ? 1 : toJS(a0)); break;
+      case "flatMap":      r = arr().flatMap((v, i) => cbv(a0, v, i)); break;   // cbv 已返回 JS 值，勿再 toJS
+      case "reduceRight":  { const a2 = arr();
+                             const rc2 = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
+                             r = toJS(a1) !== undefined ? a2.reduceRight((acc, v, i) => rc2(acc, v, i), toJS(a1))
+                                                         : a2.reduceRight((acc, v, i) => rc2(acc, v, i)); break; }
+      case "at":           { const a2 = arr(); const i = Math.trunc(toJS(a0)); r = a2[i < 0 ? a2.length + i : i]; break; }
+      case "copyWithin":   { const a3 = arr(); a3.copyWithin(toJS(a0), a1 === undefined ? 0 : toJS(a1), a2 === undefined ? a3.length : toJS(a2)); arrSetInPlace(recv, a3); return recv; }
+      case "toString":     r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(","); break;
+      case "toSorted":     r = a0 === undefined ? arr().slice().sort() : arr().slice().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), TAG))); break;
       case "fill":        { const a = arr(); a.fill(toJS(a0)); arrSetInPlace(recv, a); return recv; }
       default: throw new Error("method_call: 数组无方法 " + name);
     }
@@ -345,6 +366,15 @@ function makeQzvm(strings, opts) {
       case "replace":      r = s.replace(String(arg(a0)), String(arg(a1))); break;
       case "split":        r = s.split(String(arg(a0))); break;   // 返回 JS 数组句柄（toJS = array）
       case "concat":       r = s.concat(...extra().map(String)); break;
+      case "at":           { const i = Math.trunc(arg(a0)); r = s[i < 0 ? s.length + i : i]; break; }
+      case "localeCompare": r = s.localeCompare(String(arg(a0))); break;
+      case "normalize":    r = arg(a0) === undefined ? s.normalize() : s.normalize(String(arg(a0))); break;
+      case "codePointAt":  r = s.codePointAt(arg(a0)); break;
+      case "match":        r = s.match(toJS(a0)); break;
+      case "search":       r = s.search(toJS(a0)); break;
+      case "matchAll":     r = Array.from(s.matchAll(toJS(a0))); break;
+      case "replaceAll":   r = s.replaceAll(toJS(a0), String(arg(a1))); break;
+      case "charAt":       r = s.charAt(arg(a0)); break;
       default: throw new Error("未知字符串方法: " + name);
     }
     // 字符串 → 写回 wasm 堆（[len][utf8]），返回 0x7FFA 句柄（与热路径内存布局一致）；
@@ -434,6 +464,12 @@ function makeQzvm(strings, opts) {
         return new DataView(mem.buffer).getBigInt64(off + e[1], true);
       }
       if (hi === HOST_HI) { const o = handles[off]; return ret(o == null ? undefined : o[name]); }
+      // 字符串/数组：方法名 → 绑定宿主函数（truthy + 可调用）；其余属性 → 值
+      if (hi === STR_HI || hi === 0x7ffbn) {
+        const v = toJS(recv);
+        const m = v == null ? undefined : v[name];
+        return typeof m === "function" ? tagHandle(m.bind(v)) : ret(m);
+      }
       return ret(toJS(recv)[name]);
     },
     prop_set: (recv, id, v) => {
