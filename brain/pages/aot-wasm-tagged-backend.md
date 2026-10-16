@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-15T15:33:54"
+updated: "2026-10-16T00:46:08"
 ---
 
 <!-- compiled_truth -->
@@ -99,3 +99,9 @@ updated: "2026-10-15T15:33:54"
   summary: "三处静默语义错误修复：①数组句柄标签 0x7FF8=canonical quiet NaN（宿主 box(NaN) 恰产此位型）→ NaN 返回值被误判为数组→[]；改 0x7FFB。②_fromJS 原仅 number→numToBits、其余 tagHandle → 字符串入参得 0x7FF9 假句柄（非 0x7FFA 写回）→ .length/concat 静默 0；改 _fromJS=bitsOf。③num emitCond 原 x!=0 → NaN 误判 truthy（IEEE NaN≠0=true，JS Boolean(NaN)=false）；改 (x!=0)&&(x==x)。回归门 test_aot.js +7 项，101 ALL PASS。"
   source: "会话 2026-10-15：差分测试发现静默语义偏差"
   affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T00:46:08
+  kind: decision
+  summary: "AOT 语义精度第二批（差分审计驱动）：①bool 独立 tag 0x7FFC（此前 tagged bool = f64 0/1，与 number 混淆 → 's'+true 得 's1'、typeof true 得 'number'、1==true 得 false）。②null/undefined 区分：null 用固定槽 handles[1]（0x7FF9|1）、undefined handles[0]（0x7FF9|0），此前统一 0x7FF9|0 → typeof null 得 'undefined'。③宽松 ==/!= 走宿主 qz.eq/qz.ne（此前与 === 同走严格 → 1=='1' 得 false）。④**（宿主 qz.math_pow/qz.pow）、??（qz.is_nullish）、~/+（qz.bnot/qz.to_num）。⑤% 精确到 JS Number::remainder（零余数符号随被除数——原 f64Neg 把 2%2 的 +0 翻成 -0；差溢出走宿主 fmod）。⑥+ 拼接 ToPrimitive（区分纯数/串/bool/句柄，双纯数走原生 f64 add 否则宿主）。⑦NaN truthy（num emitCond 从 x!=0 改 (x!=0)&&(x==x)，!x 同源）。守门 test_aot.js 135 ALL PASS。已知限制（loud 非静默）：位运算 NaN/Inf trap、instanceof/in/?./void/delete/**=/??= 未实现、typeof function 报 'object'。"
+  source: "会话 2026-10-15：完成aot 目标下的差分审计"
+  affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
