@@ -3,6 +3,17 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **fix(aot): 差分审计扫出的一批静默错值/合法代码 trap（可重入表达式临时槽重构）**。
+  - **可重入表达式临时槽**（`_expEnter/_expLeave`，8 层 × 2×i64 + 3×i32）：此前接收者/值存在 `scratch`/`sT` 被内层表达式（`.length`/下标/拼接/嵌套字面量）覆盖 → `out.push(x.length)` 丢元素、`[[1,2],[3,4]][1][1]` 读错、`o.a.b.c` 越界读对象头。受影响点全部改专用可重入槽：数组字面量、`push/pop`、`a[i]` 读写、`o.a` 读写。
+  - **属性读越界 → undefined**（POJO/类实例按 `[4]=size` 边界检查）：此前读到对象外内存 → 静默错值；非对象（数组/字符串/数字）上的普通属性 → undefined。
+  - **下标读按接收者 tag 分派**：字符串键或非 wasm 数组（宿主数组/字符串/POJO/实例）→ 宿主 `qz.get_index`，wasm 数组 + 数值键 → 内存快路径（修 `"abc"[1]` / `json.a[2]` 的 trap 与错值）。
+  - **`NaN`/`Infinity` 全局常量**；**`.length` 宿主回退** `qz.length_of`。
+  - **位运算 ToInt32 语义**：`i32.trunc_f64_s` 对 NaN/越界会 trap → 只在安全域（非 NaN、|x|<2^31）内联，否则宿主 `qz.bor/band/...`（JS 环绕语义）。修 `NaN|0`、`1e18|0` trap。
+  - **空对象**（`{}`）尺寸曾为 `Math.max()`=-Infinity → 哨兵句柄撞车（`{} === {}` 曾为 true）→ size ≥ 8。
+  - **函数落空/裸 `return;` → 返回 undefined**（此前补 `unreachable` → 合法代码 `function f(){}` 直接 trap）。
+  - **数值方法**（`(255).toString(16)`/`toFixed`/`toPrecision`/`toExponential`）：回退分支 + 免对齐 `clsId` 读取。
+  - **变参 `concat`**（字符串/数组）取全部实参（此前只取第一个 → 静默丢参）。
+  审计脚本：`/tmp/qzaux/diffrun.js` + `corpus.js`（同源 tsc 剥类型跑 JS 作 oracle，47 例独立编译差分；本轮 34/47 一致，余为已记录 loud 未实现）。`test_aot.js` 223 checks ALL PASS。
 - **feat(aot): 类静态字段**（`static x = v`）。宿主表 `statics`（nameId → fieldId → tagged 值）+ `qz.statics_ready/statics_mark/static_get/static_set`；访问点 lazy 内联初始值（`_emitStaticsGuard`）。覆盖读 `C.x`、写 `C.x = v`、`++C.x`/`C.x++`/`C.x += v`、静态方法内经 `C.x` 读写、继承链静态方法（`D.bump()` 调 `C.bump` 语义）。同名于数组方法名（`C.push`）时静态方法优先于数组快路径。守门：`test_aot.js` +1（223 checks ALL PASS）。
 - **feat(aot): `for...in` + 动态字符串键 `o[k]` / 修 for-of 长度被复用槽覆盖**。
   - **for-of 修复（既有静默 bug）**：循环长度原先存在 `sT[0]`，会被循环体内的字符串拼接/数组操作复用覆盖 → 第二次迭代条件读垃圾值 → 循环体只执行一次或零次（`for (const v of [1,2,3]) s+=v` 得 0）。现每层 for-of 用 3 个专用 local（句柄/索引/长度）。

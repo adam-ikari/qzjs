@@ -260,7 +260,14 @@ function makeQzvm(strings, opts) {
                    : Array.isArray(r) ? arrWriteback(r) : tagHandle(r);
   // 数组方法（recv=0x7FFB 原生数组）。回调（map/filter/reduce/…）为闭包句柄，
   // 经 closure_call(handle, v, i, arr) 调用 wasm 侧箭头函数。
-  const doArrMethod = (recv, mid, a0, a1) => {
+  // 4 参槽中未传的实参由 emitter 填 undefined 句柄（0x7FF9|0）；变参方法（concat）据此过滤。
+  const givenSlot = (x) => {
+    if (x === undefined) return false;
+    const u = BigInt.asUintN(64, x);
+    return !(u >> 48n === TAG_HI && (u & 0xffff_ffffn) <= 1n);
+  };
+  const doArrMethod = (recv, mid, a0, a1, a2, a3) => {
+    const extra = (first) => [a0, a1, a2, a3].slice(first).filter(givenSlot).map(toJS);
     const name = strings[mid];
     const arr = () => arrRead(recv);
     const cbv = (h, v, i, acc) => toJS(closureCall(h, bitsOf(v), box(i), acc === undefined ? recv : acc));
@@ -270,7 +277,7 @@ function makeQzvm(strings, opts) {
       case "lastIndexOf": r = arr().lastIndexOf(toJS(a0)); break;
       case "includes":    r = arr().some(x => x === toJS(a0)); break;
       case "slice":       r = arr().slice(toJS(a0), a1 === undefined ? undefined : toJS(a1)); break;
-      case "concat":      r = arr().concat(toJS(a0) === undefined ? [] : toJS(a0)); break;
+      case "concat":      r = arr().concat(...extra(0)); break;
       case "join":        r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(toJS(a0) === undefined ? "," : String(toJS(a0))); break;
       case "reverse":     r = arrSetInPlace(recv, arr().reverse()); return recv;
       case "shift":       { const a = arr(); r = a.length ? a.shift() : undefined; arrSetInPlace(recv, a); return ret(r); }
@@ -293,7 +300,8 @@ function makeQzvm(strings, opts) {
     }
     return ret(r);
   };
-  const doStrMethod = (recv, mid, a0, a1) => {
+  const doStrMethod = (recv, mid, a0, a1, a2, a3) => {
+    const extra = () => [a0, a1, a2, a3].filter(givenSlot).map(toJS);
     const s = toJS(recv);
     const arg = (x) => toJS(x);
     const name = strings[mid];
@@ -319,7 +327,7 @@ function makeQzvm(strings, opts) {
       case "padEnd":       r = s.padEnd(arg(a0), arg(a1)); break;
       case "replace":      r = s.replace(String(arg(a0)), String(arg(a1))); break;
       case "split":        r = s.split(String(arg(a0))); break;   // 返回 JS 数组句柄（toJS = array）
-      case "concat":       r = s.concat(arg(a0)); break;
+      case "concat":       r = s.concat(...extra().map(String)); break;
       default: throw new Error("未知字符串方法: " + name);
     }
     // 字符串 → 写回 wasm 堆（[len][utf8]），返回 0x7FFA 句柄（与热路径内存布局一致）；
@@ -461,14 +469,16 @@ function makeQzvm(strings, opts) {
       if (hi === HOST_HI) return handles[idxOf(v)] ? 1 : 0;         // 0x7FFD：宿主对象（查 handles）
       return bitsToNum(v) ? 1 : 0;
     },
+    // .length 宿主回退：宿主数组/宿主字符串句柄/POJO（物化后取 JS .length；无 length 字段 → undefined）
+    length_of: (v) => { const x = toJS(v); return ret(x == null ? undefined : x.length); },
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
     // 字符串方法：recv + 方法名 id + 2 参（undefined 句柄 = 缺省）→ 结果字符串句柄。
     str_method: (recv, mid, a0, a1) => doStrMethod(recv, mid, a0, a1),
     // 通用方法调用：字符串 → doStrMethod；数组(0x7FFB) → doArrMethod；类实例（内存 [0]=__cls id）
     // → 沿继承链查 classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
     method_call: (recv, mid, a0, a1, a2, a3) => {
-      if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1);
-      if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1);
+      if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1, a2, a3);
+      if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3);
       const name = strings[mid];
       if (isHostH(recv)) {                                   // 宿主对象（JSON.parse 结果等）：调真实 JS 方法
         const obj = handles[idxOf(recv)];
@@ -476,8 +486,26 @@ function makeQzvm(strings, opts) {
         if (typeof fn !== "function") throw new Error("method_call: 宿主对象无方法 " + name);
         return ret(fn.call(obj, ...[a0, a1, a2, a3].slice(0, 4).map(toJS)));
       }
+      // 纯数值接收者（高16位非任何句柄 tag）→ Number.prototype 方法
+      {
+        const hi = BigInt.asUintN(64, recv) >> 48n;
+        if (hi !== TAG_HI && hi !== STR_HI && hi !== BOOL_HI
+            && hi !== HOST_HI && hi !== INST_HI && hi !== 0x7ffbn) {
+          const n = bitsToNum(recv);
+          const g = (x) => (x === undefined ? undefined : toJS(x));
+          switch (name) {
+            case "toString": return ret(n.toString(g(a0) === undefined ? 10 : g(a0)));
+            case "toFixed": return ret(n.toFixed(g(a0)));
+            case "toPrecision": return ret(g(a0) === undefined ? n.toString() : n.toPrecision(g(a0)));
+            case "toExponential": return ret(n.toExponential(g(a0)));
+            case "toLocaleString": return ret(n.toLocaleString("en-US"));
+            case "valueOf": return recv;
+            default: throw new Error("method_call: 数值无方法 " + name);
+          }
+        }
+      }
       const off = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
-      const clsId = new Int32Array(mem.buffer, off, 1)[0];
+      const clsId = new DataView(mem.buffer).getInt32(off, true);   // 免 4 对齐
       let c = classMeta && classMeta[clsId];
       while (c) {
         const m = c.methods[name];
