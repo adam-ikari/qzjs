@@ -1379,6 +1379,19 @@ class Emitter {
                     throw new Error("[tagged] 不支持的类成员: " + ts.SyntaxKind[mem.kind]);
                 }
             }
+            if (ctor) {   // TS 参数属性 constructor(public x: any) → 隐式字段「this.x = x」（初值 = 形参局部读）
+                const props = [];
+                for (const p of ctor.parameters) {
+                    if (!ts.isIdentifier(p.name)) continue;
+                    const isProp = (p.modifiers || []).some(mm => mm.kind === ts.SyntaxKind.PublicKeyword || mm.kind === ts.SyntaxKind.PrivateKeyword
+                        || mm.kind === ts.SyntaxKind.ProtectedKeyword || mm.kind === ts.SyntaxKind.ReadonlyKeyword);
+                    if (!isProp) continue;
+                    const pnm = ts.isPrivateIdentifier(p.name) ? "#" + cname + "#" + p.name.text : p.name.text;
+                    if (fields.some(f2 => f2.name === pnm)) continue;
+                    props.push({ name: pnm, init: p.name });
+                }
+                fields.unshift.apply(fields, props);             // TS：参数属性先于字段初值赋值
+            }
             this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }

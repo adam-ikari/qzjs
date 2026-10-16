@@ -663,8 +663,18 @@ function makeQzvm(strings, opts) {
     is_nan_host: (v) => toJS(v) !== toJS(v) ? 1 : 0,   // JS "+" 语义（含 ToPrimitive(default)：对象优先 valueOf）
     iter_array: (v) => {                          // 非数组可迭代（Map/Set/迭代器等）→ wasm 数组（元素经 toJS/bitsOf）
       const x = toJS(v);
-      if (x == null || typeof x[Symbol.iterator] !== "function") throw new Error("for-of: 该值不可迭代");
-      return arrWriteback(Array.from(x));
+      if (x == null) throw new Error("for-of: 该值不可迭代");
+      const itf = x[Symbol.iterator];
+      if (typeof itf !== "function") throw new Error("for-of: 该值不可迭代");
+      // 手写迭代协议：自定义迭代器（类 [Symbol.iterator] 返回 { next }）只保证 next 存在，Array.from 会因缺 Symbol.iterator 退化
+      const out = [];
+      const it = itf.call(x);
+      for (let guard = 0; guard < 1e7; guard++) {
+        const r = it.next();
+        if (!r || r.done) break;
+        out.push(r.value);
+      }
+      return arrWriteback(out);
     },
     // 值调用：闭包句柄 → closure_call；宿主函数句柄 → 直接调用
     call_value: (v, a0, a1, a2, a3, ovf, recv) => {

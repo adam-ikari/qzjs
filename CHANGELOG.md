@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十批差分审计（2026-10-16）
+- 新增 `audit_corpus20.js`（19 例：Error 子类与 instanceof、**自定义 `[Symbol.iterator]`**（对象/类）、位运算负数与移位、Math 方法矩阵、字符串负索引切片（slice/substring/substr）、splice 变体、NaN 与 includes/indexOf、toString/valueOf 覆盖、私有方法/私有静态字段、defineProperty 描述符、seal/isSealed、提升与块作用域、IIFE 与互递归、字段初始化顺序、静态继承、嵌套解构默认值、do/while+continue、逗号与嵌套三元、JSON 深/Unicode 转义、**TS 参数属性**）。
+- **TS 参数属性**（`constructor(public x: any, private y: any)`）：`collectClasses` 把带修饰符的构造器形参登记为隐式字段（初值 = 形参局部读，置于字段表首位，符合 TS「参数属性先于字段初值赋值」）→ 此前 `this.x` 静默 undefined（**静默错值，已修**）。
+- **for-of 迭代协议**：`qz.iter_array` 改为手写迭代协议（`x[Symbol.iterator]()` + `next()` 循环），不再用 `Array.from`（后者要求迭代器自带 `Symbol.iterator`，自定义类的 `{ next }` 会被当 array-like）。
+- 已知 loud（新增）：静态私有字段经类名写；静态方法内 `this`（类名作值）；类 `[Symbol.iterator]` 的物化路径。
+- 结果：**501/512（97.9%）**；残余 11 项全部 loud（零静默错值）。
+
 ### 第十九批差分审计（2026-10-16）
 - 新增 `audit_corpus19.js`（19 例：数值/字符串格式化、数组边角（flat·flatMap·fill·reduceRight·findLast·默认字典序 sort）、对象工具（fromEntries·is·values·entries）、Date 细节、RegExp（exec·lastIndex·全局循环·split）、JSON 细节、**函数标签模板（含 rest 形参）**、类继承访问器 + `super`、try/finally 与 return 交互、while/for-of 每迭代绑定闭包、`new` + 展开、可选链/空值合并组合、parseInt/parseFloat/Number 边界、switch fallthrough、对象字面量嵌套方法的 `this`、稀疏数组、字符串迭代/码点、getter/setter 副作用顺序）。
 - **函数标签模板 → 顶层函数直调**：`tag\`…\`` 中标签为顶层函数声明时改为直接 wasm 调用（此前按闭包值求值 → 编译期 loud「未定义捕获变量」）；rest 形参按形参表打包。
