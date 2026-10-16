@@ -376,8 +376,10 @@ function makeQzvm(strings, opts) {
       case "includes":     r = s.includes(String(arg(a0))); break;
       case "padStart":     r = s.padStart(arg(a0), arg(a1)); break;
       case "padEnd":       r = s.padEnd(arg(a0), arg(a1)); break;
-      case "replace":      r = s.replace(String(arg(a0)), String(arg(a1))); break;
-      case "split":        r = s.split(String(arg(a0))); break;   // 返回 JS 数组句柄（toJS = array）
+      case "replace":      { const pat = toJS(a0);   // 正则模式原样传（String() 会毁掉 RegExp）
+                             r = s.replace(pat instanceof RegExp ? pat : String(pat), String(arg(a1))); break; }
+      case "split":        { const sep = toJS(a0);
+                             r = s.split(sep instanceof RegExp ? sep : String(sep)); break; }   // 返回 JS 数组句柄（toJS = array）
       case "concat":       r = s.concat(...extra().map(String)); break;
       case "at":           { const i = Math.trunc(arg(a0)); r = s[i < 0 ? s.length + i : i]; break; }
       case "localeCompare": r = s.localeCompare(String(arg(a0))); break;
@@ -791,6 +793,7 @@ function makeQzvm(strings, opts) {
       return 1n;
     },
     // 变参数组方法：实参数组 + 名 → push/unshift/splice/concat（含就地变更与返回值语义）
+    empty_array: () => arrWriteback([]),          // rest 形参未传实参 → 空数组
     arr_apply: (recv, mid, arr) => {
       if ((BigInt.asUintN(64, recv) >> 48n) !== 0x7ffbn) throw new Error("arr_apply: 非 wasm 数组接收者");
       const name = strings[mid], args = toJS(arr) || [], a = arrRead(recv);
@@ -807,6 +810,13 @@ function makeQzvm(strings, opts) {
     str_chars: (v) => arrWriteback(Array.from(strRead(v))),
     // 内建函数值读取（Math.expm1 / JSON.stringify 之类，作为值而非调用）→ 宿主函数句柄
     // 内建成员读（作为值）：常量 → 值；函数 → 宿主函数句柄；未知 → undefined
+    // 正则字面量：宿主 RegExp（/pat/flags 原文 → new RegExp）。typeof → object ✓ instanceof RegExp ✓
+    regex: (id) => {
+      const src = strings[id];
+      const m = /^\/(.*)\/([a-z]*)$/s.exec(src);
+      if (!m) throw new Error("regex: 无法解析字面量 " + src);
+      return tagHandle(new RegExp(m[1], m[2]));
+    },
     builtin_member: (id) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);

@@ -114,9 +114,11 @@ const QZ = {
   env_new: { params: ["i32"], results: ["i64"] },        // 闭包环境：parentIdx(-1=根) → 环境句柄
   env_def: { params: ["i32", "i32", "i64"], results: [] },   // 直接写入该环境层（每迭代绑定种子）
   arr_apply: { params: ["i64", "i32", "i64"], results: ["i64"] },     // 变参数组方法（实参数组）
+  empty_array: { params: [], results: ["i64"] },                 // rest 形参缺省 → 空数组
   str_chars: { params: ["i64"], results: ["i64"] },                   // 字符串 → 码点字符数组
   builtin_fn: { params: ["i32"], results: ["i64"] },                  // 内建函数值（作为值读取）
   builtin_member: { params: ["i32"], results: ["i64"] },              // 内建成员当作值读
+  regex: { params: ["i32"], results: ["i64"] },                        // 正则字面量 → 宿主 RegExp
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
@@ -228,7 +230,10 @@ class Emitter {
         const name = d.name;
         if (ts.isIdentifier(name)) {
             if (d.initializer) {
-                if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) { this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text); }
+                if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
+                    this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text);
+                    this._fnNodes = this._fnNodes || new Map(); this._fnNodes.set(name.text, d.initializer);
+                }
                 this.emitTaggedExpr(d.initializer); this._emitVarStore(name.text, this.scratchB); this.m.drop();
             }
             return;
@@ -578,6 +583,33 @@ class Emitter {
         M.localGet(t.w); M.localGet(t.v); M.call("qz.closure_call_spread");
         this._expLeave();
     }
+    // 被调函数（已解析到 AST）是否以 rest 形参收尾 → 返回其形参数组，否则 null。
+    _calleeParams(name) {
+        const node = (this._fnNodes && this._fnNodes.get(name)) || null;
+        return node ? node.parameters : null;
+    }
+    // 落栈实参：rest 收尾 → 固定参 + 打包数组；否则按元数补 undefined / 截断。
+    _emitCallArgs(params, args, fnName) {
+        const M = this.m;
+        const nPar = params.length;
+        const hasRest = nPar > 0 && !!params[nPar - 1].dotDotDotToken;
+        if (!hasRest) {
+            for (let i = 0; i < nPar; i++) {
+                if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+            }
+            return;
+        }
+        const nFix = nPar - 1;
+        for (let i = 0; i < nFix; i++) {
+            if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        }
+        const rest = args.slice(nFix);
+        if (rest.some(a2 => ts.isSpreadElement(a2))) throw new Error(`[tagged] ${fnName} 的 rest 实参与展开混用暂不支持`);
+        const lit = ts.factory.createArrayLiteralExpression(rest);
+        lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+        this.emitTaggedExpr(lit);
+    }
+
     // 闭包调用：closure_call(handle, a0..a3)。句柄先入可重入槽（参数求值可能嵌套闭包调用），
     // 再按「句柄在前、4 参压栈」顺序调用（参数求值用栈深度隔离，无需逐参临时）。
     _emitClosureCall(fn, args) {
@@ -591,8 +623,14 @@ class Emitter {
             M.localGet(hIdx); M.localSet(t.v);
         }
         M.localGet(t.v);
-        for (let i = 0; i < 4; i++) {
-            if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        const cp = this._calleeParams(fn);
+        if (cp && cp.length > 0 && cp[cp.length - 1].dotDotDotToken && cp.length <= 4) {
+            this._emitCallArgs(cp, args, fn);
+            for (let i = cp.length; i < 4; i++) this._emitUndefined();
+        } else {
+            for (let i = 0; i < 4; i++) {
+                if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+            }
         }
         M.call("qz.closure_call");
         this._expLeave();
@@ -712,8 +750,14 @@ class Emitter {
         const M = this.m;
         for (let i = 0; i < params.length; i++) {
             const p = params[i];
-            if (p.dotDotDotToken) throw new Error("[tagged] rest 形参暂不支持（wasm 固定元数 ABI）");
             const idx = base + i;
+            if (p.dotDotDotToken) {                       // rest 形参：调用方打包实参数组（未传 → 空数组）
+                if (this.mode !== "tagged") throw new Error("[num] rest 形参不支持");
+                M.localGet(idx); M.call("qz.is_undef");
+                M.ifBlock("void");
+                M.call("qz.empty_array"); M.localSet(idx);
+                M.end();
+            }
             if (p.initializer) {
                 if (this.mode !== "tagged") throw new Error("[num] 形参默认值不支持（f64 ABI 无 undefined）");
                 M.localGet(idx); M.call("qz.is_undef");
@@ -769,6 +813,8 @@ class Emitter {
         for (const lam of this._collectScopeFnDecls(body)) {
             if (!lam.name) continue;
             this._fnVars.add(lam.name.text);
+            this._fnNodes = this._fnNodes || new Map();
+            this._fnNodes.set(lam.name.text, lam);
             this._emitLambdaNew(lam);                       // 栈：闭包句柄
             this._emitVarStore(lam.name.text, this.scratchB);
             M.drop();
@@ -787,6 +833,7 @@ class Emitter {
         // 多文件编译：em.sf 由 compileTS 按「本函数所属源文件」设置（行号/DWARF 用）。
         const savedCurClass = this._curClass, savedCapActive = this.capListActive, savedStatic = this._staticVars;
         const savedFnVars = this._fnVars; this._fnVars = new Set();   // 本函数的「持有闭包的变量」集合
+        const savedFnNodes = this._fnNodes; this._fnNodes = new Map(savedFnNodes || []);
         this._curClass = undefined; this.capListActive = false;
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this.mode = funcMode(f);
@@ -870,7 +917,7 @@ class Emitter {
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
         this._curClass = savedCurClass; this.capListActive = savedCapActive; this._staticVars = savedStatic;
-        this._fnVars = savedFnVars;
+        this._fnVars = savedFnVars; this._fnNodes = savedFnNodes;
     }
 
 
@@ -1034,7 +1081,8 @@ class Emitter {
                 } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
                     (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isIdentifier(mem.name)) {
-                    if (isStatic(mem)) throw new Error(`[tagged] 静态访问器未实现（${cname}.${mem.name.text}）`);
+                    if (isStatic(mem)) { staticMethods.push({ name: mem.name.text, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" }); }
+                    else
                     methods.push({ name: mem.name.text, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" });
                 } else {
                     throw new Error("[tagged] 不支持的类成员: " + ts.SyntaxKind[mem.kind]);
@@ -1069,7 +1117,7 @@ class Emitter {
             this.m.declareFunc(ctorName(cname), ["i64", "i64", "i64", "i64", "i64"], []);
             for (const sm of c.staticMethods) {
                 const voidRet = !!sm.node.type && sm.node.type.kind === ts.SyntaxKind.VoidKeyword;
-                this.m.declareFunc(staticMethName(cname, sm.name), ["i64", "i64", "i64", "i64", "i64"], voidRet ? [] : ["i64"]);
+                this.m.declareFunc(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), ["i64", "i64", "i64", "i64", "i64"], voidRet ? [] : ["i64"]);
             }
         }
     }
@@ -1088,7 +1136,7 @@ class Emitter {
         const isVoid = !!sm.node.type && sm.node.type.kind === ts.SyntaxKind.VoidKeyword;
         const realParams = sm.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
-        this._mEnter(staticMethName(cname, sm.name), cname, params, sm.node.body, isVoid, sm.node.parameters);
+        this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
         this._curClassObj = this.classes.get(cname);
         this._emitFnDeclClosures(sm.node.body);
         this.emitTaggedBlock(sm.node.body);
@@ -2022,6 +2070,8 @@ function compileTS(input, outWasm, opts = {}) {
         em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
 
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
+        em._fnNodes = new Map();         // 顶层函数名 → 声明节点（rest 形参打包用）
+        for (const st of fns) em._fnNodes.set(st.name.text, st);
         for (const st of fns) { em.fnNames.add(st.name.text); em._fnParams.set(st.name.text, st.parameters.length); }
         for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
         if (!m.collect) {
@@ -2063,7 +2113,7 @@ function compileTS(input, outWasm, opts = {}) {
         for (const cname of em._classList) {
             const c = em.classes.get(cname);
             for (const mth of c.methods) { const en = methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name); m.exportFn(en, en); }
-            for (const sm of c.staticMethods) m.exportFn(staticMethName(cname, sm.name), staticMethName(cname, sm.name));
+            for (const sm of c.staticMethods) { const en = staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")); m.exportFn(en, en); }
             m.exportFn(ctorName(cname), ctorName(cname));
         }
         if (m.memory !== null) m.exportMemory();
@@ -2171,6 +2221,16 @@ Emitter.prototype._emitStaticsGuard = function (cname) {
     M.end();
 };
 // 类名（标识符）是否为已收集的类
+// 沿继承链找静态访问器（kind: "get"|"set"）→ { cname, acc }（静态属性读/写分派）
+Emitter.prototype._findStaticAccessor = function (cn, name, kind) {
+    let c = this.classes.get(cn);
+    while (c) {
+        const acc = (c.staticMethods || []).find(sm => sm.accessor === kind && sm.name === name);
+        if (acc) return { cname: c.name, acc };
+        c = c.parent ? this.classes.get(c.parent) : null;
+    }
+    return null;
+};
 Emitter.prototype._isClassName = function (node) {
     return !!node && ts.isIdentifier(node) && this.classes.has(node.text);
 };
@@ -2509,6 +2569,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (idx === undefined) throw new Error("[tagged] this 仅在类方法/构造器内可用");
         this.m.localGet(idx); return;
     }
+    if (ts.isRegularExpressionLiteral(e)) {
+        this.m.i32Const(this._strId(e.text));        // 含定界符与 flags 的原文（宿主解析）
+        this.m.call("qz.regex");
+        return;
+    }
     if (ts.isIdentifier(e)) {
         if (this.capMap.has(e.text)) { this._emitCapturedRead(e.text); return; }   // 捕获名优先走 env（与本体共享）
         const idx = this._local(e.text);
@@ -2769,7 +2834,15 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     // 类静态字段 C.x（C 为已收集类名）→ 确保静态已初始化 + 宿主 static_get
     if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._isClassName(e.expression)) {
-        const cn = e.expression.text;
+        const cn = this._className(e.expression.text);
+        const got = this._findStaticAccessor(cn, e.name.text, "get");
+        if (got) {                                            // 静态 getter（含继承）→ 直调 __sm_<owner>$<name>
+            this._emitStaticsGuard(got.cname);
+            this._emitUndefined();
+            for (let i = 0; i < 4; i++) this._emitUndefined();
+            this.m.call(staticMethName(got.cname, got.acc.name));
+            return;
+        }
         this._emitStaticsGuard(cn);
         this.m.i32Const(this._strId(cn)); this.m.i32Const(this._strId(e.name.text)); this.m.call("qz.static_get");
         return;
@@ -2902,10 +2975,15 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (calleeNum && e.arguments.length < nPar) {
             throw new Error(`[tagged] num 函数 ${fn} 需 ${nPar} 个实参（JS 少传 → undefined 无法在 f64 ABI 表示）`);
         }
-        const nPass = calleeNum ? e.arguments.length : nPar;
-        for (let i = 0; i < nPass; i++) {
-            if (i < e.arguments.length) { this.emitTaggedExpr(e.arguments[i]); if (xt) this._argToCallee(fn); }
-            else this._emitUndefined();
+        const calleeParams = !calleeNum ? (this._calleeParams(fn) || this._calleeParams(this._fnName(fn))) : null;
+        if (calleeParams && calleeParams.length === nPar && calleeParams.some(p => p.dotDotDotToken && p === calleeParams[nPar - 1])) {
+            this._emitCallArgs(calleeParams, e.arguments, fn);       // rest 收尾：打包余下实参
+        } else {
+            const nPass = calleeNum ? e.arguments.length : nPar;
+            for (let i = 0; i < nPass; i++) {
+                if (i < e.arguments.length) { this.emitTaggedExpr(e.arguments[i]); if (xt) this._argToCallee(fn); }
+                else this._emitUndefined();
+            }
         }
         this.m.call(this._fnName(fn));
         this._retFromCallee(fn); return;
@@ -3211,9 +3289,19 @@ Emitter.prototype._emitStoreProp = function (left) {
     const M = this.m, t = this._expEnter();       // 值/接收者须存活于嵌套求值
     // 类静态字段写 C.x = v → 宿主 qz.static_set
     if (this._isClassName(left.expression)) {
-        const cn = left.expression.text;
+        const cn = this._className(left.expression.text);
+        const got = this._findStaticAccessor(cn, left.name.text, "set");
         M.localSet(t.w);                           // 值（i64）
         this._emitStaticsGuard(cn);
+        if (got) {                                 // 静态 setter（含继承）→ 直调 __sm_<owner>$<name>$set
+            this._emitUndefined();
+            M.localGet(t.w);
+            for (let i = 0; i < 3; i++) this._emitUndefined();
+            M.call(staticMethName(got.cname, got.acc.name + "$set"));
+            M.localGet(t.w);
+            this._expLeave();
+            return;
+        }
         M.i32Const(this._strId(cn)); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.static_set");
         M.localGet(t.w);                           // 赋值表达式返回所赋之值
         this._expLeave();
