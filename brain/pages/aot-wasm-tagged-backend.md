@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T18:47:34"
+updated: "2026-10-16T18:57:50"
 ---
 
 <!-- compiled_truth -->
@@ -306,4 +306,9 @@ updated: "2026-10-16T18:47:34"
 - time: 2026-10-16T18:47:34
   kind: evidence
   summary: "第二十一批：520/530（98.1%）；修 4 处（一元负 ToNumber、finally 范围、类字段箭头 this、hasOwnProperty）+ 记录 2 项架构级静默"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T18:57:50
+  kind: evidence
+  summary: "宿主数组句柄统一：JSON.parse 数组写丢失修复（521/530）"
   affects: [aot-wasm-tagged-backend]
