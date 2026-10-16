@@ -454,6 +454,29 @@ function makeQzvm(strings, opts) {
         default: throw new Error("instanceof_builtin: 未知内建类 " + name);
       }
     },
+    // 展开实参动态调用：call_named(nameId, argsArr, isNum)；isNum=1 → 目标为 f64 ABI（传数字）。
+    call_named: (id, arr, isNum) => {
+      const name = strings[id];
+      const fn = exportsRef && exportsRef[name];
+      if (typeof fn !== "function") throw new Error("call_named: 未导出函数 " + name);
+      const raw = toJS(arr) || [];
+      const args = isNum ? raw.map(Number) : raw.map(ret);   // JS 值 → tagged（bitsOf 是反向）
+      // 目标可能是多参 ABI（静态方法 = self + a0..a3 共 5 槽）→ 按导出函数的实际参数个数补齐
+      const n = fn.length || args.length;
+      while (args.length < n) args.push(isNum ? NaN : ret(undefined));
+      // 调用结果已是 tagged i64（tagged 目标）/ f64（num 目标）→ 不可再 ret（双重装箱）
+      return isNum ? box(Number(fn(...args))) : fn(...args);
+    },
+    closure_call_spread: (handle, arr) => {
+      const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
+      const funcidx = new DataView(mem.buffer).getUint32(off, true);
+      const meta = lamMeta && lamMeta[funcidx];
+      if (!meta) throw new Error("closure_call_spread: 未知 funcidx " + funcidx);
+      const blk = new DataView(mem.buffer).getInt32(off + 4, true);
+      const raw = (toJS(arr) || []).slice(0, 4).map(ret);
+      while (raw.length < 4) raw.push(TAG);
+      return exportsRef[meta.name](blk, ...raw);
+    },
     is_undef: (v) => (BigInt.asUintN(64, v) === TAG ? 1 : 0),   // undefined = 0x7FF9|0（null = |1 不触发默认值）
     // {...rest}：物化后去掉指定键，返回**宿主对象**（可继续读写）。
     object_rest: (v, i0, i1, i2, i3) => {

@@ -49,6 +49,8 @@ const QZ = {
   object_rest: { params: ["i64", "i32", "i32", "i32", "i32"], results: ["i64"] },  // {...rest}
   is_undef: { params: ["i64"], results: ["i32"] },           // v === undefined
   instanceof_builtin: { params: ["i64", "i32"], results: ["i32"] },   // x instanceof 内建类 → 0/1
+  call_named: { params: ["i32", "i64", "i32"], results: ["i64"] },      // 展开实参：按名动态调用（isNum=1 → f64 ABI）
+  closure_call_spread: { params: ["i64", "i64"], results: ["i64"] },    // 展开实参：闭包动态调用
 
 
 
@@ -500,6 +502,48 @@ class Emitter {
         return n;
     }
 
+    // 展开实参调用：实参合成一个数组（复用数组字面量展开路径），宿主按 callee 动态调用。
+    _emitSpreadCall(e) {
+        const M = this.m, t = this._expEnter();
+        // 实参数组：createArrayLiteralExpression(e.arguments)（含 SpreadElement → 走 concat 折叠）
+        const isStaticSpread = ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression) && this._isClassName(e.expression.expression);
+        // 静态方法 ABI 为 (self, a0..a3)：实参数组前置 undefined 占位 self
+        const elems = isStaticSpread ? [ts.factory.createIdentifier("undefined"), ...e.arguments] : e.arguments;
+        const lit = ts.factory.createArrayLiteralExpression(elems);
+        lit.pos = e.pos; lit.end = e.end;
+        this.emitTaggedExpr(lit); M.localSet(t.v);
+        const cx = e.expression;
+        if (ts.isPropertyAccessExpression(cx) && ts.isIdentifier(cx.expression) && this._isClassName(cx.expression)) {
+            // C.m(...args)：静态方法直调（导出名静态可知）
+            let owner = this._className(cx.expression.text);
+            const method = cx.name.text;
+            while (owner && !(this.classes.get(owner).staticMethods || []).some(s2 => s2.name === method)) owner = this.classes.get(owner).parent;
+            if (!owner) throw new Error(`[tagged] 静态方法 ${cx.expression.text}.${method}() 未定义`);
+            this._emitStaticsGuard(cx.expression.text);
+            M.i32Const(this._strId(staticMethName(owner, method))); M.localGet(t.v); M.i32Const(0);
+            M.call("qz.call_named");
+            this._expLeave();
+            return;
+        }
+        if (!ts.isIdentifier(cx)) throw new Error("[tagged] 展开实参仅支持顶层函数/闭包/静态方法调用");
+        const name = this._fnName(cx.text);
+        if (this.m._funcIdx[name] !== undefined || this.fnNames.has(name)) {
+            const isNum = this._calleeInfo(cx.text) && this._calleeInfo(cx.text).mode === "num";
+            M.i32Const(this._strId(name)); M.localGet(t.v); M.i32Const(isNum ? 1 : 0);
+            M.call("qz.call_named");
+            this._expLeave();
+            return;
+        }
+        // 闭包：句柄（局部或 env_get）→ closure_call_spread
+        if (this.capMap.has(cx.text)) { M.localGet(this.capMap.get(cx.text)); M.i32Const(this._strId(cx.text)); M.call("qz.env_get"); M.localSet(t.w); }
+        else {
+            const hIdx = this._local(cx.text);
+            if (hIdx === undefined) throw new Error("未定义函数: " + cx.text);
+            M.localGet(hIdx); M.localSet(t.w);
+        }
+        M.localGet(t.w); M.localGet(t.v); M.call("qz.closure_call_spread");
+        this._expLeave();
+    }
     // 闭包调用：closure_call(handle, a0..a3)。句柄先入可重入槽（参数求值可能嵌套闭包调用），
     // 再按「句柄在前、4 参压栈」顺序调用（参数求值用栈深度隔离，无需逐参临时）。
     _emitClosureCall(fn, args) {
@@ -2208,6 +2252,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitStrLitHandle("function");   // 函数值（顶层函数名 / 持有闭包的变量）
             return;
         }
+        // 内建全局：typeof Math/JSON → "object"；typeof Symbol/parseInt/… → "function"（JS 语义，免宿主调用）
+        if (ts.isIdentifier(e.expression) && BUILTIN_GLOBALS.has(e.expression.text)) {
+            const isObj = /^(Math|JSON|Reflect)$/.test(e.expression.text);
+            this._emitStrLitHandle(isObj ? "object" : "function");
+            return;
+        }
         this.emitTaggedExpr(e.expression); M.localSet(this.scratch);
         M.block("i64");
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
@@ -2422,6 +2472,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
         }
         this.m.call(methName(c, method));
+        return;
+    }
+    // 调用实参含展开 f(...a, x)：wasm 静态元数无法承载 → 实参先构造成数组，宿主按名/闭包动态派发
+    if (ts.isCallExpression(e) && e.arguments.some(a => ts.isSpreadElement(a))) {
+        this._emitSpreadCall(e);
         return;
     }
     if (ts.isCallExpression(e)) {

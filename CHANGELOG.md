@@ -3,6 +3,7 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 调用实参展开 `f(...args)`**（宿主 `qz.call_named` 按名动态调用 / `qz.closure_call_spread` 闭包动态调用 / 静态方法经数组前置 `self` 占位；目标按导出函数实际参数个数补齐 ABI 槽）；**`typeof` 内建全局**（Math/JSON/Reflect → "object"，其余内建函数 → "function"）。差分审计 43/47。
 - **test(aot): 差分审计工具入库** `src/qzvm/aot/audit_diff.js` + `audit_corpus.js`（oracle = 同一 TS 源经 tsc 剥类型在 node 跑真 JS；逐例独立编译比对；当前 41/47，余为 loud 未实现）。`node src/qzvm/aot/audit_diff.js`。
 - **feat(aot): 嵌套函数声明按闭包处理 + 类访问器 + 解构完备 + 内建 instanceof/super 分派**。
   - **嵌套函数声明 → 闭包**：此前整树提升到模块级，丢失对外层局部的捕获（`function inner(){ total += 1 }` 编译期报「未定义变量」）。现仅在文件顶层提升，嵌套声明在所属函数入口先建闭包写入变量（保持声明提升/相互递归语义）。
