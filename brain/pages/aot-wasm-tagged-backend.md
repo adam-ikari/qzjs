@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T17:40:35"
+updated: "2026-10-16T18:00:29"
 ---
 
 <!-- compiled_truth -->
@@ -271,4 +271,9 @@ updated: "2026-10-16T17:40:35"
 - time: 2026-10-16T17:40:35
   kind: evidence
   summary: "第十八批补充：464/474（97.9%），计算属性类字段与 (C as any).st 支持"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T18:00:29
+  kind: evidence
+  summary: "类表达式别名修复 + receiver 通道重构方案落档（464/474）"
   affects: [aot-wasm-tagged-backend]
