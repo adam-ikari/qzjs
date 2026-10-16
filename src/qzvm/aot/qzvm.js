@@ -412,14 +412,38 @@ function makeQzvm(strings, opts) {
   };
   // 闭包调用：handle → 堆对象 [funcidx:i32][nCaps:i32][cell×N i64]。
   // blk = off+8（cell 起点），按 lamMeta[funcidx]={name,n} 调 wasm 导出 __lam_N。
-  const closureCall = (handle, a0, a1, a2, a3) => {
+  const closureCall = (handle, a0, a1, a2, a3, ovfArr) => {
     const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
     const funcidx = new DataView(mem.buffer).getUint32(off, true);   // 免 4 对齐（bump 偏移可非 4 倍数）
     const meta = lamMeta && lamMeta[funcidx];
     if (!meta) throw new Error("closure_call: 未知 funcidx " + funcidx);
     const fn = exportsRef[meta.name];
     const blk = new DataView(mem.buffer).getInt32(off + 4, true);   // env 索引（0 = 无捕获）
-    const args = [blk, a0, a1, a2, a3].slice(0, 1 + meta.n);
+    let args;
+    const hasEx = ovfArr !== undefined && ovfArr !== TAG;      // 调用点是否显式传了溢出实参数组
+    if (hasEx) {
+      // 新约定：slots a0..a3 = 实参 0..3（未传补 TAG），ovfArr = 实参 3.. 的数组 → 两种被调均可还原
+      const ex = toJS(ovfArr) || [];
+      const slots = [a0, a1, a2, a3];
+      const nFix = meta.rest ? meta.n - 1 : meta.n;
+      args = [blk];
+      for (let i = 0; i < Math.min(nFix, 4); i++) args.push(slots[i] === undefined ? TAG : slots[i]);
+      if (meta.rest) {                                // rest：固定参之外的实参（slots 尾部 + 溢出数组）打包成数组
+        const tail = [];
+        for (let i = nFix; i < 4; i++) if (slots[i] !== undefined && slots[i] !== TAG) tail.push(toJS(slots[i]));
+        for (let i = 1; i < ex.length; i++) tail.push(ex[i]);   // ex[0] = 实参 3（已在 slots）
+        args.push(arrWriteback(tail));
+      } else {
+        for (let i = 4; i < meta.n; i++) args.push((i - 3) < ex.length ? bitsOf(ex[i - 3]) : TAG);   // ex[0] = 实参 3（已在 slots）
+      }
+    } else if (meta.n > 4) {
+      const ex = (a3 === undefined || a3 === TAG) ? [] : (toJS(a3) || []);
+      args = [blk, a0, a1, a2];
+      if (meta.rest) args.push(arrWriteback(ex.slice(meta.n - 4)));
+      else for (let i = 0; i < meta.n - 3; i++) args.push(i < ex.length ? bitsOf(ex[i]) : TAG);
+    } else {
+      args = [blk, a0, a1, a2, a3].slice(0, 1 + meta.n);
+    }
     return fn(...args);
   };
   // JS 值 → tagged 位型（宿主回退返回用）：number→box、bool→boxBool、string→0x7FFA、
@@ -583,9 +607,9 @@ function makeQzvm(strings, opts) {
       return arrWriteback(Array.from(x));
     },
     // 值调用：闭包句柄 → closure_call；宿主函数句柄 → 直接调用
-    call_value: (v, a0, a1, a2, a3) => {
+    call_value: (v, a0, a1, a2, a3, ovf) => {
       const h = BigInt.asUintN(64, v) >> 48n;
-      if (h === CLO_HI) return closureCall(v, a0, a1, a2, a3);
+      if (h === CLO_HI) return closureCall(v, a0, a1, a2, a3, ovf);
       if (h === HOST_HI) {
         const f = handles[idxOf(v)];
         if (typeof f === "function") {

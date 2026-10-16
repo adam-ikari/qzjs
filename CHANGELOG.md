@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 闭包 >4 形参（2026-10-16）
+- 新增 `audit_corpus12.js`（16 例：>4 形参的嵌套函数声明/箭头函数表达式/IIFE/rest 组合/默认值/值传递/高阶回调/递归/类与对象方法）。
+- **统一溢出实参约定**：闭包调用与值调用一律 `a0..a3 = 实参 0..3`（未传补 undefined）+ 第 6 参 `ovf = 实参 3.. 的数组`；宿主 `closureCall` 依 `lamMeta.n` 与 `lamMeta.rest` 还原形参槽（rest 形参把尾部实参打包为数组）。
+- 覆盖：嵌套函数声明、箭头/函数表达式、IIFE、`fn(...)` 值传递（变量/参数持闭包）、高阶回调（回调形参数未知）、递归、rest+固定参混用、默认值、调用元数（少传补 undefined / 多传截断）。
+- `lamMeta` 增加 `rest` 标志；`call_value`/标签模板调用点补齐第 6 参。
+- 已知 loud：**类方法与对象字面量方法 >4 形参**（方法 ABI 为 `self + 4` 槽）。
+- 结果：**353/361（97.8%）**；**残余 8 项全部为 loud（零静默错值）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿。
+
 ### 运行时访问器（Object.defineProperty get/set）（2026-10-16）
 - **运行时访问器表**：`Object.defineProperty(o, k, {get, set})` 在 POJO/实例上 → 记入宿主访问器表（`dynAcc`，bump 失效），读/写经宿主分派调用闭包（`this` = 接收者）→ `o.v` / `o.v = x` 与 JS 一致；数据描述符路径不变。
 - **物化**：访问器按插入序定义到物化对象上（`Object.keys` 含该键、`JSON.stringify` 调 getter、`enumerable:false` 记入非枚举表）。

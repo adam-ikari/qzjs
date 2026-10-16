@@ -131,7 +131,7 @@ const QZ = {
   iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组
   builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
   spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
-  call_value: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 值调用（闭包/宿主函数）
+  call_value: { params: ["i64", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // v, a0..a3, 溢出实参数组   // 值调用（闭包/宿主函数）
   call_named_rest: { params: ["i32", "i64", "i32"], results: ["i64"] },             // 展开实参 + rest 收尾被调函数
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
@@ -645,6 +645,7 @@ class Emitter {
         this._expLeave();
     }
     // 值调用：被调值求值到可重入槽 → 参数压栈 → qz.call_value（闭包 → closure_call；宿主函数 → 调用）
+    // 第 6 参 = 溢出实参数组（args[3..]）：闭包形参 >4 时宿主按 meta.n 展开（本 ABI 仅 4 个实参槽）
     _emitValueCall(calleeExpr, args) {
         const M = this.m, t = this._expEnter();
         this.emitTaggedExpr(calleeExpr); M.localSet(t.v);
@@ -652,6 +653,13 @@ class Emitter {
         for (let i = 0; i < 4; i++) {
             if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
         }
+        if (args.length > 4) {
+            const ovfNodes = args.slice(3);
+            if (ovfNodes.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 值调用的溢出实参与展开混用暂不支持");
+            const litV = ts.factory.createArrayLiteralExpression(ovfNodes);
+            litV.pos = args[0].pos; litV.end = args[args.length - 1].end;
+            this.emitTaggedExpr(litV);
+        } else this._emitUndefined();
         M.call("qz.call_value");
         this._emitErrCheck();
         this._expLeave();
@@ -773,7 +781,22 @@ class Emitter {
         }
         M.localGet(t.v);
         const cp = this._calleeParams(fn);
-        if (cp && cp.length > 4) throw new Error("[tagged] 闭包/lambda 调用暂不支持超过 4 个形参（顶层函数直调支持；见 ASSESSMENT 限制）");
+        const needOvf = (cp === null && args.length > 3) || (cp !== null && cp.length > 4);   // >4 形参（含 rest）恒用溢出约定
+        if (needOvf) {
+            // 形参未知（变量/参数持闭包）或 >4 形参：a0..a3 = 实参 0..3，第 6 参 = 实参 3.. 数组（宿主按 meta.n 还原）
+            for (let i = 0; i < 4; i++) {
+                if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+            }
+            const ovfN = args.slice(3);
+            if (ovfN.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 闭包调用的溢出实参与展开混用暂不支持");
+            const litK = ts.factory.createArrayLiteralExpression(ovfN);
+            litK.pos = args.length ? args[0].pos : 0; litK.end = args.length ? args[args.length - 1].end : 0;
+            this.emitTaggedExpr(litK);
+            M.call("qz.call_value");
+            this._emitErrCheck();
+            this._expLeave();
+            return;
+        }
         if (cp && cp.length > 0 && cp[cp.length - 1].dotDotDotToken && cp.length <= 4) {
             this._emitCallArgs(cp, args, fn);
             for (let i = cp.length; i < 4; i++) this._emitUndefined();
@@ -1098,7 +1121,7 @@ class Emitter {
         const params = lam.parameters.map(p => p.name.text);
         // 捕获名先分析并记录（emitLambdaBody 内 identifier 读写用 capMap 路由）
         const caps = this._capturesOf(lam);
-        this._lamById.set(lam, { id, fname, caps, n: params.length });
+        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(lam.parameters && lam.parameters.length && lam.parameters[lam.parameters.length - 1].dotDotDotToken) });
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
         this._pendingLambdas.push({ lam, fname, params, caps });
         return { fname, caps };
@@ -2433,7 +2456,7 @@ function compileTS(input, outWasm, opts = {}) {
         params: f.parameters.length,
     }));
     const lamMeta = {};
-    for (const meta of em._lamById.values()) lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n };
+    for (const meta of em._lamById.values()) lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest };
     // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
     const classMeta = em._classList.map(cname => {
         const c = em.classes.get(cname);
@@ -3021,6 +3044,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitCallArgs(cp0, argNodes, tagName0);
             const pushed = cp0.length > 4 ? 4 : cp0.length;            // call_value ABI 固定 4 个实参槽
             for (let i = pushed; i < 4; i++) this._emitUndefined();
+            if (cp0.length > 4 || argNodes.length > 4) {                // 第 6 参：溢出实参数组
+                const ovfT = ts.factory.createArrayLiteralExpression(argNodes.slice(3));
+                ovfT.pos = e.pos; ovfT.end = e.end;
+                this.emitTaggedExpr(ovfT);
+            } else this._emitUndefined();
             M.call("qz.call_value");
             this._emitErrCheck();
             this._expLeave();
@@ -3543,12 +3571,20 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (ts.isParenthesizedExpression(e.expression)
             && (ts.isArrowFunction(e.expression.expression) || ts.isFunctionExpression(e.expression.expression))) {
             const M2 = this.m, t2 = this._expEnter();
+            const inner = e.expression.expression;
             this.emitTaggedExpr(e.expression); M2.localSet(t2.v);
             M2.localGet(t2.v);
             for (let i = 0; i < 4; i++) {
                 if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
             }
-            M2.call("qz.closure_call");
+            if (inner.parameters.length > 4 || e.arguments.length > 4) {   // 溢出实参 → 第 6 参（call_value）
+                const ovfI = e.arguments.slice(3);
+                const litI = ts.factory.createArrayLiteralExpression(ovfI);
+                litI.pos = e.pos; litI.end = e.end;
+                this.emitTaggedExpr(litI);
+                M2.call("qz.call_value");
+            } else M2.call("qz.closure_call");
+            this._emitErrCheck();
             this._expLeave();
             return;
         }
