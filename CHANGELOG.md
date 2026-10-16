@@ -3,6 +3,12 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 静态块 / extends 内建 / for-of 解构与可迭代 / POJO-instance clsId 混淆修复（语料 4 满分 38/38）**。
+  - `static { … }`：与静态字段同批**惰性一次执行**（守卫内执行；守卫体重入已抑制）。
+  - `class X extends Error`：父类为内建时 `super(m)` → 写 `message`/`name` 字段（子类仍为内存实例）。
+  - for-of：支持解构模式 `for (const [k,v] of …)`；非数组可迭代值（Map/Set/迭代器）经 `qz.iter_array`（Array.from）→ 数组。
+  - **POJO 与实例的 clsId 混淆修复**：POJO 头 `[0]=0` 与「第一个类的 id」撞号 → 物化时被误挂该类的 toJSON/valueOf/toString 钩子（`JSON.stringify({p: instance})` 得 `{}`）；现 `materialize(off, isInst)` 仅对实例挂钩子，`method_call` 仅对 0x7FFE 实例走类方法派发。
+  差分：语料 4 = **38/38**；语料 1/2/3 = 46/47、40/40、37/39。
 - **fix(aot): 字符串不可变语义（此前原地追加会改写左操作数缓冲）+ 累加器逃逸分析**。
   - 原 `qzs_append` 在缓冲位于 bump 顶时**原地追加** → `out += "a"` 会改写 `out` 旧值所在缓冲，随后再读 `out` 得到被改写内容（`out + "|" + out` 得 `a|a|`）。
   - 现按**逃逸分析**分派：`x` 的每次出现都只是自身赋值目标 / 赋值给 x 的右侧 / 只读访问 → 视为**私有累加器**，走无条件原地追加 `qzs_append_ip`（`x += y` 累加仍 O(n)：70k 次追加实测 bump 70 KB）；否则先 `qz.str_dup` 复制再原地追加（不可变 ✓）。

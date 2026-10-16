@@ -120,6 +120,7 @@ const QZ = {
   builtin_member: { params: ["i32"], results: ["i64"] },              // 内建成员当作值读
   regex: { params: ["i32"], results: ["i64"] },                        // 正则字面量 → 宿主 RegExp
   str_dup: { params: ["i64"], results: ["i64"] },                     // 字符串私有副本（不可变语义）
+  iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
@@ -1072,13 +1073,15 @@ class Emitter {
             const parent = st.heritageClauses && st.heritageClauses.length
                 ? st.heritageClauses[0].types[0] : null;
             const parentName = parent ? parent.expression.text : null;
-            const fields = [], methods = [], staticMethods = [], staticFields = [];
+            const fields = [], methods = [], staticMethods = [], staticFields = [], staticBlocks = [];
             let ctor = null;
             const isStatic = (mem) => !!mem.modifiers && mem.modifiers.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
             for (const mem of st.members) {
                 if (ts.isPropertyDeclaration(mem) && ts.isIdentifier(mem.name)) {
                     if (isStatic(mem)) staticFields.push({ name: mem.name.text, init: mem.initializer || null });
                     else fields.push({ name: mem.name.text, init: mem.initializer || null });
+                } else if (ts.isClassStaticBlockDeclaration(mem)) {
+                    staticBlocks.push(mem);                                  // static { … }：首次访问静态时执行
                 } else if (ts.isConstructorDeclaration(mem)) {
                     ctor = mem;
                 } else if (ts.isPropertyDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
@@ -1095,7 +1098,7 @@ class Emitter {
                     throw new Error("[tagged] 不支持的类成员: " + ts.SyntaxKind[mem.kind]);
                 }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, staticBlocks, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
@@ -2228,7 +2231,13 @@ Emitter.prototype._expLeave = function () { this._expDepth--; };
 // 类静态字段：C.x 前确保静态已初始化（lazy 内联初始值 → 宿主表 qz.static_set / statics_mark）。
 Emitter.prototype._emitStaticsGuard = function (cname) {
     const c = this.classes.get(cname);
-    if (!c || !(c.staticFields || []).length) return;
+    if (!c || (!(c.staticFields || []).length && !(c.staticBlocks || []).length)) return;
+    if (this._inStaticsGuard) return;                     // 守卫体内再访问同类静态 → 不再嵌套（避免无限展开）
+    this._inStaticsGuard = true;
+    try { this._emitStaticsGuardBody(c); } finally { this._inStaticsGuard = false; }
+};
+Emitter.prototype._emitStaticsGuardBody = function (c) {
+    const cname = c.name;
     const M = this.m;
     M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
     M.i32Eqz();
@@ -2238,6 +2247,10 @@ Emitter.prototype._emitStaticsGuard = function (cname) {
         if (f.init) this.emitTaggedExpr(f.init); else this._emitUndefined();
         M.call("qz.static_set");
     }
+    for (const blk of (c.staticBlocks || [])) {           // static { … }：与字段初始化同批惰性执行一次
+        for (const st of blk.body.statements) this.emitTaggedStmt(st);
+    }
+    M.i32Const(this._strId(cname)); M.call("qz.statics_mark");
     M.end();
 };
 // 类名（标识符）是否为已收集的类
@@ -2485,11 +2498,10 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         // for (let x of arr) body：每嵌套层独立 local 对（arrL=i64 句柄, idxL=i32 索引）。
         // 结构同 for：block(brk) loop block(cont) body end; i++; br 0 end end。
         const M = this.m;
-        if (!ts.isVariableDeclarationList(s.initializer) || s.initializer.declarations.length !== 1
-            || !ts.isIdentifier(s.initializer.declarations[0].name))
-            throw new Error("[tagged] for-of 仅支持 let x of arr");
-        const varIdx = this._local(s.initializer.declarations[0].name.text);
-        if (varIdx === undefined) throw new Error("未定义 for-of 变量");
+        if (!ts.isVariableDeclarationList(s.initializer) || s.initializer.declarations.length !== 1)
+            throw new Error("[tagged] for-of 仅支持 let x of arr / let [a,b] of arr");
+        const bindName = s.initializer.declarations[0].name;
+        if (ts.isIdentifier(bindName) && this._local(bindName.text) === undefined) throw new Error("未定义 for-of 变量");
         const arrL = this.forOfBase + this.forOfCount * 3;       // 本层数组句柄 local
         const idxL = arrL + 1;                                   // 本层索引 local
         const lenL = arrL + 2;                                   // 本层长度 local（专用，避免被 sT 复用覆盖）
@@ -2498,7 +2510,13 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         // 字符串 → 码点字符数组（for…of 按**码点**迭代："😀".length=2 但迭代 1 次）
         M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
         M.ifBlock("void");
-        M.localGet(arrL); M.call("qz.str_chars"); M.localSet(arrL);
+        M.localGet(arrL); M.call("qz.str_chars"); M.localSet(arrL);              // 字符串 → 码点数组
+        M.else_();
+        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+        M.i32Eqz();
+        M.ifBlock("void");
+        M.localGet(arrL); M.call("qz.iter_array"); M.localSet(arrL);             // 其它可迭代（Map/Set/迭代器）→ 数组
+        M.end();
         M.end();
         this._emitLengthOf(arrL); M.f64ReinterpretI64(); M.i32TruncF64S(); M.localSet(lenL);   // len（专用 local）
         M.i32Const(0); M.localSet(idxL);                         // i = 0
@@ -2521,7 +2539,15 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 8);       // dataOff
         M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // dataOff + i*8
         M.i64Load(3, 0);
-        M.end(); this._emitVarStore(s.initializer.declarations[0].name.text, this.scratchB); this.m.drop();   // x = arr[i]（被捕获则写 env）
+        M.end();
+        if (ts.isIdentifier(bindName)) {
+            this._emitVarStore(bindName.text, this.scratchB); this.m.drop();     // x = arr[i]（被捕获则写 env）
+        } else {
+            const tb = this._expEnter();
+            M.localSet(tb.v);
+            this._emitDestructurePattern(bindName, tb.v);                       // let [k,v] of …
+            this._expLeave();
+        }
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
         this.depth--; M.end();                                   // end cont
@@ -3043,6 +3069,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isNewExpression(e)) { this._emitNewCall(e); return; }
     if (ts.isCallExpression(e) && ts.isSuperKeyword(e.expression)) {
         if (!this._curClassObj) throw new Error("[tagged] super() 仅在构造器内可用");
+        const par = this._curClassObj.parent;
+        if (par && !this.classes.has(par)) {                  // 父类为内建（Error 族…）→ 写 message/name 字段
+            const M2 = this.m;
+            M2.localGet(0); M2.i32WrapI64();
+            if (e.arguments && e.arguments.length) this.emitTaggedExpr(e.arguments[0]); else this._emitUndefined();
+            M2.i64Store(3, this._fieldIndex("message"));
+            M2.localGet(0); M2.i32WrapI64(); this._emitStrLitHandle(par);
+            M2.i64Store(3, this._fieldIndex("name"));
+            this._emitFieldDefaults(this._curClassObj);
+            return;
+        }
         this._emitSuperCall(this._curClassObj, e.arguments || []); return;
     }
     // super.m(args)：父类方法**静态**直调（继承链编译期已知 → 无虚派发，与 JS super 语义一致）

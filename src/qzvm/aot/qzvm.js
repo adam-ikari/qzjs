@@ -168,7 +168,7 @@ function makeQzvm(strings, opts) {
   // POJO/类实例（内存驻留）→ JS 对象物化：按 [0]=size 限定范围，逐字段读（undefined sentinel 跳过）。
   const pojoOf = new WeakMap();   // 物化对象 → { off, mem }（往返还原 POJO 句柄）
   const cloOf = new WeakMap();    // 闭包包装函数 → 闭包句柄
-  const materialize = (off) => {
+  const materialize = (off, isInst) => {
     syncExtras();
     // 每次新鲜物化：POJO/实例由 bump 分配，调用间 __bump_reset 会复用偏移 → 不可跨调用缓存。
     const o = {};
@@ -188,7 +188,7 @@ function makeQzvm(strings, opts) {
     }
     pojoOf.set(o, { off, mem });
     // 类方法驱动的强制转换钩子（JSON.stringify 用 toJSON；String()/+ 用 toString/valueOf）——非枚举，不进 Object.keys/JSON
-    if (mem) {
+    if (mem && isInst) {                             // 仅实例才有类方法钩子（POJO 的 clsId 恒为 0，会撞第一个类的 id）
       const clsId = new DataView(mem.buffer).getInt32(off, true);
       let c = classMeta && classMeta[clsId];
       const hook = (nm) => {
@@ -213,7 +213,7 @@ function makeQzvm(strings, opts) {
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
   const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
-  const toJS = (b) => (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b)) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b)) : {}) : bitsToNum(b));
+  const toJS = (b) => (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b), false) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b), true) : {}) : bitsToNum(b));
   // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
   const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (HOST_TAG | BigInt(handles.push(x) - 1));
   const box = (n) => numToBits(n);
@@ -431,6 +431,11 @@ function makeQzvm(strings, opts) {
     object_get: (o, k) => ret(handles[idxOf(o)][strings[k]]),   // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）
     string_new: (id) => tagHandle(strings[id]),
     string_concat: (a, b) => strWriteback(toJS(a) + toJS(b)),   // JS "+" 语义（含 ToPrimitive(default)：对象优先 valueOf）
+    iter_array: (v) => {                          // 非数组可迭代（Map/Set/迭代器等）→ wasm 数组（元素经 toJS/bitsOf）
+      const x = toJS(v);
+      if (x == null || typeof x[Symbol.iterator] !== "function") throw new Error("for-of: 该值不可迭代");
+      return arrWriteback(Array.from(x));
+    },
     str_dup: (a) => strWriteback(strRead(a)),     // 字符串私有副本（在 bump 顶，随后原地追加安全）
     str_len: (a) => box(strRead(a).length),
     add:  (a, b) => ret(toJS(a) + toJS(b)),   // JS + 可能产字符串 → ret（非固定数值）
@@ -788,6 +793,8 @@ function makeQzvm(strings, opts) {
           }
         }
       }
+      // 仅类实例(0x7FFE)走类方法派发：POJO(0x7FF9) 的 clsId 恒为 0，会撞第一个类的 id
+      if ((BigInt.asUintN(64, recv) >> 48n) !== INST_HI) throw new Error("method_call: 无方法 " + name);
       const clsId = new DataView(mem.buffer).getInt32(off, true);   // 免 4 对齐
       let c = classMeta && classMeta[clsId];
       while (c) {
