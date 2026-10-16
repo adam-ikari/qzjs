@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T10:42:35"
+updated: "2026-10-16T11:00:01"
 ---
 
 <!-- compiled_truth -->
@@ -141,4 +141,9 @@ updated: "2026-10-16T10:42:35"
 - time: 2026-10-16T10:42:35
   kind: evidence
   summary: "第五轮差分审计：189/192 一致"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T11:00:01
+  kind: evidence
+  summary: "第六批语料后：218/221 一致"
   affects: [aot-wasm-tagged-backend]
