@@ -1339,7 +1339,7 @@ function makeQzvm(strings, opts) {
     str_method: (recv, mid, a0, a1) => doStrMethod(recv, mid, a0, a1),
     // 通用方法调用：字符串 → doStrMethod；数组(0x7FFB) → doArrMethod；类实例（内存 [0]=__cls id）
     // → 沿继承链查 classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
-    method_call: (recv, mid, a0, a1, a2, a3) => {
+    method_call: (recv, mid, a0, a1, a2, a3, ovf) => {
       try {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1, a2, a3);
       if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3);

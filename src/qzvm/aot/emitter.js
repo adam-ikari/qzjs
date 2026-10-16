@@ -74,7 +74,7 @@ const QZ = {
   // 按 classMeta[clsId].methods[mid]（含继承链）调 wasm 导出 __m_<C>$<m>(recv, a0..a3)。
   // 最多 4 参（缺省 undefined 句柄）。wasm 侧仅在静态可判定 owner 时直调，否则走此回退。
   // 类实例分配在 wasm 内联（bump，见 _emitNewCall）——不经宿主，故无对应 import。
-  method_call: { params: ["i64", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  method_call: { params: ["i64", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // recv, mid, a0..a3, ovf(实参 4..)
   arr_set_len: { params: ["i64", "i64"], results: ["i64"] },
   arr_set_index: { params: ["i64", "i64", "i64"], results: ["i64"] },   // a[i]=v（越界扩容）
   arr_delete_index: { params: ["i64", "i64"], results: ["i64"] },       // delete a[i]
@@ -307,6 +307,7 @@ class Emitter {
                     M.localGet(this.scratch); M.i32Const(this._strId("slice"));
                     M.i64ConstBits(...f64Bits(i));
                     this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                    this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
                     M.call("qz.method_call");
                     this._emitBindingTarget(el.name);
                     i++;
@@ -777,6 +778,7 @@ class Emitter {
                 for (let i = 0; i < nFix; i++) this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
                 M.localGet(t.v); M.i32Const(this._strId("slice"));
                 M.i64ConstBits(...f64Bits(nFix)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
                 M.call("qz.method_call");
                 M.call(this._fnName(name));
                 this._retFromCallee(cx.text);
@@ -804,6 +806,7 @@ class Emitter {
             for (let i = 0; i < nFix3; i++) this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
             M.localGet(t.v); M.i32Const(this._strId("slice"));
             M.i64ConstBits(...f64Bits(nFix3)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+            this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
             M.call("qz.method_call");
             for (let i = cp3.length; i < 4; i++) this._emitUndefined();
             this._emitUndefined();                                    // recv（展开/可变调用：普通调用 = undefined）
@@ -968,6 +971,7 @@ class Emitter {
                 if (el.dotDotDotToken) {
                     M.localGet(valLocal); M.i32Const(this._strId("slice"));
                     M.i64ConstBits(...f64Bits(i)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                    this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
                     M.call("qz.method_call");
                     this._emitBindingTarget(el.name);
                     i++; continue;
@@ -3064,6 +3068,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         M.localGet(arrL); M.i32Const(this._strId("charAt"));
         M.localGet(idxL); M.f64ConvertI32U(); M.i64ReinterpretF64();
         this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+        this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
         M.call("qz.method_call");
         M.else_();
         M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 8);       // dataOff
@@ -3615,6 +3620,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 Mt.i32Const(this._strId("concat"));
                 this.emitTaggedExpr(ts.factory.createArrayLiteralExpression([el]));
                 this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
                 Mt.call("qz.method_call");
                 Mt.localSet(t.v);
             }
@@ -4683,6 +4689,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
     for (let i = 0; i < 4; i++) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
     }
+    this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
     M.call("qz.method_call");
     this._emitErrCheck();          // 宿主方法可能抛出（如空数组 reduce）→ 转入本函数 catch
 };
