@@ -115,7 +115,7 @@ async function runTagged() {
     const src = path.join(__dirname, "mix.ts");
     const wasm = path.join(os.tmpdir(), "qz_aot_mix.wasm");
     const r = compileTS(src, wasm, {});
-    const qz = makeQzvm(r.strings);
+    const qz = makeQzvm(r.strings, { fields: r.fields });
     const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasm), { qz });
     qz.bindMem(instance.exports.memory);
     if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
@@ -147,7 +147,7 @@ async function runTagged() {
     // 字符串：wasm 内表示（0x7FFA 句柄 + data 段字面量 + 原地 append）
     const strs = path.join(os.tmpdir(), "qz_aot_str.wasm");
     const rs = compileTS(path.join(__dirname, "strwork.ts"), strs, {});
-    const qzs = makeQzvm(rs.strings);
+    const qzs = makeQzvm(rs.strings, { fields: rs.fields });
     const { instance: instS } = await WebAssembly.instantiate(fs.readFileSync(strs), { qz: qzs });
     qzs.bindMem(instS.exports.memory);
     if (instS.exports.__bump) qzs.bindBump(instS.exports.__bump);
@@ -167,7 +167,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     const cw = path.join(os.tmpdir(), "qz_aot_clos.wasm");
     fs.writeFileSync(ct, closSrc);
     const rcl = compileTS(ct, cw, {});
-    const qzc = makeQzvm(rcl.strings);
+    const qzc = makeQzvm(rcl.strings, { fields: rcl.fields });
     const { instance: instCl } = await WebAssembly.instantiate(fs.readFileSync(cw), { qz: qzc });
     qzc.bindMem(instCl.exports.memory);
     if (instCl.exports.__bump) qzc.bindBump(instCl.exports.__bump);
@@ -179,7 +179,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     const cwT = path.join(os.tmpdir(), "qz_aot_closwrite.ts");
     fs.writeFileSync(cwT, "export function c1(): any { let c = 0; const f = function(): number { c++; return c; }; f(); f(); return f(); }\nexport function c2(): any { let n = 10; const f = () => { n += 5; return n; }; f(); return f(); }\n");
     const rw = compileTS(cwT, path.join(os.tmpdir(), "qz_aot_closwrite.wasm"), {});
-    const qzw = makeQzvm(rw.strings);
+    const qzw = makeQzvm(rw.strings, { fields: rw.fields });
     const { instance: instW } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_closwrite.wasm")), { qz: qzw });
     qzw.bindMem(instW.exports.memory); if (instW.exports.__bump) qzw.bindBump(instW.exports.__bump);
     qzw.bindClosures(instW.exports, rw.lamMeta);
@@ -196,7 +196,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     const stT = path.join(os.tmpdir(), "qz_aot_strparam.ts");
     fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\nexport function tagPow(a: any, b: any): any { return a ** b; }\nexport function tagNN(a: any, b: any): any { return a ?? b; }\nexport function tagNNA(a: any): any { let x = a; x ??= 42; return x; }\nexport function semAdd(a: any, b: any): any { return a + b; }\nexport function semTypeof(a: any): any { return typeof a; }\nexport function semEq(a: any, b: any): any { return a == b; }\nexport function semSeq(a: any, b: any): any { return a === b; }\nexport function semNull(): any { return null; }\nexport function semUndef(): any { return undefined; }\nexport function semNot(a: any): any { return !a; }\nexport function semTnot(a: any): any { return ~a; }\nexport function semOpt(): any { const o: any = { x: 1 }; return o?.x; }\nexport function semOptN(): any { const o: any = null; return o?.x ?? 99; }\nexport function semJoin(a: any): any { return a.join(); }\nexport function semSort(a: any): any { return a.sort(); }\nexport function semSplice(a: any, i: any): any { return a.splice(i); }\n");
     const rst2 = compileTS(stT, path.join(os.tmpdir(), "qz_aot_strparam.wasm"), {});
-    const qzsp = makeQzvm(rst2.strings);
+    const qzsp = makeQzvm(rst2.strings, { fields: rst2.fields });
     const { instance: instSp } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_strparam.wasm")), { qz: qzsp });
     qzsp.bindMem(instSp.exports.memory); if (instSp.exports.__bump) qzsp.bindBump(instSp.exports.__bump);
     const callSp = (n, a) => { if (instSp.exports.__bump_reset) instSp.exports.__bump_reset(); return qzsp._toJS(instSp.exports[n](...a.map(x => qzsp._fromJS(x)))); };
@@ -262,7 +262,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function isInt(a: any): any { return Number.isInteger(a); }\n"
       + "export function sfcc(a: any, b: any): any { return String.fromCharCode(a, b); }\n");
     const rbi = compileTS(path.join(os.tmpdir(), "qz_aot_builtin.ts"), path.join(os.tmpdir(), "qz_aot_builtin.wasm"), {});
-    const qzb = makeQzvm(rbi.strings);
+    const qzb = makeQzvm(rbi.strings, { fields: rbi.fields });
     const { instance: instBi } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_builtin.wasm")), { qz: qzb });
     qzb.bindMem(instBi.exports.memory); if (instBi.exports.__bump) qzb.bindBump(instBi.exports.__bump);
     const callB = (n, a) => { if (instBi.exports.__bump_reset) instBi.exports.__bump_reset(); return qzb._toJS(instBi.exports[n](...a.map(x => qzb._fromJS(x)))); };
@@ -292,7 +292,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function dRen(): any { const { a: z } = { a: 5 }; return z; }\n"
       + "export function dVar(): any { const s = [7, 8]; const [p, q] = s; return p + q; }\n");
     const rDe = compileTS(path.join(os.tmpdir(), "qz_aot_destr.ts"), path.join(os.tmpdir(), "qz_aot_destr.wasm"), {});
-    const qzDe = makeQzvm(rDe.strings);
+    const qzDe = makeQzvm(rDe.strings, { fields: rDe.fields });
     const { instance: instDe } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_destr.wasm")), { qz: qzDe });
     qzDe.bindMem(instDe.exports.memory); if (instDe.exports.__bump) qzDe.bindBump(instDe.exports.__bump);
     const callDe = (n) => { if (instDe.exports.__bump_reset) instDe.exports.__bump_reset(); return qzDe._toJS(instDe.exports[n]()); };
@@ -314,7 +314,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function tag(): any { return U.tag(); }\n"
       + "export function inh(): any { return V.sq(3); }\n");
     const rSt = compileTS(path.join(os.tmpdir(), "qz_aot_static.ts"), path.join(os.tmpdir(), "qz_aot_static.wasm"), {});
-    const qzSt = makeQzvm(rSt.strings);
+    const qzSt = makeQzvm(rSt.strings, { fields: rSt.fields });
     const { instance: instSt } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_static.wasm")), { qz: qzSt });
     qzSt.bindMem(instSt.exports.memory); if (instSt.exports.__bump) qzSt.bindBump(instSt.exports.__bump);
     const callSt = (n) => { if (instSt.exports.__bump_reset) instSt.exports.__bump_reset(); return qzSt._toJS(instSt.exports[n]()); };
@@ -336,7 +336,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function i8(): any { const a: any[] = [1]; return a instanceof IA; }\n"
       + "export function i9(): any { const b = new IB(); return b === b && b.v; }\n");
     const rIo = compileTS(path.join(os.tmpdir(), "qz_aot_instof.ts"), path.join(os.tmpdir(), "qz_aot_instof.wasm"), {});
-    const qzIo = makeQzvm(rIo.strings);
+    const qzIo = makeQzvm(rIo.strings, { fields: rIo.fields });
     const { instance: instIo } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_instof.wasm")), { qz: qzIo });
     qzIo.bindMem(instIo.exports.memory); if (instIo.exports.__bump) qzIo.bindBump(instIo.exports.__bump);
     qzIo.bindClasses(instIo.exports, rIo.classMeta);
@@ -362,7 +362,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function jp(): any { const o: any = JSON.parse(\"{\\\"a\\\":1,\\\"s\\\":\\\"hi\\\"}\"); return o.a + o.s; }\n"
       + "export function jpw(): any { const o: any = JSON.parse(\"{\\\"a\\\":1}\"); o.a = 9; return o.a; }\n");
     const rBc = compileTS(path.join(os.tmpdir(), "qz_aot_bicls.ts"), path.join(os.tmpdir(), "qz_aot_bicls.wasm"), {});
-    const qzBc = makeQzvm(rBc.strings);
+    const qzBc = makeQzvm(rBc.strings, { fields: rBc.fields });
     const { instance: instBc } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_bicls.wasm")), { qz: qzBc });
     qzBc.bindMem(instBc.exports.memory); if (instBc.exports.__bump) qzBc.bindBump(instBc.exports.__bump);
     const callBc = (n) => { if (instBc.exports.__bump_reset) instBc.exports.__bump_reset(); return qzBc._toJS(instBc.exports[n]()); };
@@ -375,12 +375,47 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("RegExp.test", callBc("re"), true);
     check("JSON.parse 字段读", callBc("jp"), "1hi");
     check("JSON.parse 字段写", callBc("jpw"), 9);
+    // void / **= / 字段 ??= / 展开 / POJO↔宿主物化（POJO 句柄标签修正 + host 物化）
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_misc.ts"),
+        "export function vd(): any { let n = 0; void (n = 5); return n; }\n"
+      + "export function pwe(): any { let x = 2; x **= 3; return x; }\n"
+      + "export function nneF(): any { const o: any = { a: 0 }; o.a ??= 9; return o.a; }\n"
+      + "export function nneF2(): any { const o: any = { a: 3 }; o.a ??= 9; return o.a; }\n"
+      + "export function sp(): any { const a: any = [1,2]; const b: any = [...a, 3]; return b.length + b[2]; }\n"
+      + "export function sp2(): any { const a: any = [1]; const b: any = [0, ...a, 9]; return b.join(\",\"); }\n"
+      + "export function spo(): any { const o: any = { a: 1 }; const p: any = { ...o, b: 2 }; return p.a + p.b; }\n"
+      + "export function spo2(): any { const o: any = { a: 1 }; const p: any = { ...o, ...o }; return p.a; }\n"
+      + "export function js(): any { const o: any = { a: 1, b: \"x\" }; return JSON.stringify(o); }\n"
+      + "export function okeys(): any { const o: any = { a: 1, b: 2 }; return Object.keys(o).join(\",\"); }\n"
+      + "export function ovals(): any { const o: any = { a: 7 }; return Object.values(o)[0]; }\n"
+      + "export function tpo(): any { const o: any = { a: 1 }; return typeof o; }\n"
+      + "export function ideq(): any { const o: any = { a: 1 }; return o === o; }\n"
+      + "export function mkeq(): any { return ({ a: 1 } as any) === ({ a: 1 } as any); }\n");
+    const rMs = compileTS(path.join(os.tmpdir(), "qz_aot_misc.ts"), path.join(os.tmpdir(), "qz_aot_misc.wasm"), {});
+    const qzMs = makeQzvm(rMs.strings, { fields: rMs.fields });
+    const { instance: instMs } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_misc.wasm")), { qz: qzMs });
+    qzMs.bindMem(instMs.exports.memory); if (instMs.exports.__bump) qzMs.bindBump(instMs.exports.__bump);
+    const callMs = (n) => { if (instMs.exports.__bump_reset) instMs.exports.__bump_reset(); return qzMs._toJS(instMs.exports[n]()); };
+    check("void (n=5) 副作用保留", callMs("vd"), 5);
+    check("x **= 3", callMs("pwe"), 8);
+    check("o.a ??= 9 (0 非空)", callMs("nneF"), 0);
+    check("o.a ??= 9 (3 非空)", callMs("nneF2"), 3);
+    check("数组展开 [...a,3]", callMs("sp"), 6);
+    check("数组展开 [0,...a,9]", callMs("sp2"), "0,1,9");
+    check("对象展开 {...o,b:2}", callMs("spo"), 3);
+    check("对象展开 {...o,...o}", callMs("spo2"), 1);
+    check("JSON.stringify(POJO)", callMs("js"), "{\"a\":1,\"b\":\"x\"}");
+    check("Object.keys(POJO)", callMs("okeys"), "a,b");
+    check("Object.values(POJO)", callMs("ovals"), 7);
+    check("typeof POJO", callMs("tpo"), "object");
+    check("POJO === 自身", callMs("ideq"), true);
+    check("不同 POJO !==", callMs("mkeq"), false);
 }
 
 async function runClasses() {
     const wasm = path.join(os.tmpdir(), "qz_aot_cls.wasm");
     const r = compileTS(path.join(__dirname, "cls.ts"), wasm, {});
-    const qz = makeQzvm(r.strings);
+    const qz = makeQzvm(r.strings, { fields: r.fields });
     const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasm), { qz });
     qz.bindMem(instance.exports.memory);
     if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
@@ -421,7 +456,7 @@ async function runDwarf() {
     const addr = buf.readUInt32LE(prog + 3);
     check("dwarf.首地址在文件内(段内相对约定)", addr > 0 && addr < buf.length, true);
     // wasm 仍可运行
-    const qz = makeQzvm(r.strings);
+    const qz = makeQzvm(r.strings, { fields: r.fields });
     const { instance } = await WebAssembly.instantiate(buf, { qz });
     check("dwarf.带段仍可执行", instance.exports.add(2, 3), 5);
 }
@@ -515,7 +550,7 @@ async function runMultiFile() {
         "import * as M from './nsm';\nexport function runNs(x: number): number { return M.f(M.g(x)); }\n");
     const wasmNs = path.join(dir, "ns.wasm");
     const rNs = compileTS(path.join(dir, "usens.ts"), wasmNs, {});
-    const qzNs = makeQzvm(rNs.strings);
+    const qzNs = makeQzvm(rNs.strings, { fields: rNs.fields });
     const { instance: instNs } = await WebAssembly.instantiate(fs.readFileSync(wasmNs), { qz: qzNs });
     qzNs.bindMem(instNs.exports.memory);
     if (instNs.exports.__bump) qzNs.bindBump(instNs.exports.__bump);
@@ -528,7 +563,7 @@ async function runMultiFile() {
         "import * as D from './nsd2';\nexport function runNsd(x: number): number { return D.default(x); }\n");
     const wasmNsd = path.join(dir, "nsd.wasm");
     const rNsd = compileTS(path.join(dir, "usensd.ts"), wasmNsd, {});
-    const qzNsd = makeQzvm(rNsd.strings);
+    const qzNsd = makeQzvm(rNsd.strings, { fields: rNsd.fields });
     const { instance: instNsd } = await WebAssembly.instantiate(fs.readFileSync(wasmNsd), { qz: qzNsd });
     qzNsd.bindMem(instNsd.exports.memory);
     if (instNsd.exports.__bump) qzNsd.bindBump(instNsd.exports.__bump);
@@ -558,7 +593,7 @@ async function runMultiFile() {
         "import { Pt } from './cmod';\nexport function runC(x: number): number { const p = new Pt(x, 4); return p.sum(); }\n");
     const wasmC = path.join(dir, "c.wasm");
     const rc = compileTS(path.join(dir, "usec.ts"), wasmC, {});
-    const qzc = makeQzvm(rc.strings);
+    const qzc = makeQzvm(rc.strings, { fields: rc.fields });
     const { instance: instC } = await WebAssembly.instantiate(fs.readFileSync(wasmC), { qz: qzc });
     qzc.bindMem(instC.exports.memory);
     if (instC.exports.__bump) qzc.bindBump(instC.exports.__bump);
@@ -575,7 +610,7 @@ async function runMultiFile() {
         "export function callNumTagged(x: number): number { const s = 'x'; return pure(x, 1) + s.length - 1; }\n");
     const wasmXT = path.join(dir, "xt.wasm");
     const rXT = compileTS(path.join(dir, "xnum.ts"), wasmXT, {});
-    const qzXT = makeQzvm(rXT.strings);
+    const qzXT = makeQzvm(rXT.strings, { fields: rXT.fields });
     const { instance: iXT } = await WebAssembly.instantiate(fs.readFileSync(wasmXT), { qz: qzXT });
     qzXT.bindMem(iXT.exports.memory);
     if (iXT.exports.__bump) qzXT.bindBump(iXT.exports.__bump);
@@ -588,7 +623,7 @@ async function runMultiFile() {
         "export function callTaggedNum(x: number): number { return th(x, 1); }\n");
     const wasmTN = path.join(dir, "tn.wasm");
     const rTN = compileTS(path.join(dir, "xtag.ts"), wasmTN, {});
-    const qzTN = makeQzvm(rTN.strings);
+    const qzTN = makeQzvm(rTN.strings, { fields: rTN.fields });
     const { instance: iTN } = await WebAssembly.instantiate(fs.readFileSync(wasmTN), { qz: qzTN });
     check("跨模式.num调tagged(5)", iTN.exports.callTaggedNum(5), 6);
 }

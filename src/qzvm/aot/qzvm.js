@@ -116,7 +116,7 @@ function _utf8(u8, s, e) {
     return r;
 }
 
-function makeQzvm(strings) {
+function makeQzvm(strings, opts) {
   const handles = [undefined, null];      // index 0=undefined、1=null（固定槽，供 wasm 内 null 字面量用 0x7FF9|1）；其余从 2 起
 
   const numToBits = (n) => _writeF64(n, true);
@@ -142,18 +142,34 @@ function makeQzvm(strings) {
     return out;
   };
   const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
-  const instCache = new Map();
+  const isObjHandle = (u) => { const h = u >> 48n; if (h === TAG_HI) return (u & MASK32) >= 8n; return h === INST_HI || h === HOST_HI; };
+  let fieldEntries = [];                  // [[name, byteOffset], ...]（bindFields 设；与 emitter _fieldIndex 一致）
+  const bindFields = (fields) => { fieldEntries = (fields || []).map((n, i) => [n, (i + 1) * 8]); };
+  // POJO/类实例（内存驻留）→ JS 对象物化：按 [0]=size 限定范围，逐字段读（undefined sentinel 跳过）。
+  const materialize = (off) => {
+    // 每次新鲜物化：POJO/实例由 bump 分配，调用间 __bump_reset 会复用偏移 → 不可跨调用缓存。
+    const o = {};
+    if (!mem) return o;
+    const dv = new DataView(mem.buffer);
+    const size = dv.getInt32(off + 4, true);
+    for (const [name, idx] of fieldEntries) {
+      if (idx >= size) continue;
+      const v = toJS(dv.getBigInt64(off + idx, true));
+      if (v !== undefined) o[name] = v;
+    }
+    return o;
+  };
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
   const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
-  const instObj = (b) => { const off = Number(BigInt(b) & MASK32); let o = instCache.get(off); if (o === undefined) { o = { __wasmInstance: off }; instCache.set(off, o); } return o; };
-  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? instObj(b) : bitsToNum(b));
+  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b)) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b)) : {}) : bitsToNum(b));
   // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
   const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (HOST_TAG | BigInt(handles.push(x) - 1));
   const box = (n) => numToBits(n);
   const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
   const bool = (b) => boxBool(b);
   let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null, classMeta = null;
+  if (opts && opts.fields) bindFields(opts.fields);   // 便于宿主物化 POJO/实例（等价 bindFields）
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   const bindBump = (g) => { bumpRef = g; };
   // 宿主侧 bump 分配：与 wasm 侧 STR_BASE(8MiB) 同界；越界抛错（绝不静默覆盖字面量段）。
@@ -332,7 +348,8 @@ function makeQzvm(strings) {
     pow:  (a, b) => box(Math.pow(toJS(a), toJS(b))),
     math_pow: (a, b) => Math.pow(a, b),
     math_rem: (a, b) => a % b,
-    is_nullish: (a) => { const v = toJS(a); return (v === null || v === undefined) ? 1 : 0; },
+    // nullish = 0x7FF9|0（undefined）或 0x7FF9|1（null）——按 tag 判定，不经 toJS（无需字段表/物化）。
+    is_nullish: (a) => { const u = BigInt.asUintN(64, a); if ((u >> 48n) !== TAG_HI) return 0; const idx = Number(u & MASK32); return (idx === 0 || idx === 1) ? 1 : 0; },
     // instanceof：obj 须为类实例句柄（专用 tag 0x7FFE|off，[off]=clsId）；沿「实例类 → 父链」查目标 clsId。
     // 非实例（数字/字符串/bool/null/数组/POJO/宿主对象）→ false。需 bindClasses 提供 classMeta。
     instanceof_op: (obj, clsId) => {
@@ -348,6 +365,8 @@ function makeQzvm(strings) {
       }
       return boxBool(false);
     },
+    // 对象展开（{...o, a:1}）：Object.assign({}, ...pieces) → 宿主对象句柄。n = pieces 数。
+    obj_assign: (n, a0, a1, a2, a3) => ret(Object.assign({}, ...[a0, a1, a2, a3].slice(0, n).map(toJS))),
     // 内建全局调用/常量：nameId + n(实际参数个数) + a0..a3 → 宿主 JS 内建 → ret。
     // n 由调用点编译期已知：变参函数（Math.max/min/hypot/Array.of/fromCharCode）按 n 取参，
     // 不传 undefined 占位（否则 Math.max(2,5) 会变 Math.max(2,5,undefined,…)=NaN）。
@@ -369,8 +388,10 @@ function makeQzvm(strings) {
     gt:   (a, b) => bool(toJS(a) > toJS(b)),
     le:   (a, b) => bool(toJS(a) <= toJS(b)),
     ge:   (a, b) => bool(toJS(a) >= toJS(b)),
-    seq:  (a, b) => bool(toJS(a) === toJS(b)),
-    sne:  (a, b) => bool(toJS(a) !== toJS(b)),
+    // == / === 对「对象类句柄」（POJO 0x7FF9|off≥8、实例 0x7FFE、宿主 0x7FFD）按 (tag|off) 身份比较
+    // （物化对象每次新建，不能靠引用相等）；其余按 toJS 值比较（宽松 == 另走 qz.eq）。
+    seq:  (a, b) => { const ua = BigInt.asUintN(64, a), ub = BigInt.asUintN(64, b); const oa = isObjHandle(ua), ob = isObjHandle(ub); return oa || ob ? bool(oa && ob && ua === ub) : bool(toJS(a) === toJS(b)); },
+    sne:  (a, b) => { const ua = BigInt.asUintN(64, a), ub = BigInt.asUintN(64, b); const oa = isObjHandle(ua), ob = isObjHandle(ub); return oa || ob ? bool(!(oa && ob && ua === ub)) : bool(toJS(a) !== toJS(b)); },
     // 宽松相等 == / 不等 !=：JS 强制转换（ToPrimitive/ToNumber；1=="1"=true、null==undefined=true）
     eq:   (a, b) => bool(toJS(a) == toJS(b)),
     ne:   (a, b) => bool(toJS(a) != toJS(b)),
@@ -380,7 +401,7 @@ function makeQzvm(strings) {
     // 经 toJS 会取到 undefined 而误判 falsy。按 tag 直接判：idx=0=undefined→假；其余查 handles[idx]（null→假、对象→真）。
     truthy: (v) => {
       const u = BigInt.asUintN(64, v), hi = u >> 48n;
-      if (hi === TAG_HI) { const idx = Number(u & MASK32); return idx === 0 ? 0 : (handles[idx] ? 1 : 0); }  // 0x7FF9：idx=0=undefined→假；其余查 handles[idx]（null→假、对象→真）
+      if (hi === TAG_HI) { const idx = Number(u & MASK32); if (idx === 0) return 0; if (idx === 1) return 0; return idx >= 8 ? 1 : (handles[idx] ? 1 : 0); }  // 0x7FF9：0=undefined/1=null→假；POJO(idx>=8)→真；其余查 handles[idx]
       if (hi === STR_HI) return strRead(v).length ? 1 : 0;          // 0x7FFA：字符串
       if (hi === 0x7ffbn) return 1;                                 // 0x7FFB：wasm 原生数组（恒真；Boolean([])=true）
       if (hi === BOOL_HI) return Number(u & 1n);                    // 0x7FFC：布尔（复用低 32 = 0/1）
@@ -439,6 +460,7 @@ function makeQzvm(strings) {
       return numToBits(want);
     },
     bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; },
+    bindFields,
     bindBump,
     // 供宿主检查用（不在 wasm import 面）
     // 宿主 JS 值 → wasm 句柄位型：复用 bitsOf（string→0x7FFA 写回、array→0x7FFB、bool→num、其它→0x7FF9）。

@@ -84,6 +84,8 @@ const QZ = {
   builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
+  // 对象展开 {..o}：n(i32) + pieces(i64×4) → Object.assign({}, ...) → 宿主对象句柄
+  obj_assign: { params: ["i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
 };
 
 // JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。
@@ -935,7 +937,7 @@ class Emitter {
     emitBinary(e) {
         const op = e.operatorToken.kind;
         // 赋值：x = rhs → localTee（保留值供表达式上下文）；x op= rhs → 读-算-写
-        const assignOps = { [ts.SyntaxKind.EqualsToken]: null, [ts.SyntaxKind.PlusEqualsToken]: ts.SyntaxKind.PlusToken, [ts.SyntaxKind.MinusEqualsToken]: ts.SyntaxKind.MinusToken, [ts.SyntaxKind.AsteriskEqualsToken]: ts.SyntaxKind.AsteriskToken, [ts.SyntaxKind.SlashEqualsToken]: ts.SyntaxKind.SlashToken, [ts.SyntaxKind.PercentEqualsToken]: ts.SyntaxKind.PercentToken, [ts.SyntaxKind.LessThanLessThanEqualsToken]: ts.SyntaxKind.LessThanLessThanToken, [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanToken, [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken, [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken, [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken, [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken };
+        const assignOps = { [ts.SyntaxKind.EqualsToken]: null, [ts.SyntaxKind.AsteriskAsteriskEqualsToken]: ts.SyntaxKind.AsteriskAsteriskToken, [ts.SyntaxKind.PlusEqualsToken]: ts.SyntaxKind.PlusToken, [ts.SyntaxKind.MinusEqualsToken]: ts.SyntaxKind.MinusToken, [ts.SyntaxKind.AsteriskEqualsToken]: ts.SyntaxKind.AsteriskToken, [ts.SyntaxKind.SlashEqualsToken]: ts.SyntaxKind.SlashToken, [ts.SyntaxKind.PercentEqualsToken]: ts.SyntaxKind.PercentToken, [ts.SyntaxKind.LessThanLessThanEqualsToken]: ts.SyntaxKind.LessThanLessThanToken, [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanToken, [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken, [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken, [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken, [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken };
         if (Object.prototype.hasOwnProperty.call(assignOps, op)) {
             if (!ts.isIdentifier(e.left)) throw new Error("赋值左值必须是标识符");
             const idx = this._local(e.left.text);
@@ -1278,8 +1280,10 @@ function funcMode(f) {
             || ts.isTemplateExpression(n)
             || ts.isSpreadElement(n) || ts.isTaggedTemplateExpression(n)
             || ts.isClassExpression(n) || ts.isAwaitExpression(n) || ts.isYieldExpression(n)
-            || ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n))
-            unsafe = true;
+            || ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)
+            || ts.isTypeOfExpression(n) || ts.isVoidExpression(n) || ts.isDeleteExpression(n)
+            || (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword))
+            unsafe = true;   // 注：as / x! / satisfies 为纯类型层构造（emit 恒等擦除），不列入
         ts.forEachChild(n, walk);
     };
     if (f.body) walk(f);
@@ -1951,7 +1955,16 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isObjectLiteralExpression(e)) {
         // POJO：字段驻留 wasm 线性内存（零跨界读写）。句柄 = box(高16位0x7FF9 | offset)。字段宽 8 字节（i64）。
-        if (e.properties.some(p => ts.isSpreadAssignment(p))) throw new Error("[tagged] 对象展开 {...o} 未实现（用 Object.assign({}, o, {...})）");
+        if (e.properties.some(p => ts.isSpreadAssignment(p))) {
+            // {..o, a:1} → qz.obj_assign(n, ...pieces)（非 spread 属性各自打包成对象字面量）
+            const M = this.m;
+            const pieces = e.properties.map(p => ts.isSpreadAssignment(p) ? p.expression : ts.factory.createObjectLiteralExpression([p]));
+            if (pieces.length > 4) throw new Error("[tagged] 对象展开最多 4 段");
+            M.i32Const(pieces.length);
+            for (let i = 0; i < 4; i++) { if (i < pieces.length) this.emitTaggedExpr(pieces[i]); else this._emitUndefined(); }
+            M.call("qz.obj_assign");
+            return;
+        }
         if (e.properties.some(p => !ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p))) {
             throw new Error("[tagged] 对象字面量只支持 { x: v } / { x } 形式（方法/访问器/计算属性名不支持）");
         }
@@ -1961,10 +1974,16 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const fIdx = e.properties.map(p => this._fieldIndex(p.name.text));
         const size = Math.max(...fIdx) + 8;
         emitBumpAlloc(this.m, () => this.m.i32Const(size));   // → offset(i32)（越界 trap）
-        this.m.i64ExtendI32U(); this.m.i64ConstBits(0, 0x7ff9); this.m.i64Or();   // 句柄 = 高16位0x7FF9 | offset(低32)
+        this.m.i64ExtendI32U(); this.m.i64ConstBits(0, 0x7ff90000); this.m.i64Or();   // 句柄 = 高16位0x7FF9 | offset(低32)
         const slot = this.objBase + this._objDepth;   // 本层句柄槽（嵌套各占一层，避免内层覆盖）
         this._objDepth++;
         this.m.localSet(slot);                        // 句柄 → slot（i64）
+        // 头：[0]=clsId(0=非实例)、[4]=size；槽 [8,size) 清零为 undefined sentinel（供宿主物化 toJS 判定字段存在）
+        this.m.localGet(slot); this.m.i32WrapI64(); this.m.i32Const(0); this.m.i32Store(2, 0);
+        this.m.localGet(slot); this.m.i32WrapI64(); this.m.i32Const(size); this.m.i32Store(2, 4);
+        for (let off = 8; off < size; off += 8) {
+            this.m.localGet(slot); this.m.i32WrapI64(); this.m.i64ConstBits(0, 0x7ff90000); this.m.i64Store(3, off);
+        }
         for (let i = 0; i < NF; i++) {
             const p = e.properties[i];
             this.m.localGet(slot);                    // [h]
@@ -1977,7 +1996,22 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isArrayLiteralExpression(e)) {
-        if (e.elements.some(el => ts.isSpreadElement(el))) throw new Error("[tagged] 数组展开 [...a] 未实现（用 a.concat([...]) 或显式索引）");
+        if (e.elements.some(el => ts.isSpreadElement(el))) {
+            // [..a, x] → ([] concat a) concat [x]；concat 由宿主 doArrMethod 处理（返回新数组句柄）
+            const M = this.m;
+            this.emitTaggedExpr(ts.factory.createArrayLiteralExpression([])); M.localSet(this.scratch);
+            for (const el of e.elements) {
+                M.localGet(this.scratch);
+                M.i32Const(this._strId("concat"));
+                if (ts.isSpreadElement(el)) this.emitTaggedExpr(el.expression);
+                else this.emitTaggedExpr(ts.factory.createArrayLiteralExpression([el]));
+                this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                M.call("qz.method_call");
+                M.localSet(this.scratch);
+            }
+            M.localGet(this.scratch);
+            return;
+        }
         // 数组：稳定句柄布局 header(16B: len,cap,dataOff,pad) + data 块(elem i64×N)。
         // 句柄 = 0x7FFB|headerOff；push 增长只换 data 块、句柄不变（支持别名/传参/属性）。
         const N = e.elements.length;
@@ -2124,6 +2158,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.end();
         return;
     }
+    if (ts.isVoidExpression(e)) { this.emitTaggedExpr(e.expression); this.m.drop(); this._emitUndefined(); return; }   // void x → undefined（求值副作用，丢弃值）
     if (ts.isPrefixUnaryExpression(e)) {
         if (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken) {
             const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
@@ -2472,7 +2507,7 @@ Emitter.prototype._emitLambdaNew = function (lam) {
         M.i64Store(3, 0);
     }
     M.localGet(this.cloOff); M.i64ExtendI32U();
-    M.i64ConstBits(0, 0x7ff9); M.i64Or();
+    M.i64ConstBits(0, 0x7ff90000); M.i64Or();
 };
 // 类实例分配：size 覆盖全局字段表最大偏移（+8 头），clsId 写 [0]；返回 self 句柄。
 Emitter.prototype._instSize = function () {
@@ -2502,7 +2537,11 @@ Emitter.prototype._emitNewCall = function (e) {
     M.localSet(this.sT[0]);
     emitBumpSet(M, () => { M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Add(); });   // bump = off+size（越界 trap）
     M.localGet(this.sT[0]);
-    M.i32Const(c.id); M.i32Store(2, 0);                     // [off]=clsId
+    M.i32Const(c.id); M.i32Store(2, 0);                     // [0]=clsId
+    M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Store(2, 4);   // [4]=size（供宿主物化）
+    for (let off = 8; off < this._instSize(); off += 8) {
+        M.localGet(this.sT[0]); M.i64ConstBits(0, 0x7ff90000); M.i64Store(3, off);   // 槽清零 = undefined sentinel
+    }
     M.localGet(this.sT[0]); M.i64ExtendI32U(); M.i64ConstBits(0, 0x7ffe0000); M.i64Or();   // 实例句柄 = 0x7FFE|offset（专用 tag，与 POJO 0x7FF9 区分，供 instanceof）
     M.localSet(this.scratch);                               // self 句柄
     M.localGet(this.scratch);
@@ -2601,7 +2640,6 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         return;
     }
     if (op === ts.SyntaxKind.InKeyword) throw new Error("[tagged] in 未实现");
-    if (op === ts.SyntaxKind.AsteriskAsteriskEqualsToken) throw new Error("[tagged] **= 未实现（用 x = x ** y）");
     if (op === ts.SyntaxKind.CommaToken) { this.emitTaggedExpr(e.left); this.m.drop(); this.emitTaggedExpr(e.right); return; }
     if (op === ts.SyntaxKind.FirstAssignment) {
         if (ts.isPropertyAccessExpression(e.left)) {
@@ -2624,6 +2662,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken,
         [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken,
         [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken,
+        [ts.SyntaxKind.AsteriskAsteriskEqualsToken]: ts.SyntaxKind.AsteriskAsteriskToken,
     };
     if (COMPOUND[op] !== undefined) {
         if (ts.isPropertyAccessExpression(e.left)) {
@@ -2653,7 +2692,12 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         return;
     }
     if (op === ts.SyntaxKind.QuestionQuestionEqualsToken) {
-        if (!ts.isIdentifier(e.left)) throw new Error("[tagged] 暂不支持字段/索引上的 ??=（仅 `x ??= v`）");
+        // a ??= b ≡ a = a ?? b（同样支持字段/索引；接收者读+写各求值一次，无副作用表达式安全）
+        if (ts.isPropertyAccessExpression(e.left)) {
+            if (e.left.name.text === "length") { this.emitNullish(e.left, e.right); this._emitStoreLength(e.left); return; }
+            this.emitNullish(e.left, e.right); this._emitStoreProp(e.left); return;
+        }
+        if (ts.isElementAccessExpression(e.left)) { this.emitNullish(e.left, e.right); this._emitStoreElem(e.left); return; }
         this.emitNullish(e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
     }
