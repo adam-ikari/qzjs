@@ -23,7 +23,7 @@ const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低
 const INST_HI = 0x7ffen;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 const HOST_TAG = 0x7ffd_0000_0000_0000n;  // 宿主对象句柄标记（0x7FFD|低32=handles 索引）
 const CLO_HI = 0x7fffn;                   // 闭包值（函数）句柄高 16 位（0x7FFF|低32=cell offset）
-const HOLE = 0x7ff9000000000002n;         // 数组「洞」（稀疏）：读作 undefined，数组方法跳过，JSON → null                   // 闭包值（函数）句柄高 16 位（0x7FFF|低32=cell offset）
+const HOLE = 0x7ff9000000000002n;         // 数组「洞」（稀疏）：读作 undefined，数组方法跳过，JSON → null
 const HOST_HI = 0x7ffdn;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 // 内建全局分派：名 → JS 函数（参数个数由调用点传入的 n 决定，见 builtin）。
 // AOT 产物经 qz.builtin(nameId, a0..a3) 调；未列出的报「未实现」。
@@ -288,10 +288,13 @@ function makeQzvm(strings, opts) {
   const toJS = (b) => (typeof b === "bigint" && BigInt.asUintN(64, b) === HOLE) ? undefined : (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b), false) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b), true) : {}) : bitsToNum(b));
   // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
   const hostOf = new WeakMap();   // JS 对象/函数 → 已有句柄（同一 JS 值恒等同一句柄 → === 语义正确）
+  const symOf = new Map();        // Symbol → 句柄（symbol 非对象，WeakMap 不收；well-known 符号为单例，泄漏可忽略）
   const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n)
       : (typeof x === "object" || typeof x === "function")
         ? (hostOf.has(x) ? hostOf.get(x) : (() => { const h = HOST_TAG | BigInt(handles.push(x) - 1); hostOf.set(x, h); return h; })())
-      : (HOST_TAG | BigInt(handles.push(x) - 1));
+      : (typeof x === "symbol"
+        ? (symOf.has(x) ? symOf.get(x) : (() => { const h = HOST_TAG | BigInt(handles.push(x) - 1); symOf.set(x, h); return h; })())
+        : (HOST_TAG | BigInt(handles.push(x) - 1)));
   const box = (n) => numToBits(n);
   const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
   const bool = (b) => boxBool(b);
@@ -925,6 +928,8 @@ function makeQzvm(strings, opts) {
     // 含方法/访问器的对象字面量 → 宿主对象：get/set 回调 wasm 闭包（宿主 JS 侧亦按 JS 语义工作）
     obj_new: () => tagHandle({}),
     typeof_host: (v) => (typeof handles[idxOf(v)] === "function" ? 1 : 0),
+    is_symbol_host: (v) => (typeof handles[idxOf(v)] === "symbol" ? 1 : 0),   // typeof 宿主 symbol → "symbol"
+    is_symbol_host: (v) => (typeof handles[idxOf(v)] === "symbol" ? 1 : 0),   // typeof 宿主 symbol → "symbol"
     // 对象字面量的方法（闭包，第一个形参为 self）：宿主调用时转发接收者
     object_set_method: (o, k, v) => {
       const obj = handles[idxOf(o)];
@@ -1134,6 +1139,25 @@ function makeQzvm(strings, opts) {
           return ret(out2);
         }
       }
+      // Reflect.set / Reflect.deleteProperty：目标为 POJO/实例 → 就地改（物化副本无效）
+      if ((name === "Reflect.set" || name === "Reflect.deleteProperty") && a0 !== undefined) {
+        const h0 = BigInt.asUintN(64, a0) >> 48n, off0 = Number(BigInt.asUintN(64, a0) & MASK32);
+        if ((h0 === TAG_HI && off0 >= 8) || h0 === INST_HI) {
+          const key = String(toJS(a1));
+          const slotOf = (nm) => { const e2 = fieldEntries.find(([n]) => n === nm); return (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) ? e2[1] : -1; };
+          const so = slotOf(key);
+          if (name === "Reflect.set") {
+            const val = bitsOf(toJS(a2));
+            if (so >= 0) new DataView(mem.buffer).setBigInt64(off0 + so, val, true);
+            else { syncExtras(); extras.set(off0 + "|" + key, val); }
+            return boxBool(true);
+          }
+          if (so >= 0) new DataView(mem.buffer).setBigInt64(off0 + so, TAG, true);
+          else { syncExtras(); extras.delete(off0 + "|" + key); }
+          syncOrder(); { const l = orderMap.get(off0); if (l) { const ix = l.indexOf(key); if (ix >= 0) l.splice(ix, 1); } }
+          return boxBool(true);
+        }
+      }
       if (name === "Object.assign" && a0 !== undefined) {          // 就地合并（POJO/实例为目标）并返回目标句柄
         const h = BigInt.asUintN(64, a0) >> 48n;
         const off0 = Number(BigInt.asUintN(64, a0) & MASK32);
@@ -1164,6 +1188,12 @@ function makeQzvm(strings, opts) {
         return ret(Object.getOwnPropertyDescriptors(o0));
       }
       let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
+      if (fn === undefined && typeof globalThis[name] === "function") fn = globalThis[name];   // 内建全局函数作调用（Symbol/BigInt/Reflect/…）
+      if (fn === undefined && name.indexOf(".") > 0) {                       // 点号成员（Symbol.for / Reflect.has / Number.isInteger…）
+        let cur = globalThis;
+        for (const seg of name.split(".")) { cur = cur == null ? undefined : cur[seg]; if (cur === undefined) break; }
+        fn = cur;
+      }
       let arity = 0;                                  // 表项 [fn, arity] = 固定元数（调用点按此裁剪实参）
       if (Array.isArray(fn)) { arity = fn[1]; fn = fn[0]; }
       if (typeof fn !== "function") throw new Error("qz.builtin 未实现: " + name);
@@ -1347,6 +1377,11 @@ function makeQzvm(strings, opts) {
     // delete a[i] → 槽置 undefined（长度不变；JS 的「洞」在本表示里等同 undefined）
     // delete o[k]（数组 → 槽置 undefined；POJO/实例 → 字段置 undefined；宿主对象 → delete）
     delete_index: (o, k) => {
+      { const u = BigInt.asUintN(64, o);                              // wasm 数组 + 数值键 → 写洞（JS：delete a[i] 产生洞，length 不变）
+        if ((u >> 48n) === 0x7ffbn) {
+          const kk = toJS(k);
+          if (typeof kk === "number") { const a2 = arrRead(o); if (kk >= 0 && kk < a2.length) { const dv = new DataView(mem.buffer); const off0 = Number(u & MASK32); dv.setBigInt64(dv.getInt32(off0 + 8, true) + Math.trunc(kk) * 8, BigInt.asIntN(64, HOLE), true); } return true; }
+        } }
       { const u = BigInt.asUintN(64, o), h = u >> 48n;                 // 插入序名单同步移除（否则 keys/for-in 仍列出已删属性）
         if ((h === TAG_HI && Number(u & MASK32) >= 8) || h === INST_HI) {
           syncOrder(); const l = orderMap.get(Number(u & MASK32));
@@ -1405,7 +1440,13 @@ function makeQzvm(strings, opts) {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
       const e = BUILTIN_FNS[name];
-      const f = Array.isArray(e) ? e[0] : (e || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
+      let f = Array.isArray(e) ? e[0] : (e || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
+      if (f === undefined && Object.prototype.hasOwnProperty.call(globalThis, name)) f = globalThis[name];   // 内建全局作值（Symbol/BigInt/Math/JSON/Reflect…）
+      if (f === undefined && name.indexOf(".") > 0) {                       // 点号成员（Symbol.for / Object.prototype.toString / Number.isInteger…）→ 沿 globalThis 走
+        let cur = globalThis;
+        for (const seg of name.split(".")) { cur = cur == null ? undefined : cur[seg]; if (cur === undefined) break; }
+        f = cur;
+      }
       return f === undefined ? TAG : tagHandle(f);    // 函数/原型对象/其它值皆返回句柄
     },
     // 内建函数 + 展开实参（Math.max(...a) 等）
@@ -1434,7 +1475,8 @@ function makeQzvm(strings, opts) {
     builtin_spread: (id, arr) => {
       const name = strings[id];
       const e2 = BUILTIN_FNS[name];
-      const f = Array.isArray(e2) ? e2[0] : (e2 || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
+      let f = Array.isArray(e2) ? e2[0] : (e2 || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
+      if (f === undefined && typeof globalThis[name] === "function") f = globalThis[name];
       if (typeof f !== "function") throw new Error("builtin_spread: 非函数 " + name);
       return ret(f.apply(null, toJS(arr) || []));
     },

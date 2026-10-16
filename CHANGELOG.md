@@ -4,6 +4,18 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十五批差分审计 + 内建全局/Symbol/Reflect/可选调用（2026-10-16）
+- 新增 audit_corpus15.js（20 例：Symbol 值/Reflect/Map·Set 深水/Date/RegExp 命名组/Array.from 迭代/String.raw 变体/类表达式继承/switch TDZ/标签 break/数组 delete/Number·String 静态/JSON replacer·reviver/Error 子类链/自定义迭代器/getter 返回对象/WeakMap 身份/可选链调用）。
+- 内建全局作值（Symbol/BigInt/Reflect/Math/JSON）：builtin_member + builtin + builtin_spread 补 globalThis 回退与点号路径解析（Symbol.for / Reflect.has / Number.isInteger）。
+- Symbol 句柄去重（symOf Map）-> Symbol.for 同一符号恒等同一句柄。
+- typeof symbol（is_symbol_host）-> 宿主 symbol 返回 symbol。
+- 可选链调用 o.f?.(x)：nullish 短路（求值一次）；否则走 call_value。
+- Reflect.set/deleteProperty 对 POJO/实例就地改（物化副本无效 -> 此前静默不生效）。
+- delete a[i] 对 wasm 数组写 HOLE（Object.keys 跳过洞）。
+- ret 还原物化句柄（find/pop/at 返回元素保持身份与方法）。
+- 已知 loud：用户标签模板 strings.raw（wasm 数组无附加属性）。
+- 结果：408/418（97.1%）；残余 10 项全部为 loud（零静默错值）；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 第十四批的 3 项静默差异已修（2026-10-16）
 - **`undefined/null` 写属性 → TypeError**：`_emitStoreProp` 先用「TAG|0/1」判定接收者 → 走宿主 `prop_set`（host 抛 TypeError）；err 检查放在整条 if 链**之外**（链内插入会破坏嵌套深度/平衡）。
 - **块级 `let/const` 遮蔽外层同名变量**：`_collectLocals` 按作用域精确扫描遮蔽块（`_shadowBlocks`）；进入遮蔽块前把外层同名局部保存进 `$shN`（i64 值局部），退出后恢复 → `{ let x = 10 }` 不再污染外层 `x`。

@@ -85,6 +85,7 @@ const QZ = {
   object_set_method: { params: ["i64", "i32", "i64"], results: [] },     // 对象方法（闭包 + self 转发）
   object_set_method_key: { params: ["i64", "i64", "i64"], results: [] }, // 计算键名方法（Symbol.iterator 等）
   typeof_host: { params: ["i64"], results: ["i32"] },                    // 宿主值是否 JS 函数 → 0/1
+  is_symbol_host: { params: ["i64"], results: ["i32"] },                  // 宿主值是否 JS symbol → 0/1
   err_stack: { params: ["i64"], results: ["i64"] },                      // Error 族实例的 .stack（合成）
   field_order: { params: ["i64", "i64"], results: [] },                  // 属性写入登记插入序
   field_order_lit: { params: ["i64", "i32"], results: [] },
@@ -482,9 +483,10 @@ class Emitter {
         const M = this.m;
         if (this.capMap.has(name)) { M.localGet(this.capMap.get(name)); M.i32Const(this._strId(name)); M.call("qz.env_get"); return; }
         const idx = this._local(name);
-        if (idx === undefined) throw new Error(BUILTIN_GLOBALS.has(name)
-            ? `[tagged] 内建 ${name} 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
-            : "未定义捕获变量: " + name);
+        if (idx === undefined) {
+            if (BUILTIN_GLOBALS.has(name)) { M.i32Const(this._strId(name)); M.call("qz.builtin_member"); return; }   // 内建全局作值（Symbol/Math/JSON…）
+            throw new Error("未定义捕获变量: " + name);
+        }
         M.localGet(idx);
     }
 
@@ -492,7 +494,10 @@ class Emitter {
     _emitVarGet(name) {
         if (this.capMap.has(name)) { this.m.localGet(this.capMap.get(name)); this.m.i32Const(this._strId(name)); this.m.call("qz.env_get"); return; }
         const idx = this._local(name);
-        if (idx === undefined) throw new Error("未定义变量: " + name);
+        if (idx === undefined) {
+            if (BUILTIN_GLOBALS.has(name)) { this.m.i32Const(this._strId(name)); this.m.call("qz.builtin_member"); return; }
+            throw new Error("未定义变量: " + name);
+        }
         this.m.localGet(idx);
     }
     // 变量写（含闭包捕获）：栈顶值 → 变量，并保留该值（赋值表达式结果）。
@@ -3179,7 +3184,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         M.ifBlock("i64");
         this._emitStrLitHandle("function");
         M.else_();
+        M.localGet(this.scratch); M.call("qz.is_symbol_host");
+        M.ifBlock("i64");
+        this._emitStrLitHandle("symbol");
+        M.else_();
         this._emitStrLitHandle("object");
+        M.end();
         M.end();
         M.else_();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();
@@ -3537,6 +3547,22 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isNewExpression(e)) { this._emitNewCall(e); return; }
+    if (ts.isCallExpression(e) && e.questionDotToken) {
+        const M = this.m, t = this._expEnter();
+        this.emitTaggedExpr(e.expression); M.localSet(t.v);        // 被调值（只求值一次）
+        M.localGet(t.v); M.call("qz.is_nullish");
+        M.ifBlock("i64");
+        this._emitUndefined();
+        M.else_();
+        M.localGet(t.v);
+        for (let i = 0; i < 4; i++) { if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined(); }
+        this._emitUndefined();                                    // 第 6 参（溢出实参）：可选调用不打包
+        M.call("qz.call_value");
+        this._emitErrCheck();
+        M.end();
+        this._expLeave();
+        return;
+    }
     if (ts.isCallExpression(e) && ts.isSuperKeyword(e.expression)) {
         if (!this._curClassObj) throw new Error("[tagged] super() 仅在构造器内可用");
         const par = this._curClassObj.parent;
