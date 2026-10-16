@@ -631,7 +631,7 @@ class Emitter {
         const sT = this.mode === "tagged" ? Array.from({ length: 32 }, () => "i32") : [];
         this.sT = this.mode === "tagged" ? Array.from({ length: 32 }, (_, i) => nLoc + 5 + i) : null;
         // 嵌套对象字面量的句柄临时槽（i64）：每层独立，避免内层覆盖外层句柄。
-        const objPool = this.mode === "tagged" ? Array.from({ length: 32 }, () => "i64") : [];
+        const objPool = this.mode === "tagged" ? Array.from({ length: 48 }, () => "i64") : [];
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
         // 尾部追加：sT(8×i32，tagged) + swIdx(i32) + forOf 对×(vt,i32)（每嵌套层独立）。
@@ -780,7 +780,7 @@ class Emitter {
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
         const sT = Array.from({ length: 32 }, () => "i32");
         this.sT = Array.from({ length: 32 }, (_, i) => nLoc + 5 + i);
-        const objPool = Array.from({ length: 32 }, () => "i64");
+        const objPool = Array.from({ length: 48 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
         this.swIdx = this.objBase + objPool.length;
@@ -976,7 +976,7 @@ class Emitter {
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
         const sT = Array.from({ length: 32 }, () => "i32");
         this.sT = Array.from({ length: 32 }, (_, i) => nLoc + 5 + i);
-        const objPool = Array.from({ length: 32 }, () => "i64");
+        const objPool = Array.from({ length: 48 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
         this.swIdx = this.objBase + objPool.length;
@@ -1602,6 +1602,20 @@ function compileTS(input, outWasm, opts = {}) {
         }
     };
     for (const f of sfs) collectDecls(f);
+    // 预登记所有属性名（POJO/实例容量统一；否则「运行期新增字段」会越界写、静态读会错位）。
+    const preNames = [];
+    {
+        const seenN = new Set(), push = (t) => { if (t !== undefined && t !== null && !seenN.has(t)) { seenN.add(t); preNames.push(t); } };
+        const walkNames = (n) => {
+            if (ts.isPropertyAccessExpression(n)) push(n.name.text);
+            else if (ts.isPropertyAssignment(n) || ts.isPropertyDeclaration(n)) push(n.name.text);
+            else if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)) push(n.name.text);
+            else if (ts.isBindingElement(n)) { if (n.propertyName) push(n.propertyName.text); if (ts.isIdentifier(n.name)) push(n.name.text); }
+            else if (ts.isElementAccessExpression(n) && (ts.isStringLiteral(n.argumentExpression) || ts.isNumericLiteral(n.argumentExpression))) push(n.argumentExpression.text);
+            ts.forEachChild(n, walkNames);
+        };
+        for (const f of sfs) walkNames(f);
+    }
     const hasClasses = clsStmts.length > 0;
     // import 绑定：{ 本地名 → 目标顶层函数名 }。模块图由 tsc 解析（createProgram），
     // 用 checker 穿透 re-export 链解析到最终目标——AST 级 `sp.propertyName` 只
@@ -1815,6 +1829,7 @@ function compileTS(input, outWasm, opts = {}) {
         const em = new Emitter(m);
         em.sf = sf;
         em.hoistedFns = hoistedFns;   // 顶层函数声明（其余函数声明按闭包处理）
+        em.fieldMap = new Map([["__cls", 0], ...preNames.map((n, i) => [n, i + 1])]);   // 预登记字段表（与产物一起冻结）
         em.importAlias = importAlias;    // 跨文件 import 别名 → 目标顶层函数名
         em.nsAlias = nsAlias;            // 命名空间导入解析表
         em.classAlias = classAlias;      // 导入类本地名 → 目标类名
@@ -1948,8 +1963,8 @@ Emitter.prototype._strId = function (text) {
 // 避免内层表达式（含 .length / 下标 / 拼接）覆盖外层正在使用的接收者/值。
 Emitter.prototype._expEnter = function () {
     const d = this._expDepth || 0; this._expDepth = d + 1;
-    if (!this.sT) return { v: 0, w: 0, x: 0, a: 0, b: 0, c: 0 };
-    return { v: this.objBase + 8 + d, w: this.objBase + 16 + d, x: this.objBase + 24 + d,   // 各 8 层（objPool 共 32 槽）
+    if (!this.sT) return { v: 0, w: 0, x: 0, y: 0, z: 0, a: 0, b: 0, c: 0 };
+    return { v: this.objBase + 8 + d, w: this.objBase + 16 + d, x: this.objBase + 24 + d, y: this.objBase + 32 + d, z: this.objBase + 40 + d,   // 各 8 层（objPool 48 槽）
              a: this.sT[8 + 3 * d], b: this.sT[9 + 3 * d], c: this.sT[10 + 3 * d] };   // 各 8 层（sT 共 32 槽）
 };
 Emitter.prototype._expLeave = function () { this._expDepth--; };
@@ -2376,25 +2391,23 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const NF = e.properties.length;
         // 字段偏移用全局 fieldMap（名→固定偏移，POJO 隐式形状）：与读取端 _fieldIndex 一致。
         // 分配 size = 最大字段字节偏移 + 8（偏移 0 保留给 __cls 头，POJO 留 0 亦无害）。
-        const fIdx = e.properties.map(p => this._fieldIndex(p.name.text));
-        const size = (fIdx.length ? Math.max(...fIdx) : 0) + 8;   // 空对象也占 8B（保证句柄 offset 唯一）
+        for (const p of e.properties) this._fieldIndex(p.name.text);   // 字段已在预登记表中
+        const size = this._instSize();   // 统一容量：所有字段名皆可写（支持运行期新增字段），未赋值槽 = undefined
         emitBumpAlloc(this.m, () => this.m.i32Const(size));   // → offset(i32)（越界 trap）
         this.m.i64ExtendI32U(); this.m.i64ConstBits(0, 0x7ff90000); this.m.i64Or();   // 句柄 = 高16位0x7FF9 | offset(低32)
         const slot = this.objBase + this._objDepth;   // 本层句柄槽（嵌套各占一层，避免内层覆盖）
         this._objDepth++;
         this.m.localSet(slot);                        // 句柄 → slot（i64）
-        // 头：[0]=clsId(0=非实例)、[4]=size；槽 [8,size) 清零为 undefined sentinel（供宿主物化 toJS 判定字段存在）
+        // 头：[0]=clsId(0=非实例)、[4]=size；槽 [8,size) 全写 undefined 句柄（未赋值字段 = undefined）
         this.m.localGet(slot); this.m.i32WrapI64(); this.m.i32Const(0); this.m.i32Store(2, 0);
         this.m.localGet(slot); this.m.i32WrapI64(); this.m.i32Const(size); this.m.i32Store(2, 4);
-        for (let off = 8; off < size; off += 8) {
-            this.m.localGet(slot); this.m.i32WrapI64(); this.m.i64ConstBits(0, 0x7ff90000); this.m.i64Store(3, off);
-        }
+        this.m.localGet(slot); this.m.i32WrapI64(); this._emitFillUndef(size);
         for (let i = 0; i < NF; i++) {
             const p = e.properties[i];
             this.m.localGet(slot);                    // [h]
             this.m.i32WrapI64();                      // 低32位=offset
             this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);   // 简写 {x} ≡ {x: x}
-            this.m.i64Store(3, fIdx[i]);              // memory[off + idx] = val（fIdx 已是字节偏移）
+            this.m.i64Store(3, this._fieldIndex(p.name.text));   // memory[off + 字段字节偏移] = val
         }
         this.m.localGet(slot);
         this._objDepth--;
@@ -3049,6 +3062,20 @@ Emitter.prototype._emitLambdaNew = function (lam) {
     M.i64ConstBits(0, 0x7fff0000); M.i64Or();
 };
 // 类实例分配：size 覆盖全局字段表最大偏移（+8 头），clsId 写 [0]；返回 self 句柄。
+// 把 [base+8, base+size) 的槽逐个写为 undefined 句柄（POJO/实例字段「未赋值」表示；循环避免展开膨胀）。
+Emitter.prototype._emitFillUndef = function (size) {
+    const M = this.m, t = this._expEnter();
+    M.localSet(t.a);                                                     // base(i32) ← 栈顶
+    M.localGet(t.a); M.i32Const(8); M.i32Add(); M.localSet(t.c);         // p = base + 8
+    M.localGet(t.a); M.i32Const(size); M.i32Add(); M.localSet(t.b);      // end = base + size
+    M.block("void"); M.loop("void");
+    M.localGet(t.c); M.localGet(t.b); M.i32GeU(); M.brIf(1);             // p >= end → 出循环
+    M.localGet(t.c); M.i64ConstBits(0, 0x7ff90000); M.i64Store(3, 0);
+    M.localGet(t.c); M.i32Const(8); M.i32Add(); M.localSet(t.c);
+    M.br(0);
+    M.end(); M.end();
+    this._expLeave();
+};
 Emitter.prototype._instSize = function () {
     return ((this.fieldMap ? this.fieldMap.size : 0) + 1) * 8;
 };
@@ -3066,27 +3093,28 @@ Emitter.prototype._emitNewCall = function (e) {
     const c = this.classes.get(cname);
     const args = e.arguments;
     if (args.length > 4) throw new Error("[tagged] new 最多 4 参");
-    for (let i = 0; i < 4; i++) {
+    const te = this._expEnter();                            // 实例 off / ctor 实参用可重入槽（嵌套 new 不覆盖）
+    { const argSlots = [te.w, te.x, te.y, te.z];   // self 占 te.v，实参用 w/x/y/z
+      for (let i = 0; i < 4; i++) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
-        M.localSet(this.cloArgs[i]);
-    }
+        M.localSet(argSlots[i]);
+      } }
     // 内联 bump 分配（与 POJO/数组同款）：避免 qz.newobj 跨界 + BigInt 装箱（构造热路径）。
     // 布局：offset 8 对齐，[off]=clsId(i32)，字段槽由 ctor 写。
     M.globalGet(0); M.i32Const(7); M.i32Add(); M.i32Const(-8); M.i32And();   // off=(bump+7)&~7
-    M.localSet(this.sT[0]);
-    emitBumpSet(M, () => { M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Add(); });   // bump = off+size（越界 trap）
-    M.localGet(this.sT[0]);
+    M.localSet(te.a);
+    emitBumpSet(M, () => { M.localGet(te.a); M.i32Const(this._instSize()); M.i32Add(); });   // bump = off+size（越界 trap）
+    M.localGet(te.a);
     M.i32Const(c.id); M.i32Store(2, 0);                     // [0]=clsId
-    M.localGet(this.sT[0]); M.i32Const(this._instSize()); M.i32Store(2, 4);   // [4]=size（供宿主物化）
-    for (let off = 8; off < this._instSize(); off += 8) {
-        M.localGet(this.sT[0]); M.i64ConstBits(0, 0x7ff90000); M.i64Store(3, off);   // 槽清零 = undefined sentinel
-    }
-    M.localGet(this.sT[0]); M.i64ExtendI32U(); M.i64ConstBits(0, 0x7ffe0000); M.i64Or();   // 实例句柄 = 0x7FFE|offset（专用 tag，与 POJO 0x7FF9 区分，供 instanceof）
-    M.localSet(this.scratch);                               // self 句柄
-    M.localGet(this.scratch);
-    for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);
+    M.localGet(te.a); M.i32Const(this._instSize()); M.i32Store(2, 4);   // [4]=size（供宿主物化）
+    M.localGet(te.a); this._emitFillUndef(this._instSize());   // 槽 = undefined（未赋值字段）
+    M.localGet(te.a); M.i64ExtendI32U(); M.i64ConstBits(0, 0x7ffe0000); M.i64Or();   // 实例句柄 = 0x7FFE|offset（专用 tag，与 POJO 0x7FF9 区分，供 instanceof）
+    M.localSet(te.v);                                       // self 句柄（受保护）
+    M.localGet(te.v);
+    for (let i = 0; i < 4; i++) M.localGet([te.w, te.x, te.y, te.z][i]);
     M.call(ctorName(cname));                                // 写 __cls、字段、执行体
-    M.localGet(this.scratch);                               // 表达式值 = 实例
+    M.localGet(te.v);                                       // 表达式值 = 实例
+    this._expLeave();
 };
 // super(...)：在构造器内，self=local0。调父 ctor 后回写本类字段默认值（JS 派生字段初始化序）。
 Emitter.prototype._emitSuperCall = function (c, args) {
@@ -3194,6 +3222,33 @@ Emitter.prototype.emitTaggedBinary = function (e) {
     }
     if (op === ts.SyntaxKind.CommaToken) { this.emitTaggedExpr(e.left); this.m.drop(); this.emitTaggedExpr(e.right); return; }
     if (op === ts.SyntaxKind.FirstAssignment) {
+        // 解构赋值 [a,b] = rhs / ({x} = rhs)：RHS 求值一次 → 逐目标读取 + 写入（结果 = RHS）
+        if (ts.isArrayLiteralExpression(e.left) || ts.isObjectLiteralExpression(e.left)) {
+            const M = this.m, t = this._expEnter();
+            this.emitTaggedExpr(e.right); M.localSet(t.x);
+            if (ts.isArrayLiteralExpression(e.left)) {
+                let i = 0;
+                for (const el of e.left.elements) {
+                    if (ts.isOmittedExpression(el)) { i++; continue; }
+                    if (!ts.isIdentifier(el)) throw new Error("[tagged] 解构赋值目标仅支持标识符");
+                    this._emitElemOf(t.x, ts.factory.createNumericLiteral(i));
+                    this._emitVarStore(el.text, this.scratchB); M.drop();
+                    i++;
+                }
+            } else {
+                for (const p of e.left.properties) {
+                    if (!ts.isPropertyAssignment(p)) throw new Error("[tagged] 解构赋值仅支持 {key: target} 形式");
+                    const key = ts.isIdentifier(p.name) ? p.name.text : (ts.isStringLiteral(p.name) || ts.isNumericLiteral(p.name) ? p.name.text : null);
+                    const target = ts.isIdentifier(p.initializer) ? p.initializer.text : null;
+                    if (key === null || target === null) throw new Error("[tagged] 解构赋值仅支持标识符目标");
+                    this._emitPropReadFromLocal(t.x, key);
+                    this._emitVarStore(target, this.scratchB); M.drop();
+                }
+            }
+            M.localGet(t.x);                      // 赋值表达式结果 = RHS
+            this._expLeave();
+            return;
+        }
         if (ts.isPropertyAccessExpression(e.left)) {
             if (e.left.name.text === "length") { this.emitTaggedExpr(e.right); this._emitStoreLength(e.left); return; }
             this.emitTaggedExpr(e.right); this._emitStoreProp(e.left); return;

@@ -3,6 +3,12 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): POJO/实例统一容量（支持运行期新增字段）+ 解构赋值 + 宿主 extras 旁表**。
+  - **预登记字段表**：编译期先扫描全程序属性名冻结 `fieldMap`，POJO/实例一律按**统一容量**分配并把槽全写为 undefined 句柄 → `o.newField = v`、`memo[k] = v`（k 运行期决定）不再越界写/错位读；未赋值字段读 = undefined（JS 语义）。
+  - **运行期新键旁表**：未预登记的名字存宿主 `extras`（key = 内存偏移|名字），`bump` 复位即失效；`get/set_index`、`prop_get/set`、`delete_index`、物化（Object.keys/JSON）全链可见。
+  - **解构赋值** `[a,b]=[b,a]` / `({m:x} = o)`（结果 = RHS）。
+  - **可重入槽扩展**（8 层 × i64×5 + i32×3）：`new` 的 self/实参、`sT[0]` 等此前会被嵌套 `new`/表达式覆盖。
+  差分：语料 1 = 44/47，语料 2 = 38/40。
 - **fix(aot): try/finally 语义完备**（此前 finally 只在正常路径执行 → 静默漏副作用）。
   - `return` 穿过 try → 先求返回值表达式（JS 顺序）再跑 finally；`throw` 穿出 try → 跑该异常路径经过的 finally（同一 try 的 finally 仍由自然流负责，避免重复执行）；`break`/`continue` 退出含 try 的循环 → 先跑退出范围内的 finally。
   差分：语料 2 = 34/40。

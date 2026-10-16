@@ -152,6 +152,7 @@ function makeQzvm(strings, opts) {
   const bindFields = (fields) => { fieldEntries = (fields || []).map((n, i) => [n, (i + 1) * 8]); };
   // POJO/类实例（内存驻留）→ JS 对象物化：按 [0]=size 限定范围，逐字段读（undefined sentinel 跳过）。
   const materialize = (off) => {
+    syncExtras();
     // 每次新鲜物化：POJO/实例由 bump 分配，调用间 __bump_reset 会复用偏移 → 不可跨调用缓存。
     const o = {};
     if (!mem) return o;
@@ -161,6 +162,12 @@ function makeQzvm(strings, opts) {
       if (idx >= size) continue;
       const v = toJS(dv.getBigInt64(off + idx, true));
       if (v !== undefined) o[name] = v;
+    }
+    for (const [k, v] of extras) {                        // 运行期新增字段
+      const bar = k.indexOf("|");
+      if (Number(k.slice(0, bar)) !== off) continue;
+      const jv = toJS(v);
+      if (jv !== undefined) o[k.slice(bar + 1)] = jv;
     }
     return o;
   };
@@ -174,6 +181,12 @@ function makeQzvm(strings, opts) {
   const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
   const bool = (b) => boxBool(b);
   let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null, classMeta = null;
+  // 运行期新增字段（POJO/实例上静态未预登记的名字，如 o[k] 中 k 由运行期决定）：
+  // 存宿主侧旁表，键 = 内存偏移 + "|" + 字段名；bump 复位（偏移复用）时整体清空。
+  const extras = new Map();
+  let extrasAt = -1;
+  // bump 复位（值变小）→ 偏移被复用 → 旁表整体失效；仅「变小」才清（同一次调用内 bump 单调增）
+  const syncExtras = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < extrasAt) extras.clear(); extrasAt = v; };
   if (opts && opts.fields) bindFields(opts.fields);   // 便于宿主物化 POJO/实例（等价 bindFields）
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   const bindBump = (g) => { bumpRef = g; };
@@ -415,8 +428,9 @@ function makeQzvm(strings, opts) {
           c = c.parent != null ? classMeta[c.parent] : null;
         }
         const e = fieldEntries.find(([n]) => n === name);
-        if (!e) return TAG;
-        if (new DataView(mem.buffer).getInt32(off + 4, true) < e[1] + 8) return TAG;
+        if (!e || new DataView(mem.buffer).getInt32(off + 4, true) < e[1] + 8) {
+          syncExtras(); const x = extras.get(off + "|" + name); return x === undefined ? TAG : x;
+        }
         return new DataView(mem.buffer).getBigInt64(off + e[1], true);
       }
       if (hi === HOST_HI) { const o = handles[off]; return ret(o == null ? undefined : o[name]); }
@@ -434,7 +448,7 @@ function makeQzvm(strings, opts) {
           c = c.parent != null ? classMeta[c.parent] : null;
         }
         const e = fieldEntries.find(([n]) => n === name);
-        if (!e) return;
+        if (!e || new DataView(mem.buffer).getInt32(off + 4, true) < e[1] + 8) { syncExtras(); extras.set(off + "|" + name, v); return; }
         new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
         return;
       }
@@ -497,7 +511,7 @@ function makeQzvm(strings, opts) {
         if (off < 8) return handles[off];
         const name = String(toJS(k));
         const e = fieldEntries.find(([n]) => n === name);
-        if (!e || !mem) return TAG;
+        if (!e || !mem) { syncExtras(); const x = extras.get(off + "|" + name); return x === undefined ? TAG : x; }
         return new DataView(mem.buffer).getBigInt64(off + e[1], true);
       }
       if (hi === HOST_HI) return ret(handles[off][toJS(k)]);
@@ -509,7 +523,7 @@ function makeQzvm(strings, opts) {
         if (off < 8) { handles[off] = toJS(v); return; }
         const name = String(toJS(k));
         const e = fieldEntries.find(([n]) => n === name);
-        if (!e || !mem) throw new Error("set_index: POJO 无字段 " + name);
+        if (!e || !mem) { syncExtras(); extras.set(off + "|" + name, v); return; }   // 运行期新增字段
         new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
         return;
       }
@@ -651,7 +665,7 @@ function makeQzvm(strings, opts) {
         const e = fieldEntries.find(([n]) => n === name);
         if (e && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= e[1] + 8) {
           new DataView(mem.buffer).setBigInt64(off + e[1], TAG, true);
-        }
+        } else if (mem) { syncExtras(); extras.delete(off + "|" + name); }
         return 1n;
       }
       return 1n;
