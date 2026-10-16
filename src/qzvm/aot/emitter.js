@@ -3473,7 +3473,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isIdentifier(e)) {
-        if (e.text === "arguments") throw new Error("[tagged] `arguments` 对象未实现（用 rest 形参替代）；见 ASSESSMENT 限制");
+        if (e.text === "arguments") throw new Error("[tagged] `arguments` 对象未实现（建议 rest 形参）；闭包/方法/顶层函数内的 `arguments` 均需 ABI 透传实参，属已知 loud——见 ASSESSMENT");
         if (this.capMap.has(e.text)) { this._emitCapturedRead(e.text); return; }   // 捕获名优先走 env（与本体共享）
         const idx = this._local(e.text);
         if (idx !== undefined) { this.m.localGet(idx); return; }
