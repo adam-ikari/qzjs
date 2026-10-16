@@ -81,6 +81,13 @@ const QZ = {
   // typeof 走 wasm 内联分类（见 emitTaggedExpr）：无法区分「宿主侧 handles 索引」与
   // 「POJO 内存 offset」（二者共用 0x7FF9 低 32 位空间），故不设宿主回退。
 };
+
+// JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。
+const BUILTIN_GLOBALS = new Set(["Math", "JSON", "Array", "Object", "String", "Number", "Boolean", "Date",
+    "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Symbol", "BigInt", "Error", "TypeError",
+    "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", "Reflect", "Proxy",
+    "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent",
+    "encodeURI", "decodeURI", "structuredClone", "globalThis", "Intl", "Atomics", "SharedArrayBuffer"]);
 // 注册 qz.* import。only = 采集到的「实际用到」集合（Set<"qz.<name>">）；缺省/undefined
 // 则全量注册（向后兼容）。按需注册是 brain [[aot-generic-compiler-target]] 的要求：
 // import 面 = 需求驱动的最小契约面，不是 qzjs 私有 ABI 的全集。
@@ -278,7 +285,9 @@ class Emitter {
             return;
         }
         const idx = this._local(name);
-        if (idx === undefined) throw new Error("未定义捕获变量: " + name);
+        if (idx === undefined) throw new Error(BUILTIN_GLOBALS.has(name)
+            ? `[tagged] 内建 ${name} 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
+            : "未定义捕获变量: " + name);
         M.localGet(idx);
     }
 
@@ -1987,7 +1996,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (this.m._funcIdx[this._fnName(fn)] === undefined && !this.fnNames.has(this._fnName(fn))) {
             // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)
             const hIdx = this._local(fn);
-            if (hIdx === undefined) throw new Error("未定义函数: " + fn);
+            if (hIdx === undefined) throw new Error(BUILTIN_GLOBALS.has(fn)
+                ? `[tagged] 内建 ${fn}() 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
+                : "未定义函数: " + fn);
             for (let i = 0; i < 4; i++) {
                 if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]);
                 else this._emitUndefined();
@@ -2439,6 +2450,11 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
 };
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
+    // 未实现的二元运算符：先于操作数求值报错（否则右操作数如类名 A 会先崩「未定义捕获变量: A」）
+    if (op === ts.SyntaxKind.InstanceOfKeyword) throw new Error("[tagged] instanceof 未实现");
+    if (op === ts.SyntaxKind.InKeyword) throw new Error("[tagged] in 未实现");
+    if (op === ts.SyntaxKind.AsteriskAsteriskEqualsToken) throw new Error("[tagged] **= 未实现（用 x = x ** y）");
+    if (op === ts.SyntaxKind.CommaToken) { this.emitTaggedExpr(e.left); this.m.drop(); this.emitTaggedExpr(e.right); return; }
     if (op === ts.SyntaxKind.FirstAssignment) {
         if (ts.isPropertyAccessExpression(e.left)) {
             if (e.left.name.text === "length") { this.emitTaggedExpr(e.right); this._emitStoreLength(e.left); return; }
