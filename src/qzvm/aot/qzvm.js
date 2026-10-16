@@ -197,6 +197,7 @@ function makeQzvm(strings, opts) {
     const seen = new Set();
     if (ord) {                                   // 插入序优先（JS 语义：键序 = 插入序；含赋值为 undefined 的键）
       for (const name of ord) {
+        if (typeof name === "string" && name.charCodeAt(0) === 35) continue;     // 私有字段不进 Object.keys/JSON
         seen.add(name);
         const acc2 = dynAcc.get(off + "|" + name);
         if (acc2) {                                    // 运行时访问器 → 物化对象上定义 get/set（JSON.stringify 会调 getter）
@@ -215,6 +216,7 @@ function makeQzvm(strings, opts) {
     }
     for (const [name, idx] of fieldEntries) {
       if (idx >= size || seen.has(name)) continue;
+      if (typeof name === "string" && name.charCodeAt(0) === 35) continue;        // 私有字段（#类名#名）：非自有可枚举属性（JS 私有槽）
       if (nonEnum.has(off + "|" + name)) continue;   // defineProperty enumerable:false
       const v = toJS(dv.getBigInt64(off + idx, true));
       if (v !== undefined) { o[name] = v; setNow.add(name); }
@@ -1047,7 +1049,7 @@ function makeQzvm(strings, opts) {
           if (h === HOST_HI) { Object.defineProperty(handles[off0], key, desc); return a0; }
           if (desc.get || desc.set) {                     // 访问器描述符：记入访问器表（POJO/实例读/写走宿主）
             syncDynAcc();
-            { let l = orderMap.get(off0); if (!l) { l = []; orderMap.set(off0, l); } if (l.indexOf(key) < 0) l.push(key); }
+            { if (typeof key === "string") { let l = orderMap.get(off0); if (!l) { l = []; orderMap.set(off0, l); } if (l.indexOf(key) < 0) l.push(key); } }   // 符号键不进插入序
             const gv = desc.get, sv = desc.set;
             const gH = (gv && typeof gv === "function" && gv.__qzClo !== undefined) ? gv.__qzClo : (gv === undefined ? undefined : bitsOf(gv));
             const sH = (sv && typeof sv === "function" && sv.__qzClo !== undefined) ? sv.__qzClo : (sv === undefined ? undefined : bitsOf(sv));

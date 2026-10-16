@@ -3385,7 +3385,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     // 类静态字段 C.x（C 为已收集类名）→ 确保静态已初始化 + 宿主 static_get
     // 私有成员访问 this.#v / obj.#m()：名字按「当前类」限定（JS 私有名仅同类可访问）
-    if (ts.isPropertyAccessExpression(e) && ts.isPrivateIdentifier(e.name) && this._curClass) {
+    if (ts.isPropertyAccessExpression(e) && ts.isPrivateIdentifier(e.name) && this._curClass && !this._isClassName(e.expression)) {   // 类名接收者（P.#s）→ 走静态路径
         const pn = "#" + this._curClass + "#" + e.name.text;
         const c = this.classes.get(this._curClass);
         if (c && (c.methods || []).some(m => m.name === pn)) {   // 私有方法：同名按类名限定
@@ -3415,7 +3415,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const M3 = this.m, ts2 = this._expEnter();
         this._emitUndefined(); M3.localSet(ts2.v);
         for (const x of chain.slice().reverse()) {          // 父 → 子：越派生越后写（遮蔽父类同名字段）
-            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(e.name.text)); M3.call("qz.statics_has");
+            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.statics_has");   // 私有静态字段需类名限定
             M3.ifBlock("void");
             M3.i32Const(this._strId(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.static_get");
             M3.localSet(ts2.v);
@@ -4236,7 +4236,10 @@ Emitter.prototype._emitBuiltinCall = function (name, args) {
 Emitter.prototype._emitDynMethod = function (rx, method, args) {
     const M = this.m;
     if (args.length > 4) throw new Error("[tagged] 方法最多 4 参");
-    if (/^#[^#]+$/.test(method) && ts.isIdentifier(rx)) method = "#" + this._className(rx.text) + "#" + method;   // 私有方法/私有静态方法：类名限定（PrivateIdentifier.text 自带 #）
+    if (/^#[^#]+$/.test(method)) {                      // 私有方法：类名限定（PrivateIdentifier.text 自带 #）
+        const cnP = ts.isIdentifier(rx) ? this._className(rx.text) : this._curClass;
+        if (cnP) method = "#" + cnP + "#" + method;
+    }
     // 静态方法 C.m(...)：类名不是变量 → 沿继承链找 static 方法 owner，直调 __sm_<Owner>$<m>
     // （self 传 undefined 占位；静态方法体不用 this）。
     if (ts.isIdentifier(rx) && this.classes.has(this._className(rx.text))) {

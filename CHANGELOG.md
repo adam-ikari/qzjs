@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 私有成员修正（2026-10-16）
+- **私有字段不参与枚举**：物化时跳过 `#类名#名`（JS 私有槽不是自有可枚举属性）→ `Object.keys(instance)`/`JSON.stringify` 与 JS 一致。
+- **静态私有字段**：`static #s` 的存储键与读路径统一为 `#类名#名`（`statics_has`/`static_get` 此前用裸名 → 读为 undefined）；`P.#s` 的属性读改走静态路径（私有名 + 类名接收者不再当实例私有读）。
+- **私有方法调用**：`this.#m()` 按 `_curClass` 限定键（此前只有类名接收者会限定）。
+- **符号键**：`defineProperty` 的符号键不进插入序表（避免非字符串键混入 `Object.keys` 路径）。
+- 结果：**354/361（98.1%）**；**残余 7 项全部为 loud（零静默错值）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿。
+
 ### 闭包 >4 形参（2026-10-16）
 - 新增 `audit_corpus12.js`（16 例：>4 形参的嵌套函数声明/箭头函数表达式/IIFE/rest 组合/默认值/值传递/高阶回调/递归/类与对象方法）。
 - **统一溢出实参约定**：闭包调用与值调用一律 `a0..a3 = 实参 0..3`（未传补 undefined）+ 第 6 参 `ovf = 实参 3.. 的数组`；宿主 `closureCall` 依 `lamMeta.n` 与 `lamMeta.rest` 还原形参槽（rest 形参把尾部实参打包为数组）。
