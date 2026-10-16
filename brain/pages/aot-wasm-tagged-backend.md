@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T11:11:50"
+updated: "2026-10-16T11:29:46"
 ---
 
 <!-- compiled_truth -->
@@ -151,4 +151,9 @@ updated: "2026-10-16T11:11:50"
 - time: 2026-10-16T11:11:50
   kind: evidence
   summary: "第七批差分审计：241/248（97.2%），7 项均为已记录限制"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T11:29:46
+  kind: evidence
+  summary: "第八批差分审计：265/272（97.4%），新增语料 24 例全通过"
   affects: [aot-wasm-tagged-backend]
