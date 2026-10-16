@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T17:16:05"
+updated: "2026-10-16T17:21:38"
 ---
 
 <!-- compiled_truth -->
@@ -256,4 +256,9 @@ updated: "2026-10-16T17:16:05"
 - time: 2026-10-16T17:16:05
   kind: evidence
   summary: "第十七批：445/455（97.8%），残余 10 项全 loud（零静默错值）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T17:21:38
+  kind: evidence
+  summary: "this 形参作用域标记修复：_lamThisParam 按函数复位"
   affects: [aot-wasm-tagged-backend]
