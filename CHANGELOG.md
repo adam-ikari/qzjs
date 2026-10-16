@@ -3,6 +3,7 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **test(aot): 差分审计工具入库** `src/qzvm/aot/audit_diff.js` + `audit_corpus.js`（oracle = 同一 TS 源经 tsc 剥类型在 node 跑真 JS；逐例独立编译比对；当前 41/47，余为 loud 未实现）。`node src/qzvm/aot/audit_diff.js`。
 - **feat(aot): 嵌套函数声明按闭包处理 + 类访问器 + 解构完备 + 内建 instanceof/super 分派**。
   - **嵌套函数声明 → 闭包**：此前整树提升到模块级，丢失对外层局部的捕获（`function inner(){ total += 1 }` 编译期报「未定义变量」）。现仅在文件顶层提升，嵌套声明在所属函数入口先建闭包写入变量（保持声明提升/相互递归语义）。
   - **闭包调用**：句柄来源支持「捕获」（env_get）+ 参数直接压栈（不再用会被嵌套调用覆盖的 `cloArgs`）；支持 IIFE `(() => 42)()`。
