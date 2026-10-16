@@ -3351,7 +3351,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 const off = this._fieldIndex(ts.isPrivateIdentifier(e.operand.name) && this._curClass ? "#" + this._curClass + "#" + e.operand.name.text : e.operand.name.text);
                 this.emitTaggedExpr(e.operand.expression);
                 this.m.localSet(this.scratchObj);
-                this.m.localGet(this.scratchObj); this.m.i32WrapI64(); this.m.i64Load(3, off);
+                this.m.localGet(this.scratchObj); this.m.i32Const(this._strId(ts.isPrivateIdentifier(e.operand.name) && this._curClass ? "#" + this._curClass + "#" + e.operand.name.text : e.operand.name.text)); this.m.call("qz.prop_get");
                 this.m.i64ConstBits(...f64Bits(1));
                 this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
                 this.m.localSet(this.scratch);
@@ -3409,7 +3409,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const off = this._fieldIndex(ts.isPrivateIdentifier(e.operand.name) && this._curClass ? "#" + this._curClass + "#" + e.operand.name.text : e.operand.name.text);
             this.emitTaggedExpr(e.operand.expression);
             this.m.localSet(this.scratchObj);
-            this.m.localGet(this.scratchObj); this.m.i32WrapI64(); this.m.i64Load(3, off);
+            this.m.localGet(this.scratchObj); this.m.i32Const(this._strId(ts.isPrivateIdentifier(e.operand.name) && this._curClass ? "#" + this._curClass + "#" + e.operand.name.text : e.operand.name.text)); this.m.call("qz.prop_get");
             this.m.localSet(this.scratch);          // scratch=旧值（表达式结果）
             this.m.localGet(this.scratch);
             this.m.i64ConstBits(...f64Bits(1));
