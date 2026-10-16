@@ -2978,6 +2978,29 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isTaggedTemplateExpression(e)) {
         // tag`a${1}b`：构造字面量数组 [a, b]（含 raw 省略）+ 值 1 → closure_call(tag, arr, a0, a1, a2)
         const M = this.m, t = this._expEnter();
+        // String.raw`…`：raw 文本 = 各段源码原文（去定界符）→ 直接按 ToString 拼接（无需 strings.raw 表）
+        if (ts.isPropertyAccessExpression(e.tag) && ts.isIdentifier(e.tag.expression) && e.tag.expression.text === "String" && e.tag.name.text === "raw") {
+            const rawOf = (lit) => {
+                let txt = lit.getText();
+                if (txt.startsWith("`") || txt.startsWith("}")) txt = txt.slice(1);
+                if (txt.endsWith("${")) txt = txt.slice(0, -2);
+                else if (txt.endsWith("`")) txt = txt.slice(0, -1);
+                return txt;
+            };
+            const M = this.m, t = this._expEnter();
+            const noSub = ts.isNoSubstitutionTemplateLiteral(e.template);
+            const spans = noSub ? [] : e.template.templateSpans;
+            this._emitStrLitHandle(noSub ? rawOf(e.template) : rawOf(e.template.head));   // 首段 raw
+            for (const sp of spans) {
+                this.emitTaggedExpr(sp.expression);
+                M.call("qz.to_string");                                  // ToString（string hint）
+                this._emitConcat();
+                this._emitStrLitHandle(rawOf(sp.literal));
+                this._emitConcat();
+            }
+            this._expLeave();
+            return;
+        }
         const noSub0 = ts.isNoSubstitutionTemplateLiteral(e.template);
         // 标签为**已知形参**的函数（本作用域函数声明/闭包）→ 按形参表落栈（rest 打包 / 元数补齐；否则 rest 形参会拿到非数组）
         const tagName0 = ts.isIdentifier(e.tag) ? e.tag.text : null;
@@ -3029,6 +3052,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         // 数值全局常量（无需 import）：NaN/Infinity
         if (e.text === "NaN") { this.m.i64ConstBits(...f64Bits(NaN)); return; }
         if (e.text === "Infinity") { this.m.i64ConstBits(...f64Bits(Infinity)); return; }
+        if (this.classes.has(this._className(e.text))) throw new Error("[tagged] 类名作值未实现（仅支持 new C(...) / c instanceof C / C.m() / C.x；见 ASSESSMENT 限制）");
         this._emitCapturedRead(e.text); return;
     }
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) { this._emitLambdaNew(e); return; }

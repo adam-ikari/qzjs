@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### String.raw + 类名作值报错（2026-10-16）
+- **`String.raw` 标签**：编译期按源码原文取 raw 段（去模板定界符）+ `ToString(插值)` 拼接 → 与 JS 一致（此前因 strings 数组无 `.raw` 表而运行时 loud）。
+- **类名作值**：给出明确编译期报错（此前为「未定义捕获变量: C」）；`new C()` / `c instanceof C` / `C.m()` / `C.x` 仍正常。
+- 结果：**337/345（97.7%）**；**残余 8 项全部为 loud**；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 类表达式 / 私有静态成员（2026-10-16）
 - **类表达式**（`const C = class {…}`、`class Named {…}`、`{ K: class {…} }`）：收集期合成类名并登记绑定别名 → `new C(...)`、`c instanceof C`、`C.staticMethod()` 按普通类处理；作为**值**使用仍编译期 loud（无类值表示）。
 - **私有静态字段/方法**：`static #n` / `static #m()`（此前私有字段分支忽略 `static` → 变成实例字段，读取静默 NaN）；键统一为 `#类名#名`，静态读/写/`++`/复合赋值与动态分派均按此键（修复 `#name` 二次限定）。
