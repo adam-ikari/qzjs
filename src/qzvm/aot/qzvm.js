@@ -179,7 +179,7 @@ function makeQzvm(strings, opts) {
     return out;
   };
   const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
-  const isObjHandle = (u) => { const h = u >> 48n; if (h === TAG_HI) return (u & MASK32) >= 8n; return h === INST_HI || h === HOST_HI || h === CLO_HI; };
+  const isObjHandle = (u) => { const h = u >> 48n; if (h === TAG_HI) return (u & MASK32) >= 8n; return h === INST_HI || h === HOST_HI || h === CLO_HI || h === 0x7ffbn; };   // 数组：引用同一性
   const statics = new Map();
   let fieldEntries = [];                  // [[name, byteOffset], ...]（bindFields 设；与 emitter _fieldIndex 一致）
   const bindFields = (fields) => { fieldEntries = (fields || []).map((n, i) => [n, (i + 1) * 8]); };
@@ -229,7 +229,7 @@ function makeQzvm(strings, opts) {
     }
     { const m = symProps.get(off);                       // 符号键属性（own enumerable symbol）
       if (m) for (const [sy, tv] of m) Object.defineProperty(o, sy, { value: toJS(tv), enumerable: true, writable: true, configurable: true }); }
-    pojoOf.set(o, { off, mem });
+    pojoOf.set(o, { off, mem, isInst });
     // 类方法驱动的强制转换钩子（JSON.stringify 用 toJSON；String()/+ 用 toString/valueOf）——非枚举，不进 Object.keys/JSON
     if (mem && isInst) {                             // 仅实例才有类方法钩子（POJO 的 clsId 恒为 0，会撞第一个类的 id）
       const clsId = new DataView(mem.buffer).getInt32(off, true);
@@ -372,7 +372,8 @@ function makeQzvm(strings, opts) {
   const own = (o, k) => (o && Object.prototype.hasOwnProperty.call(o, k)) ? o[k] : undefined;
   const bitsOf = (e) => Array.isArray(e) && arrOf.has(e) ? arrOf.get(e)   // 来自 wasm 的数组 → 原句柄（别名）
                      : typeof e === "function" && cloOf.has(e) ? cloOf.get(e)
-                     : (e !== null && typeof e === "object" && pojoOf.has(e) && pojoOf.get(e).mem === mem) ? (TAG | BigInt(pojoOf.get(e).off))
+                     : (e !== null && typeof e === "object" && pojoOf.has(e) && pojoOf.get(e).mem === mem)
+                       ? ((pojoOf.get(e).isInst ? (0x7ffen << 48n) : TAG) | BigInt(pojoOf.get(e).off))   // 实例 → 实例 tag（回调里方法调用需要）
                      : typeof e === "string" ? strWriteback(e)
                      : typeof e === "number" ? numToBits(e)
                      : typeof e === "boolean" ? boxBool(e)
@@ -895,18 +896,25 @@ function makeQzvm(strings, opts) {
     // 对象字面量的方法（闭包，第一个形参为 self）：宿主调用时转发接收者
     object_set_method: (o, k, v) => {
       const obj = handles[idxOf(o)];
-      obj[strings[k]] = function (...args) { return toJS(closureCall(v, o, ret(args[0]), ret(args[1]), ret(args[2]))); };
+      obj[strings[k]] = function (...args) {
+        const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : o;   // 实际接收者（原型链调用时 != 定义对象）
+        return toJS(closureCall(v, selfH, ret(args[0]), ret(args[1]), ret(args[2])));
+      };
       obj[strings[k]].__qzClo = v;   // 原始闭包句柄（访问器调用需替换 this）
     },
     object_set_method_key: (o, keyHandle, v) => {   // 计算键名方法（Symbol.iterator 等）
       const obj = handles[idxOf(o)], key = toJS(keyHandle);
-      obj[key] = function (...args) { return toJS(closureCall(v, o, ret(args[0]), ret(args[1]), ret(args[2]))); };
+      obj[key] = function (...args) {
+        const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : o;
+        return toJS(closureCall(v, selfH, ret(args[0]), ret(args[1]), ret(args[2])));
+      };
       obj[key].__qzClo = v;
     },
     obj_accessor: (o, k, g, s2) => {
       const name = strings[k], obj = handles[idxOf(o)], opt = {};
-      if (BigInt.asUintN(64, g) >> 48n === CLO_HI) opt.get = () => toJS(closureCall(g, o, TAG, TAG, TAG));
-      if (BigInt.asUintN(64, s2) >> 48n === CLO_HI) opt.set = (v) => { closureCall(s2, o, ret(v), TAG, TAG); };
+      const selfOf = function () { return (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : o; };
+      if (BigInt.asUintN(64, g) >> 48n === CLO_HI) opt.get = function () { return toJS(closureCall(g, selfOf.call(this), TAG, TAG, TAG)); };
+      if (BigInt.asUintN(64, s2) >> 48n === CLO_HI) opt.set = function (v) { closureCall(s2, selfOf.call(this), ret(v), TAG, TAG); };
       if (opt.get || opt.set) Object.defineProperty(obj, name, { get: opt.get, set: opt.set, configurable: true, enumerable: true });
     },
     obj_merge: (target, src) => {
@@ -962,6 +970,19 @@ function makeQzvm(strings, opts) {
       syncOrder(); const off = Number(u & MASK32); let l = orderMap.get(off);
       if (!l) { l = []; orderMap.set(off, l); }
       for (const nm of strings[sid].split("\u0000")) { if (nm && l.indexOf(nm) < 0) l.push(nm); }
+    },
+    // delete o.k：宿主对象真删（原型链可继续透出）；POJO/实例 → 槽写 undefined sentinel（等价删除）
+    prop_delete: (recv, id) => {
+      const name = strings[id];
+      const u = BigInt.asUintN(64, recv), hi = u >> 48n;
+      if (hi === HOST_HI) { const o = handles[idxOf(recv)]; if (o !== null && typeof o === "object") delete o[name]; }
+      else if ((hi === TAG_HI && idxOf(recv) >= 8) || hi === INST_HI) {
+        const off0 = idxOf(recv);
+        const e2 = fieldEntries.find(([n]) => n === name);
+        if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(off0 + e2[1], TAG, true);   // 槽置 undefined（等价删除）
+        else { syncExtras(); extras.delete(off0 + "|" + name); }
+      }
+      syncOrder(); { const l = orderMap.get(idxOf(recv)); if (l) { const ix = l.indexOf(name); if (ix >= 0) l.splice(ix, 1); } }
     },
     // 写前写保护检查（仅在程序使用 freeze/seal/preventExtensions 时由产物调用）：冻结/不可扩展对象写入 → 抛 TypeError
     prot_check: (v, nameId) => {
@@ -1138,7 +1159,7 @@ function makeQzvm(strings, opts) {
     seq:  (a, b) => { const ua = BigInt.asUintN(64, a), ub = BigInt.asUintN(64, b); const oa = isObjHandle(ua), ob = isObjHandle(ub); return oa || ob ? bool(oa && ob && ua === ub) : bool(toJS(a) === toJS(b)); },
     sne:  (a, b) => { const ua = BigInt.asUintN(64, a), ub = BigInt.asUintN(64, b); const oa = isObjHandle(ua), ob = isObjHandle(ub); return oa || ob ? bool(!(oa && ob && ua === ub)) : bool(toJS(a) !== toJS(b)); },
     // 宽松相等 == / 不等 !=：JS 强制转换（ToPrimitive/ToNumber；1=="1"=true、null==undefined=true）
-    eq:   (a, b) => bool(toJS(a) == toJS(b)),
+    eq:   (a, b) => { const ua = BigInt.asUintN(64, a), ub = BigInt.asUintN(64, b); const oa = isObjHandle(ua), ob = isObjHandle(ub); return bool(oa && ob ? ua === ub : toJS(a) == toJS(b)); },   // 两个对象 → 身份；其余走 JS 宽松相等（含对象↔原始值强转）
     ne:   (a, b) => bool(toJS(a) != toJS(b)),
     bnot: (a) => box(~(toJS(a) | 0)),
     to_num: (a) => box(+toJS(a)),

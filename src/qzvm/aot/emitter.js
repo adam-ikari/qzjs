@@ -90,6 +90,7 @@ const QZ = {
   field_order_lit: { params: ["i64", "i32"], results: [] },
   field_order_del: { params: ["i64", "i64"], results: [] },              // 删除属性时同步插入序名单              // 批量登记（\u0000 分隔的名单，编译期常量）
   prot_check: { params: ["i64", "i32"], results: [] },                       // 写保护检查（freeze/seal）
+  prop_delete: { params: ["i64", "i32"], results: [] },                       // delete o.k（宿主真删 / POJO 槽置 undefined）
   elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
   // wasm 侧仅用于 0x7FFB 数组；字符串/其它不适用。
@@ -2682,7 +2683,7 @@ Emitter.prototype._emitConcat = function (inPlace) {
             M.drop();
             M.i32Const(SCRATCH); M.i32Load(2, 0); M.localSet(this.sT[0]);
             M.i32Const(SCRATCH + 4); M.localSet(this.sT[2]);
-            M.localGet(this.scratchB); M.i32WrapI64();
+            M.localGet(this.scratchB); if (!this._concatInPlace) M.call("qz.str_dup"); M.i32WrapI64();   // 左操作数可能被别名引用 → 先私有副本（此前缺失 → 静默改到他处）
             M.localGet(this.sT[2]); M.localGet(this.sT[0]); M.call("qzs_append");
             this._strTag();
           M.else_();
@@ -3651,10 +3652,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             M.localGet(t.v); M.localGet(t.w); M.call("qz.delete_index");
             M.drop();
         } else if (ts.isPropertyAccessExpression(op)) {
-            // 宿主对象 → object_delete；POJO/实例 → 槽写 undefined（经宿主，越界即报错，不静默越界写）
+            // delete obj.k：宿主对象真删（原型可透出）；POJO/实例槽置 undefined（等价删除）——统一由 prop_delete 处理
+            M.localGet(t.v); M.i32Const(this._strId(op.name.text)); M.call("qz.prop_delete");
             if (this.usesKeyOrder) { M.localGet(t.v); this._emitStrLitHandle(op.name.text); M.call("qz.field_order_del"); }   // 插入序名单同步移除
-            M.localGet(t.v); this._emitStrLitHandle(op.name.text); this._emitUndefined(); M.call("qz.set_index");
-            this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
+            this._emitErrCheck(false);
         } else throw new Error("[tagged] delete 仅支持属性/下标（delete obj.k / delete a[i]）");
         this._expLeave();
         M.i64ConstBits(1, 0x7ffc0000);   // true（tagged bool）
@@ -3799,6 +3800,8 @@ Emitter.prototype._emitIsHandle = function (scratch) {
     // 均须回退宿主（f64ReinterpretI64 对它们是 NaN 位型 → 原生 f64 运算全错）。
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+    M.i32Or();
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();   // wasm 数组（===/== 需引用同一性）
     M.i32Or();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffcn); M.i64Eq();
     M.i32Or();

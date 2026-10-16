@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十三批差分审计（2026-10-16）
+- 新增 `audit_corpus13.js`（20 例：别名/共享、原型链、键序（整数键）、`this` 绑定、shallow 语义、迭代器、提取方法）。
+- **字符串 `+=` 数字快路径缺 `str_dup`（静默错值）**：`s += n` 的数字分支直接 `qzs_append` 原地追加 → 被容器快照的同一字符串被改写（如 `parts.push(r)` 后所有元素变成最终值）。现按 `_concatInPlace` 先取私有副本。
+- **对象字面量方法/访问器的 `this`**：改为**实际接收者**（`tagHandle(this)`）——此前绑定义时对象 → 原型链调用（`Object.create` 继承）读到错误字段。
+- **`delete` 语义**：宿主对象真删（原型可继续透出，此前写成自有 undefined 遮蔽原型）；POJO/实例槽置 undefined；插入序名单同步移除。
+- **对象元素在回调中的身份**：`map/filter/...` 回调收到的实例/POJO 现为**原句柄**（此前物化成快照 → 方法调用报「无方法」、身份丢失）；`bytesOf` 还原实例 tag。
+- **`==` / `===` 引用同一性**：数组（0x7FFB）纳入对象句柄判定（此前物化成不同 JS 数组 → 恒 false）；`eq` 对「双方皆对象」走句柄同一性，其余仍走 JS 宽松相等。
+- 结果：**370/381（97.1%）**；残余 11 项 = 7 loud + 4 已知静默差异（见 ASSESSMENT）；test_aot 233 checks ALL PASS；ctest 32/32 全绿。
+
 ### 私有成员修正（2026-10-16）
 - **私有字段不参与枚举**：物化时跳过 `#类名#名`（JS 私有槽不是自有可枚举属性）→ `Object.keys(instance)`/`JSON.stringify` 与 JS 一致。
 - **静态私有字段**：`static #s` 的存储键与读路径统一为 `#类名#名`（`statics_has`/`static_get` 此前用裸名 → 读为 undefined）；`P.#s` 的属性读改走静态路径（私有名 + 类名接收者不再当实例私有读）。
