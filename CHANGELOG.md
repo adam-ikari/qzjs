@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 顶层函数作值 + 模块级语句执行（2026-10-16）
+- **顶层函数作值**：`[1,2,3].map(namedFn)`、`const h = fn; h()`、`fn.call/apply/bind` 与 JS 一致。`qz.fn_value(nameId, arity)` 把顶层函数包装为宿主函数句柄（按 arity 补 TAG、同名缓存）；`closureCall` 支持宿主函数句柄（只传真传实参）；函数名接收者的属性写走 `qz.prop_set`（此前内存快路径把句柄低 32 位当地址 → 静默越界）。探针 `corpus_fv.js` 2/3（`fn.prop` 再读回得 0，待查）。
+- **模块级非声明语句执行（静默 bug 修复）**：`__module_init` 此前只收集变量语句 → 模块级副作用（`fx.extra = 5`、表达式/if/for/try 语句）被**静默丢弃**；现纳入 init（排除 function/class/interface/type/module/import/export/enum 声明）。
+- 分项验证：`test_aot` 233 ALL PASS；corpus13/7/21/10 无回归。
+
 ### 第二十二批差分审计（2026-10-16）
 - 新增 `audit_corpus22.js`（19 例：默认参数间依赖、原型链 + `Object.create`、类字段/静态块顺序、正则分组与标志、错误链与 finally、Map/Set 对象键、迭代协议（Map/Set/entries/解构循环）、描述符与原型、字符串比较与排序、模块模式闭包、Math 取整与浮点、**逻辑赋值 `||= &&= ??=`（字段/索引）**、类继承覆写与 `super`、数组聚合、复杂 switch、循环内 try/finally+continue、`toJSON`/replacer、多键排序、函数形参嵌套解构）。
 - **修复：`||=` / `&&=` 支持字段/索引目标**（此前按标识符处理 → `_emitVarStore(undefined)` → loud `未定义变量: undefined`）；与 `??=` 同款（接收者读+写各求值一次，带副作用则 loud）。探针 `corpus_la.js` **4/4**。

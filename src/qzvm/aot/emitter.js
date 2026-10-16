@@ -135,6 +135,7 @@ const QZ = {
   regex: { params: ["i32"], results: ["i64"] },                        // 正则字面量 → 宿主 RegExp
   str_dup: { params: ["i64"], results: ["i64"] },                     // 字符串私有副本（不可变语义）
   iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组
+  fn_value: { params: ["i32", "i32"], results: ["i64"] },   // 顶层函数作值：包装为宿主函数句柄（arity = 形参数，缺省补 TAG）
   builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
   spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
   call_value: { params: ["i64", "i64", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // v, a0..a3, 溢出实参数组, recv   // 值调用（闭包/宿主函数）
@@ -515,6 +516,11 @@ class Emitter {
         if (idx === undefined) {
             const g = this.moduleGlobals && this.moduleGlobals.get(name);
             if (g !== undefined) { M.globalGet(g); return; }   // 模块级变量
+            if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
+                // 顶层函数作值（回调/别名/属性宿主）→ 包装为宿主函数句柄（此前 loud：未定义捕获变量）
+                M.i32Const(this._strId(this._fnName(name))); M.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0); M.call("qz.fn_value");
+                return;
+            }
             if (BUILTIN_GLOBALS.has(name)) { M.i32Const(this._strId(name)); M.call("qz.builtin_member"); return; }   // 内建全局作值（Symbol/Math/JSON…）
             throw new Error("未定义捕获变量: " + name);
         }
@@ -528,6 +534,10 @@ class Emitter {
         if (idx === undefined) {
             const g = this.moduleGlobals && this.moduleGlobals.get(name);
             if (g !== undefined) { this.m.globalGet(g); return; }   // 模块级变量
+            if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
+                this.m.i32Const(this._strId(this._fnName(name))); this.m.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0); this.m.call("qz.fn_value");
+                return;
+            }
             if (BUILTIN_GLOBALS.has(name)) { this.m.i32Const(this._strId(name)); this.m.call("qz.builtin_member"); return; }
             throw new Error("未定义变量: " + name);
         }
@@ -2309,6 +2319,12 @@ function compileTS(input, outWasm, opts = {}) {
                     else if (ts.isNumericLiteral(d.initializer)) modConstLit.set(d.name.text, Number(d.initializer.text.replace(/_/g, "")));
                 }
                 modStmts.push(st);
+            } else if (!ts.isFunctionDeclaration(st) && !ts.isClassDeclaration(st) && !ts.isInterfaceDeclaration(st)
+                && !ts.isEnumDeclaration(st) && !ts.isEnumMember(st)
+                && !ts.isTypeAliasDeclaration(st) && !ts.isModuleDeclaration(st)
+                && st.kind !== ts.SyntaxKind.ImportDeclaration && st.kind !== ts.SyntaxKind.ExportDeclaration
+                && st.kind !== ts.SyntaxKind.ExportAssignment) {
+                modStmts.push(st);   // 模块级其它语句（表达式副作用、if/for/try 等）→ 纳入 __module_init（此前被**静默丢弃**）
             }
             walkCls(st);
         }
@@ -4384,6 +4400,15 @@ Emitter.prototype.emitTaggedRem = function () {
 // 属性/索引赋值：值已在栈（i64）。注意会重新求值 receiver（读+写各一次；无副作用表达式安全）。
 Emitter.prototype._emitStoreProp = function (left) {
     const M = this.m, t = this._expEnter();       // 值/接收者须存活于嵌套求值
+    if (ts.isPropertyAccessExpression(left) && ts.isIdentifier(left.expression) && this.fnNames && this.fnNames.has(left.expression.text)
+        && !this.capMap.has(left.expression.text) && this._local(left.expression.text) === undefined
+        && !(this.moduleGlobals && this.moduleGlobals.get(left.expression.text) !== undefined)) {
+        // 顶层函数作值（宿主函数句柄）：属性写走宿主 qz.prop_set（内存快路径会写到句柄低 32 位 → 静默错/越界）
+        this.emitTaggedExpr(left.expression); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set");
+        M.localGet(t.w);
+        this._expLeave();
+        return;
+    }
     if (ts.isPropertyAccessExpression(left) && ts.isSuperKeyword(left.expression)) {   // super.v = x：父类 setter 优先，否则按父类字段槽直写
         const parent = this._curClassObj && this._curClassObj.parent;
         if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");

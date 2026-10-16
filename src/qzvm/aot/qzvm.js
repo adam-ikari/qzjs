@@ -164,6 +164,7 @@ function makeQzvm(strings, opts) {
   const isArrH = (b) => (BigInt(b) >> 48n) === 0x7ffbn;
   // wasm 原生数组（0x7FFB）：header[0]=len，header[2]=dataOff，data = i64×len（元素解引用递归）。
   const arrOf = new WeakMap();   // JS 数组 → 原 wasm 数组句柄（往返还原，保持别名）
+  let fnCacheMap = null;         // 顶层函数名 → 宿主包装句柄（fn_value：同一函数名恒等同一句柄）
   const arrOfHost = new WeakMap();   // **宿主来源**的 JS 数组 → {h, bump}：同一 bump 世代内同一数组恒同一句柄
                                      // （否则 `h.c` 每次读都新建 box → `h.c[0]=v` 写入丢失；见 ASSESSMENT 已知静默项）
   const arrRead = (b) => {
@@ -428,6 +429,11 @@ function makeQzvm(strings, opts) {
   // 闭包调用：handle → 堆对象 [funcidx:i32][nCaps:i32][cell×N i64]。
   // blk = off+8（cell 起点），按 lamMeta[funcidx]={name,n} 调 wasm 导出 __lam_N。
   const closureCall = (handle, a0, a1, a2, a3, ovfArr, recv) => {
+    if ((BigInt.asUintN(64, handle) >> 48n) === HOST_HI) {         // 宿主函数句柄（顶层函数作值/回调）→ 直接调用
+      const hf = handles[idxOf(handle)];
+      if (typeof hf !== "function") throw new Error("closure_call: 非函数值");
+      return ret(hf(...[a0, a1, a2, a3].filter(givenSlot).map(toJS)));   // 只传真传了的实参
+    }
     const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
     const funcidx = new DataView(mem.buffer).getUint32(off, true);   // 免 4 对齐（bump 偏移可非 4 倍数）
     const meta = lamMeta && lamMeta[funcidx];
@@ -1635,6 +1641,23 @@ function makeQzvm(strings, opts) {
       for (const v of toJS(x)) a2.push(v);
       arrSetInPlace(acc, a2);
       return acc;
+    },
+    // 顶层函数作值（回调/别名/属性宿主）：包装为宿主 JS 函数，调用时按 arity 补 TAG 后直调 wasm 导出
+    fn_value: (sid, arity) => {
+      const nm = strings[sid];
+      const n = arity | 0;
+      fnCacheMap = fnCacheMap || new Map();
+      const hit = fnCacheMap.get(nm);
+      if (hit !== undefined) return hit;                       // 同名 → 同一宿主句柄（属性/身份稳定）
+      const hv = tagHandle(function (...as) {
+        const f = exportsRef && exportsRef[nm];
+        if (typeof f !== "function") throw new Error("fn_value: 未导出函数 " + nm);
+        const a2 = as.slice(0, n).map(x => (x === undefined || x === null) ? TAG : bitsOf(x));   // JS 少传 = undefined → TAG
+        while (a2.length < n) a2.push(TAG);
+        return toJS(f(...a2));
+      });
+      fnCacheMap.set(nm, hv);
+      return hv;
     },
     builtin_spread: (id, arr) => {
       const name = strings[id];
