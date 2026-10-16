@@ -462,6 +462,27 @@ function makeQzvm(strings, opts) {
     const u = BigInt.asUintN(64, x);
     return !(u >> 48n === TAG_HI && (u & 0xffff_ffffn) <= 1n);
   };
+  // 数组迭代器（values/keys/entries）：惰性读 wasm 内存 → 迭代期间的 push/length 变化可见（JS 迭代的是活数组）
+  const liveIter = (recv, kind) => {
+    let i = 0;
+    const it = {
+      next() {
+        const off = Number(BigInt.asUintN(64, recv) & MASK32);
+        const dv = new DataView(mem.buffer);
+        const len = dv.getInt32(off, true);
+        if (i >= len) return { value: undefined, done: true };
+        const dataOff = dv.getInt32(off + 8, true);
+        const raw = BigInt.asUintN(64, dv.getBigInt64(dataOff + i * 8, true));
+        const idx = i++;
+        if (kind === "keys") return { value: idx, done: false };
+        if (raw === HOLE) return { value: undefined, done: false };
+        const v = toJS(raw);
+        return { value: kind === "values" ? v : [idx, v], done: false };
+      },
+      [Symbol.iterator]() { return this; },
+    };
+    return tagHandle(it);
+  };
   const doArrMethod = (recv, mid, a0, a1, a2, a3) => {
     const extra = (first) => [a0, a1, a2, a3].slice(first).filter(givenSlot).map(toJS);
     const name = strings[mid];
@@ -506,9 +527,9 @@ function makeQzvm(strings, opts) {
                             const items = [a2, a3].slice(0, 2).filter(givenSlot).map(toJS);
                             r = src.slice(); r.splice(st2, givenSlot(a1) ? toJS(a1) : src.length - (st2 < 0 ? Math.max(0, src.length + st2) : Math.min(st2, src.length)), ...items); break; }
       case "with":         r = toJS(a0) < 0 ? arr().slice(0, arr().length + toJS(a0)).concat([toJS(a1)], arr().slice(arr().length + toJS(a0) + 1)) : arr().slice(0, toJS(a0)).concat([toJS(a1)], arr().slice(toJS(a0) + 1)); break;
-      case "entries":      return tagHandle(arr().entries());
-      case "keys":         return tagHandle(arr().keys());
-      case "values":       return tagHandle(arr().values());
+      case "entries":      return liveIter(recv, "entries");   // 惰性读内存：迭代期间的 push/length 变化可见（JS 迭代活数组）
+      case "keys":         return liveIter(recv, "keys");
+      case "values":       return liveIter(recv, "values");
       case "copyWithin":   { const a3 = arr(); a3.copyWithin(toJS(a0), a1 === undefined ? 0 : toJS(a1), a2 === undefined ? a3.length : toJS(a2)); arrSetInPlace(recv, a3); return recv; }
       case "toString":     r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(","); break;
       case "toSorted":     r = givenSlot(a0) ? arr().slice().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv))) : arr().slice().sort(); break;

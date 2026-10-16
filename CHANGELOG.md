@@ -4,6 +4,10 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 数组迭代器惰性化（2026-10-16）
+- `values()` / `keys()` / `entries()` 改为**惰性读 wasm 内存**（`liveIter`）：每次 `next()` 读当前长度与元素 → 迭代期间的 `push`/长度变化可见（JS 迭代的是活数组；此前取的是取值时刻的副本快照），洞按 `undefined` 贡献。
+- 结果：**371/381（97.4%）**；残余 10 项 = 7 loud + 3 已知静默差异（提取方法不抛错、`this` 捕获 NaN、…）；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 提取方法的 this 与 undefined 属性读（2026-10-16）
 - 对象字面量方法/访问器包装：`this` 非对象时传 **undefined**（JS 语义；此前回落定义时对象 → 提取后调用误读到定义对象的字段）。
 - `prop_get`：接收者为 undefined/null 时抛 `TypeError: Cannot read properties of …`（JS 语义；此前静默 undefined）。注：wasm 内存快路径仍直接返回 undefined，故该错误只在经宿主分派的读取上生效。
