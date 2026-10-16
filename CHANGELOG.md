@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 键序（Key order）修复 —— 已知静默清零（2026-10-16）
+- **根因**：宿主 `qz.builtin` 的 `Object.assign` 专用**就地合并**分支逐个写槽/`extras`，但**从不登记键序** → 目标对象物化时键序退化为槽序（fieldMap 序）→ `Object.assign({}, {d:4}, over)` 得 `a,b,c,d`（JS `a,b,d,c`）。
+- **修复**：合并时按 JS 规则登记键序（已存在键保持原位、**新键追加**）。
+- **配套（同类问题闭环）**：① 新增 `qz.order_note(i64 off, i32 strId)` —— 键取 `strings[sid]`，**不触内存**，故 start 段（`__module_init` 期间宿主 `mem` 尚未 `bindMem`）也能登记模块级对象键序；emitter 编译期计算模块级 const 的**静态键序**（`modObjKeys`，对象字面量 + 对已知 const 的展开；无法静态定序则跳过）；② 展开路径补 `qz.spread_order(dst, src)`（按源键序表/物化视图补登记）+ 对**显式属性**发 `qz.field_order`（此前只写槽不登记序）；③ `qz.field_order`/`spread_order` 在 `!mem` 时安全 return。
+- 验证：`corpus_oa3.js` **3/3**、`audit_corpus21.js` **18/18**；`test_aot` 233 ALL PASS。
+- 结果：**522/530（98.5%）**，残余 7 项**全部 loud** —— **零已知静默差异**。
+
 ### 方法 >4 形参 / rest（对象字面量方法，2026-10-16）
 - **宿主对象方法分支**：`method_call` 的宿主对象路径把 `ovf` 的实参 4.. 接在 4 槽之后（`fn.apply(obj, as)`）——此前只传 4 槽，第 5 个实参丢失（rest 求和少一项）。
 - **物化方法包装器**：`object_set_method` 的 `obj[k] = function(...args)` 现转发 `ovf`（`args.slice(3)` → 第 6 参）→ 否则 `closureCall` 收到 `hasEx=false`，rest 数组缺失、`for...of` 报「该值不可迭代」。

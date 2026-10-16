@@ -79,6 +79,7 @@ const QZ = {
   arr_set_index: { params: ["i64", "i64", "i64"], results: ["i64"] },   // a[i]=v（越界扩容）
   arr_delete_index: { params: ["i64", "i64"], results: ["i64"] },       // delete a[i]
   delete_index: { params: ["i64", "i64"], results: ["i64"] },           // delete o[k] / a[i]
+  spread_order: { params: ["i64", "i64"], results: [] },   // {..src}：把 src 的键序补登记到 dst
   obj_merge: { params: ["i64", "i64"], results: [] },           // {...hostObj} 物化合并
   obj_new: { params: [], results: ["i64"] },                    // 新宿主对象（含方法/访问器的字面量）
   obj_accessor: { params: ["i64", "i32", "i64", "i64"], results: [] },   // defineProperty(get/set 闭包回调)
@@ -88,7 +89,8 @@ const QZ = {
   is_symbol_host: { params: ["i64"], results: ["i32"] },                  // 宿主值是否 JS symbol → 0/1
   err_stack: { params: ["i64"], results: ["i64"] },                      // Error 族实例的 .stack（合成）
   tagged_strings: { params: ["i64", "i64"], results: ["i64"] },          // 用户标签模板：cooked+raw → 带 .raw 的 strings 对象
-  field_order: { params: ["i64", "i64"], results: [] },                  // 属性写入登记插入序
+  field_order: { params: ["i64", "i64"], results: [] },                  // 属性写入登记插入序（键为字符串句柄，需内存）
+  order_note: { params: ["i64", "i32"], results: [] },                  // 同上，键取 strings[strId]：**不触内存** → start 段（模块初始化）可用
   field_order_lit: { params: ["i64", "i32"], results: [] },
   field_order_del: { params: ["i64", "i64"], results: [] },              // 删除属性时同步插入序名单              // 批量登记（\u0000 分隔的名单，编译期常量）
   prot_check: { params: ["i64", "i32"], results: [] },                       // 写保护检查（freeze/seal）
@@ -294,6 +296,11 @@ class Emitter {
                     this._fnNodes = this._fnNodes || new Map(); this._fnNodes.set(name.text, d.initializer);
                 }
                 this.emitTaggedExpr(d.initializer); this._emitVarStore(name.text, this.scratchB); this.m.drop();
+                if (this._inModInit && this.usesKeyOrder && this._modObjKeys && this._modObjKeys.has(name.text)) {
+                    for (const k2 of this._modObjKeys.get(name.text)) {   // 模块级对象键序（start 段 mem 未绑定 → 用 order_note）
+                        this._emitVarGet(name.text); this.m.i32Const(this._strId(k2)); this.m.call("qz.order_note");
+                    }
+                }
             }
             return;
         }
@@ -2307,6 +2314,30 @@ function compileTS(input, outWasm, opts = {}) {
         }
     };
     for (const f of sfs) collectDecls(f);
+    // 模块级 const 的**静态键序**（对象字面量 + 对已知 const 的展开；未知则整条跳过 = 保持既有行为）
+    const modObjKeys = new Map();
+    {
+        const keysOfNode = (node, depth) => {
+            if (!node || depth > 8 || !ts.isObjectLiteralExpression(node)) return null;
+            const out = [];
+            for (const prop of node.properties) {
+                if (ts.isPropertyAssignment(prop) || ts.isShorthandPropertyAssignment(prop)) {
+                    if (!ts.isIdentifier(prop.name) && !ts.isStringLiteral(prop.name) && !ts.isNumericLiteral(prop.name)) return null;
+                    const nm = prop.name.text;
+                    if (out.indexOf(nm) < 0) out.push(nm);
+                } else if (ts.isSpreadAssignment(prop)) {
+                    const sub = ts.isIdentifier(prop.expression) ? modObjKeys.get(prop.expression.text) : keysOfNode(prop.expression, depth + 1);
+                    if (!sub) return null;
+                    for (const nm2 of sub) if (out.indexOf(nm2) < 0) out.push(nm2);
+                } else return null;   // 方法/访问器/计算键 → 无法静态定序
+            }
+            return out;
+        };
+        for (const d of modVars) if (ts.isIdentifier(d.name) && d.initializer) {
+            const ks = keysOfNode(d.initializer, 0);
+            if (ks) modObjKeys.set(d.name.text, ks);
+        }
+    }
     if (modStmts.length) {
         // 合成模块初始化函数：体 = 模块级变量语句（按源序），返回值 void；实例化时由 start 段自动执行。
         const initFn = ts.factory.createFunctionDeclaration(undefined, undefined, "__module_init", undefined, [],
@@ -2603,6 +2634,7 @@ function compileTS(input, outWasm, opts = {}) {
         for (const st of fns) { em.fnNames.add(st.name.text); em._fnParams.set(st.name.text, st.parameters.length); }
         for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
         em.moduleGlobals = em.moduleGlobals || new Map();
+        em._modObjKeys = modObjKeys;    // 模块级 const 的静态键序（对象字面量 + 已知 const 展开）
         em._inModInit = false;
         if (!m.collect) {
             if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
@@ -3590,13 +3622,16 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     Ma.localGet(ta.c); Ma.i32Const(8); Ma.i32Add(); Ma.localSet(ta.c);
                     Ma.br(0);
                     Ma.end(); Ma.end();
+                    if (this.usesKeyOrder) { Ma.localGet(ta.v); Ma.localGet(ta.w); Ma.call("qz.spread_order"); }   // 键序补登记（否则合并后键序退化为槽序）
                     Ma.else_();
                     Ma.localGet(ta.v); Ma.localGet(ta.w); Ma.call("qz.obj_merge");      // 宿主对象等 → 物化合并
+                    if (this.usesKeyOrder) { Ma.localGet(ta.v); Ma.localGet(ta.w); Ma.call("qz.spread_order"); }
                     Ma.end();
                 } else if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
                     Ma.localGet(ta.v); Ma.i32WrapI64();
                     this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);
                     Ma.i64Store(3, this._fieldIndex(p.name.text));
+                    if (this.usesKeyOrder) { Ma.localGet(ta.v); this._emitStrLitHandle(p.name.text); Ma.call("qz.field_order"); }   // 显式属性也登记键序
                 } else throw new Error("[tagged] 对象展开仅支持 属性/展开 混合（方法/访问器不支持）");
             }
             Ma.localGet(ta.v);
@@ -4749,7 +4784,6 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
     }
     {   // ovf：实参 4..（被调形参 >4 时由宿主按其 arity 解包；否则忽略）
         const ovfA = args.slice(3);   // 与闭包 ABI 同款：ex[0] = 实参 3（已在 a3）
-        if (process.env.QZDBG) console.error("[dbg] dynOvf argsLen=", args.length, "ovfLen=", ovfA.length);
         if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 方法调用的溢出实参与展开混用暂不支持");
         const lit = ts.factory.createArrayLiteralExpression(ovfA);
         lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;

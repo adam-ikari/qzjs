@@ -113,9 +113,9 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
-结果：**521/530 一致（98.3%）**；残余 9 项：**8 项 loud + 1 项已知静默**（`Object.assign` 多源键序）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**522/530 一致（98.5%）**；残余 7 项：**全部 loud**（零已知静默）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
-**残余 loud 清单（方法 >4 形参/rest 打通后，7 项 loud + 1 项已知静默）**
+**残余 loud 清单（键序修复后，7 项 loud，零已知静默）**
 
 **方法/对象方法 >4 形参 / rest（类路径已通，对象字面量 rest 未通）**：ABI 铺路已提交（`qz.method_call` 增第 7 参 `ovf`=实参 4..，7 处发射点补位，行为中性）。剩余补丁见 `/tmp/qzaux/patch_mo2.js`（方法/静态方法签名 +`i64` 槽、`$ovf` 形参槽、`_mEnter` 的 `$ovfArg` 预留 local 与 varMap `i<4?1+i:1+params.length+(i-4)`、`_emitOvfParamUnpack` 解包、动态分派传真实溢出数组、删「方法最多 4 参」守卫）。**第二轮尝试的结论（重要，可直接复用）**：
 - **local 布局 bug 已定位并修复**：`params` 必须是「前 4 个实参形参 + 补位 + `$ovf`」，即 `realParams.slice(0, 4).concat(["$p1"..].slice(0, max(0,4-len))).concat(len>4?["$ovf"]:[])`；此前写成 `realParams.concat(补位)` 导致 `params.length` 比 wasm 形参数多 1 → 之后所有 local（scratch/sT/objPool）错位 → 校验报 `expected [f64] but got [i64]`。修好后 wasm-validate 通过。
@@ -134,17 +134,10 @@
 9. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
 9. 静态成员体内 `this.<name>` 经**派生类**调用且派生类**自有覆写**该名 → loud（本实现 `this` ≡ 定义类；未覆写时与 JS 一致，故不报错）
 
-**已知静默差异（1 项）**：
-- **`Object.assign` 多源键序**：多源合并时新键的追加位置与 JS 不同。最小复现（`/tmp/qzaux/corpus_oa3.js`）：
-  `const base={a:1,b:2}; const over={...base,b:99,c:3}; Object.assign({}, {d:4}, over)` → JS `{"d":4,"a":1,"b":99,"c":3}`，本实现 `{"a":1,"b":99,"c":3,"d":4}`（**源被按后置优先处理**）。
-  已排除：`_emitBuiltinCall` 按序压栈（非逆序）、宿主 `[a0..a3].slice(0, arity || n).map(toJS)` 参数顺序正确、双源/字面量源场景一致。
-  指向：emitter 侧对 `Object.assign({}, …)` 的**对象字面量+展开**路径（`emitter.js` 展开分支按**槽序**做内存级合并 → 键序退化为 fieldMap 槽序）；或该路径与 builtin 路径的选择条件。
-- 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏过滤（探针 /tmp/qzaux/corpus_p1.js 的 hasown-nonenum）。
-  - **根因已定位（2026-10-16）**：键序登记函数（`qz.field_order` / `qz.spread_order`）在 **start 段 `__module_init`** 期间不可用 —— 宿主 `mem` 尚未绑定（glue 在 `WebAssembly.instantiate` **之后**才调 `qz.bindMem(instance.exports.memory)`，而 start 函数在 instantiate **之中**执行）→ `toJS(键句柄)` 走 `strRead` → `Cannot read properties of null (reading 'buffer')`。因此**模块级**展开构造对象（如 `const over = { ...base, b: 99, c: 3 }`）在 start 段拿不到键序 → 物化时退化为**槽序**（fieldMap 序）→ `Object.assign({}, {d:4}, over)` 得 `a,b,c,d`（JS `a,b,d,c`）。
-  - **两条已验证修法**（下一轮实施，任选其一）：① **模块导入内存**（`wasm-encoder` 已支持导入 shared memory —— C++ 运行器走的就是这条）→ 实例化前宿主即持有内存；② glue 在 `qz.bindMem` 之后调用导出的 `__order_init` 做二次登记（emitter 编译期已知模块级对象键名，可发 `field_order_lit` 风格调用）。
-  - 配套约 32 行改动已试并回退（避免未验证复杂度）：`qz.spread_order(dst, src)`（按 `orderMap`/物化视图补登记：已存在保持原位、新键追加）+ 展开路径对**显式属性**也发 `qz.field_order`（此前只写槽不登记序）+ 两者在 `!mem` 时安全 return。
-
-**已修（2026-10-16，第二十一批后）**：`JSON.parse` 结果里的数组字段此前每次读得到不同实例（wasm box 与宿主数组分离）→ 写入丢失；现宿主数组保持**宿主句柄**（`object_get`/`prop_get` 对 `Array.isArray` 值返回 `tagHandle`），元素读/写就地作用于真实 JS 数组 → 读值与 `JSON.stringify` 视图一致（探针 corpus_j1 3/3）。
+**已知静默差异：无（2026-10-16 清零）**
+- **`Object.assign` 多源键序**：已修。根因 = 宿主 `qz.builtin` 的 `Object.assign` **专用就地合并分支**逐个写槽/extras 但**从不登记键序** → 目标对象物化时退化槽序（fieldMap 序）。修复：合并时按 JS 规则登记（已存在键保持原位、新键追加）。
+- 配套（同一类问题的完整闭环）：① `qz.order_note(i64 off, i32 strId)` —— 键取 `strings[sid]`，**不触内存** → start 段（`__module_init`，此时宿主 `mem` 尚未 bindMem）也能登记模块级对象的键序（emitter 编译期已算出模块级 const 的静态键序，见 `modObjKeys`）；② 展开路径补 `qz.spread_order(dst, src)`（按源的键序表/物化视图补登记，已存在保持原位）+ 对**显式属性**发 `qz.field_order`；③ `qz.field_order`/`spread_order` 在 `!mem` 时安全 return。
+- 验证：`/tmp/qzaux/corpus_oa3.js` **3/3**、`audit_corpus21.js` **18/18**。
 
 **另：窄面 loud（避免静默错值，非缺陷残留）**：`o[带副作用] op= v` / `o[带副作用] ??= v`（重复求值风险）、`o(带副作用).f = v`、catch 解构的默认值/嵌套/rest、`o.f?.()` 之外的复杂可选链组合。
 

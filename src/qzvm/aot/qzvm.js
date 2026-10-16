@@ -1048,6 +1048,25 @@ function makeQzvm(strings, opts) {
       if (BigInt.asUintN(64, s2) >> 48n === CLO_HI) opt.set = function (v) { closureCall(s2, ret(v), TAG, TAG, TAG, undefined, selfOf.call(this)); };
       if (opt.get || opt.set) Object.defineProperty(obj, name, { get: opt.get, set: opt.set, configurable: true, enumerable: true });
     },
+    // {..src}：把 src 的自有可枚举键按**键序**补登记到 dst（已存在保持原位、新键追加 = JS 语义）
+    spread_order: (dst, src) => {
+      if (!mem) return;                                  // start 段 mem 未绑定 → 跳过（模块级对象的键序由 order_note 负责）
+      syncOrder(); syncExtras();
+      const so = Number(BigInt.asUintN(64, src) & MASK32), dof = Number(BigInt.asUintN(64, dst) & MASK32);
+      let srcList = orderMap.get(so);
+      if (!srcList) { const js = toJS(src); if (!js || typeof js !== "object") return; srcList = Object.keys(js); }
+      let dl = orderMap.get(dof); if (!dl) { dl = []; orderMap.set(dof, dl); }
+      for (const k of srcList) {
+        if (typeof k === "string" && k.charCodeAt(0) === 35) continue;
+        let present = extras.has(so + "|" + k);
+        if (!present) { const fe2 = fieldEntries.find(([n]) => n === k);
+          present = !!(fe2 && new DataView(mem.buffer).getInt32(so + 4, true) >= fe2[1] + 8
+                       && BigInt.asUintN(64, new DataView(mem.buffer).getBigInt64(so + fe2[1], true)) !== TAG); }
+        if (!present) { const js2 = toJS(src); present = !!(js2 && typeof js2 === "object" && k in js2); }
+        if (!present) continue;
+        if (dl.indexOf(k) < 0) dl.push(k);
+      }
+    },
     obj_merge: (target, src) => {
       const o = toJS(src);
       if (o == null) return;
@@ -1080,7 +1099,18 @@ function makeQzvm(strings, opts) {
 
 
     // 插入序登记（程序观察键序时才由产物调用）：Object.keys/for-in/JSON.stringify/对象展开 依赖插入序
+    // 键序登记（strId 版）：start 段 mem 未绑定时亦可用（模块级对象键序）
+    order_note: (v, sid) => {
+      const u = BigInt.asUintN(64, v); const hi = u >> 48n;
+      if (!((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI)) return;
+      const name = strings[sid];
+      if (typeof name !== "string" || name.charCodeAt(0) === 35) return;
+      syncOrder(); const off = Number(u & MASK32); let l = orderMap.get(off);
+      if (!l) { l = []; orderMap.set(off, l); }
+      if (l.indexOf(name) < 0) l.push(name);
+    },
     field_order: (v, nameHandle) => {
+      if (!mem) return;   // start 段 mem 未绑定（模块级对象键序走 qz.order_note）
       const u = BigInt.asUintN(64, v), hi = u >> 48n;
       if (!((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI)) return;
       syncOrder(); const off = Number(u & MASK32); let l = orderMap.get(off);
@@ -1260,10 +1290,13 @@ function makeQzvm(strings, opts) {
         const h = BigInt.asUintN(64, a0) >> 48n;
         const off0 = Number(BigInt.asUintN(64, a0) & MASK32);
         if ((h === TAG_HI && off0 >= 8) || h === INST_HI || h === HOST_HI) {
+          syncOrder();
+          let dl0 = orderMap.get(off0); if (!dl0) { dl0 = []; orderMap.set(off0, dl0); }   // JS：已存在键保持原位、新键追加（此前不登记 → 物化退化为槽序）
           for (const src of [a1, a2, a3].filter(givenSlot)) {
             const o = toJS(src);
             if (o == null) continue;
             for (const k of Object.keys(o)) {
+              if (dl0.indexOf(k) < 0) dl0.push(k);
               if (h === HOST_HI) { handles[off0][k] = o[k]; continue; }
               const e2 = fieldEntries.find(([n]) => n === k);
               const v = bitsOf(o[k]);
