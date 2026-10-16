@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T19:49:00"
+updated: "2026-10-16T20:00:20"
 ---
 
 <!-- compiled_truth -->
@@ -341,4 +341,9 @@ updated: "2026-10-16T19:49:00"
 - time: 2026-10-16T19:49:00
   kind: evidence
   summary: "第二十二批：539/549（98.2%）；||=/&&= 修字段索引目标；新暴露两类 loud（顶层函数作值/模块级含访问器对象）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T20:00:20
+  kind: evidence
+  summary: "顶层函数作值支持 + 模块级语句静默丢弃修复"
   affects: [aot-wasm-tagged-backend]
