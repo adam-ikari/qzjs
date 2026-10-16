@@ -410,6 +410,23 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("typeof POJO", callMs("tpo"), "object");
     check("POJO === 自身", callMs("ideq"), true);
     check("不同 POJO !==", callMs("mkeq"), false);
+    // in / delete
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_indel.ts"),
+        "export function iin(): any { const o: any = { a: 1 }; return (\"a\" in o) + \":\" + (\"b\" in o); }\n"
+      + "export function iinHost(): any { const o: any = JSON.parse(\"{\\\"a\\\":1}\"); return (\"a\" in o); }\n"
+      + "export function iinArr(): any { const a: any = [1,2]; return (0 in a) + \":\" + (5 in a); }\n"
+      + "export function del(): any { const o: any = { a: 1, b: 2 }; const r = delete o.a; return r + \":\" + (o.a === undefined) + \":\" + o.b; }\n"
+      + "export function delHost(): any { const o: any = JSON.parse(\"{\\\"a\\\":1,\\\"b\\\":2}\"); const r = delete o.a; return r + \":\" + (o.a === undefined) + \":\" + o.b; }\n");
+    const rId = compileTS(path.join(os.tmpdir(), "qz_aot_indel.ts"), path.join(os.tmpdir(), "qz_aot_indel.wasm"), {});
+    const qzId = makeQzvm(rId.strings, { fields: rId.fields });
+    const { instance: instId } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_indel.wasm")), { qz: qzId });
+    qzId.bindMem(instId.exports.memory); if (instId.exports.__bump) qzId.bindBump(instId.exports.__bump);
+    const callId = (n) => { if (instId.exports.__bump_reset) instId.exports.__bump_reset(); return qzId._toJS(instId.exports[n]()); };
+    check("in (POJO)", callId("iin"), "true:false");
+    check("in (宿主对象)", callId("iinHost"), true);
+    check("in (数组)", callId("iinArr"), "true:false");
+    check("delete (POJO)", callId("del"), "true:true:2");
+    check("delete (宿主对象)", callId("delHost"), "true:true:2");
 }
 
 async function runClasses() {

@@ -84,6 +84,8 @@ const QZ = {
   builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
+  in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
+  object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
   // 对象展开 {..o}：n(i32) + pieces(i64×4) → Object.assign({}, ...) → 宿主对象句柄
   obj_assign: { params: ["i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
 };
@@ -2159,6 +2161,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isVoidExpression(e)) { this.emitTaggedExpr(e.expression); this.m.drop(); this._emitUndefined(); return; }   // void x → undefined（求值副作用，丢弃值）
+    if (ts.isDeleteExpression(e)) {
+        // delete obj.k：宿主对象(0x7FFD) → qz.object_delete；POJO → 槽写 undefined sentinel（等价删除）。返回 true。
+        const M = this.m;
+        const op = e.expression;
+        if (!ts.isPropertyAccessExpression(op)) throw new Error("[tagged] delete 仅支持对象属性（delete obj.k）");
+        this.emitTaggedExpr(op.expression); M.localSet(this.scratch);
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
+        M.ifBlock("void");
+        M.localGet(this.scratch); M.i32Const(this._strId(op.name.text)); M.call("qz.object_delete");
+        M.else_();
+        M.localGet(this.scratch); M.i32WrapI64(); M.i64ConstBits(0, 0x7ff90000); M.i64Store(3, this._fieldIndex(op.name.text));
+        M.end();
+        M.i64ConstBits(1, 0x7ffc0000);   // true（tagged bool）
+        return;
+    }
     if (ts.isPrefixUnaryExpression(e)) {
         if (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken) {
             const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
@@ -2639,7 +2656,10 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         this.m.call("qz.instanceof_op");
         return;
     }
-    if (op === ts.SyntaxKind.InKeyword) throw new Error("[tagged] in 未实现");
+    if (op === ts.SyntaxKind.InKeyword) {
+        // k in o → qz.in_op（宿主语义；POJO/实例由 toJS 物化）
+        this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this.m.call("qz.in_op"); return;
+    }
     if (op === ts.SyntaxKind.CommaToken) { this.emitTaggedExpr(e.left); this.m.drop(); this.emitTaggedExpr(e.right); return; }
     if (op === ts.SyntaxKind.FirstAssignment) {
         if (ts.isPropertyAccessExpression(e.left)) {

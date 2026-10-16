@@ -367,6 +367,10 @@ function makeQzvm(strings, opts) {
     },
     // 对象展开（{...o, a:1}）：Object.assign({}, ...pieces) → 宿主对象句柄。n = pieces 数。
     obj_assign: (n, a0, a1, a2, a3) => ret(Object.assign({}, ...[a0, a1, a2, a3].slice(0, n).map(toJS))),
+    // k in o：宿主语义（POJO/实例先物化；数组/宿主对象直接 in）。
+    in_op: (k, o) => boxBool(toJS(k) in toJS(o)),   // tagged bool（不可经 ret：BigInt 会被当宿主句柄）
+    // delete o.k：宿主对象真删；POJO/实例由 emitter 直接把槽写成 undefined sentinel（本函数仅宿主）。
+    object_delete: (o, kid) => { const obj = handles[idxOf(o)]; if (obj !== null && typeof obj === "object") delete obj[strings[kid]]; },
     // 内建全局调用/常量：nameId + n(实际参数个数) + a0..a3 → 宿主 JS 内建 → ret。
     // n 由调用点编译期已知：变参函数（Math.max/min/hypot/Array.of/fromCharCode）按 n 取参，
     // 不传 undefined 占位（否则 Math.max(2,5) 会变 Math.max(2,5,undefined,…)=NaN）。
