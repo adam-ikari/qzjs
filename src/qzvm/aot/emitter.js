@@ -1942,8 +1942,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isObjectLiteralExpression(e)) {
         // POJO：字段驻留 wasm 线性内存（零跨界读写）。句柄 = box(高16位0x7FF9 | offset)。字段宽 8 字节（i64）。
-        if (e.properties.some(p => !ts.isPropertyAssignment(p))) {
-            throw new Error("[tagged] 对象字面量只支持 { x: v } 形式");
+        if (e.properties.some(p => ts.isSpreadAssignment(p))) throw new Error("[tagged] 对象展开 {...o} 未实现（用 Object.assign({}, o, {...})）");
+        if (e.properties.some(p => !ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p))) {
+            throw new Error("[tagged] 对象字面量只支持 { x: v } / { x } 形式（方法/访问器/计算属性名不支持）");
         }
         const NF = e.properties.length;
         // 字段偏移用全局 fieldMap（名→固定偏移，POJO 隐式形状）：与读取端 _fieldIndex 一致。
@@ -1956,9 +1957,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._objDepth++;
         this.m.localSet(slot);                        // 句柄 → slot（i64）
         for (let i = 0; i < NF; i++) {
+            const p = e.properties[i];
             this.m.localGet(slot);                    // [h]
             this.m.i32WrapI64();                      // 低32位=offset
-            this.emitTaggedExpr(e.properties[i].initializer);   // [off(i32), val(i64)]
+            this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);   // 简写 {x} ≡ {x: x}
             this.m.i64Store(3, fIdx[i]);              // memory[off + idx] = val（fIdx 已是字节偏移）
         }
         this.m.localGet(slot);
@@ -1966,6 +1968,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isArrayLiteralExpression(e)) {
+        if (e.elements.some(el => ts.isSpreadElement(el))) throw new Error("[tagged] 数组展开 [...a] 未实现（用 a.concat([...]) 或显式索引）");
         // 数组：稳定句柄布局 header(16B: len,cap,dataOff,pad) + data 块(elem i64×N)。
         // 句柄 = 0x7FFB|headerOff；push 增长只换 data 块、句柄不变（支持别名/传参/属性）。
         const N = e.elements.length;
@@ -2451,7 +2454,9 @@ Emitter.prototype._emitNewCall = function (e) {
     const M = this.m;
     if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] new 目标必须是标识符");
     const cname = this._className(e.expression.text);   // 导入类本地名 → 目标类名
-    if (!this.classes.has(cname)) throw new Error("[tagged] new 未知类: " + e.expression.text);
+    if (!this.classes.has(cname)) throw new Error(BUILTIN_GLOBALS.has(e.expression.text)
+        ? `[tagged] 内建类 ${e.expression.text} 未实现（new Map/Set/Date/Error 等暂不支持）`
+        : "[tagged] new 未知类: " + e.expression.text);
     const c = this.classes.get(cname);
     const args = e.arguments;
     if (args.length > 4) throw new Error("[tagged] new 最多 4 参");
