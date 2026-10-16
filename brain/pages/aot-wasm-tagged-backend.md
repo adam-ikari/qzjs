@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T01:39:28"
+updated: "2026-10-16T02:14:56"
 ---
 
 <!-- compiled_truth -->
@@ -110,4 +110,10 @@ updated: "2026-10-16T01:39:28"
   kind: decision
   summary: "AOT 差分审计第三批（静默错修复 + 未实现显式报错）：①可选链 o?.x / o?.[i] / o?.length 静默返回 0 → 现 base 求值一次、nullish 短路 undefined（不求 index）。②数组方法默认参数：a0/a1 是 tagged 句柄非 JS undefined，'a0===undefined' 恒假 → join()/concat()/splice(i)/sort() 全错；改判 toJS(a0)。③sort() 无比较器改引擎默认字典序。④.length 返回 UTF-8 字节数应 UTF-16 码元数 → 新增 wasm helper qzs_utf16len。⑤numstr 截断小数（''+0.5 得 '0'）→ 整数走 wasm、小数/NaN/Inf 走宿主 String。⑥闭包写捕获变量值快照语义致外层读不到（静默错值）→ 新增静态检测 _closureWriteConflict，lambda 写+外层访问 → 编译期报错（loud 优于静默错；共享环境待实现）。⑦未实现特性显式报错：静态方法/解构/字段??=/内建全局(Math/JSON/String…)/instanceof/in/**=。守门 test_aot.js 146 ALL PASS。"
   source: "会话 2026-10-15：完成aot 目标下的多轮差分审计"
+  affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
+
+- time: 2026-10-16T02:14:56
+  kind: decision
+  summary: "AOT 差分审计第四批（通用性补全）：①内建全局支持（Math/String/Number/JSON/Object/Array… 经单一通用宿主入口 qz.builtin(nameId,n,a0..a3)；n=实际参数数避免 Math.max 传 undefined 占位得 NaN；含 Math.PI 等常量）。②解构声明单层支持（const [a,b]=arr / const {x,y}=obj / {a:z} / [,b]；嵌套报错）。③未实现特性显式报错（静态方法 C.m()/展开/内建类 new Map|Set|Date|Error/instanceof/in/**=/字段??=）。守门 test_aot.js 170 ALL PASS。"
+  source: "会话 2026-10-15：完成aot 目标下的第四轮审计与补全"
   affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
