@@ -96,7 +96,13 @@
 2. **~~字符串后端~~ 已完成**（2026-10-11，wasm 内表示 + 原地追加，无跨界；见 STR_BACKEND_DESIGN.md 状态标记）。
 3. qzvm 补全（对象方法/数组）。**数组方法已补**（2026-10-12）：`split` 返 wasm 原生数组（句柄 `0x7FFB`）；宿主 `doArrMethod` 覆盖 20 方法，回调经 `closure_call`。见 README「数组方法」条。
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
-5. **未实现运算符/语义（2026-10-15 审计）**：`instanceof`/`in`/`?.`（可选链）/`void`/`delete`/`**=`/`??=` 编译崩（loud，非静默错）；位运算遇 NaN/Infinity/超 2^31 走 `i32TruncF64S` trap（JS ToInt32 应给 0/回绕）；`typeof` 对 function 值报 `"object"`（0x7FF9 低 32 位对宿主 handles 索引与 POJO 内存 offset 同空间，wasm 内无法区分）。以上均 **loud crash**（用户裁决：静默错优先修，loud 可暂留——故未改用 `trunc_sat`，避免引入新的静默饱和误差）。
+5. **未实现特性（2026-10-15 审计，均显式报错非静默错）**：
+   - 运算符：`instanceof`/`in`/`void`/`delete`/`**=`/`??=`（仅 identifier，字段/索引上 `??=` 报错）。
+   - 语法：数组/对象解构声明、展开 `[...a]`/`{...o}`、静态方法 `C.m()`。
+   - 内建全局：`Math`/`JSON`/`String`/`Number`/`Boolean`/`Array`/`Object`/`Map`/`Set`/`Date`/`RegExp`/`Promise`/`parseInt`/`isNaN` 等一律报「内建 X 未实现」（AOT 只编译用户代码 + `qz.*` 契约面；`Math_floor` 等走宿主约定名）。
+   - 位运算遇 NaN/Infinity/超 2^31 走 `i32TruncF64S` trap（JS ToInt32 应给 0/回绕）；`typeof` 对 function 值报 `"object"`（0x7FF9 低 32 位对宿主 handles 索引与 POJO 内存 offset 同空间，wasm 内无法区分）。
+   - 闭包写捕获变量且外层也访问 → 编译期报错（未实现共享环境，避免静默错值）。
+   - 以上均 **loud**（用户裁决：静默错优先修，loud 可暂留——故未改用 `trunc_sat`，避免引入新的静默饱和误差）。
 
 ## 设计文档
 - `PORTABILITY_32BIT.md` — 32 位可移植性评估与「单 f64 表示」裁决
