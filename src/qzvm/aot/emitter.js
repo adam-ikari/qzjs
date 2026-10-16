@@ -103,6 +103,7 @@ const QZ = {
   // 单目 ~ / +（tagged）：~a = ~(ToInt32(ToNumber(a)))；+a = ToNumber(a)。宿主 toJS 解引用。
   bnot: { params: ["i64"], results: ["i64"] },
   to_num:{ params: ["i64"], results: ["i64"] },
+  neg:  { params: ["i64"], results: ["i64"] },   // 一元 -：ToNumber（对象 valueOf / 字符串 parse）后取反
   // ?? 判定：a == null || a == undefined（含宿主侧 null 独立句柄）→ i32(0/1)
   is_nullish: { params: ["i64"], results: ["i32"] },
   // 宽松相等 == / 不等 !=：JS 强制转换（ToPrimitive/ToNumber；1=="1"=true、null==undefined=true）
@@ -1097,7 +1098,9 @@ class Emitter {
     }
     // 本函数体（含嵌套）所有 lambda 捕获的、属于本函数参数/局部的变量名（去重，稳定序）。
     _probeCaptured(body, paramNames, localNames) {
-        const lams = this._collectLambdas(body);
+        const roots = Array.isArray(body) ? body : [body];
+        const lams = [];
+        for (const r2 of roots) if (r2) for (const l of this._collectLambdas(r2)) if (lams.indexOf(l) < 0) lams.push(l);
         if (!lams.length) return [];
         const own = new Set([...paramNames, ...localNames, "this"]);   // 方法的 this 亦可被箭头闭包捕获
         const out = [], seen = new Set();
@@ -1516,7 +1519,8 @@ class Emitter {
         const realParams = ctor ? ctor.parameters.map(p => p.name.text) : [];
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         const body = ctor ? ctor.body : { statements: [] };
-        this._mEnter(ctorName(c.name), c.name, params, body, true, ctor ? ctor.parameters : []);
+        this._mEnter(ctorName(c.name), c.name, params, body, true, ctor ? ctor.parameters : [],
+            c.fields.filter(f2 => f2.init).map(f2 => f2.init));   // 字段初值在 ctor 内联发射 → 其闭包（如 = () => this.x）须捕获 this
         this._inStaticMethod = false;
         this._curClassObj = c;
         // 派生类：字段默认值须在 super(...) 之后写（同名遮蔽字段父写后子覆写）；
@@ -1559,7 +1563,7 @@ class Emitter {
     }
     // 方法/构造器发射作用域：this=local0，参数 1..，完整 scratch/sT/obj/forOf/clo 槽布局。
     // 与 emitFunc(tagged) 同构；额外 _curClass 供静态方法分派解析继承链。
-    _mEnter(fname, cname, params, body, isVoid, astParams) {
+    _mEnter(fname, cname, params, body, isVoid, astParams, extraNodes) {
         this._mSaved = {
             mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
             blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef, fnVars: this._fnVars,
@@ -1598,7 +1602,7 @@ class Emitter {
         this.scratchObj = this.cloArgs[3] + 1;
         this.cloSlotsLen = cloSlots.length;
         // 方法体内被（嵌套）lambda 捕获的 this/参数/局部 → 共享环境（同 emitFunc）
-        const capNames = this._probeCaptured(body, params, locals);
+        const capNames = this._probeCaptured(extraNodes ? [body].concat(extraNodes) : body, params, locals);
         const envDecls = capNames.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
             .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
@@ -2591,7 +2595,8 @@ function compileTS(input, outWasm, opts = {}) {
             const c = em.classes.get(cname);
             if (c.ctor) for (const lam of em._collectLambdas(c.ctor.body)) em.emitLambda(lam, lamSeq++);
             for (const mth of c.methods) for (const lam of em._collectLambdas(mth.node.body)) em.emitLambda(lam, lamSeq++);
-            for (const f of c.fields) if (f.init) for (const lam of em._collectLambdas(f.init)) em.emitLambda(lam, lamSeq++);
+            // 字段初值内的闭包（如 `getV = () => this.v`）**不**在此预登记：它们需要在构造器上下文里登记，
+            // 才能把 `this`（ctor 的 local 0）纳入捕获集；否则 this 在闭包内为 undefined（运行时错）。
         }
         // 阶段2：逐个发射 body（顶层函数 + lambda + 类方法/构造器）
         for (const st of fns) { if (interpSet.has(st.name.text)) continue; em.sf = fnSf.get(st) || sf; em.emitFunc(st); }
@@ -3137,7 +3142,7 @@ Emitter.prototype.emitTry = function (s, tagged) {
     const M = this.m;
     const fin = s.finallyBlock;
     const finTok = fin ? {} : null;                // 该 try 的身份令牌（throw 时判断此 finally 是否已被「自然流」负责）
-    if (fin) { this._finallyStack = this._finallyStack || []; this._finallyStack.push({ node: fin, tok: finTok, labelsLen: (this.labels || []).length }); }
+    if (fin) { this._finallyStack = this._finallyStack || []; this._finallyStack.push({ node: fin, tok: finTok, labelsLen: (this.labels || []).length, tryDepth: (this._tryStack || []).length }); }
     M.block(); this.depth++;                       // $done
     M.block(); this.depth++;                       // $err
     this._tryStack.push({ errBrk: this.depth, tok: finTok });   // 记录 $err 相对深度（throw 用）
@@ -3198,12 +3203,12 @@ Emitter.prototype.emitTry = function (s, tagged) {
 Emitter.prototype._emitPendingFinally = function (tagged, forThrow) {
     const st = this._finallyStack;
     if (!st || !st.length) return;
-    const live = new Set((this._tryStack || []).map(e => e.tok));
+    // throw：目标 catch = 最内层仍在 tryStack 的 try。只运行**位于其内部**的 finally
+    // （入栈深度 >= 当前 tryStack 长度）；目标 try 自己的 finally 由其 catch 之后的正常路径负责。
+    const curDepth = (this._tryStack || []).length;
     for (let i = st.length - 1; i >= 0; i--) {
         const e = st[i];
-        // throw：目标 try 的 finally 由自然流（catch 后的正常路径）负责，不能在此重复执行；
-        // 只有当该 try 已不在 tryStack（异常正向外穿出，如 catch 内 rethrow）时才在此跑。
-        if (forThrow && live.has(e.tok)) continue;
+        if (forThrow && ((e.tryDepth === undefined ? -1 : e.tryDepth) < curDepth)) continue;   // 目标及其外层：不在此跑
         this._finallyStack = st.slice(0, i);        // 防重入：finally 体内的 return/throw 不再重复跑本层
         if (tagged) this.emitTaggedBlock(e.node); else this.emitBlock(e.node);
     }
@@ -4051,7 +4056,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         } else if (e.operator === ts.SyntaxKind.PlusToken) {
             this.m.call("qz.to_num");        // +a = ToNumber(a)
         } else if (e.operator === ts.SyntaxKind.MinusToken) {
-            this.m.f64ReinterpretI64(); this.m.f64Neg(); this.m.i64ReinterpretF64();
+            this._emitUnaryNum("qz.neg", this.m.f64Neg);   // JS：-a = -ToNumber(a)（对象走 valueOf，此前裸取反 → 静默 NaN）
         }
         return;
     }
@@ -4188,6 +4193,19 @@ Emitter.prototype.emitCondI32 = function (expr) {
 // guarded 数值特化：栈 [a b] → 都是 tagged number 走原生指令，否则回退 qz.* 跨界。
 // 数值=原始 f64 位型，句柄=高16位 0x7FF9（对象）/0x7FFA（字符串）→ reinterpret 后原生 f64 运算（零跨界）。
 // cmp=true 时 fastEmit 产出 i32 谓词（f64.lt 等），需 extend 回 i64。
+// 一元数值运算 guard：句柄（对象/字符串）→ 宿主 qz.<op>；纯数值 → 内联 f64。
+Emitter.prototype._emitUnaryNum = function (qzName, fastEmit) {
+    const M = this.m;
+    M.localSet(this.scratchB);
+    this._emitIsHandle(this.scratchB);
+    M.ifBlock("i64");
+    M.localGet(this.scratchB); M.call(qzName);
+    M.else_();
+    M.localGet(this.scratchB); M.f64ReinterpretI64();
+    fastEmit.call(M);
+    M.i64ReinterpretF64();
+    M.end();
+};
 Emitter.prototype.emitGuardedOp = function (qzName, fastEmit, cmp) {
     this.m.localSet(this.scratchB);
     this.m.localSet(this.scratchA);

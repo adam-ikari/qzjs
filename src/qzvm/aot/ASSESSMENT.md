@@ -113,9 +113,9 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
-结果：**503/512 一致（98.2%）**；残余 9 项**全部 loud**（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**520/530 一致（98.1%）**；残余 10 项：8 项 loud + 2 项**已知静默**（见下，架构级）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
-**残余 loud 清单（第二十批后，9 项）**：
+**残余 loud 清单（第二十一批后，8 项 loud + 2 项已知静默）**：
 1. `arguments` 对象（建议 rest 形参）
 2. generator（`function*` / `yield`）
 3. async / await（需 Promise 运行时）
@@ -126,6 +126,11 @@
 8. 内建调用 >4 实参（内建 ABI 仅 4 槽；如 `Date.UTC(y,m,d,h,mi,s,ms)`）
 9. 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）
 9. 静态成员体内 `this.<name>` 经**派生类**调用且派生类**自有覆写**该名 → loud（本实现 `this` ≡ 定义类；未覆写时与 JS 一致，故不报错）
+
+**已知静默差异（2 项，架构级；优先级最高）**：
+- **宿主对象上的数组元素写**：`JSON.parse(...)` 结果里的数组字段经 `o.list[0] = v` 写 → 该字段读时被**转成 wasm 数组**（拷贝），写入只落在拷贝上 → 下次读回原值（静默丢写）。机制：`prop_get` 对宿主数组做了表示转换。
+- **`Object.assign` 多源键序**：多源合并（如 `Object.assign({}, base, {d:4}, over)`）时新键的追加位置与 JS 不同（JS：`a,b,d,c`；本实现 `a,b,c,d`）。机制：内部走键拷贝而非 `Object.assign` 语义。
+- 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏 `enumerable:false` 过滤。
 
 **receiver 通道（已完成 2026-10-16）**：带 `this` 形参的闭包/函数表达式现有真实 receiver 槽 —— `qz.closure_call` 增第 6 参 `recv`、`qz.call_value` 增第 7 参 `recv`，宿主在 `closureCall` 内对 `synthThis` 闭包把 `recv` 前置为槽 0；发射器所有调用点补 `recv`（普通调用 = undefined，与 JS 一致），`_calleeParams` 见首参为 `this` 即 `slice(1)`（receiver 不占实参槽）。三类宿主调用方（wasm 侧调用 / 物化包装器 `object_set_method`·`obj_accessor` / `call`·`apply`·`bind` 的 `callIt`·`cm`）全部改为经 `recv` 传 receiver。效果：`fn-call-apply-bind`、`callback-this-binding`、`this-arrow-vs-fn`、`closure-captures-this-method` 全部转为一致。
 现状约定：`synthThis` 闭包（对象字面量方法/访问器，`_synthArrow` 合成）期望 **槽 0 = receiver**，由三类调用方以 `a0` 传入：

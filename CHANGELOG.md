@@ -4,6 +4,16 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十一批差分审计（2026-10-16）
+- 新增 `audit_corpus21.js`（18 例：构造器 super 参数链 / 闭包柯里化·记忆化·组合 / 高阶数组管道 / 对象展开与覆盖 / valueOf·toString 协议参与比较与算术 / 描述符 getter-setter 与自有属性判定 / 短路副作用 / 分发表与状态机 switch / 嵌套 try-catch-finally 与 return / 计数器闭包 / 模板字符串方法 / Map·Set 操作 / 整数与浮点边界 / 类字段箭头函数 this / 继承访问器在构造器内读 / 深拷贝比较 / for-in 与 Object.keys·entries）。
+- **一元 `-` 的 ToNumber**：`-a` 对对象/字符串此前直接翻转 f64 符号位 → **静默 NaN**；新增 `qz.neg` 与一元 guard（句柄走宿主 `-ToJS(a)`，纯数值内联 `f64.neg`）。
+- **`finally` 执行范围**：抛异常时只运行「目标 catch 所属 try **内部**」的 finally（finally 条目记录入栈时的 `_tryStack` 深度并按深度过滤）→ 修掉两处顺序错误（本 try 的 finally 提前执行 / catch 内 rethrow 时外层 finally 提前执行）。
+- **类字段初始化器中的箭头函数 `this`**：字段初值内的闭包改在**构造器上下文**登记（`_mEnter` 新增 `extraNodes`），使 `this`（ctor 的 local 0）进入捕获集 → 此前 `getV = () => this.v` 运行期报错。
+- **`hasOwnProperty` 漏报**：`defineProperty` 定义的访问器键与插入序表键现计入自有属性（此前只查内存槽 → 静默 false）。
+- **宿主 `arr_set_index` 防御**：非 wasm 数组 tag 一律转 `set_index`（此前按 wasm 数组写 → 静默丢失）。
+- 已知静默（新增，架构级，已记录于 ASSESSMENT）：宿主数组字段的表示转换导致写入丢失；`Object.assign` 多源键序。
+- 结果：**520/530（98.1%）**；残余 10 项 = 8 项 loud + 2 项已知静默（架构级）。
+
 ### 第二十批补充 2（2026-10-16）
 - **静态私有字段写 `C.#n = v`**：`_emitStoreProp` 顶部新增类名接收者 + 私有名分支（`qz.static_set(cn, "#类名#名")`，与读路径 `_staticKey` 一致）——此前落到实例私有分支 → 把 `C` 当值 → 编译期 loud。
 - **静态方法/getter/setter 内 `this` ≡ 定义类**：`_isClassName`/`_classOfExpr` 在静态方法体内把 `this` 解析为当前类，`_inStaticMethod` 逐函数显式复位（顶层函数/方法/构造器/lambda 均置 false）；**静态方法直调**（`_emitDynMethod`）改用 `_isClassName(rx)` 识别接收者，支持 `(C as any).m()`、括号、静态方法内的 `this.m()`。

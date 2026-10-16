@@ -654,6 +654,36 @@ function makeQzvm(strings, opts) {
       propFlags.set(k, { w: w === undefined ? cur.w : w, c: c === undefined ? cur.c : c });
     }
   };
+  const setIndexImpl = (o, k, v) => {
+      const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === 0x7ffbn) {                            // wasm 数组 + 数字形态字符串键 → 按索引写（JS：a["0"] ≡ a[0]）
+        const kk = toJS(k);
+        if (typeof kk === "string" && /^\d+$/.test(kk)) {
+          const a2 = arrRead(o), i2 = Number(kk);
+          while (a2.length <= i2) a2.push(undefined);
+          a2[i2] = toJS(v);
+          arrSetInPlace(o, a2);
+          return;
+        }
+      }
+      if (hi === TAG_HI || hi === INST_HI) {
+        if (off < 8) { handles[off] = toJS(v); return; }
+        { const kk = toJS(k); if (typeof kk === "symbol") { symBucket(off).set(kk, v); return; } }
+        const name = String(toJS(k));
+        { syncDynAcc(); const acc = dynAcc.get(off + "|" + name);            // 运行时 setter（o[k] = v）
+          if (acc) { if (acc.s === undefined) return;
+            const us = BigInt.asUintN(64, acc.s);
+            if (us >> 48n === CLO_HI) closureCall(acc.s, v, TAG, TAG, TAG, undefined, o); else handles[idxOf(acc.s)].call(toJS(o), toJS(v));
+            return; } }
+        if (protGuard(off, name)) return;
+        const e = fieldEntries.find(([n]) => n === name);
+        if (!e || !mem) { syncExtras(); extras.set(off + "|" + name, v); return; }   // 运行期新增字段
+        new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
+        return;
+      }
+      if (hi === HOST_HI) { handles[off][toJS(k)] = toJS(v); return; }   // 键原样（符号键可用）
+      toJS(o)[toJS(k)] = toJS(v);
+  };
   return {
     // POJO 分配：返回 wasm 内存偏移（裸 i32），字段由 wasm i64.store 写入（零跨界）
     alloc: (nbytes) => { const off = bump; bump += nbytes; return off; },
@@ -1070,36 +1100,7 @@ function makeQzvm(strings, opts) {
       const u = BigInt.asUintN(64, v), hi = u >> 48n;
       if ((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI) protGuard(Number(u & MASK32), strings[nameId]);
     },
-    set_index: (o, k, v) => {
-      const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
-      if (hi === 0x7ffbn) {                            // wasm 数组 + 数字形态字符串键 → 按索引写（JS：a["0"] ≡ a[0]）
-        const kk = toJS(k);
-        if (typeof kk === "string" && /^\d+$/.test(kk)) {
-          const a2 = arrRead(o), i2 = Number(kk);
-          while (a2.length <= i2) a2.push(undefined);
-          a2[i2] = toJS(v);
-          arrSetInPlace(o, a2);
-          return;
-        }
-      }
-      if (hi === TAG_HI || hi === INST_HI) {
-        if (off < 8) { handles[off] = toJS(v); return; }
-        { const kk = toJS(k); if (typeof kk === "symbol") { symBucket(off).set(kk, v); return; } }
-        const name = String(toJS(k));
-        { syncDynAcc(); const acc = dynAcc.get(off + "|" + name);            // 运行时 setter（o[k] = v）
-          if (acc) { if (acc.s === undefined) return;
-            const us = BigInt.asUintN(64, acc.s);
-            if (us >> 48n === CLO_HI) closureCall(acc.s, v, TAG, TAG, TAG, undefined, o); else handles[idxOf(acc.s)].call(toJS(o), toJS(v));
-            return; } }
-        if (protGuard(off, name)) return;
-        const e = fieldEntries.find(([n]) => n === name);
-        if (!e || !mem) { syncExtras(); extras.set(off + "|" + name, v); return; }   // 运行期新增字段
-        new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
-        return;
-      }
-      if (hi === HOST_HI) { handles[off][toJS(k)] = toJS(v); return; }   // 键原样（符号键可用）
-      toJS(o)[toJS(k)] = toJS(v);
-    },
+    set_index: (o, k, v) => setIndexImpl(o, k, v),
     // k in o：宿主语义（POJO/实例先物化；数组/宿主对象直接 in）。
     in_op: (k, o) => {
       const u0 = BigInt.asUintN(64, o);
@@ -1175,6 +1176,7 @@ function makeQzvm(strings, opts) {
           const e2 = fieldEntries.find(([n]) => n === key);
           if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(off0 + e2[1], val, true);
           else { syncExtras(); extras.set(off0 + "|" + key, val); }
+          if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(off0 + "|" + key, true); }   // 值描述符同样可能 non-enumerable
           syncPropFlags(); propFlags.set(off0 + "|" + key, { w: desc.writable !== false, c: desc.configurable !== false });
           syncPropFlags(); propFlags.set(off0 + "|" + key, { w: desc.writable !== false, c: desc.configurable !== false });
           if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(off0 + "|" + key, true); }
@@ -1302,6 +1304,7 @@ function makeQzvm(strings, opts) {
     ne:   (a, b) => bool(toJS(a) != toJS(b)),
     bnot: (a) => box(~(toJS(a) | 0)),
     to_num: (a) => box(+toJS(a)),
+    neg: (a) => box(-toJS(a)),                          // 一元 -：ToNumber（对象 valueOf）
     // 真值判定：不经 toJS——类实例/POJO 句柄（0x7FF9|内存偏移）不在 JS handles 表中，
     // 经 toJS 会取到 undefined 而误判 falsy。按 tag 直接判：idx=0=undefined→假；其余查 handles[idx]（null→假、对象→真）。
     truthy: (v) => {
@@ -1383,7 +1386,12 @@ function makeQzvm(strings, opts) {
               const v = new DataView(mem.buffer).getBigInt64(off0 + e2[1], true);
               if (BigInt.asUintN(64, v) !== TAG) return boxBool(true);
             }
-            syncExtras();
+            syncExtras(); syncDynAcc(); syncOrder();
+            {   // defineProperty 定义的访问器（dynAcc）与插入序表（orderMap）里的键也是自有属性（此前只查内存槽 → 静默漏报）
+              if (extras.has(off0 + "|" + key) || dynAcc.has(off0 + "|" + key)) return boxBool(true);
+              const ord0 = orderMap.get(off0);
+              if (ord0 && ord0.indexOf(key) >= 0) return boxBool(true);
+            }
             return boxBool(extras.has(off0 + "|" + key));
           }
           if (name === "toString" || name === "toLocaleString" || name === "valueOf") return ret("[object Object]");
@@ -1442,6 +1450,7 @@ function makeQzvm(strings, opts) {
     // 数组 .length= 赋值：截断或扩容（扩容量不足换 data 块，新槽补 undefined 句柄 0x7FF9|0）。
     // a[i] = v（越界：JS 扩容并补 undefined 槽）；返回所赋之值
     arr_set_index: (recv, i, v) => {
+      if ((BigInt.asUintN(64, recv) >> 48n) !== 0x7ffbn) return setIndexImpl(recv, i, v);   // 宿主对象/POJO/实例 → 交 set_index（此前按 wasm 数组写 → 静默丢失）
       const a = arrRead(recv);
       const idx = Math.trunc(toJS(i));
       if (idx < 0 || !isFinite(idx)) return v;
