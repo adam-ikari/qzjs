@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十九批差分审计（2026-10-16）
+- 新增 `audit_corpus19.js`（19 例：数值/字符串格式化、数组边角（flat·flatMap·fill·reduceRight·findLast·默认字典序 sort）、对象工具（fromEntries·is·values·entries）、Date 细节、RegExp（exec·lastIndex·全局循环·split）、JSON 细节、**函数标签模板（含 rest 形参）**、类继承访问器 + `super`、try/finally 与 return 交互、while/for-of 每迭代绑定闭包、`new` + 展开、可选链/空值合并组合、parseInt/parseFloat/Number 边界、switch fallthrough、对象字面量嵌套方法的 `this`、稀疏数组、字符串迭代/码点、getter/setter 副作用顺序）。
+- **函数标签模板 → 顶层函数直调**：`tag\`…\`` 中标签为顶层函数声明时改为直接 wasm 调用（此前按闭包值求值 → 编译期 loud「未定义捕获变量」）；rest 形参按形参表打包。
+- **`new (C as any)(…)` / `new (C)()`**：`new` 目标跳过括号/as/非空断言后解析类名（此前 loud「new 目标必须是标识符」）。
+- 结果：**485/493（98.4%）**；残余 8 项全部 loud（零静默错值）。
+
 ### receiver 通道（2026-10-16）
 - **闭包 receiver 槽**：`qz.closure_call` 增第 6 参 `recv`、`qz.call_value` 增第 7 参 `recv`；宿主 `closureCall(handle, a0..a3, ovfArr, recv)` 对 `synthThis` 闭包把 `recv` 前置为槽 0（`hasEx` 路径归一为「ovf[0] = 实参 3」同形）。
 - **发射器**：`lamMeta` 对带 `this` 形参的闭包同样标 `synthThis: true`（`this` ↦ local 1）；`_calleeParams` 首参为 `this` 时 `slice(1)`（receiver 不占实参槽）；9 处调用点（`closure_call` ×3、`call_value` ×6）末尾补 `recv = undefined`。

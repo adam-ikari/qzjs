@@ -3242,6 +3242,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const tStrings = this._expEnter();
             this.emitTaggedExpr(lit0); this.emitTaggedExpr(rawLit0); M.call("qz.tagged_strings"); M.localSet(tStrings.v);
             this._expLeave();
+            // 顶层函数标签：无闭包句柄 → 直接 wasm 调用（否则会误走「未定义捕获变量」）
+            if (tagName0 && this.fnNames && this.fnNames.has(tagName0) && this._local(tagName0) === undefined
+                && !(this.capMap && this.capMap.has(tagName0))
+                && !(this.moduleGlobals && this.moduleGlobals.get(tagName0) !== undefined)) {
+                M.localGet(tStrings.v);
+                this._emitCallArgs(cp0.slice(1), argNodes.slice(1), tagName0, false);   // 其余按形参表（rest 打包；直接调用无 ovf）
+                M.call(tagName0);
+                this._emitErrCheck();
+                this._expLeave();
+                return;
+            }
             this.emitTaggedExpr(e.tag); M.localSet(t.v);
             M.localGet(t.v);
             M.localGet(tStrings.v);                                   // 第 1 参：strings 对象（含 .raw）
@@ -4432,14 +4443,17 @@ Emitter.prototype._instSize = function () {
 };
 Emitter.prototype._emitNewCall = function (e, argSrc) {
     const M = this.m;
-    if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] new 目标必须是标识符");
-    const cname = this._className(e.expression.text);   // 导入类本地名 → 目标类名
+    let tgt = e.expression;                                  // new (C as any)(…) / new (C)() 亦按类名解析
+    while (tgt && (ts.isParenthesizedExpression(tgt) || ts.isAsExpression(tgt) || ts.isNonNullExpression(tgt)
+        || ts.isTypeAssertionExpression(tgt) || ts.isSatisfiesExpression(tgt))) tgt = tgt.expression;
+    if (!ts.isIdentifier(tgt)) throw new Error("[tagged] new 目标必须是标识符");
+    const cname = this._className(tgt.text);   // 导入类本地名 → 目标类名
     // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.builtin（构造语义）；未登记者报错
     if (!this.classes.has(cname)) {
-        if (EMITTER_BUILTIN_CTORS.has(e.expression.text)) { this._emitBuiltinCall(e.expression.text, e.arguments); return; }
-        throw new Error(BUILTIN_GLOBALS.has(e.expression.text)
-            ? `[tagged] 内建类 ${e.expression.text} 未实现（支持 Error 族/Map/Set/Date/Array/RegExp）`
-            : "[tagged] new 未知类: " + e.expression.text);
+        if (EMITTER_BUILTIN_CTORS.has(tgt.text)) { this._emitBuiltinCall(tgt.text, e.arguments); return; }
+        throw new Error(BUILTIN_GLOBALS.has(tgt.text)
+            ? `[tagged] 内建类 ${tgt.text} 未实现（支持 Error 族/Map/Set/Date/Array/RegExp）`
+            : "[tagged] new 未知类: " + tgt.text);
     }
     const c = this.classes.get(cname);
     const args = e.arguments;
