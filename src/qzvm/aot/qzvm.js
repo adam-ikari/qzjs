@@ -143,6 +143,7 @@ function makeQzvm(strings, opts) {
   };
   const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
   const isObjHandle = (u) => { const h = u >> 48n; if (h === TAG_HI) return (u & MASK32) >= 8n; return h === INST_HI || h === HOST_HI; };
+  const statics = new Map();
   let fieldEntries = [];                  // [[name, byteOffset], ...]（bindFields 设；与 emitter _fieldIndex 一致）
   const bindFields = (fields) => { fieldEntries = (fields || []).map((n, i) => [n, (i + 1) * 8]); };
   // POJO/类实例（内存驻留）→ JS 对象物化：按 [0]=size 限定范围，逐字段读（undefined sentinel 跳过）。
@@ -383,6 +384,11 @@ function makeQzvm(strings, opts) {
       while (e) { if (Object.prototype.hasOwnProperty.call(e, name)) { e[name] = v; return; } e = e.__parent; }
       handles[idx][name] = v;
     },
+    // 类静态字段：宿主表 nameId → { fieldId: tagged值 }；lazy 初始化（statics_ready 未标记时由产物内联初始值）。
+    statics_ready: (id) => (statics.has(strings[id]) ? 1 : 0),
+    statics_mark: (id) => { if (!statics.has(strings[id])) statics.set(strings[id], {}); },
+    static_get: (id, fid) => { const o = statics.get(strings[id]); const v = o ? o[strings[fid]] : undefined; return v === undefined ? TAG : v; },
+    static_set: (id, fid, v) => { let o = statics.get(strings[id]); if (!o) { o = {}; statics.set(strings[id], o); } o[strings[fid]] = v; },
     // 动态键取值/赋值 o[k]：POJO/实例按字段名表（fieldEntries）定位；宿主对象直接索引；数组/字符串走 toJS。
     get_index: (o, k) => {
       const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);

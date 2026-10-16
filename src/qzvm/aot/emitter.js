@@ -85,6 +85,10 @@ const QZ = {
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
+  statics_ready: { params: ["i32"], results: ["i32"] },        // 类静态字段：是否已初始化
+  statics_mark: { params: ["i32"], results: [] },
+  static_get: { params: ["i32", "i32"], results: ["i64"] },    // (classId, fieldId) → tagged
+  static_set: { params: ["i32", "i32", "i64"], results: [] },
   get_index: { params: ["i64", "i64"], results: ["i64"] },   // o[k]（动态键）：宿主按名/索引取值
   set_index: { params: ["i64", "i64", "i64"], results: [] }, // o[k] = v
   env_new: { params: ["i32"], results: ["i64"] },        // 闭包环境：parentIdx(-1=根) → 环境句柄
@@ -639,13 +643,13 @@ class Emitter {
             const parent = st.heritageClauses && st.heritageClauses.length
                 ? st.heritageClauses[0].types[0] : null;
             const parentName = parent ? parent.expression.text : null;
-            const fields = [], methods = [], staticMethods = [];
+            const fields = [], methods = [], staticMethods = [], staticFields = [];
             let ctor = null;
             const isStatic = (mem) => !!mem.modifiers && mem.modifiers.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
             for (const mem of st.members) {
                 if (ts.isPropertyDeclaration(mem) && ts.isIdentifier(mem.name)) {
-                    if (isStatic(mem)) throw new Error(`[tagged] 静态字段未实现（${cname}.${mem.name.text}）`);
-                    fields.push({ name: mem.name.text, init: mem.initializer || null });
+                    if (isStatic(mem)) staticFields.push({ name: mem.name.text, init: mem.initializer || null });
+                    else fields.push({ name: mem.name.text, init: mem.initializer || null });
                 } else if (ts.isConstructorDeclaration(mem)) {
                     ctor = mem;
                 } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
@@ -657,7 +661,7 @@ class Emitter {
                     throw new Error("[tagged] 不支持的类成员: " + ts.SyntaxKind[mem.kind]);
                 }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
@@ -1699,6 +1703,25 @@ Emitter.prototype._strId = function (text) {
     if (i < 0) { i = this.strings.length; this.strings.push(text); }
     return i;
 };
+// 类静态字段：C.x 前确保静态已初始化（lazy 内联初始值 → 宿主表 qz.static_set / statics_mark）。
+Emitter.prototype._emitStaticsGuard = function (cname) {
+    const c = this.classes.get(cname);
+    if (!c || !(c.staticFields || []).length) return;
+    const M = this.m;
+    M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
+    M.i32Eqz();
+    M.ifBlock("void");
+    for (const f of c.staticFields) {
+        M.i32Const(this._strId(cname)); M.i32Const(this._strId(f.name));
+        if (f.init) this.emitTaggedExpr(f.init); else this._emitUndefined();
+        M.call("qz.static_set");
+    }
+    M.end();
+};
+// 类名（标识符）是否为已收集的类
+Emitter.prototype._isClassName = function (node) {
+    return !!node && ts.isIdentifier(node) && this.classes.has(node.text);
+};
 // 字符串句柄 tag 测试：栈顶 i64 → i32（是字符串?）
 Emitter.prototype._emitIsStr = function () {
     this.m.i64Const(48n); this.m.i64ShrU(); this.m.i64Const(0x7ffan); this.m.i64Eq();
@@ -2151,6 +2174,13 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         Mi.end();
         return;
     }
+    // 类静态字段 C.x（C 为已收集类名）→ 确保静态已初始化 + 宿主 static_get
+    if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._isClassName(e.expression)) {
+        const cn = e.expression.text;
+        this._emitStaticsGuard(cn);
+        this.m.i32Const(this._strId(cn)); this.m.i32Const(this._strId(e.name.text)); this.m.call("qz.static_get");
+        return;
+    }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
         // .length：字符串(0x7FFA) → qzs_utf16len（UTF-16 码元数，非 UTF-8 字节数："你好".length=2）；
         //   数组(0x7FFB) → 结构首 i32（元素数）；其余 → qz.str_len（跨界，罕见）。
@@ -2208,6 +2238,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     this._retFromCallee(resolved); return;
                 }
             }
+            // 类静态方法优先：C.push/C.pop 等与数组方法同名，不能走数组快路径
+            if (this._isClassName(rx)) { this._emitDynMethod(rx, method, e.arguments); return; }
             if (method === "push" && e.arguments.length === 1) { this._emitArrayPush(rx, e.arguments[0]); return; }
             if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
             this._emitDynMethod(rx, method, e.arguments); return;
@@ -2267,6 +2299,18 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken) {
             const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
             if (ts.isPropertyAccessExpression(e.operand)) {
+                // ++C.n / --C.n（类静态字段）：guard → static_get ± 1 → static_set；结果=新值
+                if (this._isClassName(e.operand.expression)) {
+                    const cn = e.operand.expression.text, Mc = this.m;
+                    this._emitStaticsGuard(cn);
+                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.call("qz.static_get");
+                    Mc.i64ConstBits(...f64Bits(1));
+                    this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
+                    Mc.localSet(this.scratch);
+                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.localGet(this.scratch); Mc.call("qz.static_set");
+                    Mc.localGet(this.scratch);
+                    return;
+                }
                 // ++this.n / --obj.a：接收者求值一次 → 读字段 ± 1 → 写回；结果=新值
                 const off = this._fieldIndex(e.operand.name.text);
                 this.emitTaggedExpr(e.operand.expression);
@@ -2304,6 +2348,19 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isPostfixUnaryExpression(e)) {                                                    // x++ / x--（guard 命中走原生 f64）
         const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
         if (ts.isPropertyAccessExpression(e.operand)) {
+            // C.n++ / C.n--（类静态字段）：结果=旧值，静态槽写回 ±1
+            if (this._isClassName(e.operand.expression)) {
+                const cn = e.operand.expression.text, Mc = this.m;
+                this._emitStaticsGuard(cn);
+                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.call("qz.static_get");
+                Mc.localSet(this.scratch);            // scratch=旧值（表达式结果）
+                Mc.localGet(this.scratch); Mc.i64ConstBits(...f64Bits(1));
+                this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
+                Mc.localSet(this.scratchB);
+                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.localGet(this.scratchB); Mc.call("qz.static_set");
+                Mc.localGet(this.scratch);
+                return;
+            }
             // this.n++ / obj.a--：接收者求值一次 → 旧值留栈为结果，字段写回 ±1
             const off = this._fieldIndex(e.operand.name.text);
             this.emitTaggedExpr(e.operand.expression);
@@ -2493,6 +2550,15 @@ Emitter.prototype.emitTaggedRem = function () {
 // 属性/索引赋值：值已在栈（i64）。注意会重新求值 receiver（读+写各一次；无副作用表达式安全）。
 Emitter.prototype._emitStoreProp = function (left) {
     const M = this.m;
+    // 类静态字段写 C.x = v → 宿主 qz.static_set
+    if (this._isClassName(left.expression)) {
+        const cn = left.expression.text;
+        M.localSet(this.scratch);                  // 值 → scratch（i64）
+        this._emitStaticsGuard(cn);
+        M.i32Const(this._strId(cn)); M.i32Const(this._strId(left.name.text)); M.localGet(this.scratch); M.call("qz.static_set");
+        M.localGet(this.scratch);                  // 赋值表达式返回所赋之值
+        return;
+    }
     M.localSet(this.scratch);                     // 值 → scratch（i64）
     this.emitTaggedExpr(left.expression);         // obj 句柄
     M.localSet(this.scratchA);
@@ -2693,6 +2759,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         let owner = this._className(rx.text);
         while (owner && !(this.classes.get(owner).staticMethods || []).some(s => s.name === method)) owner = this.classes.get(owner).parent;
         if (!owner) throw new Error(`[tagged] 静态方法 ${rx.text}.${method}() 未定义`);
+        this._emitStaticsGuard(rx.text);
         this._emitUndefined();
         for (let i = 0; i < 4; i++) {
             if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();

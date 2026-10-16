@@ -425,6 +425,24 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("不同 POJO !==", callMs("mkeq"), false);
     check("函数内 class 声明", callMs("inClass"), 5);
     check("函数内 function 声明", callMs("inFn"), 12);
+    // 类静态字段（lazy 初始化 + 宿主表）与静态方法
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_static.ts"),
+            "class C { static n: number = 1; static log: string = \"\"; static inc(): number { return ++C.n; }\n"
+          + "  static mul(k: number): number { return C.n * k; }\n"
+          + "  static push(s: string): string { C.log = C.log + s; return C.log; } }\n"
+          + "class D extends C { static bump(): number { return ++C.n; } }\n"
+          + "export function seq(): string { let out = \"\"; out = out + C.n + \",\"; out = out + (++C.n) + \",\";\n"
+          + "  out = out + (C.n++) + \",\"; out = out + C.n + \",\"; out = out + (C.n += 5) + \",\"; C.n = 100;\n"
+          + "  out = out + C.mul(2) + \",\"; out = out + C.inc() + \",\"; out = out + D.bump() + \",\";\n"
+          + "  out = out + C.push(\"a\") + C.push(\"b\"); return out; }\n");
+        const rSt = compileTS(path.join(os.tmpdir(), "qz_aot_static.ts"), path.join(os.tmpdir(), "qz_aot_static.wasm"), {});
+        const qzSt = makeQzvm(rSt.strings, { fields: rSt.fields });
+        const { instance: instSt } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_static.wasm")), { qz: qzSt });
+        qzSt.bindMem(instSt.exports.memory); if (instSt.exports.__bump) qzSt.bindBump(instSt.exports.__bump);
+        qzSt.bindClosures(instSt.exports, rSt.lamMeta); qzSt.bindClasses(instSt.exports, rSt.classMeta);
+        check("静态字段/方法序列", qzSt._toJS(instSt.exports.seq()), "1,2,2,3,8,200,101,102,aab");
+    }
     // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

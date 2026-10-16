@@ -3,6 +3,7 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 类静态字段**（`static x = v`）。宿主表 `statics`（nameId → fieldId → tagged 值）+ `qz.statics_ready/statics_mark/static_get/static_set`；访问点 lazy 内联初始值（`_emitStaticsGuard`）。覆盖读 `C.x`、写 `C.x = v`、`++C.x`/`C.x++`/`C.x += v`、静态方法内经 `C.x` 读写、继承链静态方法（`D.bump()` 调 `C.bump` 语义）。同名于数组方法名（`C.push`）时静态方法优先于数组快路径。守门：`test_aot.js` +1（223 checks ALL PASS）。
 - **feat(aot): `for...in` + 动态字符串键 `o[k]` / 修 for-of 长度被复用槽覆盖**。
   - **for-of 修复（既有静默 bug）**：循环长度原先存在 `sT[0]`，会被循环体内的字符串拼接/数组操作复用覆盖 → 第二次迭代条件读垃圾值 → 循环体只执行一次或零次（`for (const v of [1,2,3]) s+=v` 得 0）。现每层 for-of 用 3 个专用 local（句柄/索引/长度）。
   - **`for...in`**：改写为 `for (const k of Object.keys(o))` 复用 for-of 机制。
