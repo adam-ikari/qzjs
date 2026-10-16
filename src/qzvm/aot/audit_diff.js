@@ -9,7 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const corpus = require(process.argv[2] || require("path").join(__dirname, "audit_corpus.js"));
+const corpus = require(process.argv[2] ? require("path").resolve(process.argv[2]) : require("path").join(__dirname, "audit_corpus.js"));
 
 function jsFn(src, fn) {
   const out = ts.transpileModule(src, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText;

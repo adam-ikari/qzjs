@@ -522,9 +522,11 @@ function makeQzvm(strings, opts) {
     builtin: (id, n, a0, a1, a2, a3) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
-      const fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
-      if (!fn) throw new Error("qz.builtin 未实现: " + name);
-      const args = [a0, a1, a2, a3].slice(0, n).map(toJS);
+      let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
+      let arity = 0;                                  // 表项 [fn, arity] = 固定元数（调用点按此裁剪实参）
+      if (Array.isArray(fn)) { arity = fn[1]; fn = fn[0]; }
+      if (typeof fn !== "function") throw new Error("qz.builtin 未实现: " + name);
+      const args = [a0, a1, a2, a3].slice(0, arity || n).map(toJS);
       return ret(BUILTIN_CTORS.has(name) ? Reflect.construct(fn, args) : fn.apply(null, args));
     },
     band: (a, b) => box((toJS(a) | 0) & (toJS(b) | 0)),
@@ -607,6 +609,23 @@ function makeQzvm(strings, opts) {
       throw new Error("method_call: 类 " + clsId + " 无方法 " + name);
     },
     // 数组 .length= 赋值：截断或扩容（扩容量不足换 data 块，新槽补 undefined 句柄 0x7FF9|0）。
+    // a[i] = v（越界：JS 扩容并补 undefined 槽）；返回所赋之值
+    arr_set_index: (recv, i, v) => {
+      const a = arrRead(recv);
+      const idx = Math.trunc(toJS(i));
+      if (idx < 0 || !isFinite(idx)) return v;
+      while (a.length < idx) a.push(undefined);
+      a[idx] = toJS(v);
+      arrSetInPlace(recv, a);
+      return v;
+    },
+    // delete a[i] → 槽置 undefined（长度不变；JS 的「洞」在本表示里等同 undefined）
+    arr_delete_index: (recv, i) => {
+      const a = arrRead(recv);
+      const idx = Math.trunc(toJS(i));
+      if (idx >= 0 && idx < a.length) { a[idx] = undefined; arrSetInPlace(recv, a); }
+      return 1;
+    },
     arr_set_len: (recv, n) => {
       const off = Number(BigInt.asUintN(64, recv) & MASK32);
       const want = Math.max(0, Math.trunc(toJS(n)));

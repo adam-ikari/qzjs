@@ -3,6 +3,12 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **fix(aot): 位运算守卫栈失衡（虚留 i32 → 产物类型非法）+ 下标越界/类型分派 + 内建元数表项**。
+  - `emitGuardedBit` 守卫条件此前少一次 `i32.or` 合并 → 栈上遗留 i32 → `(3.9|0)+(2.1&3)` 之类产物 `local.set` 类型非法（wasm2wat 报错、实例化失败）。现累进合并为单条件。
+  - `a[i]` 越界/NaN/负数 → undefined（此前裸读内存 → trap 或静默错值）；接收者非 wasm 数组（宿主数组/字符串/POJO）→ 宿主 `qz.get_index`。
+  - `a[i] = v` 越界 → 宿主 `qz.arr_set_index`（JS 扩容补 undefined）；新增 `qz.arr_delete_index`。
+  - 内建表 `[fn, arity]` 元组项此前被当函数调用（`Math.hypot`/`log2`/`atan2` 报 `fn.apply is not a function`）。
+  - 第二批差分语料 `audit_corpus2.js`（40 例）：30 一致。
 - **feat(aot): 调用实参展开 `f(...args)`**（宿主 `qz.call_named` 按名动态调用 / `qz.closure_call_spread` 闭包动态调用 / 静态方法经数组前置 `self` 占位；目标按导出函数实际参数个数补齐 ABI 槽）；**`typeof` 内建全局**（Math/JSON/Reflect → "object"，其余内建函数 → "function"）。差分审计 43/47。
 - **test(aot): 差分审计工具入库** `src/qzvm/aot/audit_diff.js` + `audit_corpus.js`（oracle = 同一 TS 源经 tsc 剥类型在 node 跑真 JS；逐例独立编译比对；当前 41/47，余为 loud 未实现）。`node src/qzvm/aot/audit_diff.js`。
 - **feat(aot): 嵌套函数声明按闭包处理 + 类访问器 + 解构完备 + 内建 instanceof/super 分派**。

@@ -75,6 +75,9 @@ const QZ = {
   // 类实例分配在 wasm 内联（bump，见 _emitNewCall）——不经宿主，故无对应 import。
   method_call: { params: ["i64", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
   arr_set_len: { params: ["i64", "i64"], results: ["i64"] },
+  arr_set_index: { params: ["i64", "i64", "i64"], results: ["i64"] },   // a[i]=v（越界扩容）
+  arr_delete_index: { params: ["i64", "i64"], results: ["i64"] },       // delete a[i]
+  elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
   // wasm 侧仅用于 0x7FFB 数组；字符串/其它不适用。
   // num 模式 ** ：wasm 无原生 f64.pow → 宿主 Math.pow（f64×2 → f64）。
@@ -444,19 +447,28 @@ class Emitter {
     // wasm 数组(0x7FFB) + 数值键 → 内存 dataOff + i*8（快路径）。
     _emitElemOf(base, idxExpr) {
         const M = this.m, t = this._expEnter();
-        this.emitTaggedExpr(idxExpr); M.localSet(t.w);
+        this.emitTaggedExpr(idxExpr); M.localSet(t.w);              // 键
         M.localGet(t.w); this._emitIsStr();
         M.ifBlock("i64");
-        M.localGet(base); M.localGet(t.w); M.call("qz.get_index");
+        M.localGet(base); M.localGet(t.w); M.call("qz.get_index");  // 字符串键 → 宿主
         M.else_();
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+        M.ifBlock("i64");                                           // wasm 数组 + 数值键
+        this._emitInt32Safe(t.w);
         M.ifBlock("i64");
-        M.localGet(t.w); M.f64ReinterpretI64(); M.i32TruncF64S();
-        M.i32Const(8); M.i32Mul();
-        M.localGet(base); M.i32WrapI64(); M.i32Load(2, 8); M.i32Add();
-        M.i64Load(3, 0);
+        M.localGet(t.w); M.f64ReinterpretI64(); M.i32TruncF64S(); M.localSet(t.a);
+        M.localGet(t.a); M.localGet(base); M.i32WrapI64(); M.i32Load(2, 0); M.i32LtU();   // idx <u len（负数→巨大→假）
+        M.ifBlock("i64");
+        M.localGet(base); M.i32WrapI64(); M.i32Load(2, 8);
+        M.localGet(t.a); M.i32Const(8); M.i32Mul(); M.i32Add(); M.i64Load(3, 0);
         M.else_();
-        M.localGet(base); M.localGet(t.w); M.call("qz.get_index");
+        this._emitUndefined();                                      // 越界 → undefined（JS 语义）
+        M.end();
+        M.else_();
+        M.localGet(base); M.localGet(t.w); M.call("qz.get_index");   // NaN/超范围索引 → 宿主
+        M.end();
+        M.else_();
+        M.localGet(base); M.localGet(t.w); M.call("qz.get_index");   // 非 wasm 数组（宿主数组/字符串/POJO/实例）
         M.end();
         M.end();
         this._expLeave();
@@ -618,7 +630,7 @@ class Emitter {
         const sT = this.mode === "tagged" ? Array.from({ length: 32 }, () => "i32") : [];
         this.sT = this.mode === "tagged" ? Array.from({ length: 32 }, (_, i) => nLoc + 5 + i) : null;
         // 嵌套对象字面量的句柄临时槽（i64）：每层独立，避免内层覆盖外层句柄。
-        const objPool = this.mode === "tagged" ? Array.from({ length: 24 }, () => "i64") : [];
+        const objPool = this.mode === "tagged" ? Array.from({ length: 32 }, () => "i64") : [];
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
         // 尾部追加：sT(8×i32，tagged) + swIdx(i32) + forOf 对×(vt,i32)（每嵌套层独立）。
@@ -767,7 +779,7 @@ class Emitter {
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
         const sT = Array.from({ length: 32 }, () => "i32");
         this.sT = Array.from({ length: 32 }, (_, i) => nLoc + 5 + i);
-        const objPool = Array.from({ length: 24 }, () => "i64");
+        const objPool = Array.from({ length: 32 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
         this.swIdx = this.objBase + objPool.length;
@@ -963,7 +975,7 @@ class Emitter {
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
         const sT = Array.from({ length: 32 }, () => "i32");
         this.sT = Array.from({ length: 32 }, (_, i) => nLoc + 5 + i);
-        const objPool = Array.from({ length: 24 }, () => "i64");
+        const objPool = Array.from({ length: 32 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
         this.swIdx = this.objBase + objPool.length;
@@ -1915,8 +1927,8 @@ Emitter.prototype._strId = function (text) {
 // 避免内层表达式（含 .length / 下标 / 拼接）覆盖外层正在使用的接收者/值。
 Emitter.prototype._expEnter = function () {
     const d = this._expDepth || 0; this._expDepth = d + 1;
-    if (!this.sT) return { v: 0, w: 0, a: 0, b: 0, c: 0 };
-    return { v: this.objBase + 8 + d, w: this.objBase + 16 + d,   // 各 8 层（objPool 共 24 槽）
+    if (!this.sT) return { v: 0, w: 0, x: 0, a: 0, b: 0, c: 0 };
+    return { v: this.objBase + 8 + d, w: this.objBase + 16 + d, x: this.objBase + 24 + d,   // 各 8 层（objPool 共 32 槽）
              a: this.sT[8 + 3 * d], b: this.sT[9 + 3 * d], c: this.sT[10 + 3 * d] };   // 各 8 层（sT 共 32 槽）
 };
 Emitter.prototype._expLeave = function () { this._expDepth--; };
@@ -2395,24 +2407,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isElementAccessExpression(e)) {
         // o[k]：字符串键（动态）→ 宿主 qz.get_index（POJO 按字段名表 / 宿主对象按索引）；
         //       数值键 → wasm 内存快路径（数组 dataOff + i*8）。
-        const Mi = this.m, t = this._expEnter();     // 键/接收者须存活于嵌套求值（可重入槽）
-        this.emitTaggedExpr(e.argumentExpression); Mi.localSet(t.w);   // 键
-        Mi.localGet(t.w); this._emitIsStr();
-        Mi.ifBlock("i64");
-        this.emitTaggedExpr(e.expression); Mi.localGet(t.w); Mi.call("qz.get_index");
-        Mi.else_();
-        this.emitTaggedExpr(e.expression); Mi.localSet(t.v);           // 接收者
-        // wasm 数组(0x7FFB) → 内存快路径；其余（宿主数组/字符串/POJO/类实例）→ 宿主 qz.get_index
-        Mi.localGet(t.v); Mi.i64Const(48n); Mi.i64ShrU(); Mi.i64Const(0x7ffbn); Mi.i64Eq();
-        Mi.ifBlock("i64");
-        Mi.localGet(t.w); Mi.f64ReinterpretI64(); Mi.i32TruncF64S();   // → i32 index
-        Mi.i32Const(8); Mi.i32Mul();
-        Mi.localGet(t.v); Mi.i32WrapI64(); Mi.i32Load(2, 8); Mi.i32Add();   // dataOff + i*8
-        Mi.i64Load(3, 0);
-        Mi.else_();
-        Mi.localGet(t.v); Mi.localGet(t.w); Mi.call("qz.get_index");
-        Mi.end();
-        Mi.end();
+        const Mi = this.m, t = this._expEnter();
+        this.emitTaggedExpr(e.expression); Mi.localSet(t.v);
+        this._emitElemOf(t.v, e.argumentExpression);
         this._expLeave();
         return;
     }
@@ -2771,8 +2768,9 @@ Emitter.prototype._emitInt32Safe = function (local) {
 Emitter.prototype.emitGuardedBit = function (qzName, i32op, unsigned) {
     const M = this.m;
     M.localSet(this.scratchB); M.localSet(this.scratchA);
-    this._emitIsHandle(this.scratchA); this._emitIsHandle(this.scratchB); M.i32Or();
-    this._emitInt32Safe(this.scratchA); this._emitInt32Safe(this.scratchB); M.i32Or();
+    this._emitIsHandle(this.scratchA); this._emitIsHandle(this.scratchB); M.i32Or();   // 1 个条件值
+    this._emitInt32Safe(this.scratchA); M.i32Or();     // 累进合并（此前少一次合并 → 栈上多留 i32）
+    this._emitInt32Safe(this.scratchB); M.i32Or();
     M.ifBlock("i64");
     M.localGet(this.scratchA); M.localGet(this.scratchB); M.call(qzName);
     M.else_();
@@ -2888,17 +2886,31 @@ Emitter.prototype._emitStoreElem = function (left) {
     const M = this.m, t = this._expEnter();       // 值/键/接收者须存活于嵌套求值
     M.localSet(t.w);                              // 值（i64）
     this.emitTaggedExpr(left.argumentExpression); M.localSet(t.v);   // 键
-    // 字符串键 → 宿主 qz.set_index（POJO 按字段名 / 宿主对象按索引）；数值键 → wasm 内存
     M.localGet(t.v); this._emitIsStr();
     M.ifBlock("void");
-    this.emitTaggedExpr(left.expression); M.localGet(t.v); M.localGet(t.w); M.call("qz.set_index");
+    this.emitTaggedExpr(left.expression); M.localSet(t.x);
+    M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.set_index");   // 字符串键 → 宿主
     M.else_();
-    this.emitTaggedExpr(left.expression); M.localSet(t.v);
-    M.localGet(t.v); M.i32WrapI64(); M.localSet(t.a);   // headerOff
-    M.localGet(t.v); M.f64ReinterpretI64(); M.i32TruncF64S();
-    M.i32Const(8); M.i32Mul();
-    M.localGet(t.a); M.i32Load(2, 8); M.i32Add();       // dataOff + i*8
+    this.emitTaggedExpr(left.expression); M.localSet(t.x);
+    M.localGet(t.x); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+    M.ifBlock("void");                                             // wasm 数组 + 数值键
+    this._emitInt32Safe(t.v);
+    M.ifBlock("void");
+    M.localGet(t.v); M.f64ReinterpretI64(); M.i32TruncF64S(); M.localSet(t.a);
+    M.localGet(t.a); M.localGet(t.x); M.i32WrapI64(); M.i32Load(2, 0); M.i32LtU();
+    M.ifBlock("void");
+    M.localGet(t.x); M.i32WrapI64(); M.i32Load(2, 8);
+    M.localGet(t.a); M.i32Const(8); M.i32Mul(); M.i32Add();
     M.localGet(t.w); M.i64Store(3, 0);
+    M.else_();
+    M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.arr_set_index"); M.drop();   // 越界 → 扩容（JS 语义）
+    M.end();
+    M.else_();
+    M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.arr_set_index"); M.drop();
+    M.end();
+    M.else_();
+    M.localGet(t.x); M.localGet(t.v); M.localGet(t.w); M.call("qz.set_index");       // 其它接收者 → 宿主
+    M.end();
     M.end();
     M.localGet(t.w);                              // 返回所赋之值
     this._expLeave();
