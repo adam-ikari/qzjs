@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 提取方法的 this 与 undefined 属性读（2026-10-16）
+- 对象字面量方法/访问器包装：`this` 非对象时传 **undefined**（JS 语义；此前回落定义时对象 → 提取后调用误读到定义对象的字段）。
+- `prop_get`：接收者为 undefined/null 时抛 `TypeError: Cannot read properties of …`（JS 语义；此前静默 undefined）。注：wasm 内存快路径仍直接返回 undefined，故该错误只在经宿主分派的读取上生效。
+- 结果：**370/381（97.1%）**（本轮语料新增 20 例，17→16 差异为「提取方法」用例语义更接近 JS 但未抛错，仍记为待修）。
+
 ### 第十三批差分审计（2026-10-16）
 - 新增 `audit_corpus13.js`（20 例：别名/共享、原型链、键序（整数键）、`this` 绑定、shallow 语义、迭代器、提取方法）。
 - **字符串 `+=` 数字快路径缺 `str_dup`（静默错值）**：`s += n` 的数字分支直接 `qzs_append` 原地追加 → 被容器快照的同一字符串被改写（如 `parts.push(r)` 后所有元素变成最终值）。现按 `_concatInPlace` 先取私有副本。

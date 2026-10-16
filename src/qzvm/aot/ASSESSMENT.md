@@ -119,7 +119,7 @@
 
 已知限制（均已记录，loud 或窄面差异）：
 - （已修）**POJO/实例键序**：插入序表（`field_order`/`field_order_lit`，写/删同步）→ `Object.keys`/`for-in`/`JSON.stringify` 键序与 JS 一致。
-- **已知静默差异（待修）**：（1）对象字面量方法**被提取后调用**（`const f = o.m; f()`）——JS 中 `this` 为 undefined（抛错），本后端仍绑定义时对象；（2）`Object.create` 之外的原型链方法调用 `this`、`delete` 已按接收者修正，但 `this` 未定义时不抛错；（3）**数组迭代器**（`values()/entries()/keys()`）读取的是取值时刻的副本，迭代中 `push` 不会体现（JS 迭代活数组）；（4）方法内经 `this` 捕获的嵌套函数（`function` 表达式带 this 参数）个别场景捕获值为 NaN。
+- **已知静默差异（待修）**：（1）对象字面量方法**被提取后调用**（`const f = o.m; f()`）——`this` 已按 JS 传 undefined（不再误读定义对象），但属性读返回 undefined 而非抛 TypeError（wasm 快路径未插 err 检查：插入点会破坏嵌套 if 平衡，待重构）；（2）`Object.create` 之外的原型链方法调用 `this`、`delete` 已按接收者修正，但 `this` 未定义时不抛错；（3）**数组迭代器**（`values()/entries()/keys()`）读取的是取值时刻的副本，迭代中 `push` 不会体现（JS 迭代活数组）；（4）方法内经 `this` 捕获的嵌套函数（`function` 表达式带 this 参数）个别场景捕获值为 NaN。
 - **`arguments` 对象**未实现（编译期 loud，建议 rest 形参）；**闭包/lambda >4 形参**（wasm 闭包 ABI 仅 4 实参槽；顶层函数直调不限）。
 - （已修）**稀疏数组洞**：数据槽以 `HOLE`(0x7FF9|2) 标记，`arrRead` 还原为真 JS 稀疏数组 → `map/filter/reduce/indexOf/join/Object.keys/JSON/for-of` 与 JS 一致（`includes` 不跳洞）。
 - （已修）**POJO/实例键序**：插入序跟踪（见下）。

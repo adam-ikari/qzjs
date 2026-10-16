@@ -687,6 +687,13 @@ function makeQzvm(strings, opts) {
     prop_get: (recv, id) => {
       const name = strings[id];
       const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === TAG_HI && off < 8) {                    // undefined/null 上读属性 → TypeError（JS）
+        throwValue(new TypeError("Cannot read properties of " + (off === 1 ? "null" : "undefined") + " (reading '" + name + "')"));
+        return TAG;
+      }
+      if (hi === BOOL_HI || (hi !== TAG_HI && hi !== STR_HI && hi !== 0x7ffbn && hi !== HOST_HI && hi !== CLO_HI && hi !== INST_HI)) {
+        // 数字/布尔等原始值：JS 会装箱（'x'.length 之类已由字符串/数组路径处理）→ 走宿主取值或 undefined
+      }
       if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {           // 运行时访问器（Object.defineProperty）
         syncDynAcc();
         const acc = dynAcc.get(off + "|" + name);
@@ -897,7 +904,7 @@ function makeQzvm(strings, opts) {
     object_set_method: (o, k, v) => {
       const obj = handles[idxOf(o)];
       obj[strings[k]] = function (...args) {
-        const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : o;   // 实际接收者（原型链调用时 != 定义对象）
+        const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG;   // 实际接收者；提取后调用 this=undefined（JS 语义）
         return toJS(closureCall(v, selfH, ret(args[0]), ret(args[1]), ret(args[2])));
       };
       obj[strings[k]].__qzClo = v;   // 原始闭包句柄（访问器调用需替换 this）
@@ -905,14 +912,14 @@ function makeQzvm(strings, opts) {
     object_set_method_key: (o, keyHandle, v) => {   // 计算键名方法（Symbol.iterator 等）
       const obj = handles[idxOf(o)], key = toJS(keyHandle);
       obj[key] = function (...args) {
-        const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : o;
+        const selfH = (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG;
         return toJS(closureCall(v, selfH, ret(args[0]), ret(args[1]), ret(args[2])));
       };
       obj[key].__qzClo = v;
     },
     obj_accessor: (o, k, g, s2) => {
       const name = strings[k], obj = handles[idxOf(o)], opt = {};
-      const selfOf = function () { return (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : o; };
+      const selfOf = function () { return (this && typeof this === "object" && this !== globalThis) ? tagHandle(this) : TAG; };
       if (BigInt.asUintN(64, g) >> 48n === CLO_HI) opt.get = function () { return toJS(closureCall(g, selfOf.call(this), TAG, TAG, TAG)); };
       if (BigInt.asUintN(64, s2) >> 48n === CLO_HI) opt.set = function (v) { closureCall(s2, selfOf.call(this), ret(v), TAG, TAG); };
       if (opt.get || opt.set) Object.defineProperty(obj, name, { get: opt.get, set: opt.set, configurable: true, enumerable: true });
