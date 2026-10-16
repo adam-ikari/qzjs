@@ -504,6 +504,21 @@ function makeQzvm(strings, opts) {
       for (const k of Object.keys(o || {})) if (!skip.includes(k)) out[k] = o[k];
       return tagHandle(out);
     },
+    // 对象展开的宿主源（JSON.parse 结果等非 POJO）：物化后逐键写进目标（预登记字段 → 内存槽；其余 → extras）。
+    obj_merge: (target, src) => {
+      const o = toJS(src);
+      if (o == null) return;
+      syncExtras();
+      const u = BigInt.asUintN(64, target), off = Number(u & MASK32);
+      const dv = mem ? new DataView(mem.buffer) : null;
+      const size = dv ? dv.getInt32(off + 4, true) : 0;
+      for (const k of Object.keys(o)) {
+        const v = ret(o[k]);
+        const e = fieldEntries.find(([n]) => n === k);
+        if (e && dv && e[1] + 8 <= size) dv.setBigInt64(off + e[1], v, true);
+        else extras.set(off + "|" + k, v);
+      }
+    },
     // 动态键取值/赋值 o[k]：POJO/实例按字段名表（fieldEntries）定位；宿主对象直接索引；数组/字符串走 toJS。
     get_index: (o, k) => {
       const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);

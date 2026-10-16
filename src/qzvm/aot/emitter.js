@@ -78,6 +78,7 @@ const QZ = {
   arr_set_index: { params: ["i64", "i64", "i64"], results: ["i64"] },   // a[i]=v（越界扩容）
   arr_delete_index: { params: ["i64", "i64"], results: ["i64"] },       // delete a[i]
   delete_index: { params: ["i64", "i64"], results: ["i64"] },           // delete o[k] / a[i]
+  obj_merge: { params: ["i64", "i64"], results: [] },           // {...hostObj} 物化合并
   elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
   // wasm 侧仅用于 0x7FFB 数组；字符串/其它不适用。
@@ -2166,9 +2167,18 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         M.i32GeS(); M.brIf(1);                                   // i >= len → 退出
         M.block(); this.depth++;
         this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
+        // 元素：字符串(0x7FFA) → 宿主 charAt（UTF-16 码元）；wasm 数组(0x7FFB) → 内存 dataOff + i*8
+        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+        M.ifBlock("i64");
+        M.localGet(arrL); M.i32Const(this._strId("charAt"));
+        M.localGet(idxL); M.f64ConvertI32U(); M.i64ReinterpretF64();
+        this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+        M.call("qz.method_call");
+        M.else_();
         M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 8);       // dataOff
         M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // dataOff + i*8
-        M.i64Load(3, 0); this._emitVarStore(s.initializer.declarations[0].name.text, this.scratchB); this.m.drop();   // x = arr[i]（被捕获则写 env）
+        M.i64Load(3, 0);
+        M.end(); this._emitVarStore(s.initializer.declarations[0].name.text, this.scratchB); this.m.drop();   // x = arr[i]（被捕获则写 env）
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
         this.depth--; M.end();                                   // end cont
@@ -2376,13 +2386,38 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isObjectLiteralExpression(e)) {
         // POJO：字段驻留 wasm 线性内存（零跨界读写）。句柄 = box(高16位0x7FF9 | offset)。字段宽 8 字节（i64）。
         if (e.properties.some(p => ts.isSpreadAssignment(p))) {
-            // {..o, a:1} → qz.obj_assign(n, ...pieces)（非 spread 属性各自打包成对象字面量）
-            const M = this.m;
-            const pieces = e.properties.map(p => ts.isSpreadAssignment(p) ? p.expression : ts.factory.createObjectLiteralExpression([p]));
-            if (pieces.length > 4) throw new Error("[tagged] 对象展开最多 4 段");
-            M.i32Const(pieces.length);
-            for (let i = 0; i < 4; i++) { if (i < pieces.length) this.emitTaggedExpr(pieces[i]); else this._emitUndefined(); }
-            M.call("qz.obj_assign");
+            // {..a, k: v}：分配统一容量的新 POJO → 展开段做**内存级浅拷贝**（嵌套句柄原样复制 = JS 别名语义）+
+            // 宿主对象/非 POJO 源走 qz.obj_merge（物化后逐键写）；显式属性直接写各自字段槽。
+            const Ma = this.m, ta = this._expEnter();
+            const cap = this._instSize();
+            emitBumpAlloc(Ma, () => Ma.i32Const(cap));            // → off(i32)
+            Ma.localSet(ta.a);
+            Ma.localGet(ta.a); Ma.i64ExtendI32U(); Ma.i64ConstBits(0, 0x7ff90000); Ma.i64Or(); Ma.localSet(ta.v);
+            Ma.localGet(ta.a); Ma.i32Const(0); Ma.i32Store(2, 0);                  // [0]=clsId（POJO=0）
+            Ma.localGet(ta.a); Ma.i32Const(cap); Ma.i32Store(2, 4);                // [4]=size
+            Ma.localGet(ta.a); this._emitFillUndef(cap);                           // 未赋值槽 = undefined
+            for (const p of e.properties) {
+                if (ts.isSpreadAssignment(p)) {
+                    this.emitTaggedExpr(p.expression); Ma.localSet(ta.w);
+                    Ma.localGet(ta.w); Ma.i64Const(48n); Ma.i64ShrU(); Ma.i64Const(0x7ff9n); Ma.i64Eq();
+                    Ma.localGet(ta.w); Ma.i64Const(48n); Ma.i64ShrU(); Ma.i64Const(0x7ffen); Ma.i64Eq();
+                    Ma.i32Or();
+                    Ma.ifBlock("void");
+                    Ma.localGet(ta.a); Ma.i32Const(8); Ma.i32Add();                    // dst = 新对象 + 8
+                    Ma.localGet(ta.w); Ma.i32WrapI64(); Ma.i32Const(8); Ma.i32Add();   // src = 源对象 + 8
+                    Ma.i32Const(cap - 8);                                              // n（统一容量 → 常量）
+                    Ma.call("qzs_memcpy");
+                    Ma.else_();
+                    Ma.localGet(ta.v); Ma.localGet(ta.w); Ma.call("qz.obj_merge");      // 宿主对象等 → 物化合并
+                    Ma.end();
+                } else if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+                    Ma.localGet(ta.v); Ma.i32WrapI64();
+                    this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);
+                    Ma.i64Store(3, this._fieldIndex(p.name.text));
+                } else throw new Error("[tagged] 对象展开仅支持 属性/展开 混合（方法/访问器不支持）");
+            }
+            Ma.localGet(ta.v);
+            this._expLeave();
             return;
         }
         if (e.properties.some(p => !ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p))) {
