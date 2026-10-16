@@ -106,6 +106,7 @@ const QZ = {
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
   statics_ready: { params: ["i32"], results: ["i32"] },        // 类静态字段：是否已初始化
+  statics_has: { params: ["i32", "i32"], results: ["i32"] },     // 该类是否有该静态（运行时父链查找）
   statics_mark: { params: ["i32"], results: [] },
   static_get: { params: ["i32", "i32"], results: ["i64"] },    // (classId, fieldId) → tagged
   static_set: { params: ["i32", "i32", "i64"], results: [] },
@@ -121,6 +122,8 @@ const QZ = {
   regex: { params: ["i32"], results: ["i64"] },                        // 正则字面量 → 宿主 RegExp
   str_dup: { params: ["i64"], results: ["i64"] },                     // 字符串私有副本（不可变语义）
   iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组
+  call_value: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 值调用（闭包/宿主函数）
+  call_named_rest: { params: ["i32", "i64", "i32"], results: ["i64"] },             // 展开实参 + rest 收尾被调函数
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
@@ -291,6 +294,13 @@ class Emitter {
     }
     // 栈顶值 → 绑定目标。仅支持 Identifier（单层解构）；嵌套 pattern 明确报错（避免静默错值）。
     _emitBindingTarget(name) {
+        if (!ts.isIdentifier(name)) {                    // 嵌套模式（[[a],[b]] / {a:{b}}）：值入槽后递归析构
+            const t = this._expEnter();
+            this.m.localSet(t.v);
+            this._emitDestructurePattern(name, t.v);
+            this._expLeave();
+            return;
+        }
         if (ts.isIdentifier(name)) { this.m.localSet(this._local(name.text)); return; }
         throw new Error("[tagged] 嵌套解构未实现（`const [[a],[b]] = …` / `const {a:{b}} = …`）；请用中间变量展开");
     }
@@ -505,9 +515,11 @@ class Emitter {
             return;
         }
         const foff = this._fieldIndex(name);
-        // 字符串/数组：方法名读取 → 宿主返回**绑定的 JS 函数**（truthy + 可调用；JS 里 s.at 也是函数）
+        // 字符串/数组/纯数值：属性读 → 宿主（方法名返回绑定函数：truthy + 可调用；(1).toLocaleString 亦是函数）
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+        M.i32Or();
+        this._emitIsHandle(base); M.i32Eqz();
         M.i32Or();
         M.ifBlock("i64");
         M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
@@ -544,6 +556,52 @@ class Emitter {
         return n;
     }
 
+    // ++obj.a / obj.a-- / this.#v++：接收者求值一次 → 属性读 ±1 → 属性写回（宿主/POJO/访问器统一分派）。
+    // prefix：表达式结果 = 新值；postfix：结果 = 旧值。
+    _emitIncDecProp(operand, inc, kind) {
+        const M = this.m, t = this._expEnter();
+        const pname = ts.isPrivateIdentifier(operand.name) && this._curClass
+            ? "#" + this._curClass + "#" + operand.name.text : operand.name.text;
+        this.emitTaggedExpr(operand.expression); M.localSet(t.v);              // 接收者（一次求值）
+        M.localGet(t.v); this._emitPropReadFromLocal(t.v, pname); M.localSet(t.w);   // 旧值
+        M.localGet(t.w); M.i64ConstBits(...f64Bits(1));
+        this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? M.f64Add : M.f64Sub);
+        M.localSet(t.x);                                                       // 新值
+        M.localGet(t.x);                                                       // 供存储
+        this._emitStorePropValue(operand, t.v);                                // 写回（消费值、留新值）
+        M.drop();
+        if (kind === "prefix") M.localGet(t.x); else M.localGet(t.w);           // 结果
+        this._expLeave();
+        return true;
+    }
+    // 值在栈顶 → 写到 left.expression（接收者已在 local recvLocal）
+    _emitStorePropValue(left, recvLocal) {
+        const M = this.m, t = this._expEnter();
+        M.localSet(t.w);                                    // 值
+        const pname = ts.isPrivateIdentifier(left.name) && this._curClass
+            ? "#" + this._curClass + "#" + left.name.text : left.name.text;
+        M.localGet(recvLocal); M.localSet(t.v);             // 接收者
+        M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
+        M.ifBlock("void");
+        M.localGet(t.v); M.i32Const(this._strId(pname)); M.localGet(t.w); M.call("qz.object_set");
+        M.else_();
+        M.localGet(t.v); this._emitStrLitHandle(pname); M.localGet(t.w); M.call("qz.set_index");
+        M.end();
+        M.localGet(t.w);
+        this._expLeave();
+    }
+    // 值调用：被调值求值到可重入槽 → 参数压栈 → qz.call_value（闭包 → closure_call；宿主函数 → 调用）
+    _emitValueCall(calleeExpr, args) {
+        const M = this.m, t = this._expEnter();
+        this.emitTaggedExpr(calleeExpr); M.localSet(t.v);
+        M.localGet(t.v);
+        for (let i = 0; i < 4; i++) {
+            if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        }
+        M.call("qz.call_value");
+        this._expLeave();
+    }
+
     // 展开实参调用：实参合成一个数组（复用数组字面量展开路径），宿主按 callee 动态调用。
     _emitSpreadCall(e) {
         const M = this.m, t = this._expEnter();
@@ -570,9 +628,11 @@ class Emitter {
         if (!ts.isIdentifier(cx)) throw new Error("[tagged] 展开实参仅支持顶层函数/闭包/静态方法调用");
         const name = this._fnName(cx.text);
         if (this.m._funcIdx[name] !== undefined || this.fnNames.has(name)) {
-            const isNum = this._calleeInfo(cx.text) && this._calleeInfo(cx.text).mode === "num";
+            const isNum = !!(this._calleeInfo(cx.text) && this._calleeInfo(cx.text).mode === "num");
+            const cp2 = this._calleeParams(cx.text) || this._calleeParams(name);
+            const hasRest2 = !!(cp2 && cp2.length > 0 && cp2[cp2.length - 1].dotDotDotToken);
             M.i32Const(this._strId(name)); M.localGet(t.v); M.i32Const(isNum ? 1 : 0);
-            M.call("qz.call_named");
+            M.call(hasRest2 ? "qz.call_named_rest" : "qz.call_named");   // rest 收尾：实参数组即其唯一形参
             this._expLeave();
             return;
         }
@@ -3007,8 +3067,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.call(staticMethName(got.cname, got.acc.name));
             return;
         }
-        this._emitStaticsGuard(cn);
-        this.m.i32Const(this._strId(cn)); this.m.i32Const(this._strId(e.name.text)); this.m.call("qz.static_get");
+        // 静态字段可继承/可被派生类遮蔽：先初始化父链各层，再**运行时**从当前类向上找持有者
+        const chain = [];
+        for (let x = cn; x; x = this.classes.get(x).parent) chain.push(x);
+        for (const x of chain.slice().reverse()) this._emitStaticsGuard(x);
+        const M3 = this.m, ts2 = this._expEnter();
+        this._emitUndefined(); M3.localSet(ts2.v);
+        for (const x of chain.slice().reverse()) {          // 父 → 子：越派生越后写（遮蔽父类同名字段）
+            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(e.name.text)); M3.call("qz.statics_has");
+            M3.ifBlock("void");
+            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(e.name.text)); M3.call("qz.static_get");
+            M3.localSet(ts2.v);
+            M3.end();
+        }
+        M3.localGet(ts2.v);
+        this._expLeave();
         return;
     }
     if (ts.isPropertyAccessExpression(e) && ts.isSuperKeyword(e.expression)) {
@@ -3165,7 +3238,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._expLeave();
             return;
         }
-        if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
+        if (!ts.isIdentifier(e.expression)) {
+            this._emitValueCall(e.expression, e.arguments);   // 值调用：宿主按句柄类型分派（闭包/宿主函数）
+            return;
+        }
         const fn = e.expression.text;
         // 内建全局函数调用 String(x) / parseInt(s) / isNaN(x) / JSON… → qz.builtin
         if (BUILTIN_GLOBALS.has(fn)) { this._emitBuiltinCall(fn, e.arguments); return; }
@@ -3246,7 +3322,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     Mc.localGet(this.scratch);
                     return;
                 }
-                // ++this.n / --obj.a：接收者求值一次 → 读字段 ± 1 → 写回；结果=新值
+                // ++obj.a / --obj.a：接收者求值一次 → 读字段 ± 1 → 写回；结果=新值
                 const off = this._fieldIndex(ts.isPrivateIdentifier(e.operand.name) && this._curClass ? "#" + this._curClass + "#" + e.operand.name.text : e.operand.name.text);
                 this.emitTaggedExpr(e.operand.expression);
                 this.m.localSet(this.scratchObj);
@@ -3526,6 +3602,7 @@ Emitter.prototype._emitStoreProp = function (left) {
             this._expLeave();
             return;
         }
+        this._emitStaticsGuard(cn);               // 写总是落在接收者类（JS：派生的静态属性是自有属性）
         M.i32Const(this._strId(cn)); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.static_set");
         M.localGet(t.w);                           // 赋值表达式返回所赋之值
         this._expLeave();

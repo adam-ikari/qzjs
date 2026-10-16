@@ -315,7 +315,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_destr.ts"), "export function f(): any { const [[p]] = [[7]]; return p; }\n");
     try { compileTS(path.join(os.tmpdir(), "qz_aot_destr.ts"), path.join(os.tmpdir(), "qz_aot_destr.wasm"), {}); }
     catch (e) { nestThrew = /嵌套解构未实现/.test(e.message); }
-    check("嵌套解构 → 报错", nestThrew, true);
+    // 嵌套解构（[[a],[b]] / {a:{b}}）已实现（2026-10-16）：见 runSemantics 的 destructure-nested 检查
     // 静态方法（含继承）
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_static.ts"),
         "class U { static sq(n: number): number { return n * n; } static tag(): any { return \"u\"; } }\n"

@@ -151,6 +151,7 @@ function makeQzvm(strings, opts) {
   };
   const isArrH = (b) => (BigInt(b) >> 48n) === 0x7ffbn;
   // wasm 原生数组（0x7FFB）：header[0]=len，header[2]=dataOff，data = i64×len（元素解引用递归）。
+  const arrOf = new WeakMap();   // JS 数组 → 原 wasm 数组句柄（往返还原，保持别名）
   const arrRead = (b) => {
     const off = Number(BigInt(b) & MASK32);
     const dv = new DataView(mem.buffer);
@@ -158,6 +159,7 @@ function makeQzvm(strings, opts) {
     const dataOff = dv.getInt32(off + 8, true);
     const out = new Array(len);
     for (let i = 0; i < len; i++) out[i] = toJS(dv.getBigInt64(dataOff + i * 8, true));
+    arrOf.set(out, b);
     return out;
   };
   const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
@@ -260,7 +262,8 @@ function makeQzvm(strings, opts) {
   // undefined 走 tagHandle → handles[idx]（toJS 还原 undefined）。保留 null≠undefined 区分，
   // 使 + / Number / String 等运算按 JS 正确分支（Number(null)=0 ≠ Number(undefined)=NaN）。
   // ?? 判 nullish 走宿主 qz.is_nullish（见 emitNullish），不靠 TAG|0 比对。
-  const bitsOf = (e) => typeof e === "function" && cloOf.has(e) ? cloOf.get(e)
+  const bitsOf = (e) => Array.isArray(e) && arrOf.has(e) ? arrOf.get(e)   // 来自 wasm 的数组 → 原句柄（别名）
+                     : typeof e === "function" && cloOf.has(e) ? cloOf.get(e)
                      : (e !== null && typeof e === "object" && pojoOf.has(e) && pojoOf.get(e).mem === mem) ? (TAG | BigInt(pojoOf.get(e).off))
                      : typeof e === "string" ? strWriteback(e)
                      : typeof e === "number" ? numToBits(e)
@@ -315,7 +318,7 @@ function makeQzvm(strings, opts) {
   // array→0x7FFB、null/undefined→固定槽、其它→0x7FF9 句柄。
   const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
                    : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
-                   : Array.isArray(r) ? arrWriteback(r) : tagHandle(r);
+                   : Array.isArray(r) ? (arrOf.has(r) ? arrOf.get(r) : arrWriteback(r)) : tagHandle(r);   // wasm 数组 → 原句柄（别名语义）
   // 数组方法（recv=0x7FFB 原生数组）。回调（map/filter/reduce/…）为闭包句柄，
   // 经 closure_call(handle, v, i, arr) 调用 wasm 侧箭头函数。
   // 4 参槽中未传的实参由 emitter 填 undefined 句柄（0x7FF9|0）；变参方法（concat）据此过滤。
@@ -436,6 +439,22 @@ function makeQzvm(strings, opts) {
       if (x == null || typeof x[Symbol.iterator] !== "function") throw new Error("for-of: 该值不可迭代");
       return arrWriteback(Array.from(x));
     },
+    // 值调用：闭包句柄 → closure_call；宿主函数句柄 → 直接调用
+    call_value: (v, a0, a1, a2, a3) => {
+      const h = BigInt.asUintN(64, v) >> 48n;
+      if (h === CLO_HI) return closureCall(v, a0, a1, a2, a3);
+      if (h === HOST_HI) {
+        const f = handles[idxOf(v)];
+        if (typeof f === "function") return ret(f(...[a0, a1, a2, a3].map(toJS)));
+      }
+      throw new Error("call_value: 被调值不是函数");
+    },
+    // 展开实参 + rest 收尾被调函数：实参数组即其唯一形参
+    call_named_rest: (id, arr) => {
+      const name = strings[id], fn = exportsRef && exportsRef[name];
+      if (typeof fn !== "function") throw new Error("call_named_rest: 未导出函数 " + name);
+      return fn(arr);
+    },
     str_dup: (a) => strWriteback(strRead(a)),     // 字符串私有副本（在 bump 顶，随后原地追加安全）
     str_len: (a) => box(strRead(a).length),
     add:  (a, b) => ret(toJS(a) + toJS(b)),   // JS + 可能产字符串 → ret（非固定数值）
@@ -485,6 +504,7 @@ function makeQzvm(strings, opts) {
     },
     // 类静态字段：宿主表 nameId → { fieldId: tagged值 }；lazy 初始化（statics_ready 未标记时由产物内联初始值）。
     statics_ready: (id) => (statics.has(strings[id]) ? 1 : 0),
+    statics_has: (id, fid) => { const o = statics.get(strings[id]); return o && strings[fid] in o ? 1 : 0; },
     statics_mark: (id) => { if (!statics.has(strings[id])) statics.set(strings[id], {}); },
     static_get: (id, fid) => { const o = statics.get(strings[id]); const v = o ? o[strings[fid]] : undefined; return v === undefined ? TAG : v; },
     static_set: (id, fid, v) => { let o = statics.get(strings[id]); if (!o) { o = {}; statics.set(strings[id], o); } o[strings[fid]] = v; },

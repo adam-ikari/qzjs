@@ -3,6 +3,14 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 第五批语料 + 值调用/嵌套解构/静态继承/数组句柄往返/纯数值属性读**。
+  - 值调用 `(a.b[c])(…)`、`(cond ? f : g)(…)` → `qz.call_value`（闭包 → closure_call；宿主函数 → 调用）。
+  - 嵌套解构 `[[a],[b]]` / `{a:{b}}`（`_emitBindingTarget` 递归）。
+  - 静态字段**继承/遮蔽**：读按父→子运行时查表（`qz.statics_has`），写落接收者类。
+  - 数组句柄往返：`arrRead` 记下来源句柄、`bitsOf`/`ret` 还原 → 取出再改（`m.get(k).push(3)`）保持同一数组。
+  - 纯数值/布尔的属性读走宿主（`(1).toLocaleString` 为函数）。
+  - 对象展开槽级合并（只覆盖自有键）；POJO/实例 clsId 撞号修复（见上条）。
+  差分：语料 5 = 24/28；语料 1/2/3/4 = 46/47、40/40、37/39、**38/38**。
 - **feat(aot): 静态块 / extends 内建 / for-of 解构与可迭代 / POJO-instance clsId 混淆修复（语料 4 满分 38/38）**。
   - `static { … }`：与静态字段同批**惰性一次执行**（守卫内执行；守卫体重入已抑制）。
   - `class X extends Error`：父类为内建时 `super(m)` → 写 `message`/`name` 字段（子类仍为内存实例）。
