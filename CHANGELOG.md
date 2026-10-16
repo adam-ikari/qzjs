@@ -3,6 +3,15 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 嵌套函数声明按闭包处理 + 类访问器 + 解构完备 + 内建 instanceof/super 分派**。
+  - **嵌套函数声明 → 闭包**：此前整树提升到模块级，丢失对外层局部的捕获（`function inner(){ total += 1 }` 编译期报「未定义变量」）。现仅在文件顶层提升，嵌套声明在所属函数入口先建闭包写入变量（保持声明提升/相互递归语义）。
+  - **闭包调用**：句柄来源支持「捕获」（env_get）+ 参数直接压栈（不再用会被嵌套调用覆盖的 `cloArgs`）；支持 IIFE `(() => 42)()`。
+  - **类访问器**：get/set 此前同名 → 重复 declareFunc → 编码期 `codes` 占位 null 崩溃；现 setter 独立名 `$set`，`classMeta` 分 `getters`/`setters`，属性读/写命中访问器名时走宿主 `qz.prop_get`/`qz.prop_set`（实例沿继承链，未命中退化为字段读写）。修对象解构裸读内存（越界 → undefined）。
+  - **`super.m()`**：继承链编译期已知 → 静态直调父类方法（self=this），语义与 JS super 一致。
+  - **元数语义**：实参多于形参 → 被调函数只见前 n 个；少于 → 余下 undefined（仅 tagged；num 模式少传显式报错）。
+  - **解构完备**：数组/对象 rest（`[...rest]`/`{...others}` → 宿主 `method_call slice` / `object_rest`）、元素默认值（仅 undefined 触发，新增 `qz.is_undef`）。
+  - **内建类 `instanceof`**（Array/Object/String/Number/Boolean/Function/Error/RegExp/Date）→ 宿主 `qz.instanceof_builtin`；`typeof` 顶层函数名/持有闭包的变量 → `"function"`。
+  差分审计 41/47（余 6 项为已记录 loud 未实现：对象字面量访问器、Symbol、函数 rest 形参、调用实参展开、POJO 动态新键、函数作对象属性值）。`test_aot.js` 223 checks ALL PASS。
 - **fix(aot): 差分审计扫出的一批静默错值/合法代码 trap（可重入表达式临时槽重构）**。
   - **可重入表达式临时槽**（`_expEnter/_expLeave`，8 层 × 2×i64 + 3×i32）：此前接收者/值存在 `scratch`/`sT` 被内层表达式（`.length`/下标/拼接/嵌套字面量）覆盖 → `out.push(x.length)` 丢元素、`[[1,2],[3,4]][1][1]` 读错、`o.a.b.c` 越界读对象头。受影响点全部改专用可重入槽：数组字面量、`push/pop`、`a[i]` 读写、`o.a` 读写。
   - **属性读越界 → undefined**（POJO/类实例按 `[4]=size` 边界检查）：此前读到对象外内存 → 静默错值；非对象（数组/字符串/数字）上的普通属性 → undefined。

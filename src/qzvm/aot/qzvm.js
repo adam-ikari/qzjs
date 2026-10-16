@@ -397,6 +397,72 @@ function makeQzvm(strings, opts) {
     statics_mark: (id) => { if (!statics.has(strings[id])) statics.set(strings[id], {}); },
     static_get: (id, fid) => { const o = statics.get(strings[id]); const v = o ? o[strings[fid]] : undefined; return v === undefined ? TAG : v; },
     static_set: (id, fid, v) => { let o = statics.get(strings[id]); if (!o) { o = {}; statics.set(strings[id], o); } o[strings[fid]] = v; },
+    // 类 getter/setter 分派（仅当程序内有该类属性访问器时由产物调用）：实例沿继承链找访问器；
+    // 命中 → 调 wasm 导出方法；未命中 → 退化为字段读/写（与 qz.get_index/set_index 同语义）。
+    prop_get: (recv, id) => {
+      const name = strings[id];
+      const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === INST_HI && mem) {
+        const clsId = new DataView(mem.buffer).getInt32(off, true);
+        let c = classMeta && classMeta[clsId];
+        while (c) {
+          const g = c.getters && c.getters[name];
+          if (g) return exportsRef[g.name](recv, TAG, TAG, TAG, TAG);
+          c = c.parent != null ? classMeta[c.parent] : null;
+        }
+        const e = fieldEntries.find(([n]) => n === name);
+        if (!e) return TAG;
+        if (new DataView(mem.buffer).getInt32(off + 4, true) < e[1] + 8) return TAG;
+        return new DataView(mem.buffer).getBigInt64(off + e[1], true);
+      }
+      if (hi === HOST_HI) { const o = handles[off]; return ret(o == null ? undefined : o[name]); }
+      return ret(toJS(recv)[name]);
+    },
+    prop_set: (recv, id, v) => {
+      const name = strings[id];
+      const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === INST_HI && mem) {
+        const clsId = new DataView(mem.buffer).getInt32(off, true);
+        let c = classMeta && classMeta[clsId];
+        while (c) {
+          const st = c.setters && c.setters[name];
+          if (st) { exportsRef[st.name](recv, v, v, v, v); return; }
+          c = c.parent != null ? classMeta[c.parent] : null;
+        }
+        const e = fieldEntries.find(([n]) => n === name);
+        if (!e) return;
+        new DataView(mem.buffer).setBigInt64(off + e[1], v, true);
+        return;
+      }
+      if (hi === HOST_HI) { const o = handles[off]; if (o != null) o[name] = toJS(v); return; }
+    },
+    // x instanceof 内建类：按 tag / 物化后判定（Array/Object/String/Number/Boolean/Function/Error…）
+    instanceof_builtin: (x, id) => {
+      const name = strings[id];
+      const u = BigInt.asUintN(64, x), hi = u >> 48n;
+      const j = toJS(x);
+      switch (name) {
+        case "Array":    return (hi === 0x7ffbn || Array.isArray(j)) ? 1 : 0;
+        case "String":   return (hi === STR_HI || typeof j === "string") ? 1 : 0;
+        case "Number":   return (hi !== TAG_HI && hi !== STR_HI && hi !== 0x7ffbn && hi !== HOST_HI && hi !== INST_HI && typeof j === "number") ? 1 : 0;
+        case "Boolean":  return (hi === BOOL_HI || typeof j === "boolean") ? 1 : 0;
+        case "Function": return typeof j === "function" ? 1 : 0;
+        case "Object":   return (j !== null && typeof j === "object") ? 1 : 0;
+        case "Error":    return (j instanceof Error) ? 1 : 0;
+        case "RegExp":   return (j instanceof RegExp) ? 1 : 0;
+        case "Date":     return (j instanceof Date) ? 1 : 0;
+        default: throw new Error("instanceof_builtin: 未知内建类 " + name);
+      }
+    },
+    is_undef: (v) => (BigInt.asUintN(64, v) === TAG ? 1 : 0),   // undefined = 0x7FF9|0（null = |1 不触发默认值）
+    // {...rest}：物化后去掉指定键，返回**宿主对象**（可继续读写）。
+    object_rest: (v, i0, i1, i2, i3) => {
+      const skip = [i0, i1, i2, i3].map(i => strings[i]);
+      const o = toJS(v);
+      const out = {};
+      for (const k of Object.keys(o || {})) if (!skip.includes(k)) out[k] = o[k];
+      return tagHandle(out);
+    },
     // 动态键取值/赋值 o[k]：POJO/实例按字段名表（fieldEntries）定位；宿主对象直接索引；数组/字符串走 toJS。
     get_index: (o, k) => {
       const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);

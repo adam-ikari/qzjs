@@ -44,6 +44,14 @@ const QZ = {
   truthy: { params: ["i64"], results: ["i32"] },
   str_len: { params: ["i64"], results: ["i64"] },
   length_of: { params: ["i64"], results: ["i64"] },   // .length 宿主回退（宿主数组/POJO 物化）
+  prop_get: { params: ["i64", "i32"], results: ["i64"] },      // 实例属性读（经 getter 链）
+  prop_set: { params: ["i64", "i32", "i64"], results: [] },    // 实例属性写（经 setter 链）
+  object_rest: { params: ["i64", "i32", "i32", "i32", "i32"], results: ["i64"] },  // {...rest}
+  is_undef: { params: ["i64"], results: ["i32"] },           // v === undefined
+  instanceof_builtin: { params: ["i64", "i32"], results: ["i32"] },   // x instanceof 内建类 → 0/1
+
+
+
   log:  { params: ["i64"], results: [] },
   band: { params: ["i64", "i64"], results: ["i64"] },
   bor:  { params: ["i64", "i64"], results: ["i64"] },
@@ -189,6 +197,7 @@ class Emitter {
         };
         const walk = (n) => {
             if (ts.isVariableDeclaration(n)) bindName(n.name);
+            else if (ts.isFunctionDeclaration(n) && n.name && !(this.hoistedFns && this.hoistedFns.has(n))) names.push(n.name.text);
             ts.forEachChild(n, walk);
         };
         walk(node);
@@ -201,7 +210,10 @@ class Emitter {
         const M = this.m;
         const name = d.name;
         if (ts.isIdentifier(name)) {
-            if (d.initializer) { this.emitTaggedExpr(d.initializer); this._emitVarStore(name.text, this.scratchB); this.m.drop(); }
+            if (d.initializer) {
+                if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) { this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text); }
+                this.emitTaggedExpr(d.initializer); this._emitVarStore(name.text, this.scratchB); this.m.drop();
+            }
             return;
         }
         if (!d.initializer) return;
@@ -210,16 +222,45 @@ class Emitter {
             let i = 0;
             for (const el of name.elements) {
                 if (ts.isOmittedExpression(el)) { i++; continue; }
+                if (ts.isBindingElement(el) && el.dotDotDotToken) {     // [...rest] → 宿主 arr.slice(i)
+                    M.localGet(this.scratch); M.i32Const(this._strId("slice"));
+                    M.i64ConstBits(...f64Bits(i));
+                    this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                    M.call("qz.method_call");
+                    this._emitBindingTarget(el.name);
+                    i++;
+                    continue;
+                }
                 this._emitElemOf(this.scratch, ts.factory.createNumericLiteral(i));
+                if (ts.isBindingElement(el) && el.initializer) this._emitDefaultIfUndef(el.initializer);
                 this._emitBindingTarget(el.name);
                 i++;
             }
         } else {   // ObjectBindingPattern
+            // {...rest} 需排除「其余解构键」→ 先汇总（最多 4 个，超出报错）
+            const restExcl = [];
+            for (const el of name.elements) {
+                if (!ts.isBindingElement(el) || el.dotDotDotToken) continue;
+                const k = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
+                                          : (ts.isIdentifier(el.name) ? el.name.text : null);
+                if (k === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
+                restExcl.push(k);
+            }
             for (const el of name.elements) {
                 if (!ts.isBindingElement(el)) continue;
-                const key = el.propertyName ? el.propertyName.text : (ts.isIdentifier(el.name) ? el.name.text : null);
+                const key = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
+                                            : (ts.isIdentifier(el.name) ? el.name.text : null);
                 if (key === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
-                M.localGet(this.scratch); M.i32WrapI64(); M.i64Load(3, this._fieldIndex(key));
+                if (el.dotDotDotToken) {                               // {...rest} → 宿主 object_rest
+                    if (restExcl.length > 4) throw new Error("[tagged] 对象 rest 解构最多排除 4 个键");
+                    M.localGet(this.scratch);
+                    for (let i = 0; i < 4; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
+                    M.call("qz.object_rest");
+                    this._emitBindingTarget(el.name);
+                    continue;
+                }
+                this._emitPropReadFromLocal(this.scratch, key);        // 越界 → undefined（不再裸读内存）
+                if (el.initializer) this._emitDefaultIfUndef(el.initializer);
                 this._emitBindingTarget(el.name);
             }
         }
@@ -233,7 +274,8 @@ class Emitter {
     // 收集函数体内所有箭头函数/函数表达式（含嵌套），按源序。返回节点列表。
     _collectLambdas(node, out = []) {
         const walk = (n) => {
-            if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) { out.push(n); }
+            if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) out.push(n);
+            else if (ts.isFunctionDeclaration(n) && n.name && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n);
             ts.forEachChild(n, walk);
         };
         walk(node);
@@ -422,6 +464,10 @@ class Emitter {
     // 其余（数组/字符串/数字上的普通属性）→ undefined。
     _emitPropReadFromLocal(base, name) {
         const M = this.m;
+        if (this._hasAccessor(name, "get")) {   // 程序内有该名 getter → 宿主分派（实例经继承链）
+            M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
+            return;
+        }
         const foff = this._fieldIndex(name);
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
         M.ifBlock("i64");
@@ -454,6 +500,50 @@ class Emitter {
         return n;
     }
 
+    // 闭包调用：closure_call(handle, a0..a3)。句柄先入可重入槽（参数求值可能嵌套闭包调用），
+    // 再按「句柄在前、4 参压栈」顺序调用（参数求值用栈深度隔离，无需逐参临时）。
+    _emitClosureCall(fn, args) {
+        const M = this.m, t = this._expEnter();
+        if (this.capMap.has(fn)) { M.localGet(this.capMap.get(fn)); M.i32Const(this._strId(fn)); M.call("qz.env_get"); M.localSet(t.v); }
+        else {
+            const hIdx = this._local(fn);
+            if (hIdx === undefined) throw new Error(BUILTIN_GLOBALS.has(fn)
+                ? `[tagged] 内建 ${fn}() 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
+                : "未定义函数: " + fn);
+            M.localGet(hIdx); M.localSet(t.v);
+        }
+        M.localGet(t.v);
+        for (let i = 0; i < 4; i++) {
+            if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+        }
+        M.call("qz.closure_call");
+        this._expLeave();
+    }
+    // 解构默认值：栈顶值 === undefined 则替换为 init（JS 语义：仅 undefined 触发，null 不触发）。
+    _emitDefaultIfUndef(init) {
+        const M = this.m, t = this._expEnter();
+        M.localSet(t.v);
+        M.localGet(t.v); M.call("qz.is_undef");
+        M.ifBlock("i64");
+        this.emitTaggedExpr(init);
+        M.else_();
+        M.localGet(t.v);
+        M.end();
+        this._expLeave();
+    }
+    // 函数体内的**嵌套函数声明**（未提升）在该函数入口先建闭包存入其变量（JS 函数声明提升语义：
+    // 声明前可调用、可相互递归）。返回闭包句柄逐个写入变量（含经 env 的捕获写）。
+    _emitFnDeclClosures(body) {
+        const M = this.m;
+        this._fnVars = this._fnVars || new Set();
+        for (const lam of this._collectLambdas(body)) {
+            if (!ts.isFunctionDeclaration(lam) || !lam.name) continue;
+            this._fnVars.add(lam.name.text);
+            this._emitLambdaNew(lam);                       // 栈：闭包句柄
+            this._emitVarStore(lam.name.text, this.scratchB);
+            M.drop();
+        }
+    }
     // 本函数体（含嵌套）所有 lambda 捕获的、属于本函数参数/局部的变量名（去重，稳定序）。
     _probeCaptured(body, paramNames, localNames) {
         const lams = this._collectLambdas(body);
@@ -466,6 +556,7 @@ class Emitter {
     emitFunc(f) {
         // 多文件编译：em.sf 由 compileTS 按「本函数所属源文件」设置（行号/DWARF 用）。
         const savedCurClass = this._curClass, savedCapActive = this.capListActive, savedStatic = this._staticVars;
+        const savedFnVars = this._fnVars; this._fnVars = new Set();   // 本函数的「持有闭包的变量」集合
         this._curClass = undefined; this.capListActive = false;
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this.mode = funcMode(f);
@@ -530,7 +621,7 @@ class Emitter {
         }
         this.depth = 0; this.labels = [];
         this._staticVars = this.mode === "tagged" ? this._computeStaticVars(f.body, f.parameters.map(p => p.name.text)) : new Map();
-        if (this.mode === "tagged") this.emitTaggedBlock(f.body);
+        if (this.mode === "tagged") { this._emitFnDeclClosures(f.body); this.emitTaggedBlock(f.body); }
         else this.emitBlock(f.body);
         // 末尾非 return 且函数有返回值 → fallthrough 路径缺值（穷尽 switch/if-else 全 return）。
         // 合法代码不会到达；补 unreachable 满足 wasm 验证。
@@ -542,6 +633,7 @@ class Emitter {
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
         this._curClass = savedCurClass; this.capListActive = savedCapActive; this._staticVars = savedStatic;
+        this._fnVars = savedFnVars;
     }
 
 
@@ -612,6 +704,7 @@ class Emitter {
         const savedMap = this.varMap, savedCap = this.capMap, savedBlk = this.blkLocal;
         const savedMode = this.mode, savedDepth = this.depth, savedStatic = this._staticVars;
         const savedEnvRef = this.envRef;
+        const savedFnVars2 = this._fnVars; this._fnVars = new Set();
         this.mode = "tagged";
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
         const locals = this._collectLocals(lam.body);
@@ -665,8 +758,9 @@ class Emitter {
         this._staticVars = this._computeStaticVars(lam.body, params);
         // 箭头表达式体：表达式即返回值；块体：语句
         if (ts.isExpression(lam.body)) { this.emitTaggedExpr(lam.body); M.return_(); }
-        else this.emitTaggedBlock(lam.body);
+        else { this._emitFnDeclClosures(lam.body); this.emitTaggedBlock(lam.body); }
         const last = ts.isBlock(lam.body) ? lam.body.statements[lam.body.statements.length - 1] : null;
+        this._fnVars = savedFnVars2;
         if (!(last && ts.isReturnStatement(last))) this._emitUndefined();   // 无显式 return → undefined（JS 语义；不是 unreachable）
         M.endBody();
         this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
@@ -728,7 +822,8 @@ class Emitter {
             const c = this.classes.get(cname);
             for (const mth of c.methods) {
                 const voidRet = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
-                this.m.declareFunc(methName(cname, mth.name), ["i64", "i64", "i64", "i64", "i64"],
+                this.m.declareFunc(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name),
+                                   ["i64", "i64", "i64", "i64", "i64"],
                                    mth.accessor === "set" || voidRet ? [] : ["i64"]);
             }
             this.m.declareFunc(ctorName(cname), ["i64", "i64", "i64", "i64", "i64"], []);
@@ -755,6 +850,7 @@ class Emitter {
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         this._mEnter(staticMethName(cname, sm.name), cname, params, sm.node.body, isVoid);
         this._curClassObj = this.classes.get(cname);
+        this._emitFnDeclClosures(sm.node.body);
         this.emitTaggedBlock(sm.node.body);
         { const stmts = sm.node.body.statements; const last = stmts[stmts.length - 1];   // tagged：落空 → undefined
           if (!(last && ts.isReturnStatement(last))) { this._emitUndefined(); M.return_(); } }
@@ -772,7 +868,7 @@ class Emitter {
         // 派生类：字段默认值须在 super(...) 之后写（同名遮蔽字段父写后子覆写）；
         // super 语句处 _emitSuperCall 负责调用父 ctor 后回写本类默认值。基类：此处直接写。
         if (!c.parent) this._emitFieldDefaults(c);
-        if (ctor) this.emitTaggedBlock(ctor.body);
+        if (ctor) { this._emitFnDeclClosures(ctor.body); this.emitTaggedBlock(ctor.body); }
         else if (c.parent) this._emitSuperCallForward(c);   // 合成 ctor：constructor(...a){ super(...a) }
         this._curClassObj = null;
         M.endBody();
@@ -794,7 +890,8 @@ class Emitter {
         const isVoid = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
         const realParams = mth.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
-        this._mEnter(methName(cname, mth.name), cname, params, mth.node.body, isVoid);
+        this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid);
+        this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);
         { const stmts = mth.node.body.statements; const last = stmts[stmts.length - 1];   // tagged：落空 → undefined
           if (!(last && ts.isReturnStatement(last))) { this._emitUndefined(); M.return_(); } }
@@ -806,7 +903,7 @@ class Emitter {
     _mEnter(fname, cname, params, body, isVoid) {
         this._mSaved = {
             mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
-            blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef,
+            blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef, fnVars: this._fnVars,
         };
         this.mode = "tagged";
         const nParams = 1 + params.length;
@@ -857,6 +954,7 @@ class Emitter {
         }
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
         this._curClass = cname;
+        this._curClassObj = this.classes.get(cname) || null;   // super.m()/静态分派需类元数据（继承链编译期已知）
         this._staticVars = this._computeStaticVars(body, params);
     }
     _mExit() {
@@ -865,6 +963,7 @@ class Emitter {
         this.blkLocal = s.blkLocal; this.depth = s.depth; this.labels = s.labels;
         this._labelStack = s.labelStack; this._curClass = s.curClass; this._curClassObj = s.curClassObj;
         this._staticVars = s.staticVars; this.envLocal = s.envLocal; this.envRef = s.envRef;
+        this._fnVars = new Set();   // 方法体自身作用域（内层 lambda 各自再包一层）
     }
     emitBlock(node) { for (const s of node.statements) this.emitStmt(s); }
 
@@ -1412,13 +1511,18 @@ function compileTS(input, outWasm, opts = {}) {
     const clsStmts = [];
     // 递归收集：函数/类声明**任意深度**均提升到模块级（函数内定义的 class/function 亦可编译）。
     // 提升后不再深入其体（避免重复收集其内部声明）。
+    // 顶层函数声明 → 模块级 wasm 函数；**嵌套**函数声明 → 闭包（lambda+env，见 _emitFnDeclClosures），
+    // 否则其对外层局部的捕获会丢失（此前整树提升 → 编译期「未定义变量」）。
+    const hoistedFns = new Set();
     const collectDecls = (f) => {
-        const walk = (n) => {
-            if (ts.isFunctionDeclaration(n) && n.name) { fns.push(n); fnSf.set(n, f); }
-            else if (ts.isClassDeclaration(n)) { clsStmts.push(n); }
-            ts.forEachChild(n, walk);   // 继续下探：函数内的 class/function 声明同样提升
+        const walkCls = (n) => {          // class 仍整树提升（含函数内 class）
+            if (ts.isClassDeclaration(n)) clsStmts.push(n);
+            ts.forEachChild(n, walkCls);
         };
-        for (const st of f.statements) walk(st);
+        for (const st of f.statements) {
+            if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
+            walkCls(st);
+        }
     };
     for (const f of sfs) collectDecls(f);
     const hasClasses = clsStmts.length > 0;
@@ -1633,11 +1737,14 @@ function compileTS(input, outWasm, opts = {}) {
     const emitAll = (m, contract) => {
         const em = new Emitter(m);
         em.sf = sf;
+        em.hoistedFns = hoistedFns;   // 顶层函数声明（其余函数声明按闭包处理）
         em.importAlias = importAlias;    // 跨文件 import 别名 → 目标顶层函数名
         em.nsAlias = nsAlias;            // 命名空间导入解析表
         em.classAlias = classAlias;      // 导入类本地名 → 目标类名
         em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
-        for (const st of fns) em.fnNames.add(st.name.text);
+
+        em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
+        for (const st of fns) { em.fnNames.add(st.name.text); em._fnParams.set(st.name.text, st.parameters.length); }
         for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
         if (!m.collect) {
             if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
@@ -1676,7 +1783,7 @@ function compileTS(input, outWasm, opts = {}) {
         if (hasClasses) em.emitClassBodies();
         for (const cname of em._classList) {
             const c = em.classes.get(cname);
-            for (const mth of c.methods) m.exportFn(methName(cname, mth.name), methName(cname, mth.name));
+            for (const mth of c.methods) { const en = methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name); m.exportFn(en, en); }
             for (const sm of c.staticMethods) m.exportFn(staticMethName(cname, sm.name), staticMethName(cname, sm.name));
             m.exportFn(ctorName(cname), ctorName(cname));
         }
@@ -1715,12 +1822,15 @@ function compileTS(input, outWasm, opts = {}) {
     // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
     const classMeta = em._classList.map(cname => {
         const c = em.classes.get(cname);
-        const methods = {};
+        const methods = {}, getters = {}, setters = {};
         for (const mth of c.methods) {
-            methods[mth.name] = { name: methName(cname, mth.name), n: mth.node.parameters.length };
+            if (mth.accessor === "set") setters[mth.name] = { name: methName(cname, mth.name + "$set"), n: mth.node.parameters.length };
+            else if (mth.accessor === "get") getters[mth.name] = { name: methName(cname, mth.name), n: 0 };
+            else methods[mth.name] = { name: methName(cname, mth.name), n: mth.node.parameters.length };
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
-        return { id: c.id, parent: p ? p.id : null, methods };
+
+        return { id: c.id, parent: p ? p.id : null, methods, getters, setters };
     });
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs };
 }
@@ -1736,6 +1846,21 @@ Emitter.prototype._fieldIndex = function (name) {
     let i = this.fieldMap.get(name);
     if (i === undefined) { i = this.fieldMap.size; this.fieldMap.set(name, i); }
     return (i + 1) * 8;   // 字节偏移；偏移 0 保留给实例 __cls 头（类实例），字段从 8 起
+};
+// 程序内是否存在名为 name 的属性访问器（getter/setter）——决定属性读/写是否走宿主访问器分派。
+Emitter.prototype._hasAccessor = function (name, kind) {
+    if (!this._accessorNames) {          // 惰性：首次使用时由已收集类汇总（编译期一次）
+        this._accessorNames = { get: new Set(), set: new Set() };
+        for (const cname of this._classList) {
+            const c = this.classes.get(cname);
+            if (!c || !c.methods) continue;
+            for (const mth of c.methods) {
+                if (mth.accessor === "get") this._accessorNames.get.add(mth.name);
+                else if (mth.accessor === "set") this._accessorNames.set.add(mth.name);
+            }
+        }
+    }
+    return this._accessorNames[kind].has(name);
 };
 Emitter.prototype._strId = function (text) {
     let i = this.strings.indexOf(text);
@@ -2078,6 +2203,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         //   注：0x7FF9 低 32 位对「宿主 handles 索引」与「POJO 内存 offset」同空间，
         //   function 值落此分支也得 "object"（JS 应为 "function"）——已知限制（函数作值少见）。
         const M = this.m;
+        if (ts.isIdentifier(e.expression)
+            && (this.fnNames.has(e.expression.text) || (this._fnVars && this._fnVars.has(e.expression.text)))) {
+            this._emitStrLitHandle("function");   // 函数值（顶层函数名 / 持有闭包的变量）
+            return;
+        }
         this.emitTaggedExpr(e.expression); M.localSet(this.scratch);
         M.block("i64");
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
@@ -2279,6 +2409,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (!this._curClassObj) throw new Error("[tagged] super() 仅在构造器内可用");
         this._emitSuperCall(this._curClassObj, e.arguments || []); return;
     }
+    // super.m(args)：父类方法**静态**直调（继承链编译期已知 → 无虚派发，与 JS super 语义一致）
+    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression)
+        && ts.isSuperKeyword(e.expression.expression)) {
+        const owner = this._curClassObj && this._curClassObj.parent;
+        const method = e.expression.name.text;
+        let c = owner;
+        while (c && !(this.classes.get(c).methods || []).some(m => m.name === method)) c = this.classes.get(c).parent;
+        if (!c) throw new Error(`[tagged] super.${method}() 在父类链上未定义`);
+        this.m.localGet(0);                                  // self = this
+        for (let i = 0; i < 4; i++) {
+            if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+        }
+        this.m.call(methName(c, method));
+        return;
+    }
     if (ts.isCallExpression(e)) {
         if (ts.isPropertyAccessExpression(e.expression)) {
             // 内建全局成员调用 Math.floor(x) / JSON.stringify(x) / Object.keys(o) → qz.builtin
@@ -2303,29 +2448,43 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
             this._emitDynMethod(rx, method, e.arguments); return;
         }
+        // IIFE（(() => 42)() / 函数表达式立即调用）：先求值为闭包句柄 → closure_call
+        if (ts.isParenthesizedExpression(e.expression)
+            && (ts.isArrowFunction(e.expression.expression) || ts.isFunctionExpression(e.expression.expression))) {
+            const M2 = this.m, t2 = this._expEnter();
+            this.emitTaggedExpr(e.expression); M2.localSet(t2.v);
+            M2.localGet(t2.v);
+            for (let i = 0; i < 4; i++) {
+                if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+            }
+            M2.call("qz.closure_call");
+            this._expLeave();
+            return;
+        }
         if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] 调用目标必须是标识符");
         const fn = e.expression.text;
         // 内建全局函数调用 String(x) / parseInt(s) / isNaN(x) / JSON… → qz.builtin
         if (BUILTIN_GLOBALS.has(fn)) { this._emitBuiltinCall(fn, e.arguments); return; }
         if (this.m._funcIdx[this._fnName(fn)] === undefined && !this.fnNames.has(this._fnName(fn))) {
-            // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)
-            const hIdx = this._local(fn);
-            if (hIdx === undefined) throw new Error(BUILTIN_GLOBALS.has(fn)
-                ? `[tagged] 内建 ${fn}() 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
-                : "未定义函数: " + fn);
-            for (let i = 0; i < 4; i++) {
-                if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]);
-                else this._emitUndefined();
-                this.m.localSet(this.cloArgs[i]);
-            }
-            this.m.localGet(hIdx);
-            for (let i = 0; i < 4; i++) this.m.localGet(this.cloArgs[i]);
-            this.m.call("qz.closure_call");
+            // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)。
+            // 句柄来源：本层局部变量，或**捕获**（嵌套函数声明/上层局部闭包 → env_get）。
+            this._emitClosureCall(fn, e.arguments);
             return;
         }
         const ct = this._calleeInfo(fn);
         const xt = ct && ct.mode !== this.mode;
-        for (const a of e.arguments) { this.emitTaggedExpr(a); if (xt) this._argToCallee(fn); }
+        // JS 元数语义：实参多于形参 → 被调函数只见前 nPar 个；少于 → 余下为 undefined。
+        // num 模式被调函数（f64 ABI）无法表示 undefined → 少传直接报错（loud），不静默补 0。
+        const nPar = (this._fnParams && this._fnParams.get(this._fnName(fn))) ?? e.arguments.length;
+        const calleeNum = !!ct && ct.mode === "num";
+        if (calleeNum && e.arguments.length < nPar) {
+            throw new Error(`[tagged] num 函数 ${fn} 需 ${nPar} 个实参（JS 少传 → undefined 无法在 f64 ABI 表示）`);
+        }
+        const nPass = calleeNum ? e.arguments.length : nPar;
+        for (let i = 0; i < nPass; i++) {
+            if (i < e.arguments.length) { this.emitTaggedExpr(e.arguments[i]); if (xt) this._argToCallee(fn); }
+            else this._emitUndefined();
+        }
         this.m.call(this._fnName(fn));
         this._retFromCallee(fn); return;
     }
@@ -2632,6 +2791,13 @@ Emitter.prototype._emitStoreProp = function (left) {
         return;
     }
     M.localSet(t.w);                              // 值（i64）
+    if (this._hasAccessor(left.name.text, "set")) {   // 程序内有该名 setter → 宿主分派（实例经继承链）
+        this.emitTaggedExpr(left.expression); M.localSet(t.v);
+        M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set");
+        M.localGet(t.w);
+        this._expLeave();
+        return;
+    }
     this.emitTaggedExpr(left.expression);         // obj 句柄
     M.localSet(t.v);
     // 宿主对象(0x7FFD) → qz.object_set（写 handles[idx][name]）；POJO → wasm 内存 store
@@ -2875,6 +3041,15 @@ Emitter.prototype.emitTaggedBinary = function (e) {
     if (op === ts.SyntaxKind.InstanceOfKeyword) {
         // a instanceof C：C 须为用户类（内建类不支持）→ qz.instanceof_op(a, clsId) → tagged bool
         const right = e.right;
+        if (ts.isIdentifier(right) && /^(Array|Object|String|Number|Boolean|Function|Error|RegExp|Date)$/.test(right.text)
+            && !this.classes.has(this._className(right.text))) {
+            // 内建类：宿主按 tag/物化判定（Array/Object/String/Number/Boolean/Function…）
+            this.emitTaggedExpr(e.left);
+            this.m.i32Const(this._strId(right.text));
+            this.m.call("qz.instanceof_builtin");
+            this.emitBoxBool();
+            return;
+        }
         if (!ts.isIdentifier(right) || !this.classes.has(this._className(right.text))) {
             throw new Error(right && BUILTIN_GLOBALS.has(right.text)
                 ? `[tagged] 内建类 ${right.text} 的 instanceof 未实现`
