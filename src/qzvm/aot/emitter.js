@@ -208,7 +208,8 @@ class Emitter {
         };
         const walk = (n) => {
             if (ts.isVariableDeclaration(n)) bindName(n.name);
-            else if (ts.isFunctionDeclaration(n) && n.name && !(this.hoistedFns && this.hoistedFns.has(n))) names.push(n.name.text);
+            else if (ts.isFunctionDeclaration(n) && n.name && !(this.hoistedFns && this.hoistedFns.has(n))) { names.push(n.name.text); return; }   // 嵌套函数名是本层局部，但其体属另一作用域
+            else if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) return;   // 不深入嵌套函数体
             ts.forEachChild(n, walk);
         };
         walk(node);
@@ -296,7 +297,8 @@ class Emitter {
     // 捕获的变量来自创建处（外层函数局部）。返回有序捕获名列表。
     _capturesOf(lam) {
         const lambdaIsArrow = ts.isArrowFunction(lam);   // 箭头继承 this；function 表达式有自己的 this
-        const local = new Set(lam.parameters.map(p => p.name.text));
+        const local = new Set();
+        for (const p of lam.parameters) for (const n of this._patternNames(p.name)) local.add(n);
         this._collectLocals(lam.body).forEach(n => local.add(n));
         const out = [];
         const seen = new Set();
@@ -582,6 +584,91 @@ class Emitter {
         M.call("qz.closure_call");
         this._expLeave();
     }
+    // 绑定模式（含嵌套）里绑定的所有名字。
+    _patternNames(pat, out = []) {
+        if (ts.isIdentifier(pat)) { out.push(pat.text); return out; }
+        if (ts.isArrayBindingPattern(pat) || ts.isObjectBindingPattern(pat)) {
+            for (const el of pat.elements) {
+                if (ts.isOmittedExpression(el)) continue;
+                if (ts.isBindingElement(el)) this._patternNames(el.name, out);
+            }
+        }
+        return out;
+    }
+    // 把 local `valLocal`(i64) 按绑定模式 pat 析构到各目标变量（含 rest / 默认值）。
+    _emitDestructurePattern(pat, valLocal) {
+        const M = this.m;
+        if (ts.isArrayBindingPattern(pat)) {
+            let i = 0;
+            for (const el of pat.elements) {
+                if (ts.isOmittedExpression(el)) { i++; continue; }
+                if (!ts.isBindingElement(el)) continue;
+                if (el.dotDotDotToken) {
+                    M.localGet(valLocal); M.i32Const(this._strId("slice"));
+                    M.i64ConstBits(...f64Bits(i)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                    M.call("qz.method_call");
+                    this._emitBindingTarget(el.name);
+                    i++; continue;
+                }
+                this._emitElemOf(valLocal, ts.factory.createNumericLiteral(i));
+                if (el.initializer) this._emitDefaultIfUndef(el.initializer);
+                this._emitBindingTarget(el.name);
+                i++;
+            }
+            return;
+        }
+        if (ts.isObjectBindingPattern(pat)) {
+            const restExcl = [];
+            for (const el of pat.elements) {
+                if (!ts.isBindingElement(el) || el.dotDotDotToken) continue;
+                const k = el.propertyName ? el.propertyName.text : (ts.isIdentifier(el.name) ? el.name.text : null);
+                if (k === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
+                restExcl.push(k);
+            }
+            for (const el of pat.elements) {
+                if (!ts.isBindingElement(el)) continue;
+                if (el.dotDotDotToken) {
+                    if (restExcl.length > 4) throw new Error("[tagged] 对象 rest 解构最多排除 4 个键");
+                    M.localGet(valLocal);
+                    for (let i = 0; i < 4; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
+                    M.call("qz.object_rest");
+                    this._emitBindingTarget(el.name);
+                    continue;
+                }
+                const key = el.propertyName ? el.propertyName.text : (ts.isIdentifier(el.name) ? el.name.text : null);
+                if (key === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
+                this._emitPropReadFromLocal(valLocal, key);
+                if (el.initializer) this._emitDefaultIfUndef(el.initializer);
+                this._emitBindingTarget(el.name);
+            }
+            return;
+        }
+        throw new Error("[tagged] 不支持的绑定模式");
+    }
+    // 形参序言：默认值（仅 undefined 触发，左→右）+ 解构形参。params[i] 原值在 local (base+i)。
+    // 必须在「被捕获参数写 env」之前执行，使 env 见到最终值。
+    _emitParamPrologue(params, base) {
+        const M = this.m;
+        for (let i = 0; i < params.length; i++) {
+            const p = params[i];
+            if (p.dotDotDotToken) throw new Error("[tagged] rest 形参暂不支持（wasm 固定元数 ABI）");
+            const idx = base + i;
+            if (p.initializer) {
+                if (this.mode !== "tagged") throw new Error("[num] 形参默认值不支持（f64 ABI 无 undefined）");
+                M.localGet(idx); M.call("qz.is_undef");
+                M.ifBlock("void");
+                this.emitTaggedExpr(p.initializer); M.localSet(idx);
+                M.end();
+            }
+            if (!ts.isIdentifier(p.name)) {
+                const t = this._expEnter();
+                M.localGet(idx); M.localSet(t.v);
+                this._emitDestructurePattern(p.name, t.v);
+                this._expLeave();
+            }
+        }
+    }
+
     // 由访问器/方法声明合成箭头函数节点（其体即闭包体 → 得到闭包句柄，供宿主 defineProperty 回调）。
     _synthArrow(paramNames, body) {
         const ps = paramNames.map(n => ts.factory.createParameterDeclaration(undefined, undefined, ts.factory.createIdentifier(n), undefined, undefined, undefined));
@@ -605,11 +692,21 @@ class Emitter {
     }
     // 函数体内的**嵌套函数声明**（未提升）在该函数入口先建闭包存入其变量（JS 函数声明提升语义：
     // 声明前可调用、可相互递归）。返回闭包句柄逐个写入变量（含经 env 的捕获写）。
+    // 本作用域（含块/if/for/try 内，JS 提升到函数作用域）的函数声明；不深入嵌套函数体。
+    _collectScopeFnDecls(body, out = []) {
+        const walk = (n) => {
+            if (ts.isFunctionDeclaration(n)) { if (n.name && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n); return; }
+            if (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isClassDeclaration(n)) return;
+            ts.forEachChild(n, walk);
+        };
+        walk(body);
+        return out;
+    }
     _emitFnDeclClosures(body) {
         const M = this.m;
         this._fnVars = this._fnVars || new Set();
-        for (const lam of this._collectLambdas(body)) {
-            if (!ts.isFunctionDeclaration(lam) || !lam.name) continue;
+        for (const lam of this._collectScopeFnDecls(body)) {
+            if (!lam.name) continue;
             this._fnVars.add(lam.name.text);
             this._emitLambdaNew(lam);                       // 栈：闭包句柄
             this._emitVarStore(lam.name.text, this.scratchB);
@@ -635,6 +732,10 @@ class Emitter {
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
         const locals = this._collectLocals(f.body);
+        for (const p of f.parameters) {                                  // 解构形参的绑定名也要有 local
+            if (ts.isIdentifier(p.name)) continue;
+            for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
+        }
         const nLoc = f.parameters.length + locals.length;
         this.scratch = nLoc;                                 // scratch（后缀 ++/--）
         this.scratchA = nLoc + 1;                            // 暂存 a
@@ -684,11 +785,14 @@ class Emitter {
         // 参数 → local 0..n-1；局部 → n..
         f.parameters.forEach((p, i) => this.varMap.set(p.name.text, i));
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
+        this._emitParamPrologue(f.parameters, 0);                        // 默认值 / 解构形参（先于写 env）
         if (capNames.length) {
             // 被捕获的参数初值写入 env（局部由声明语句经 _emitVarStore 写入）
-            for (let i = 0; i < f.parameters.length; i++) {
-                const pn = f.parameters[i].name.text;
-                if (this.capMap.has(pn)) { this.m.localGet(this.envLocal); this.m.i32Const(this._strId(pn)); this.m.localGet(i); this.m.call("qz.env_set"); }
+            for (const pn of capNames) {                        // 仅形参（含解构形参绑定名）：局部由声明语句写
+                const idx = this._local(pn);
+                if (idx !== undefined && idx < f.parameters.length) {
+                    this.m.localGet(this.envLocal); this.m.i32Const(this._strId(pn)); this.m.localGet(idx); this.m.call("qz.env_set");
+                }
             }
         }
         this.depth = 0; this.labels = [];
@@ -780,10 +884,11 @@ class Emitter {
         this.mode = "tagged";
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
         const locals = this._collectLocals(lam.body);
+        for (const p of lam.parameters) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         const nParams = 1 + params.length;                 // blk + 参数
         const nLoc = nParams + locals.length;
         this.varMap = new Map();
-        lam.parameters.forEach((p, i) => this.varMap.set(p.name.text, 1 + i));
+        lam.parameters.forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, 1 + i); });
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map();
         for (const n of caps) this.capMap.set(n, 0);        // 外层捕获名 → 创建方 env 索引（= blk 参数 local 0）
@@ -819,11 +924,13 @@ class Emitter {
         M.startBody(fname, bodyLocals, localNames);
         this.envLocal = ownCap.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;   // blk+参数之后
         this.envRef = ownCap.length ? this.envLocal : this.blkLocal;   // 嵌套 lambda 的 env：自身 env（链到 blk）或直接 blk
+        this._emitParamPrologue(lam.parameters, 1);         // 默认值 / 解构形参（先于写 env）
         if (ownCap.length) {
             M.localGet(0); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // parent = blk(0)
             for (const n of ownCap) this.capMap.set(n, this.envLocal);
-            for (let i = 0; i < params.length; i++) {
-                if (this.capMap.get(params[i]) === this.envLocal) { M.localGet(this.envLocal); M.i32Const(this._strId(params[i])); M.localGet(1 + i); M.call("qz.env_set"); }
+            for (const n of ownCap) {                            // 仅形参（解构形参绑定名由序言析构后再写）
+                const idx = this._local(n);
+                if (idx !== undefined && idx < 1 + params.length) { M.localGet(this.envLocal); M.i32Const(this._strId(n)); M.localGet(idx); M.call("qz.env_set"); }
             }
         }
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
@@ -920,7 +1027,7 @@ class Emitter {
         const isVoid = !!sm.node.type && sm.node.type.kind === ts.SyntaxKind.VoidKeyword;
         const realParams = sm.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
-        this._mEnter(staticMethName(cname, sm.name), cname, params, sm.node.body, isVoid);
+        this._mEnter(staticMethName(cname, sm.name), cname, params, sm.node.body, isVoid, sm.node.parameters);
         this._curClassObj = this.classes.get(cname);
         this._emitFnDeclClosures(sm.node.body);
         this.emitTaggedBlock(sm.node.body);
@@ -935,7 +1042,7 @@ class Emitter {
         const realParams = ctor ? ctor.parameters.map(p => p.name.text) : [];
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         const body = ctor ? ctor.body : { statements: [] };
-        this._mEnter(ctorName(c.name), c.name, params, body, true);
+        this._mEnter(ctorName(c.name), c.name, params, body, true, ctor ? ctor.parameters : []);
         this._curClassObj = c;
         // 派生类：字段默认值须在 super(...) 之后写（同名遮蔽字段父写后子覆写）；
         // super 语句处 _emitSuperCall 负责调用父 ctor 后回写本类默认值。基类：此处直接写。
@@ -962,7 +1069,7 @@ class Emitter {
         const isVoid = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
         const realParams = mth.node.parameters.map(p => p.name.text);
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
-        this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid);
+        this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters);
         this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);
         { const stmts = mth.node.body.statements; const last = stmts[stmts.length - 1];   // tagged：落空 → undefined
@@ -972,7 +1079,7 @@ class Emitter {
     }
     // 方法/构造器发射作用域：this=local0，参数 1..，完整 scratch/sT/obj/forOf/clo 槽布局。
     // 与 emitFunc(tagged) 同构；额外 _curClass 供静态方法分派解析继承链。
-    _mEnter(fname, cname, params, body, isVoid) {
+    _mEnter(fname, cname, params, body, isVoid, astParams) {
         this._mSaved = {
             mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
             blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef, fnVars: this._fnVars,
@@ -980,10 +1087,12 @@ class Emitter {
         this.mode = "tagged";
         const nParams = 1 + params.length;
         const locals = this._collectLocals(body);
+        for (const p of (astParams || [])) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
         const nLoc = nParams + locals.length;
         this.varMap = new Map();
         this.varMap.set("this", 0);
-        params.forEach((p, i) => this.varMap.set(p, 1 + i));
+        if (astParams) astParams.forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, 1 + i); });
+        else params.forEach((p, i) => this.varMap.set(p, 1 + i));
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map(); this.blkLocal = null;
         this.scratch = nLoc; this.scratchA = nLoc + 1; this.scratchB = nLoc + 2;
@@ -1013,6 +1122,7 @@ class Emitter {
             .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
+        this._emitParamPrologue(astParams || [], 1);        // 默认值 / 解构形参（先于写 env）
         this.envLocal = capNames.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;
         this.capMap = new Map(capNames.map(n => [n, this.envLocal]));
         this.envRef = this.envLocal;
@@ -1021,7 +1131,7 @@ class Emitter {
             M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);
             for (const n of capNames) {
                 if (n === "this") { M.localGet(this.envLocal); M.i32Const(this._strId("this")); M.localGet(0); M.call("qz.env_set"); }
-                else { const pi = params.indexOf(n); if (pi >= 0) { M.localGet(this.envLocal); M.i32Const(this._strId(n)); M.localGet(1 + pi); M.call("qz.env_set"); } }
+                else { const li = this._local(n); if (li !== undefined && li < 1 + params.length) { M.localGet(this.envLocal); M.i32Const(this._strId(n)); M.localGet(li); M.call("qz.env_set"); } }
             }
         }
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
