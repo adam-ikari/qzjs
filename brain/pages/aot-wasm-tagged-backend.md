@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T15:43:18"
+updated: "2026-10-16T15:58:12"
 ---
 
 <!-- compiled_truth -->
@@ -231,4 +231,9 @@ updated: "2026-10-16T15:43:18"
 - time: 2026-10-16T15:43:18
   kind: evidence
   summary: "第十四批差分审计（定位）：386/398（97.0%），3 项新发现的静默差异已记录待修"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T15:58:12
+  kind: evidence
+  summary: "第14批 3 项静默差异全修：389/398（97.7%），残余 9 项全部 loud（零静默错值）"
   affects: [aot-wasm-tagged-backend]
