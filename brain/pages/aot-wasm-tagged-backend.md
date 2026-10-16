@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T02:14:56"
+updated: "2026-10-16T06:53:37"
 ---
 
 <!-- compiled_truth -->
@@ -117,3 +117,18 @@ updated: "2026-10-16T02:14:56"
   summary: "AOT 差分审计第四批（通用性补全）：①内建全局支持（Math/String/Number/JSON/Object/Array… 经单一通用宿主入口 qz.builtin(nameId,n,a0..a3)；n=实际参数数避免 Math.max 传 undefined 占位得 NaN；含 Math.PI 等常量）。②解构声明单层支持（const [a,b]=arr / const {x,y}=obj / {a:z} / [,b]；嵌套报错）。③未实现特性显式报错（静态方法 C.m()/展开/内建类 new Map|Set|Date|Error/instanceof/in/**=/字段??=）。守门 test_aot.js 170 ALL PASS。"
   source: "会话 2026-10-15：完成aot 目标下的第四轮审计与补全"
   affects: [aot-wasm-tagged-backend, aot-generic-compiler-target]
+
+- time: 2026-10-16T04:31:10
+  kind: decision
+  summary: "类静态字段与 for-in/动态键落地"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T05:17:40
+  kind: decision
+  summary: "差分审计驱动的一轮修复：可重入临时槽/闭包/访问器"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T06:53:37
+  kind: decision
+  summary: "差分审计第二轮：闭包 tag/容量/访问器/展开/错误语义"
+  affects: [aot-wasm-tagged-backend]
