@@ -197,6 +197,8 @@ class Emitter {
     _fnName(name) { return (this.importAlias && this.importAlias.get(name)) || name; }
     // 导入的类本地名 → 目标类名（默认/具名导入的类）；非导入类原样返回。
     _className(name) { return (this.classAlias && this.classAlias.get(name)) || name; }
+    // 静态成员键：私有名需类名限定（与收集期一致：#类名#名；PrivateIdentifier.text 自带 #）
+    _staticKey(cn, nameNode) { return ts.isPrivateIdentifier(nameNode) ? "#" + cn + "#" + nameNode.text : nameNode.text; }
     // 命名空间成员访问 `ns.member` → 目标顶层名；非命名空间访问返回 undefined。
     _nsMember(nsName, member) {
         if (!this.nsAlias) return undefined;
@@ -253,6 +255,9 @@ class Emitter {
         const name = d.name;
         if (ts.isIdentifier(name)) {
             if (d.initializer) {
+                if (ts.isClassExpression(d.initializer) && this.clsExprMap && this.clsExprMap.has(d.initializer)) {
+                    this._emitUndefined(); this._emitVarStore(name.text, this.scratchB); this.m.drop(); return;   // const C = class {…}：C 仅作 new/instanceof 的类名
+                }
                 if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
                     this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text);
                     this._fnNodes = this._fnNodes || new Map(); this._fnNodes.set(name.text, d.initializer);
@@ -665,7 +670,7 @@ class Emitter {
         if (ts.isPropertyAccessExpression(cx) && ts.isIdentifier(cx.expression) && this._isClassName(cx.expression)) {
             // C.m(...args)：静态方法直调（导出名静态可知）
             let owner = this._className(cx.expression.text);
-            const method = cx.name.text;
+            const method = ts.isPrivateIdentifier(cx.name) ? "#" + this._className(cx.expression.text) + "#" + cx.name.text : cx.name.text;
             while (owner && !(this.classes.get(owner).staticMethods || []).some(s2 => s2.name === method)) owner = this.classes.get(owner).parent;
             if (!owner) throw new Error(`[tagged] 静态方法 ${cx.expression.text}.${method}() 未定义`);
             this._emitStaticsGuard(cx.expression.text);
@@ -1246,9 +1251,13 @@ class Emitter {
                 } else if (ts.isConstructorDeclaration(mem)) {
                     ctor = mem;
                 } else if (ts.isPropertyDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
-                    fields.push({ name: "#" + cname + "#" + mem.name.text, init: mem.initializer || null });   // 私有字段：类名限定
+                    if (isStatic(mem)) {   // 私有静态字段：#类名#名（与访问点一致）
+                        const pn = "#" + cname + "#" + mem.name.text;
+                        staticFields.push({ name: pn, init: mem.initializer || null });
+                        staticInits.push({ kind: "field", name: pn, init: mem.initializer || null });
+                    } else fields.push({ name: "#" + cname + "#" + mem.name.text, init: mem.initializer || null });   // 私有字段：类名限定
                 } else if (ts.isMethodDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
-                    methods.push({ name: "#" + cname + "#" + mem.name.text, node: mem });                      // 私有方法
+                    (isStatic(mem) ? staticMethods : methods).push({ name: "#" + cname + "#" + mem.name.text, node: mem });   // 私有方法/私有静态方法
                 } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
                     (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
                 } else if (ts.isMethodDeclaration(mem) && ts.isComputedPropertyName(mem.name)) {
@@ -2006,6 +2015,9 @@ function compileTS(input, outWasm, opts = {}) {
     const fns = [];
     const fnSf = new Map();          // 函数节点 → 源文件（逐函数设 em.sf，供行号/DWARF）
     const clsStmts = [];
+    const clsExprMap = new Map();     // ClassExpression 节点 → 合成类名
+    const clsExprSeqRef = { n: 0 };
+    let clsExprSeq = 0;
     const enumStmts = [];         // TS enum（值语义，非纯类型 → 编译期求值）
     // 递归收集：函数/类声明**任意深度**均提升到模块级（函数内定义的 class/function 亦可编译）。
     // 提升后不再深入其体（避免重复收集其内部声明）。
@@ -2041,6 +2053,13 @@ function compileTS(input, outWasm, opts = {}) {
         const walkCls = (n) => {          // class 仍整树提升（含函数内 class）
             if (ts.isClassDeclaration(n)) clsStmts.push(n);
             if (ts.isEnumDeclaration(n)) enumStmts.push(n);
+            if (ts.isClassExpression(n) && !clsExprMap.has(n)) {   // 类表达式：合成类名（用于 new / instanceof）
+                const synth = n.name ? n.name.text : "__clsExpr_" + (++clsExprSeq);
+                clsExprMap.set(n, synth);
+                const decl = ts.factory.createClassDeclaration(n.modifiers, ts.factory.createIdentifier(synth), n.typeParameters, n.heritageClauses, n.members);
+                decl.pos = n.pos; decl.end = n.end;
+                clsStmts.push(decl);
+            }
             ts.forEachChild(n, walkCls);
         };
         for (const st of f.statements) {
@@ -2099,7 +2118,18 @@ function compileTS(input, outWasm, opts = {}) {
     const sfNames = new Set(sfs.map(f => f.fileName));
     const importAlias = new Map();
     const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)
-    const classAlias = new Map();    // 导入的类本地名 → 目标类名（默认/具名导入类）
+    const classAlias = new Map();    // 导入的类本地名 → 目标类名（默认/具名导入类）+ 类表达式绑定
+    {
+        const walkCE = (n) => {
+            if ((ts.isVariableDeclaration(n) || ts.isBindingElement(n) || ts.isPropertyAssignment(n)) && n.initializer && ts.isClassExpression(n.initializer)
+                && clsExprMap.has(n.initializer)) {
+                const nm = (n.name && ts.isIdentifier(n.name)) ? n.name.text : null;
+                if (nm) classAlias.set(nm, clsExprMap.get(n.initializer));
+            }
+            ts.forEachChild(n, walkCE);
+        };
+        for (const f of sfs) walkCE(f);
+    }
     for (const f of sfs) {
         for (const st of f.statements) {
             if (ts.isExportDeclaration(st) && st.moduleSpecifier) {
@@ -2309,6 +2339,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.classAlias = classAlias;      // 导入类本地名 → 目标类名
         em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
         em.usesFreeze = usesFreeze;
+        em.clsExprMap = clsExprMap;      // 类表达式节点 → 合成类名（声明处跳过初值求值）
         em.usesKeyOrder = usesKeyOrder;
         em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
         em.protNameId = (n) => em._strId(n);
@@ -3018,6 +3049,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitStrLitHandle("function");   // 函数值（顶层函数名 / 持有闭包的变量）
             return;
         }
+        if (ts.isIdentifier(e.expression) && this.classes.has(this._className(e.expression.text))) {
+            this._emitStrLitHandle("function");   // typeof <类名> → "function"（class 是函数对象）
+            return;
+        }
         // 内建全局：typeof Math/JSON → "object"；typeof Symbol/parseInt/… → "function"（JS 语义，免宿主调用）
         if (ts.isIdentifier(e.expression) && BUILTIN_GLOBALS.has(e.expression.text)) {
             const isObj = /^(Math|JSON|Reflect)$/.test(e.expression.text);
@@ -3325,7 +3360,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         for (const x of chain.slice().reverse()) {          // 父 → 子：越派生越后写（遮蔽父类同名字段）
             M3.i32Const(this._strId(x)); M3.i32Const(this._strId(e.name.text)); M3.call("qz.statics_has");
             M3.ifBlock("void");
-            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(e.name.text)); M3.call("qz.static_get");
+            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.static_get");
             M3.localSet(ts2.v);
             M3.end();
         }
@@ -3568,11 +3603,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 if (this._isClassName(e.operand.expression)) {
                     const cn = e.operand.expression.text, Mc = this.m;
                     this._emitStaticsGuard(cn);
-                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.call("qz.static_get");
+                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.call("qz.static_get");
                     Mc.i64ConstBits(...f64Bits(1));
                     this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
                     Mc.localSet(this.scratch);
-                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.localGet(this.scratch); Mc.call("qz.static_set");
+                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.localGet(this.scratch); Mc.call("qz.static_set");
                     Mc.localGet(this.scratch);
                     return;
                 }
@@ -3626,12 +3661,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             if (this._isClassName(e.operand.expression)) {
                 const cn = e.operand.expression.text, Mc = this.m;
                 this._emitStaticsGuard(cn);
-                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.call("qz.static_get");
+                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.call("qz.static_get");
                 Mc.localSet(this.scratch);            // scratch=旧值（表达式结果）
                 Mc.localGet(this.scratch); Mc.i64ConstBits(...f64Bits(1));
                 this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
                 Mc.localSet(this.scratchB);
-                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(e.operand.name.text)); Mc.localGet(this.scratchB); Mc.call("qz.static_set");
+                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.localGet(this.scratchB); Mc.call("qz.static_set");
                 Mc.localGet(this.scratch);
                 return;
             }
@@ -3875,7 +3910,7 @@ Emitter.prototype._emitStoreProp = function (left) {
             return;
         }
         this._emitStaticsGuard(cn);               // 写总是落在接收者类（JS：派生的静态属性是自有属性）
-        M.i32Const(this._strId(cn)); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.static_set");
+        M.i32Const(this._strId(cn)); M.i32Const(this._strId(this._staticKey(cn, left.name))); M.localGet(t.w); M.call("qz.static_set");
         M.localGet(t.w);                           // 赋值表达式返回所赋之值
         this._expLeave();
         return;
@@ -4137,6 +4172,7 @@ Emitter.prototype._emitBuiltinCall = function (name, args) {
 Emitter.prototype._emitDynMethod = function (rx, method, args) {
     const M = this.m;
     if (args.length > 4) throw new Error("[tagged] 方法最多 4 参");
+    if (/^#[^#]+$/.test(method) && ts.isIdentifier(rx)) method = "#" + this._className(rx.text) + "#" + method;   // 私有方法/私有静态方法：类名限定（PrivateIdentifier.text 自带 #）
     // 静态方法 C.m(...)：类名不是变量 → 沿继承链找 static 方法 owner，直调 __sm_<Owner>$<m>
     // （self 传 undefined 占位；静态方法体不用 this）。
     if (ts.isIdentifier(rx) && this.classes.has(this._className(rx.text))) {

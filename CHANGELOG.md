@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类表达式 / 私有静态成员（2026-10-16）
+- **类表达式**（`const C = class {…}`、`class Named {…}`、`{ K: class {…} }`）：收集期合成类名并登记绑定别名 → `new C(...)`、`c instanceof C`、`C.staticMethod()` 按普通类处理；作为**值**使用仍编译期 loud（无类值表示）。
+- **私有静态字段/方法**：`static #n` / `static #m()`（此前私有字段分支忽略 `static` → 变成实例字段，读取静默 NaN）；键统一为 `#类名#名`，静态读/写/`++`/复合赋值与动态分派均按此键（修复 `#name` 二次限定）。
+- **`typeof <类名>`** → `"function"`（class 是函数对象）。
+- 结果：**336/345（97.4%）**；**残余 9 项全部为 loud（零静默错值）**；test_aot 233 checks ALL PASS；ctest 32/32 全绿。
+
 ### 第十一批差分审计（2026-10-16）
 - 新增 `audit_corpus11.js`（24 例：类表达式 / IIFE·逗号·void / 标签循环 / switch 边界 / Map·Set 边界 / 运行期键序 / 访问器定义 / 模板标签函数 / 解构默认值 / rest·spread / 私有静态方法 / 排序稳定性…）。
 - **对象恒等（物化缓存）**：同一次 bump 生命周期内同 offset → 同一 JS 对象（按需刷新、自引用直接复用）→ `o === o`、`Map`/`Set` 以对象为键、`===` 语义正确（此前每次物化新对象 → Map.get 对象键静默失效）。
