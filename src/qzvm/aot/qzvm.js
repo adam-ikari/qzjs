@@ -196,7 +196,7 @@ function makeQzvm(strings) {
   const doArrMethod = (recv, mid, a0, a1) => {
     const name = strings[mid];
     const arr = () => arrRead(recv);
-    const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? box(r ? 1 : 0)
+    const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
                      : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
                      : Array.isArray(r) ? arrWriteback(r) : tagHandle(r);
     const cbv = (h, v, i, acc) => toJS(closureCall(h, bitsOf(v), box(i), acc === undefined ? recv : acc));
@@ -263,6 +263,7 @@ function makeQzvm(strings) {
     // 使 .length/索引/push/pop 在 wasm 侧可用）；其它 → JS 句柄。
     if (typeof r === "string") return strWriteback(r);
     if (typeof r === "number") return box(r);
+    if (typeof r === "boolean") return boxBool(r);   // startsWith/endsWith/includes 等 → 真布尔 tag
     if (Array.isArray(r)) return arrWriteback(r);
     return tagHandle(r);
   };

@@ -282,6 +282,29 @@ class Emitter {
         M.localGet(idx);
     }
 
+    // 变量读（含闭包捕获）：栈 += 值。捕获变量经 blk 指针 load。
+    _emitVarGet(name) {
+        if (this.capMap.has(name)) { this.m.localGet(this.blkLocal); this.m.i64Load(3, this.capMap.get(name) * 8); return; }
+        const idx = this._local(name);
+        if (idx === undefined) throw new Error("未定义变量: " + name);
+        this.m.localGet(idx);
+    }
+    // 变量写（含闭包捕获）：栈顶值 → 变量，并保留该值（赋值表达式结果）。
+    // tmp 为捕获路径的暂存 local（默认 scratch）；调用点须保证其空闲。
+    _emitVarStore(name, tmp) {
+        const M = this.m;
+        if (this.capMap.has(name)) {
+            const t = tmp === undefined ? this.scratch : tmp;
+            M.localSet(t);
+            M.localGet(this.blkLocal); M.localGet(t); M.i64Store(3, this.capMap.get(name) * 8);
+            M.localGet(t);
+            return;
+        }
+        const idx = this._local(name);
+        if (idx === undefined) throw new Error("未定义变量: " + name);
+        M.localTee(idx);
+    }
+
     // 统计函数体内 for-of 数量（按嵌套层各分配独立 local 对）
     _countForOf(node) {
         let n = 0;
@@ -337,6 +360,11 @@ class Emitter {
         locals.forEach((n, i) => this.varMap.set(n, f.parameters.length + i));
         this.depth = 0; this.labels = [];
         this._staticVars = this.mode === "tagged" ? this._computeStaticVars(f.body, f.parameters.map(p => p.name.text)) : new Map();
+        if (this.mode === "tagged") {
+            // 闭包写捕获变量 + 外层也访问 → 未实现共享环境会静默错值 → 显式报错（loud 优于静默错）
+            const conflict = this._closureWriteConflict(f, this._collectLambdas(f.body));
+            if (conflict) throw new Error(`[tagged] 闭包写捕获变量 "${conflict}" 且外层也访问 —— 未实现共享环境（会静默错值）`);
+        }
         if (this.mode === "tagged") this.emitTaggedBlock(f.body);
         else this.emitBlock(f.body);
         // 末尾非 return 且函数有返回值 → fallthrough 路径缺值（穷尽 switch/if-else 全 return）。
@@ -362,6 +390,50 @@ class Emitter {
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
         this._pendingLambdas.push({ lam, fname, params, caps });
         return { fname, caps };
+    }
+
+    // 静态检测：lambda 写捕获变量且外层也访问 → 未实现共享环境会静默错值 → 编译期报错（loud）。
+    // 外层「访问」= f.body 中非 lambda 内对 cap 名的读/写标识符；lambda「写」= body 内赋值/自增/复合/||=/??= 的左值为 cap。
+    _closureWriteConflict(f, lams) {
+        if (!lams.length) return null;
+        const paramSet = new Set(f.parameters.map(p => p.name.text));
+        const locSet = new Set(this._collectLocals(f.body));
+        const isOuterVar = (n) => paramSet.has(n) || locSet.has(n);
+        const capSet = new Set();
+        for (const lam of lams) for (const c of this._capturesOf(lam)) if (isOuterVar(c)) capSet.add(c);
+        if (!capSet.size) return null;
+        const outerRefs = new Set();
+        const walkOuter = (n, inLambda) => {
+            if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) { ts.forEachChild(n, (c) => walkOuter(c, true)); return; }
+            if (!inLambda && ts.isIdentifier(n)) {
+                if (n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) return;
+                if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
+                if (n.parent && ts.isVariableDeclaration(n.parent) && n.parent.name === n) return;   // 声明绑定非「访问」
+                if (n.parent && ts.isParameter(n.parent) && n.parent.name === n) return;
+                if (capSet.has(n.text)) outerRefs.add(n.text);
+                return;
+            }
+            ts.forEachChild(n, (c) => walkOuter(c, inLambda));
+        };
+        walkOuter(f.body, false);
+        const lamWrites = new Set();
+        const WRITE_OPS = [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.PlusEqualsToken, ts.SyntaxKind.MinusEqualsToken,
+            ts.SyntaxKind.AsteriskEqualsToken, ts.SyntaxKind.SlashEqualsToken, ts.SyntaxKind.PercentEqualsToken,
+            ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken, ts.SyntaxKind.QuestionQuestionEqualsToken,
+            ts.SyntaxKind.AmpersandEqualsToken, ts.SyntaxKind.BarEqualsToken, ts.SyntaxKind.CaretEqualsToken,
+            ts.SyntaxKind.LessThanLessThanEqualsToken, ts.SyntaxKind.GreaterThanGreaterThanEqualsToken, ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken];
+        for (const lam of lams) {
+            const w = (n) => {
+                if (ts.isBinaryExpression(n) && ts.isIdentifier(n.left) && WRITE_OPS.indexOf(n.operatorToken.kind) >= 0
+                    && capSet.has(n.left.text)) lamWrites.add(n.left.text);
+                if ((ts.isPostfixUnaryExpression(n) || ts.isPrefixUnaryExpression(n)) && ts.isIdentifier(n.operand)
+                    && capSet.has(n.operand.text)) lamWrites.add(n.operand.text);
+                ts.forEachChild(n, w);
+            };
+            w(lam.body);
+        }
+        for (const name of lamWrites) if (outerRefs.has(name)) return name;
+        return null;
     }
     // 发射已登记的 lambda 体（阶段2，在所有顶层函数之后；签名已登记）
     emitLambdaBodies() {
@@ -1051,6 +1123,29 @@ function emitStringHelpers(m) {
     m.localGet(4);
     m.end();
     m.endBody();
+
+    // qzs_utf16len(off) -> i32：UTF-8 字符串（[byteLen:i32][utf8]）→ UTF-16 码元数。
+    // JS String.length 是 UTF-16 code units：ASCII/2字节/3字节首字节各 +1，4字节首字节额外 +1（代理对 2 码元），
+    // 续字节(0x80-0xBF) +0。此前 .length 直接返回 UTF-8 字节数 → "你好".length=6（应 2）、"😀".length=4（应 2）。
+    m.declareFunc("qzs_utf16len", ["i32"], ["i32"]);
+    m.startBody("qzs_utf16len", ["i32", "i32", "i32", "i32", "i32"]);   // locals: 1=len 2=i 3=cnt 4=b
+    m.localGet(0); m.i32Load(2, 0); m.localSet(1);               // byteLen
+    m.i32Const(0); m.localSet(2);                                // i = 0
+    m.i32Const(0); m.localSet(3);                                // cnt = 0
+    m.block("void"); m.loop("void");
+    m.localGet(2); m.localGet(1); m.i32GeU(); m.brIf(1);         // i >= len → 结束
+    m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(2); m.i32Add(); m.i32Load8U(0, 0); m.localSet(4);   // b
+    m.localGet(4); m.i32Const(0x80); m.i32LtU();                 // b < 0x80
+    m.localGet(4); m.i32Const(0xc0); m.i32GeU();                 // b >= 0xC0（首字节）
+    m.i32Or();
+    m.localGet(4); m.i32Const(0xf0); m.i32GeU();                 // 4 字节首 → +1（代理对第二码元）
+    m.i32Add();
+    m.localGet(3); m.i32Add(); m.localSet(3);                    // cnt += inc
+    m.localGet(2); m.i32Const(1); m.i32Add(); m.localSet(2);     // i++
+    m.br(0);
+    m.end(); m.end();
+    m.localGet(3);
+    m.endBody();
 }
 
 /* 函数编译模式：参数全 number、返回 number/void、且函数体**只含 num 安全表达式**
@@ -1462,13 +1557,24 @@ Emitter.prototype._emitConcat = function () {
       M.else_();
         this._emitIsPureNum(this.scratchA);
         M.ifBlock("i64");
-          M.i32Const(SCRATCH); M.localGet(this.scratchA); M.f64ReinterpretI64(); M.i64TruncF64S(); M.call("qzs_numstr");
-          M.drop();
-          M.i32Const(SCRATCH); M.i32Load(2, 0); M.localSet(this.sT[0]);
-          M.i32Const(SCRATCH + 4); M.localSet(this.sT[2]);
-          M.localGet(this.scratchB); M.i32WrapI64();
-          M.localGet(this.sT[2]); M.localGet(this.sT[0]); M.call("qzs_append");
-          this._strTag();
+          // 整数（x==trunc(x)）且 |x|<2^53 → wasm qzs_numstr 快路径；
+          // 否则（小数 0.5 / NaN / Infinity / 大数）→ 宿主 String 精确（numstr 仅整数，会截断 0.5→"0"）
+          M.localGet(this.scratchA); M.f64ReinterpretI64(); M.localSet(this.scratchFA);
+          M.localGet(this.scratchFA); M.f64Trunc(); M.localGet(this.scratchFA); M.f64Eq();
+          M.localGet(this.scratchFA); M.f64Neg(); M.localGet(this.scratchFA); M.f64Max();
+          M.f64Const(9007199254740992); M.f64Lt();
+          M.i32And();
+          M.ifBlock("i64");
+            M.i32Const(SCRATCH); M.localGet(this.scratchA); M.f64ReinterpretI64(); M.i64TruncF64S(); M.call("qzs_numstr");
+            M.drop();
+            M.i32Const(SCRATCH); M.i32Load(2, 0); M.localSet(this.sT[0]);
+            M.i32Const(SCRATCH + 4); M.localSet(this.sT[2]);
+            M.localGet(this.scratchB); M.i32WrapI64();
+            M.localGet(this.sT[2]); M.localGet(this.sT[0]); M.call("qzs_append");
+            this._strTag();
+          M.else_();
+            M.localGet(this.scratchB); M.localGet(this.scratchA); M.call("qz.string_concat");
+          M.end();
         M.else_();
           M.localGet(this.scratchB); M.localGet(this.scratchA); M.call("qz.string_concat");
         M.end();
@@ -1787,21 +1893,24 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
-        // .length：字符串(0x7FFA)/数组(0x7FFB) 结构首 i32 即 len → wasm 内 load；
-        // 其余回退 qz.str_len（跨界，罕见）。
+        // .length：字符串(0x7FFA) → qzs_utf16len（UTF-16 码元数，非 UTF-8 字节数："你好".length=2）；
+        //   数组(0x7FFB) → 结构首 i32（元素数）；其余 → qz.str_len（跨界，罕见）。
         this.emitTaggedExpr(e.expression);
         this.m.localSet(this.scratch);
         this.m.localGet(this.scratch); this.m.i64Const(48n); this.m.i64ShrU();
         this.m.i64Const(0x7ffan); this.m.i64Eq();
+        this.m.ifBlock("i64");
+        this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.call("qzs_utf16len");
+        this.m.f64ConvertI32U(); this.m.i64ReinterpretF64();
+        this.m.else_();
         this.m.localGet(this.scratch); this.m.i64Const(48n); this.m.i64ShrU();
         this.m.i64Const(0x7ffbn); this.m.i64Eq();
-        this.m.i32Or();
         this.m.ifBlock("i64");
         this.m.localGet(this.scratch); this.m.i32WrapI64(); this.m.i32Load(2, 0);
         this.m.f64ConvertI32U(); this.m.i64ReinterpretF64();
         this.m.else_();
         this.m.localGet(this.scratch); this.m.call("qz.str_len");
-        this.m.end();
+        this.m.end(); this.m.end();
         return;
     }
     if (ts.isPropertyAccessExpression(e)) {                                                 // obj.a（POJO：wasm load，零跨界）
@@ -1882,13 +1991,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 this.m.localGet(this.scratch);   // 表达式结果=新值
                 return;
             }
-            // ++x / --x：x = x ± 1，返回新值
-            const idx = this._local(e.operand.text);
-            this.m.localGet(idx);
+            // ++x / --x：x = x ± 1，返回新值（含闭包捕获变量）
+            this._emitVarGet(e.operand.text);
             this.m.i64ConstBits(...f64Bits(1));
             this.emitGuardedOp(e.operator === ts.SyntaxKind.PlusPlusToken ? "qz.add" : "qz.sub",
                                e.operator === ts.SyntaxKind.PlusPlusToken ? this.m.f64Add : this.m.f64Sub);
-            this.m.localTee(idx);   // 新值留栈（表达式结果）
+            this._emitVarStore(e.operand.text, this.scratchB);   // 写回 + 新值留栈（表达式结果）
             return;
         }
         this.emitTaggedExpr(e.operand);
@@ -1922,12 +2030,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.localGet(this.scratch);          // 留旧值
             return;
         }
-        const idx = this._local(e.operand.text);
-        this.m.localGet(idx); this.m.localSet(this.scratch);    // scratch=旧值（表达式结果）
-        this.m.localGet(idx);
+        this._emitVarGet(e.operand.text); this.m.localSet(this.scratch);   // scratch=旧值（表达式结果）
+        this._emitVarGet(e.operand.text);
         this.m.i64ConstBits(...f64Bits(1));
         this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? this.m.f64Add : this.m.f64Sub);
-        this.m.localSet(idx);
+        this._emitVarStore(e.operand.text, this.scratchB);   // 写回（栈留新值）
+        this.m.drop();
         this.m.localGet(this.scratch);                          // 留旧值
         return;
     }
@@ -2293,9 +2401,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
             this.emitTaggedExpr(e.right); this._emitStoreProp(e.left); return;
         }
         if (ts.isElementAccessExpression(e.left)) { this.emitTaggedExpr(e.right); this._emitStoreElem(e.left); return; }
-        const idx = this._local(e.left.text);
         this.emitTaggedExpr(e.right);
-        this.m.localTee(idx); return;
+        this._emitVarStore(e.left.text, this.scratchB); return;   // 含闭包捕获
     }
     const COMPOUND = {
         [ts.SyntaxKind.PlusEqualsToken]: ts.SyntaxKind.PlusToken,
@@ -2319,16 +2426,14 @@ Emitter.prototype.emitTaggedBinary = function (e) {
             this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this._emitBinOp(COMPOUND[op]);
             this._emitStoreElem(e.left); return;
         }
-        const idx = this._local(e.left.text);
-        this.m.localGet(idx); this.emitTaggedExpr(e.right);
+        this._emitVarGet(e.left.text); this.emitTaggedExpr(e.right);
         this._emitBinOp(COMPOUND[op]);
-        this.m.localTee(idx); return;
+        this._emitVarStore(e.left.text, this.scratchB); return;
     }
     if (op === ts.SyntaxKind.BarBarEqualsToken || op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) {
         // a ||= b → a = a || b（值语义短路，与 emitShortCircuit 一致）；a &&= b → a = a && b
-        const idx = this._local(e.left.text);
         this.emitShortCircuit(op === ts.SyntaxKind.AmpersandAmpersandEqualsToken, e.left, e.right);
-        this.m.localTee(idx); return;
+        this._emitVarStore(e.left.text, this.scratchB); return;
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
         this.emitShortCircuit(op === ts.SyntaxKind.AmpersandAmpersandToken, e.left, e.right);
@@ -2340,10 +2445,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         return;
     }
     if (op === ts.SyntaxKind.QuestionQuestionEqualsToken) {
-        const idx = this._local(e.left.text);
-        if (idx === undefined) throw new Error("未定义变量: " + e.left.text);
         this.emitNullish(e.left, e.right);
-        this.m.localTee(idx); return;
+        this._emitVarStore(e.left.text, this.scratchB); return;
     }
     this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right);
     this._emitBinOp(op);

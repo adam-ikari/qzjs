@@ -175,6 +175,23 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     const callC = (n, a) => { const m = rcl.funcMeta.find(f => f.name === n); if (instCl.exports.__bump_reset) instCl.exports.__bump_reset(); const r = instCl.exports[n](...a.map(x => qzc._fromJS(x))); return m.mode === "num" ? r : qzc._toJS(r); };
     check("闭包.adder(5)", callC("adder", [5]), 15);
     check("闭包.closure()", callC("closure", []), 105);
+    // 闭包写捕获变量：外层不访问 → 语义正确（blk 内读写一致）；外层也访问 → 编译期报错（防静默错值）
+    const cwT = path.join(os.tmpdir(), "qz_aot_closwrite.ts");
+    fs.writeFileSync(cwT, "export function c1(): any { let c = 0; const f = function(): number { c++; return c; }; f(); f(); return f(); }\nexport function c2(): any { let n = 10; const f = () => { n += 5; return n; }; f(); return f(); }\n");
+    const rw = compileTS(cwT, path.join(os.tmpdir(), "qz_aot_closwrite.wasm"), {});
+    const qzw = makeQzvm(rw.strings);
+    const { instance: instW } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_closwrite.wasm")), { qz: qzw });
+    qzw.bindMem(instW.exports.memory); if (instW.exports.__bump) qzw.bindBump(instW.exports.__bump);
+    qzw.bindClosures(instW.exports, rw.lamMeta);
+    check("闭包写c++ (外层不访问)", qzw._toJS(instW.exports.c1()), 3);
+    check("闭包写+= (外层不访问)", qzw._toJS(instW.exports.c2()), 20);
+    // 外层也访问被写变量 → 必须编译期报错（当前不实现共享环境）
+    let closThrew = false;
+
+    fs.writeFileSync(cwT, "export function bad(): any { let z = 5; const f = () => z--; f(); return z; }\n");
+    try { compileTS(cwT, path.join(os.tmpdir(), "qz_aot_bad.wasm"), {}); }
+    catch (e) { closThrew = /闭包写捕获变量/.test(e.message); }
+    check("闭包写捕获+外层访问 → 报错", closThrew, true);
     // 字符串参数（_fromJS 须 strWriteback 成 0x7FFA 句柄；此前仅 tagHandle → .length/concat 静默 0）。
     const stT = path.join(os.tmpdir(), "qz_aot_strparam.ts");
     fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\nexport function tagPow(a: any, b: any): any { return a ** b; }\nexport function tagNN(a: any, b: any): any { return a ?? b; }\nexport function tagNNA(a: any): any { let x = a; x ??= 42; return x; }\nexport function semAdd(a: any, b: any): any { return a + b; }\nexport function semTypeof(a: any): any { return typeof a; }\nexport function semEq(a: any, b: any): any { return a == b; }\nexport function semSeq(a: any, b: any): any { return a === b; }\nexport function semNull(): any { return null; }\nexport function semUndef(): any { return undefined; }\nexport function semNot(a: any): any { return !a; }\nexport function semTnot(a: any): any { return ~a; }\n");
@@ -219,6 +236,10 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("strParam.not(null)", callSp("semNot", [null]), true);
     check("strParam.tnot(5)", callSp("semTnot", [5]), -6);                  // ~5
     check("strParam.tnot(true)", callSp("semTnot", [true]), -2);            // ~1
+    // .length 是 UTF-16 码元数（非 UTF-8 字节数）：非 ASCII 修正
+    check("strParam.len(cjk)", callSp("strLen", ["你好"]), 2);
+    check("strParam.len(emoji)", callSp("strLen", ["😀"]), 2);
+    check("strParam.len(utf8)", callSp("strLen", ["héllo"]), 5);
 }
 
 async function runClasses() {
