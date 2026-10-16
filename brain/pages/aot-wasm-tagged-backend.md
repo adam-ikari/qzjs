@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T15:17:52"
+updated: "2026-10-16T15:43:18"
 ---
 
 <!-- compiled_truth -->
@@ -226,4 +226,9 @@ updated: "2026-10-16T15:17:52"
 - time: 2026-10-16T15:17:52
   kind: evidence
   summary: "undefined 属性读抛错 + this 形参注解模型：372/381（97.6%），残余 9 项全部 loud"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T15:43:18
+  kind: evidence
+  summary: "第十四批差分审计（定位）：386/398（97.0%），3 项新发现的静默差异已记录待修"
   affects: [aot-wasm-tagged-backend]
