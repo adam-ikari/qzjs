@@ -92,6 +92,9 @@ const BUILTIN_GLOBALS = new Set(["Math", "JSON", "Array", "Object", "String", "N
     "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", "Reflect", "Proxy",
     "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent",
     "encodeURI", "decodeURI", "structuredClone", "globalThis", "Intl", "Atomics", "SharedArrayBuffer"]);
+// 可作为 `new X(...)` 目标的内建类（宿主构造；与 qzvm BUILTIN_CTORS 一致）。
+const EMITTER_BUILTIN_CTORS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
+    "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp"]);
 // 注册 qz.* import。only = 采集到的「实际用到」集合（Set<"qz.<name>">）；缺省/undefined
 // 则全量注册（向后兼容）。按需注册是 brain [[aot-generic-compiler-target]] 的要求：
 // import 面 = 需求驱动的最小契约面，不是 qzjs 私有 ABI 的全集。
@@ -1924,6 +1927,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         M.i32Or();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();   // 类实例 → "object"
         M.i32Or();
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();   // 宿主对象 → "object"
+        M.i32Or();
         M.ifBlock("i64");
         // 0x7FF9|0 → "undefined"（null 亦映射 0x7FF9|0；JS typeof null="object" —— null 字面量
         // 由 emitTaggedExpr 直接产 0x7FF9|0，与 undefined 同表示，故 null 也报 "undefined"。
@@ -2044,10 +2049,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.end(); this.m.end();
         return;
     }
-    if (ts.isPropertyAccessExpression(e)) {                                                 // obj.a（POJO：wasm load，零跨界）
-        this.emitTaggedExpr(e.expression);
-        this.m.i32WrapI64();                       // 低32位=offset
-        this.m.i64Load(3, this._fieldIndex(e.name.text));                               // 字段 +8 字节步进
+    if (ts.isPropertyAccessExpression(e)) {
+        // obj.a：宿主对象(0x7FFD，如 JSON.parse 结果/函数值) → qz.object_get（查 handles）；
+        //        否则 POJO（0x7FF9）→ wasm 内存 load（零跨界）。
+        const M = this.m;
+        this.emitTaggedExpr(e.expression); M.localSet(this.scratch);
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
+        M.ifBlock("i64");
+        M.localGet(this.scratch); M.i32Const(this._strId(e.name.text)); M.call("qz.object_get");
+        M.else_();
+        M.localGet(this.scratch); M.i32WrapI64(); M.i64Load(3, this._fieldIndex(e.name.text));
+        M.end();
         return;
     }
     if (ts.isNewExpression(e)) { this._emitNewCall(e); return; }
@@ -2213,6 +2225,8 @@ Emitter.prototype._emitIsHandle = function (scratch) {
     M.i32Or();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
     M.i32Or();
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();   // 宿主对象(JSON.parse 结果/函数等)
+    M.i32Or();
 };
 // 纯数字判定 = 非句柄(0x7FF9)/字符串(0x7FFA)/数组(0x7FFB)/布尔(0x7FFC)/实例(0x7FFE)。
 // 用于 _emitConcat 区分「数值」与「须走宿主 ToPrimitive/ToNumber 的值」。
@@ -2224,6 +2238,7 @@ Emitter.prototype._emitIsPureNum = function (scratch) {
     M.localGet(this.sT[0]); M.i32Const(0x7ffb); M.i32Eq(); M.i32Or();
     M.localGet(this.sT[0]); M.i32Const(0x7ffc); M.i32Eq(); M.i32Or();
     M.localGet(this.sT[0]); M.i32Const(0x7ffe); M.i32Eq(); M.i32Or();
+    M.localGet(this.sT[0]); M.i32Const(0x7ffd); M.i32Eq(); M.i32Or();
     M.i32Eqz();
 };
 Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
@@ -2341,9 +2356,16 @@ Emitter.prototype._emitStoreProp = function (left) {
     const M = this.m;
     M.localSet(this.scratch);                     // 值 → scratch（i64）
     this.emitTaggedExpr(left.expression);         // obj 句柄
-    M.i32WrapI64();                               // 低32位 = offset
+    M.localSet(this.scratchA);
+    // 宿主对象(0x7FFD) → qz.object_set（写 handles[idx][name]）；POJO → wasm 内存 store
+    M.localGet(this.scratchA); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
+    M.ifBlock("void");
+    M.localGet(this.scratchA); M.i32Const(this._strId(left.name.text)); M.localGet(this.scratch); M.call("qz.object_set");
+    M.else_();
+    M.localGet(this.scratchA); M.i32WrapI64();
     M.localGet(this.scratch);
     M.i64Store(3, this._fieldIndex(left.name.text));
+    M.end();
     M.localGet(this.scratch);                     // 赋值表达式返回所赋之值
 };
 // `.length=` 赋值：数组(0x7FFB) → qz.arr_set_len（宿主截断/扩容）；其余 → 普通字段存储
@@ -2460,9 +2482,13 @@ Emitter.prototype._emitNewCall = function (e) {
     const M = this.m;
     if (!ts.isIdentifier(e.expression)) throw new Error("[tagged] new 目标必须是标识符");
     const cname = this._className(e.expression.text);   // 导入类本地名 → 目标类名
-    if (!this.classes.has(cname)) throw new Error(BUILTIN_GLOBALS.has(e.expression.text)
-        ? `[tagged] 内建类 ${e.expression.text} 未实现（new Map/Set/Date/Error 等暂不支持）`
-        : "[tagged] new 未知类: " + e.expression.text);
+    // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.builtin（构造语义）；未登记者报错
+    if (!this.classes.has(cname)) {
+        if (EMITTER_BUILTIN_CTORS.has(e.expression.text)) { this._emitBuiltinCall(e.expression.text, e.arguments); return; }
+        throw new Error(BUILTIN_GLOBALS.has(e.expression.text)
+            ? `[tagged] 内建类 ${e.expression.text} 未实现（支持 Error 族/Map/Set/Date/Array/RegExp）`
+            : "[tagged] new 未知类: " + e.expression.text);
+    }
     const c = this.classes.get(cname);
     const args = e.arguments;
     if (args.length > 4) throw new Error("[tagged] new 最多 4 参");

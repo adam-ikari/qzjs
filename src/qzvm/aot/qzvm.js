@@ -21,6 +21,8 @@ const TAG_HI = 0x7ff9n;                   // 高 16 位比较值
 const STR_HI = 0x7ffan;                   // 字符串句柄高 16 位
 const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低32=0/1）
 const INST_HI = 0x7ffen;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
+const HOST_TAG = 0x7ffd_0000_0000_0000n;  // 宿主对象句柄标记（0x7FFD|低32=handles 索引）
+const HOST_HI = 0x7ffdn;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 // 内建全局分派：名 → JS 函数（参数个数由调用点传入的 n 决定，见 builtin）。
 // AOT 产物经 qz.builtin(nameId, a0..a3) 调；未列出的报「未实现」。
 const BUILTIN_FNS = {
@@ -45,6 +47,10 @@ const BUILTIN_FNS = {
   "String.fromCharCode": String.fromCharCode, "String.fromCodePoint": String.fromCodePoint,
 };
 // 内建全局常量（属性读非调用）：Math.PI 等。
+// 内建构造器（new X(...) / X(...)）：宿主直接调用（返回宿主对象句柄 0x7FFD）。
+const BUILTIN_CTORS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
+  "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp", "Promise"]);
+
 const BUILTIN_CONSTS = {
   "Math.PI": Math.PI, "Math.E": Math.E, "Math.LN2": Math.LN2, "Math.LN10": Math.LN10,
   "Math.LOG2E": Math.LOG2E, "Math.LOG10E": Math.LOG10E, "Math.SQRT2": Math.SQRT2, "Math.SQRT1_2": Math.SQRT1_2,
@@ -138,10 +144,12 @@ function makeQzvm(strings) {
   const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
   const instCache = new Map();
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
+  const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
   const instObj = (b) => { const off = Number(BigInt(b) & MASK32); let o = instCache.get(off); if (o === undefined) { o = { __wasmInstance: off }; instCache.set(off, o); } return o; };
-  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? instObj(b) : bitsToNum(b));
-  const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (TAG | BigInt(handles.push(x) - 1));   // undefined/null 用固定槽 0/1
+  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? instObj(b) : bitsToNum(b));
+  // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
+  const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (HOST_TAG | BigInt(handles.push(x) - 1));
   const box = (n) => numToBits(n);
   const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
   const bool = (b) => boxBool(b);
@@ -311,11 +319,11 @@ function makeQzvm(strings) {
     bindMem,
     object_new: () => tagHandle({}),
     object_set: (o, k, v) => { handles[idxOf(o)][strings[k]] = toJS(v); },
-    object_get: (o, k) => tagHandle(handles[idxOf(o)][strings[k]]),
+    object_get: (o, k) => ret(handles[idxOf(o)][strings[k]]),   // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）
     string_new: (id) => tagHandle(strings[id]),
-    string_concat: (a, b) => tagHandle(String(toJS(a)) + String(toJS(b))),
+    string_concat: (a, b) => strWriteback(String(toJS(a)) + String(toJS(b))),   // → 0x7FFA
     str_len: (a) => box(strRead(a).length),
-    add:  (a, b) => box(toJS(a) + toJS(b)),
+    add:  (a, b) => ret(toJS(a) + toJS(b)),   // JS + 可能产字符串 → ret（非固定数值）
     sub:  (a, b) => box(toJS(a) - toJS(b)),
     mul:  (a, b) => box(toJS(a) * toJS(b)),
     div:  (a, b) => box(toJS(a) / toJS(b)),
@@ -346,10 +354,10 @@ function makeQzvm(strings) {
     builtin: (id, n, a0, a1, a2, a3) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
-      const fn = BUILTIN_FNS[name];
+      const fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
       if (!fn) throw new Error("qz.builtin 未实现: " + name);
       const args = [a0, a1, a2, a3].slice(0, n).map(toJS);
-      return ret(fn.apply(null, args));
+      return ret(BUILTIN_CTORS.has(name) ? Reflect.construct(fn, args) : fn.apply(null, args));
     },
     band: (a, b) => box((toJS(a) | 0) & (toJS(b) | 0)),
     bor:  (a, b) => box((toJS(a) | 0) | (toJS(b) | 0)),
@@ -377,6 +385,7 @@ function makeQzvm(strings) {
       if (hi === 0x7ffbn) return 1;                                 // 0x7FFB：wasm 原生数组（恒真；Boolean([])=true）
       if (hi === BOOL_HI) return Number(u & 1n);                    // 0x7FFC：布尔（复用低 32 = 0/1）
       if (hi === INST_HI) return 1;                                 // 0x7FFE：类实例（恒真）
+      if (hi === HOST_HI) return handles[idxOf(v)] ? 1 : 0;         // 0x7FFD：宿主对象（查 handles）
       return bitsToNum(v) ? 1 : 0;
     },
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
@@ -387,9 +396,15 @@ function makeQzvm(strings) {
     method_call: (recv, mid, a0, a1, a2, a3) => {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1);
       if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1);
+      const name = strings[mid];
+      if (isHostH(recv)) {                                   // 宿主对象（JSON.parse 结果等）：调真实 JS 方法
+        const obj = handles[idxOf(recv)];
+        const fn = obj == null ? undefined : obj[name];
+        if (typeof fn !== "function") throw new Error("method_call: 宿主对象无方法 " + name);
+        return ret(fn.call(obj, ...[a0, a1, a2, a3].slice(0, 4).map(toJS)));
+      }
       const off = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
       const clsId = new Int32Array(mem.buffer, off, 1)[0];
-      const name = strings[mid];
       let c = classMeta && classMeta[clsId];
       while (c) {
         const m = c.methods[name];

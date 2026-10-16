@@ -350,6 +350,31 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("POJO instanceof 类", callIo("i7"), false);
     check("数组 instanceof 类", callIo("i8"), false);
     check("实例 === 自身 && 字段", callIo("i9"), 1);
+    // 内建类（宿主构造 0x7FFD）：Error 族 / Map / Set / Date / Array / RegExp
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_bicls.ts"),
+        "export function err(): any { try { throw new Error(\"boom\"); } catch(e) { return e.message; } }\n"
+      + "export function errs(): any { try { throw new TypeError(\"bad\"); } catch(e) { return String(e); } }\n"
+      + "export function map(): any { const m = new Map(); m.set(\"a\", 1); m.set(\"b\", 2); return m.get(\"a\") + m.get(\"b\"); }\n"
+      + "export function setsz(): any { const s = new Set(); s.add(1); s.add(2); s.add(1); return s.size; }\n"
+      + "export function date(): any { return new Date(0).getTime(); }\n"
+      + "export function arrn(): any { return new Array(3).length; }\n"
+      + "export function re(): any { return new RegExp(\"a+\").test(\"aaa\"); }\n"
+      + "export function jp(): any { const o: any = JSON.parse(\"{\\\"a\\\":1,\\\"s\\\":\\\"hi\\\"}\"); return o.a + o.s; }\n"
+      + "export function jpw(): any { const o: any = JSON.parse(\"{\\\"a\\\":1}\"); o.a = 9; return o.a; }\n");
+    const rBc = compileTS(path.join(os.tmpdir(), "qz_aot_bicls.ts"), path.join(os.tmpdir(), "qz_aot_bicls.wasm"), {});
+    const qzBc = makeQzvm(rBc.strings);
+    const { instance: instBc } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_bicls.wasm")), { qz: qzBc });
+    qzBc.bindMem(instBc.exports.memory); if (instBc.exports.__bump) qzBc.bindBump(instBc.exports.__bump);
+    const callBc = (n) => { if (instBc.exports.__bump_reset) instBc.exports.__bump_reset(); return qzBc._toJS(instBc.exports[n]()); };
+    check("Error + .message", callBc("err"), "boom");
+    check("TypeError + String()", callBc("errs"), "TypeError: bad");
+    check("Map set/get", callBc("map"), 3);
+    check("Set.size", callBc("setsz"), 2);
+    check("Date.getTime", callBc("date"), 0);
+    check("new Array(3).length", callBc("arrn"), 3);
+    check("RegExp.test", callBc("re"), true);
+    check("JSON.parse 字段读", callBc("jp"), "1hi");
+    check("JSON.parse 字段写", callBc("jpw"), 9);
 }
 
 async function runClasses() {
