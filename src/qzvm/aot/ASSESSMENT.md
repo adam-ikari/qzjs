@@ -50,10 +50,10 @@
 1. **数值运算已对齐 TS number**（tagged = f64 NaN-box，53 位；早期 i32 31 位模型已删）：`objWork(30000)` AOT 与解释器一致 = 8999999990000。
 2. **字符串已 wasm 内原生**（2026-10-11）：句柄 `0x7FFA`|offset，内存 `[len][utf8]`；字面量 data 段去重、`s+x` bump 顶原地追加、数字→十进制 `qzs_numstr`。原「慢 14x 跨界」已消除。a 数 + b 串仍回退 `qz.string_concat`。
    - 修复（2026-10-11）：guard 谓词原只识别对象句柄 `0x7FF9`，漏字符串 `0x7FFA` → `s == "..."` 等字符串比较回落 f64（两 NaN `f64.eq` 恒 false）。抽 `_emitIsHandle`（识别两种句柄）修 `emitGuardedOp` 与 `emitCmpI32`；`s=="..."` 命中/`!=` 现正确。
-3. **tagged 布尔/自增/逻辑语义**（2026-10-11 修复，2026-10-15 收口）：比较（`<`/`==`/…）、`!`、`&&`/`||` 产 tagged bool **f64 位型** 0.0/1.0（此前 `i64ExtendI32U` 产整数 1，与 `qz.lt` 回退分支不一致 → 当值用得 `5e-324`）；`if(!x)` 此前编译崩溃（prefix `!` 直调 `qz.truthy` 产 i32 违反 i64 契约）；`&&`/`||` 左操作数误加 `i32Eqz`（等价 `(!a)&b`）；postfix 不区分 `++`/`--`、prefix `++x` 不生效——均已修。
+3. **tagged 布尔语义收口（2026-10-11 首修，2026-10-15 彻底重做）**：比较/`!`/`&&`/`||` 曾产 tagged bool **f64 位型** 0.0/1.0 —— 与 number 混淆 → `"s"+true` 得 `"s1"`、`typeof true` 得 `"number"`、`1==true` 得 false。现 bool 用**独立 tag `0x7FFC|0/1`**（NaN-box 同族 arith-inert NaN），宿主 `toJS`/`truthy` 还原真布尔；`_emitIsHandle` 纳入 bool（参与算术时回退宿主）。
    - **逻辑运算值语义已收口（2026-10-15）**：`&&`/`||`/`||=`/`&&=` 此前在 **num 快路径**里被简化成「两侧都求值 + 结果强制 0/1」，违反 JS 语义（`5&&3` 应为 `3`，实测得 `1`；`x=5; x||=9` 应为 `5`，实测得 `1`）。现两模式统一为**真短路 + 值语义**：`a&&b ≡ truthy(a)?b:a`，`a||b ≡ truthy(a)?a:b`（右侧仅在短路决策需要时求值，结果保留操作数原值）。tagged 走 `emitShortCircuit`，num 走 `block(f64)` + `brIf`（零 import）。回归门：`test_aot.js` 的 `and_val`/`or_val`/`or_assign`/`and_assign`。
    - **原则（用户裁决 2026-10-15）**：**语义精度必须保证，不可用性能换**。任何「简化掉 JS 语义以换快路径」都按缺陷处理，不按 tradeoff 记录。
-4. **`%` 已 wasm 内原生**（2026-10-11）：tagged 模式 `emitTaggedRem` 命中 number 走 `a - trunc(a/b)*b`（= JS 余数语义，含负数/除零 NaN），回退 `qz.rem`。此前 `%` 无条件跨界，含 `%` 的 tagged 循环每轮一次 host 调用。10000 次含 `%` 循环跨界归零。
+4. **`%` 已 wasm 内原生、且精确到 JS Number::remainder（2026-10-15 修）**：原 `a - b*trunc(a/b)` 再 `f64Neg` 把零余数 `+0` 翻成 `-0`（`2%2` JS=+0）、除法溢出（`1e308%1e-308`）得 NaN。新实现：零余数符号随被除数、`|b|==Inf → a`、差溢出/除零/NaN 走宿主 `qz.math_rem`（fmod 全精度）。tagged 同逻辑（guard 命中双 number 走 wasm，句柄回退 `qz.rem`）。
 5. **qzvm 契约面按需注册（2026-10-15 落地）**：`QZ` 表定义 30 个符号（Perry 规模 211，对象/数组方法未覆盖），但**产物只 import 实际用到的子集**——满足 brain `[[aot-generic-compiler-target]]` 的「import 面 = 需求驱动的最小契约面」。实现：`compileTS` **两趟发射**——第一趟 `Module({collectImports:true})` 只采集 `call()`/`importFn()` 触及的 `qz.*` 名（不登记、不产字节，产物丢弃），第二趟按该子集 `registerQz(m, contract)` 后真发。必须两趟的理由：import 索引要在 `declareFunc` 之前定妥（`funcidx = codeIdx + imports.length`），无法边发射边补登记。
    - **多文件内联（2026-10-15）**：编译器不再只吃单文件——`compileTS` 用 tsc 的 `createProgram`（**现成的模块解析器**，不自研模块图遍历）拿到 `program.getSourceFiles()` 里的全部 `.ts`，把各模块顶层函数/类编进**同一个** wasm 模块（跨文件调用 = 同模块内普通 `call`）。支持：具名 + 别名导入（`import { x as y }`，本地别名折回目标导出名 `Emitter._fnName`）、默认导入（`import d from './m'` → 目标的命名默认导出；匿名默认导出显式报错）、命名空间导入（`import * as M` → `M.member(...)` 折回目标顶层名，经 `checker.getExportsOfModule` 穿透 re-export，含 `M.default`）、导入类（`import { C }` + `new C()`，`classAlias`→`_className`）、re-export 链穿透；顶层同名冲突**显式报错**（不静默覆盖）。外部模块（import 来自非源码文件）一律**显式报错**。实测：别名 `inc as bump` → `run(40)=42`、0 import；默认导入 → `105`；命名空间 → `18`；导入类 → `9`。回归门 `test_aot.js` 的 `runMultiFile` + `runInterp`（interp 跨文件模块语法重写与执行）。**未做**：`any` 对象字段访问在 num 模式函数里仍不支持（须该函数走 tagged）。
    - **跨模式调用 ABI（2026-10-15 修复）**：num 值 = f64，tagged 值 = i64（NaN-box 数值侧 = 原始 f64 位型）。此前**同模块内跨模式直调**（tagged 调 num / num 调 tagged）不插转换 → 产非法 wasm（`call[0] expected type f64, found local.get of type i64`），**实例化即崩**——凡「`: number` 纯函数」被「含字符串/对象的函数」调用（或反之）即触发，属硬崩溃。修：`fnMode` 表（顶层名 → {mode,void}）+ 三处调用点（`emitExpr` num 直调、tagged 命名空间直调、tagged 直调）逐实参插 `f64ReinterpretI64`/`i64ReinterpretF64`、返回后插逆转换。**按位重解释精确无损**（数值侧本就是同一 f64 位型，无需装箱）。回归门 `test_aot.js` 的 `runMultiFile` 跨模式两向（tagged→num=6、num→tagged=6）。类方法 `__m_*` 恒 i64 且仅 tagged 上下文可达，不涉及。
@@ -94,8 +94,9 @@
 
 1. **~~f64 tagged + build.js `--target`~~ 已完成**（tagged = f64 NaN-box，精确 53 位，32/64 位统一；`--target/--target-abi` 交叉编译，i386 实测通过）。
 2. **~~字符串后端~~ 已完成**（2026-10-11，wasm 内表示 + 原地追加，无跨界；见 STR_BACKEND_DESIGN.md 状态标记）。
-3. qzvm 补全（对象方法/数组）。**数组方法已补**（2026-10-12）：`split` 返 wasm 原生数组（`0x7FF8`）；宿主 `doArrMethod` 覆盖 20 方法，回调经 `closure_call`。见 README「数组方法」条。
+3. qzvm 补全（对象方法/数组）。**数组方法已补**（2026-10-12）：`split` 返 wasm 原生数组（句柄 `0x7FFB`）；宿主 `doArrMethod` 覆盖 20 方法，回调经 `closure_call`。见 README「数组方法」条。
 4. 集成 qzjs 构建（编译器进 CMake/npm 流程）
+5. **未实现运算符/语义（2026-10-15 审计）**：`instanceof`/`in`/`?.`（可选链）/`void`/`delete`/`**=`/`??=` 编译崩（loud，非静默错）；位运算遇 NaN/Infinity/超 2^31 走 `i32TruncF64S` trap（JS ToInt32 应给 0/回绕）；`typeof` 对 function 值报 `"object"`（0x7FF9 低 32 位对宿主 handles 索引与 POJO 内存 offset 同空间，wasm 内无法区分）。以上均 **loud crash**（用户裁决：静默错优先修，loud 可暂留——故未改用 `trunc_sat`，避免引入新的静默饱和误差）。
 
 ## 设计文档
 - `PORTABILITY_32BIT.md` — 32 位可移植性评估与「单 f64 表示」裁决

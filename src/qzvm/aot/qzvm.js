@@ -19,6 +19,7 @@
 const TAG = 0x7ff9_0000_0000_0000n;      // 句柄标记（高 16 位 0x7FF9）
 const TAG_HI = 0x7ff9n;                   // 高 16 位比较值
 const STR_HI = 0x7ffan;                   // 字符串句柄高 16 位
+const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低32=0/-1：与字符串/数组同族 arith-inert NaN）
 const MASK32 = 0xffff_ffffn;
 const _ab = new ArrayBuffer(8);
 const _dvw = new DataView(_ab);
@@ -77,7 +78,7 @@ function _utf8(u8, s, e) {
 }
 
 function makeQzvm(strings) {
-  const handles = [undefined];            // index 0 保留（handle 0 无效）
+  const handles = [undefined, null];      // index 0=undefined、1=null（固定槽，供 wasm 内 null 字面量用 0x7FF9|1）；其余从 2 起
 
   const numToBits = (n) => _writeF64(n, true);
   const bitsToNum = (b) => _readF64(BigInt.asIntN(64, b), true);
@@ -101,11 +102,12 @@ function makeQzvm(strings) {
     for (let i = 0; i < len; i++) out[i] = toJS(dv.getBigInt64(dataOff + i * 8, true));
     return out;
   };
-  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : bitsToNum(b));
-  const tagHandle = (x) => TAG | BigInt(handles.push(x) - 1);
+  const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
+  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : bitsToNum(b));
+  const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (TAG | BigInt(handles.push(x) - 1));   // undefined/null 用固定槽 0/1
   const box = (n) => numToBits(n);
-  const bool = (b) => numToBits(b ? 1 : 0);
-
+  const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
+  const bool = (b) => boxBool(b);
   let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null, classMeta = null;
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
   const bindBump = (g) => { bumpRef = g; };
@@ -136,9 +138,13 @@ function makeQzvm(strings) {
   };
   // JS 值 → 句柄位型（i64）。string→0x7FFA；number→f64 位型；array→wasm 原生数组(0x7FFB)；
   // 其它→JS 句柄(0x7FF9)。wasm 侧可直接 .length/索引/push/pop 的只有 0x7FFA/0x7FFB。
+  // null/undefined 不在此归一：null 走 tagHandle（独立 handles[idx]，toJS 还原 null），
+  // undefined 走 tagHandle → handles[idx]（toJS 还原 undefined）。保留 null≠undefined 区分，
+  // 使 + / Number / String 等运算按 JS 正确分支（Number(null)=0 ≠ Number(undefined)=NaN）。
+  // ?? 判 nullish 走宿主 qz.is_nullish（见 emitNullish），不靠 TAG|0 比对。
   const bitsOf = (e) => typeof e === "string" ? strWriteback(e)
                      : typeof e === "number" ? numToBits(e)
-                     : typeof e === "boolean" ? numToBits(e ? 1 : 0)
+                     : typeof e === "boolean" ? boxBool(e)
                      : Array.isArray(e) ? arrWriteback(e)
                      : tagHandle(e);
   // JS 数组 → wasm 原生数组（0x7FFB 布局：header 16B [len,cap,dataOff,pad] + data i64×N），
@@ -275,6 +281,11 @@ function makeQzvm(strings) {
     mul:  (a, b) => box(toJS(a) * toJS(b)),
     div:  (a, b) => box(toJS(a) / toJS(b)),
     rem:  (a, b) => box(toJS(a) % toJS(b)),
+    // **：Math.pow 语义（含 NaN^0=1、0^0=1 等特例）；tagged 操作数经 toJS 解引用
+    pow:  (a, b) => box(Math.pow(toJS(a), toJS(b))),
+    math_pow: (a, b) => Math.pow(a, b),
+    math_rem: (a, b) => a % b,
+    is_nullish: (a) => { const v = toJS(a); return (v === null || v === undefined) ? 1 : 0; },
     band: (a, b) => box((toJS(a) | 0) & (toJS(b) | 0)),
     bor:  (a, b) => box((toJS(a) | 0) | (toJS(b) | 0)),
     bxor: (a, b) => box((toJS(a) | 0) ^ (toJS(b) | 0)),
@@ -287,14 +298,19 @@ function makeQzvm(strings) {
     ge:   (a, b) => bool(toJS(a) >= toJS(b)),
     seq:  (a, b) => bool(toJS(a) === toJS(b)),
     sne:  (a, b) => bool(toJS(a) !== toJS(b)),
+    // 宽松相等 == / 不等 !=：JS 强制转换（ToPrimitive/ToNumber；1=="1"=true、null==undefined=true）
+    eq:   (a, b) => bool(toJS(a) == toJS(b)),
+    ne:   (a, b) => bool(toJS(a) != toJS(b)),
+    bnot: (a) => box(~(toJS(a) | 0)),
+    to_num: (a) => box(+toJS(a)),
     // 真值判定：不经 toJS——类实例/POJO 句柄（0x7FF9|内存偏移）不在 JS handles 表中，
-    // 经 toJS 会取到 undefined 而误判 falsy。按 tag 直接判：undefined/null=0x7FF9|0 → 假；
-    // 对象/数组/非空字符串 → 真；其余按 f64 数值。
+    // 经 toJS 会取到 undefined 而误判 falsy。按 tag 直接判：idx=0=undefined→假；其余查 handles[idx]（null→假、对象→真）。
     truthy: (v) => {
       const u = BigInt.asUintN(64, v), hi = u >> 48n;
-      if (hi === TAG_HI) return Number(u & MASK32) !== 0 ? 1 : 0;   // 0x7FF9：偏移 0 = undefined/null
+      if (hi === TAG_HI) { const idx = Number(u & MASK32); return idx === 0 ? 0 : (handles[idx] ? 1 : 0); }  // 0x7FF9：idx=0=undefined→假；其余查 handles[idx]（null→假、对象→真）
       if (hi === STR_HI) return strRead(v).length ? 1 : 0;          // 0x7FFA：字符串
-      if (hi === 0x7ff8n) return 1;                                 // 0x7FF8：数组
+      if (hi === 0x7ffbn) return 1;                                 // 0x7FFB：wasm 原生数组（恒真；Boolean([])=true）
+      if (hi === BOOL_HI) return Number(u & 1n);                    // 0x7FFC：布尔（复用低 32 = 0/1）
       return bitsToNum(v) ? 1 : 0;
     },
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),

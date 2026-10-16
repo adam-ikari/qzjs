@@ -47,6 +47,13 @@ function satNum(x: number): number { return ((x as any) satisfies number) + 1; }
 // NaN truthy：JS Boolean(NaN)=false（此前 emitCond 仅 x!=0 → NaN 误判 truthy）。
 function nanTruthy(a: number, b: number): number { const x = a / b; return x ? 1 : 7; }
 function nanAnd(a: number, b: number): number { const x = a / b; return x && 3; }
+// ** 指数：wasm 无原生 f64.pow → 宿主 import（Math.pow 语义）；右结合嵌套由 TS AST 保证。
+function pow2(a: number, b: number): number { return a ** b; }
+function powRight(a: number): number { return 2 ** 3 ** a; }   // 右结合：2^(3^a)
+function powNaN0(a: number): number { return a ** 0; }          // NaN^0=1、0^0=1
+function pow0neg(a: number): number { return 0 ** a; }          // 0^-1=Infinity
+// ?? nullish：num 模式值恒为 f64（永非 null/undefined）→ 结果恒 = 左操作数
+function nnNum(a: number, b: number): number { return a ?? b; }
 function nanOr(a: number, b: number): number { const x = a / b; return x || 9; }
 `;
 
@@ -56,7 +63,7 @@ async function runNum() {
     const wasm = path.join(os.tmpdir(), "qz_aot_num.wasm");
     compileTS(tmp, wasm, {});
     const bytes = fs.readFileSync(wasm);
-    const stub = new Proxy({}, { get: () => (..._a) => 0 });
+    const stub = new Proxy({}, { get: (_, k) => k === "math_pow" ? Math.pow : (..._a) => 0 });
     const { instance } = await WebAssembly.instantiate(bytes, { qz: stub, env: stub });
     const e = instance.exports;
     check("big(5)", e.big(5), 5e9);
@@ -88,10 +95,19 @@ async function runNum() {
     check("angleNum(5)", e.angleNum(5), 6);
     check("satNum(5)", e.satNum(5), 6);
     check("nonNullNum(5)", e.nonNullNum(5), 6);
+    // ** 指数：wasm 无原生 f64.pow → 宿主 Math.pow import（Math.pow 语义：0^0=1、0^-1=Infinity）
+    check("pow2(2,10)", e.pow2(2, 10), 1024);
+    check("powRight(2)", e.powRight(2), 512);        // 2^(3^2)=2^9：右结合
+    check("powNaN0(0)", e.powNaN0(0), 1);            // 0^0=1
+    check("pow0neg(-1)", isFinite(e.pow0neg(-1)), false);   // 0^-1=Infinity
     // NaN truthy（JS Boolean(NaN)=false）：此前 emitCond 仅 x!=0 → NaN 误判 truthy 得 1。
     check("nanTruthy(0,0)", e.nanTruthy(0, 0), 7);   // NaN ? 1 : 7 → 7
     check("nanAnd(0,0)", isNaN(e.nanAnd(0, 0)), true);  // NaN && 3 → NaN
     check("nanOr(0,0)", e.nanOr(0, 0), 9);              // NaN || 9 → 9
+    // ??（num）：f64 永非 null/undefined → 结果恒 = 左操作数（0/NaN 亦非空）
+    check("nnNum(0,9)", e.nnNum(0, 9), 0);
+    check("nnNum(5,9)", e.nnNum(5, 9), 5);
+    check("nnNum(0/0,9)", isNaN(e.nnNum(0 / 0, 9)), true);
 }
 
 async function runTagged() {
@@ -161,7 +177,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("闭包.closure()", callC("closure", []), 105);
     // 字符串参数（_fromJS 须 strWriteback 成 0x7FFA 句柄；此前仅 tagHandle → .length/concat 静默 0）。
     const stT = path.join(os.tmpdir(), "qz_aot_strparam.ts");
-    fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\n");
+    fs.writeFileSync(stT, "export function strLen(s: any): any { return s.length; }\nexport function strType(s: any): any { return typeof s; }\nexport function strCat(n: number, s: any): any { return s + n; }\nexport function nanRet(a: number, b: number): any { const x = a / b; return x; }\nexport function tagPow(a: any, b: any): any { return a ** b; }\nexport function tagNN(a: any, b: any): any { return a ?? b; }\nexport function tagNNA(a: any): any { let x = a; x ??= 42; return x; }\nexport function semAdd(a: any, b: any): any { return a + b; }\nexport function semTypeof(a: any): any { return typeof a; }\nexport function semEq(a: any, b: any): any { return a == b; }\nexport function semSeq(a: any, b: any): any { return a === b; }\nexport function semNull(): any { return null; }\nexport function semUndef(): any { return undefined; }\nexport function semNot(a: any): any { return !a; }\nexport function semTnot(a: any): any { return ~a; }\n");
     const rst2 = compileTS(stT, path.join(os.tmpdir(), "qz_aot_strparam.wasm"), {});
     const qzsp = makeQzvm(rst2.strings);
     const { instance: instSp } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_strparam.wasm")), { qz: qzsp });
@@ -173,6 +189,36 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     // NaN 返回值不得被误判为数组（数组标签原 0x7FF8 = canonical NaN → box(NaN) 相撞）
     const nanVal = callSp("nanRet", [0, 0]);
     check("strParam.nanRet(0,0) is NaN", typeof nanVal === "number" && isNaN(nanVal), true);
+    // tagged ** ：qz.pow 经 toJS 解引用 → Math.pow；含 ToNumber 强转（"3"**2=9）
+    check("strParam.pow(2,10)", callSp("tagPow", [2, 10]), 1024);
+    check("strParam.pow(3,0.5)", callSp("tagPow", [3, 0.5]), Math.sqrt(3));
+    // ?? nullish 合并：null/undefined（TAG|0）→ 右值；0/""/false 非空 → 左值
+    check("strParam.nn(null,5)", callSp("tagNN", [null, 5]), 5);
+    check("strParam.nn(undef,5)", callSp("tagNN", [undefined, 5]), 5);
+    check("strParam.nn(0,5)", callSp("tagNN", [0, 5]), 0);
+    check("strParam.nn(3,5)", callSp("tagNN", [3, 5]), 3);
+    check("strParam.nn(\"\",5)", callSp("tagNN", ["", 5]), "");
+    check("strParam.nna(null)", callSp("tagNNA", [null]), 42);
+    check("strParam.nna(99)", callSp("tagNNA", [99]), 99);
+    // 语义精确（2026-10-15 审计）：+ 的 ToPrimitive/ToNumber、typeof、宽松 ==、null/undefined 区分、单目 ~/!
+    check("strParam.add(1,2)", callSp("semAdd", [1, 2]), 3);
+    check("strParam.add(\"s\",true)", callSp("semAdd", ["s", true]), "strue");
+    check("strParam.add(null,1)", callSp("semAdd", [null, 1]), 1);          // null ToNumber=0
+    check("strParam.add(null,null)", callSp("semAdd", [null, null]), 0);
+    check("strParam.add(undef,5) is NaN", isNaN(callSp("semAdd", [undefined, 5])), true);  // undefined ToNumber=NaN
+    check("strParam.typeof(null)", callSp("semTypeof", [null]), "object");
+    check("strParam.typeof(undef)", callSp("semTypeof", [undefined]), "undefined");
+    check("strParam.typeof(true)", callSp("semTypeof", [true]), "boolean");
+    check("strParam.typeof(1)", callSp("semTypeof", [1]), "number");
+    check("strParam.eq(1,\"1\")", callSp("semEq", [1, "1"]), true);         // 宽松 ==
+    check("strParam.eq(null,undef)", callSp("semEq", [null, undefined]), true);
+    check("strParam.seq(1,true)", callSp("semSeq", [1, true]), false);      // 严格 ===
+    check("strParam.null is null", callSp("semNull", []), null);
+    check("strParam.undef is undefined", callSp("semUndef", []), undefined);
+    check("strParam.not(true)", callSp("semNot", [true]), false);
+    check("strParam.not(null)", callSp("semNot", [null]), true);
+    check("strParam.tnot(5)", callSp("semTnot", [5]), -6);                  // ~5
+    check("strParam.tnot(true)", callSp("semTnot", [true]), -2);            // ~1
 }
 
 async function runClasses() {
