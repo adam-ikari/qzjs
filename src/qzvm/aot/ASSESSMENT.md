@@ -115,7 +115,9 @@
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
 结果：**521/530 一致（98.3%）**；残余 9 项：**8 项 loud + 1 项已知静默**（`Object.assign` 多源键序）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
-**残余 loud 清单（第二十一批后，8 项 loud + 1 项已知静默）**：
+**残余 loud 清单（第二十一批后，8 项 loud + 1 项已知静默）**
+
+**方法/对象方法 >4 形参（进行中，补丁已备）**：ABI 铺路已提交（`qz.method_call` 增第 7 参 `ovf`=实参 4..，7 处发射点补位，行为中性）。剩余补丁见 `/tmp/qzaux/patch_mo2.js`（方法/静态方法签名 +`i64` 槽、`$ovf` 形参槽、`_mEnter` 的 `$ovfArg` 预留 local 与 varMap `i<4?1+i:1+params.length+(i-4)`、`_emitOvfParamUnpack` 解包、动态分派传真实溢出数组、删「方法最多 4 参」守卫）。**已知两个待修 bug**：(1) `method-5param` 出现 wasm 校验错误 `local.set[0]`（local 布局相关：`locals.unshift("$ovfArgN")` 与 `nParams` 的对齐需复核）；(2) 含 **rest** 的方法（`sum(...xs)`）报「for-of: 该值不可迭代」→ 调用点必须把尾部实参**打包成数组**（动态分派无法静态得知 rest：需给 `classMeta.methods[name]` 增 `rest` 字段，由宿主按其打包，闭包路径已有同款 `ovf`/`meta.rest` 机制可参照）。另：patch 应用时注意 `declareFunc(...)` 是**三行**（第三参 `voidRet ? [] : ["i64"]` 不可丢）。：
 1. `arguments` 对象（建议 rest 形参）
 2. generator（`function*` / `yield`）
 3. async / await（需 Promise 运行时）
