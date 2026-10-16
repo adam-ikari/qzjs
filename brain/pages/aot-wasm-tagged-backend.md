@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T19:19:08"
+updated: "2026-10-16T19:26:20"
 ---
 
 <!-- compiled_truth -->
@@ -316,4 +316,9 @@ updated: "2026-10-16T19:19:08"
 - time: 2026-10-16T19:19:08
   kind: evidence
   summary: "类方法 >4 形参与 rest 形参打通（局部布局 bug 修复）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T19:26:20
+  kind: evidence
+  summary: "方法 >4 形参 / rest 形参 完整支持（探针 4/4，残余 loud 8→7）"
   affects: [aot-wasm-tagged-backend]
