@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T20:00:20"
+updated: "2026-10-16T20:18:28"
 ---
 
 <!-- compiled_truth -->
@@ -346,4 +346,9 @@ updated: "2026-10-16T20:00:20"
 - time: 2026-10-16T20:00:20
   kind: evidence
   summary: "顶层函数作值支持 + 模块级语句静默丢弃修复"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T20:18:28
+  kind: evidence
+  summary: "第二十三批：557/569（97.9%）；新发现 for...of 急切快照 vs JS 惰性迭代（静默）"
   affects: [aot-wasm-tagged-backend]
