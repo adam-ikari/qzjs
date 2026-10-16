@@ -3,6 +3,9 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **fix(aot): try/finally 语义完备**（此前 finally 只在正常路径执行 → 静默漏副作用）。
+  - `return` 穿过 try → 先求返回值表达式（JS 顺序）再跑 finally；`throw` 穿出 try → 跑该异常路径经过的 finally（同一 try 的 finally 仍由自然流负责，避免重复执行）；`break`/`continue` 退出含 try 的循环 → 先跑退出范围内的 finally。
+  差分：语料 2 = 34/40。
 - **feat(aot): 闭包值独立 tag 0x7FFF（函数作对象属性/模块模式）+ delete 下标 + 两批差分**。
   - 闭包句柄由 0x7FF9（与 POJO 同 tag，运行时不可区分）改为 **0x7FFF**：`typeof f`→"function"、宿主 `method_call` 对 POJO/实例字段持有闭包时直接调用（对象字面量方法 / IIFE 模块模式）、`===` 按 (tag|off) 身份比较（toJS 每次新建包装函数会恒不等）、`toJS` 还原为可调用包装。
   - `delete a[i]` / `delete o[k]`（宿主 `qz.delete_index`）；`delete o.k` 改经宿主（越界即报错，不再静默越界写）。

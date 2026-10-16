@@ -1047,9 +1047,9 @@ class Emitter {
             this.m.end();
             return;
         }
-        if (ts.isBreakStatement(s)) { this.m.br(this._breakRel(s.label && s.label.text)); return; }
+        if (ts.isBreakStatement(s)) { this._jumpOut(s.label && s.label.text, true); return; }
         if (ts.isDoStatement(s)) { this.emitDoWhile(s, false); return; }
-        if (ts.isContinueStatement(s)) { this.m.br(this._contRel(s.label && s.label.text)); return; }
+        if (ts.isContinueStatement(s)) { this._jumpOut(s.label && s.label.text, false); return; }
         if (ts.isWhileStatement(s)) { this.emitWhile(s); return; }
         if (ts.isForStatement(s)) { this.emitFor(s); return; }
         if (ts.isSwitchStatement(s)) { this.emitSwitch(s, false); return; }
@@ -1061,6 +1061,26 @@ class Emitter {
     }
 
     // break → 最近可 break 的 label（循环或 switch；带 label 名则精确匹配）；continue → 最近的循环 label。
+    // break/continue 跨 try-finally：被退出循环内层的 finally 必须先执行（JS 语义）。
+    _jumpOut(label, isBreak) {
+        const st = this._finallyStack;
+        if (st && st.length && this.labels.length) {
+            let idx = -1;
+            for (let i = this.labels.length - 1; i >= 0; i--) {
+                const ok2 = label ? (this.labels[i].label === label && (isBreak ? this.labels[i].brk != null : this.labels[i].cont != null))
+                                  : (isBreak ? this.labels[i].brk != null : this.labels[i].cont != null);
+                if (ok2) { idx = i; break; }
+            }
+            for (let i = st.length - 1; i >= 0; i--) {
+                if (st[i].labelsLen <= idx) break;                           // 该 finally 在目标循环之外
+                const keep = this._finallyStack;
+                this._finallyStack = st.slice(0, i);
+                this.emitTaggedBlock(st[i].node);
+                this._finallyStack = keep;
+            }
+        }
+        this.m.br(isBreak ? this._breakRel(label) : this._contRel(label));
+    }
     _breakRel(label) {
         for (let i = this.labels.length - 1; i >= 0; i--)
             if (label ? (this.labels[i].label === label && this.labels[i].brk != null) : this.labels[i].brk != null)
@@ -2040,15 +2060,25 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         return;
     }
     if (ts.isReturnStatement(s)) {   // 无值 return; → undefined（tagged 函数返回 i64，不能裸 return）
-        if (s.expression) this.emitTaggedExpr(s.expression); else this._emitUndefined();
+        if (this._finallyStack && this._finallyStack.length) {
+            const t = this._expEnter();
+            if (s.expression) this.emitTaggedExpr(s.expression); else this._emitUndefined();
+            this.m.localSet(t.v);                    // 先求返回值（JS：先算表达式，再跑 finally）
+            this._emitPendingFinally(true, false);
+            this.m.localGet(t.v);
+            this._expLeave();
+        } else {
+            if (s.expression) this.emitTaggedExpr(s.expression); else this._emitUndefined();
+        }
         this.m.return_(); return; }
-    if (ts.isBreakStatement(s)) { this.m.br(this._breakRel(s.label && s.label.text)); return; }
-    if (ts.isContinueStatement(s)) { this.m.br(this._contRel(s.label && s.label.text)); return; }
+    if (ts.isBreakStatement(s)) { this._jumpOut(s.label && s.label.text, true); return; }
+    if (ts.isContinueStatement(s)) { this._jumpOut(s.label && s.label.text, false); return; }
     if (ts.isDoStatement(s)) { this.emitDoWhile(s, true); return; }
     if (ts.isSwitchStatement(s)) { this.emitSwitch(s, true); return; }
     if (ts.isThrowStatement(s)) {
         if (this.mode !== "tagged") throw new Error("[num] throw 不支持（仅 tagged）");
         this.emitTaggedExpr(s.expression); this.m.globalSet(1);   // __err = 值
+        this._emitPendingFinally(true, true);                     // 穿出的 finally：JS 语义
         if (!this._tryStack.length) throw new Error("throw 不在 try 内（跨函数 throw 不支持）");
         this.m.br(this.depth - this._tryStack[this._tryStack.length - 1].errBrk);
         return;
@@ -2154,9 +2184,12 @@ Emitter.prototype.emitTaggedStmt = function (s) {
 // throw 跳 $err 后（catch）；正常跳 $done 后（跳过 catch）。finally 两路都会执行。
 Emitter.prototype.emitTry = function (s, tagged) {
     const M = this.m;
+    const fin = s.finallyBlock;
+    const finTok = fin ? {} : null;                // 该 try 的身份令牌（throw 时判断此 finally 是否已被「自然流」负责）
+    if (fin) { this._finallyStack = this._finallyStack || []; this._finallyStack.push({ node: fin, tok: finTok, labelsLen: (this.labels || []).length }); }
     M.block(); this.depth++;                       // $done
     M.block(); this.depth++;                       // $err
-    this._tryStack.push({ errBrk: this.depth });   // 记录 $err 相对深度（throw 用）
+    this._tryStack.push({ errBrk: this.depth, tok: finTok });   // 记录 $err 相对深度（throw 用）
     if (tagged) this.emitTaggedBlock(s.tryBlock); else this.emitBlock(s.tryBlock);
     M.br(this.depth - (this.depth - 1));           // 正常 → 跳 $done 后（跳过 catch）
     this._tryStack.pop();
@@ -2170,9 +2203,25 @@ Emitter.prototype.emitTry = function (s, tagged) {
         if (tagged) this.emitTaggedBlock(c.block); else this.emitBlock(c.block);
     }
     this.depth--; M.end();                         // end $done
-    if (s.finallyBlock) {
-        if (tagged) this.emitTaggedBlock(s.finallyBlock); else this.emitBlock(s.finallyBlock);
+    if (fin) {
+        this._finallyStack.pop();
+        if (tagged) this.emitTaggedBlock(fin); else this.emitBlock(fin);
     }
+};
+// 运行待执行 finally 块（return/throw 鳚出 try 时由 JS 语义要求；最内层先跑）
+Emitter.prototype._emitPendingFinally = function (tagged, forThrow) {
+    const st = this._finallyStack;
+    if (!st || !st.length) return;
+    const live = new Set((this._tryStack || []).map(e => e.tok));
+    for (let i = st.length - 1; i >= 0; i--) {
+        const e = st[i];
+        // throw：目标 try 的 finally 由自然流（catch 后的正常路径）负责，不能在此重复执行；
+        // 只有当该 try 已不在 tryStack（异常正向外穿出，如 catch 内 rethrow）时才在此跑。
+        if (forThrow && live.has(e.tok)) continue;
+        this._finallyStack = st.slice(0, i);        // 防重入：finally 体内的 return/throw 不再重复跑本层
+        if (tagged) this.emitTaggedBlock(e.node); else this.emitBlock(e.node);
+    }
+    this._finallyStack = st;
 };
 
 // switch：entry-index 方案。先算入口 clause 序号（无匹配→default，无 default→len），
