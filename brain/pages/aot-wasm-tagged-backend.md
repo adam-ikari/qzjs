@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T11:44:53"
+updated: "2026-10-16T12:17:48"
 ---
 
 <!-- compiled_truth -->
@@ -161,4 +161,9 @@ updated: "2026-10-16T11:44:53"
 - time: 2026-10-16T11:44:53
   kind: evidence
   summary: "第九批差分审计：289/297（97.3%）；修复 classMeta 原型污染等 2 个崩溃/静默错值"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T12:17:48
+  kind: evidence
+  summary: "第十批差分审计：310/321（96.6%）；修复 classMeta 原型污染、.length 静默错值、闭包内省等"
   affects: [aot-wasm-tagged-backend]
