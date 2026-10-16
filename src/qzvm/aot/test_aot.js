@@ -284,6 +284,28 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("Number.isInteger(3)", callB("isInt", [3]), true);
     check("Number.isInteger(3.5)", callB("isInt", [3.5]), false);
     check("String.fromCharCode(65,66)", callB("sfcc", [65, 66]), "AB");
+    // 解构声明（单层数组/对象；嵌套明确报错）
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_destr.ts"),
+        "export function dArr(): any { const [x, y] = [10, 20]; return x + y; }\n"
+      + "export function dSkip(): any { const [, b] = [1, 2]; return b; }\n"
+      + "export function dObj(): any { const { a, b } = { a: 3, b: 4 }; return a + b; }\n"
+      + "export function dRen(): any { const { a: z } = { a: 5 }; return z; }\n"
+      + "export function dVar(): any { const s = [7, 8]; const [p, q] = s; return p + q; }\n");
+    const rDe = compileTS(path.join(os.tmpdir(), "qz_aot_destr.ts"), path.join(os.tmpdir(), "qz_aot_destr.wasm"), {});
+    const qzDe = makeQzvm(rDe.strings);
+    const { instance: instDe } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_destr.wasm")), { qz: qzDe });
+    qzDe.bindMem(instDe.exports.memory); if (instDe.exports.__bump) qzDe.bindBump(instDe.exports.__bump);
+    const callDe = (n) => { if (instDe.exports.__bump_reset) instDe.exports.__bump_reset(); return qzDe._toJS(instDe.exports[n]()); };
+    check("解构 [x,y]", callDe("dArr"), 30);
+    check("解构 [,b]", callDe("dSkip"), 2);
+    check("解构 {a,b}", callDe("dObj"), 7);
+    check("解构 {a:z}", callDe("dRen"), 5);
+    check("解构 from var", callDe("dVar"), 15);
+    let nestThrew = false;
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_destr.ts"), "export function f(): any { const [[p]] = [[7]]; return p; }\n");
+    try { compileTS(path.join(os.tmpdir(), "qz_aot_destr.ts"), path.join(os.tmpdir(), "qz_aot_destr.wasm"), {}); }
+    catch (e) { nestThrew = /嵌套解构未实现/.test(e.message); }
+    check("嵌套解构 → 报错", nestThrew, true);
 }
 
 async function runClasses() {

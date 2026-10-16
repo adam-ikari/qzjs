@@ -155,15 +155,59 @@ class Emitter {
     // 取出并消费栈顶 label：一个 label 只修饰其直接子循环。嵌套循环 push 时各取各的。
     _curLabel() { return this._labelStack.length ? this._labelStack.pop() : null; }
 
-    // 收集函数体里的 let/const（分配 local 索引）
+    // 收集函数体里的 let/const（分配 local 索引）；支持解构绑定（数组/对象，含嵌套）。
     _collectLocals(node) {
         const names = [];
+        const bindName = (bn) => {
+            if (ts.isIdentifier(bn)) { names.push(bn.text); return; }
+            if (ts.isArrayBindingPattern(bn) || ts.isObjectBindingPattern(bn)) {
+                for (const el of bn.elements) {
+                    if (ts.isOmittedExpression(el)) continue;
+                    if (ts.isBindingElement(el)) bindName(el.name);
+                }
+            }
+        };
         const walk = (n) => {
-            if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) names.push(n.name.text);
+            if (ts.isVariableDeclaration(n)) bindName(n.name);
             ts.forEachChild(n, walk);
         };
         walk(node);
         return names;
+    }
+
+    // 变量声明（含解构）：`const a = e` / `const [a,b] = e` / `const {x,y} = e`（含嵌套）。
+    // 解构基值求值一次存 scratch；数组元素 = base[i]，对象属性 = base.field（wasm POJO，零跨界）。
+    _emitBindingDecl(d) {
+        const M = this.m;
+        const name = d.name;
+        if (ts.isIdentifier(name)) {
+            if (d.initializer) { this.emitTaggedExpr(d.initializer); M.localSet(this._local(name.text)); }
+            return;
+        }
+        if (!d.initializer) return;
+        this.emitTaggedExpr(d.initializer); M.localSet(this.scratch);
+        if (ts.isArrayBindingPattern(name)) {
+            let i = 0;
+            for (const el of name.elements) {
+                if (ts.isOmittedExpression(el)) { i++; continue; }
+                this._emitElemOf(this.scratch, ts.factory.createNumericLiteral(i));
+                this._emitBindingTarget(el.name);
+                i++;
+            }
+        } else {   // ObjectBindingPattern
+            for (const el of name.elements) {
+                if (!ts.isBindingElement(el)) continue;
+                const key = el.propertyName ? el.propertyName.text : (ts.isIdentifier(el.name) ? el.name.text : null);
+                if (key === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
+                M.localGet(this.scratch); M.i32WrapI64(); M.i64Load(3, this._fieldIndex(key));
+                this._emitBindingTarget(el.name);
+            }
+        }
+    }
+    // 栈顶值 → 绑定目标。仅支持 Identifier（单层解构）；嵌套 pattern 明确报错（避免静默错值）。
+    _emitBindingTarget(name) {
+        if (ts.isIdentifier(name)) { this.m.localSet(this._local(name.text)); return; }
+        throw new Error("[tagged] 嵌套解构未实现（`const [[a],[b]] = …` / `const {a:{b}} = …`）；请用中间变量展开");
     }
 
     // 收集函数体内所有箭头函数/函数表达式（含嵌套），按源序。返回节点列表。
@@ -1635,10 +1679,7 @@ Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.stat
 Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));
     if (ts.isVariableStatement(s)) {
-        for (const d of s.declarationList.declarations) {
-            if (!ts.isIdentifier(d.name)) throw new Error("[tagged] 暂不支持解构声明（数组/对象解构 `const [a,b]=…` / `const {a}=……`）");
-            if (d.initializer) { this.emitTaggedExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
-        }
+        for (const d of s.declarationList.declarations) this._emitBindingDecl(d);
         return;
     }
     if (ts.isReturnStatement(s)) { if (s.expression) this.emitTaggedExpr(s.expression); this.m.return_(); return; }
