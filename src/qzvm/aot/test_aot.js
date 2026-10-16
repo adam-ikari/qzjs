@@ -756,6 +756,9 @@ async function runSemantics() {
       + "export function destrAssign(): any { let a = 1, b = 2; [a, b] = [b, a]; let x = 0, y = 0; ({ m: x, n: y } = { m: 7, n: 8 }); return a + \"|\" + b + \"|\" + x + \"|\" + y; }\n"
       + "export function bitMixed(): any { const out: any = []; out.push((3.9 | 0) + (2.1 & 3)); out.push(NaN | 0); out.push(1e9 * 1e9 | 0); out.push(\"12\" | 0); return out.join(\"|\"); }\n"
       + "export function nestedNew(): any { class P { name: any = \"a\"; } class Q { tag(p: any) { return \"q:\" + p.name; } } const q = new Q(); return q.tag(new P()); }\n"
+      + "class KBase { v: any = 1; }\n"
+      + "class KDer extends KBase { w: any = 2; }\n"
+      + "export function instOf(): any { const d = new KDer(); const out: any = []; out.push(d instanceof KDer ? 1 : 0); out.push(d instanceof KBase ? 1 : 0); out.push(d instanceof Object ? 1 : 0); out.push(d instanceof Array ? 1 : 0); out.push(\"s\" instanceof String ? 1 : 0); out.push([1] instanceof Array ? 1 : 0); out.push(1 instanceof Number ? 1 : 0); return out.join(\"|\"); }\n"
       + "export function arrOOB(): any { const a: any = [1,2]; const out: any = []; out.push(a[5] === undefined ? 1 : 0); a[4] = 9; out.push(a.length); out.push(a[4]); return out.join(\"|\"); }\n");
     const wasm = path.join(os.tmpdir(), "qz_aot_sem.wasm");
     const r = compileTS(src, wasm, {});
@@ -773,6 +776,7 @@ async function runSemantics() {
     check("位运算.混合表达式", call("bitMixed"), "5|0|-1486618624|12");
     check("new.嵌套实参槽", call("nestedNew"), "q:a");
     check("数组.越界读/写扩容", call("arrOOB"), "1|5|9");
+    check("instanceof.实例tag+内建", call("instOf"), "1|1|1|0|0|1|0");   // 原始值 instanceof String/Number = false
 }
 
 (async () => {

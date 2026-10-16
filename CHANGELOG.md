@@ -3,6 +3,7 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **fix(aot): 内建类 instanceof 的原始值语义**（`"s" instanceof String` / `1 instanceof Number` 此前误判为 true；JS 语义为 false——原始值非装箱对象）。改按**物化后的 JS 语义**判定（`j instanceof C` / `Array.isArray` / `typeof`）。守门：`test_aot.js` 233 checks ALL PASS。
 - **test(aot): 语义回归入快速门**（`test_aot.js` +9：finally 穿透 / 字面量访问器 / 展开别名 / for-of 字符串 / 解构赋值 / 位运算混合 / 嵌套 new / 数组越界）。
 - **feat(aot): 对象字面量方法/访问器（宿主对象 + 闭包回调）**。
   - `{ get v(){...}, set v(x){...}, m(){...}, k: v }` 现编译为**宿主对象**（0x7FFD）：访问器经 `Object.defineProperty` 回调 wasm 闭包（`qz.obj_accessor`），方法经 `qz.object_set_method`（调用时转发接收者作为 self）；字段经 `qz.object_set`。宿主 JS 侧同样按 JS 语义可用（JSON/`Object.keys` 等）。

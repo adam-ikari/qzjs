@@ -455,17 +455,18 @@ function makeQzvm(strings, opts) {
       if (hi === HOST_HI) { const o = handles[off]; if (o != null) o[name] = toJS(v); return; }
     },
     // x instanceof 内建类：按 tag / 物化后判定（Array/Object/String/Number/Boolean/Function/Error…）
+    // x instanceof 内建类：按**物化后的 JS 语义**判定（原始值 instanceof String/Number/Boolean 为 false）
     instanceof_builtin: (x, id) => {
       const name = strings[id];
       const u = BigInt.asUintN(64, x), hi = u >> 48n;
       const j = toJS(x);
       switch (name) {
         case "Array":    return (hi === 0x7ffbn || Array.isArray(j)) ? 1 : 0;
-        case "String":   return (hi === STR_HI || typeof j === "string") ? 1 : 0;
-        case "Number":   return (hi !== TAG_HI && hi !== STR_HI && hi !== 0x7ffbn && hi !== HOST_HI && hi !== INST_HI && typeof j === "number") ? 1 : 0;
-        case "Boolean":  return (hi === BOOL_HI || typeof j === "boolean") ? 1 : 0;
+        case "Object":   return (j !== null && (typeof j === "object" || typeof j === "function")) ? 1 : 0;
         case "Function": return typeof j === "function" ? 1 : 0;
-        case "Object":   return (j !== null && typeof j === "object") ? 1 : 0;
+        case "String":   return (typeof j === "object" && j !== null && j instanceof String) ? 1 : 0;
+        case "Number":   return (typeof j === "object" && j !== null && j instanceof Number) ? 1 : 0;
+        case "Boolean":  return (typeof j === "object" && j !== null && j instanceof Boolean) ? 1 : 0;
         case "Error":    return (j instanceof Error) ? 1 : 0;
         case "RegExp":   return (j instanceof RegExp) ? 1 : 0;
         case "Date":     return (j instanceof Date) ? 1 : 0;
