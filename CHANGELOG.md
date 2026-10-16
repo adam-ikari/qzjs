@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第十六批差分审计（2026-10-16）
+- 新增 `audit_corpus16.js`（19 例：属性描述符全矩阵 / Date 方法矩阵 / RegExp lastIndex·sticky / 命名空间对象 / 私有静态跨类 / 排序稳定性 / 数值格式矩阵 / Unicode normalize / getOwnPropertyDescriptor / 数组拷贝语义 / entries·values 深水 / 闭包性能形态 / try-finally 值路径 / switch 穿透 / 数组方法返回类型 / 嵌套解构 / 布尔·数字强转 / 访问器继承混合 / JSON 嵌套）。
+- **`super.v = x`（父类属性写）**：此前未实现（`SuperKeyword` 表达式报错）→ 现优先调父类 setter，否则按父类字段槽直写（与 `super.v` 读对称）。
+- **属性描述符标志**：`Object.defineProperty` 的 `writable`/`configurable` 记入旁表（`propFlags`，bump 失效）；`Object.getOwnPropertyDescriptor` 对 POJO/实例组装完整描述符；写入非 `writable` 属性 → TypeError（strict 语义，经 `protGuard`）。
+- 结果：**428/437（97.9%）**；**残余 9 项全部为 loud（零静默错值）**；test_aot 233 ALL PASS；ctest 32/32 全绿。
+
 ### 用户标签模板 strings.raw（2026-10-16）
 - 新增 `qz.tagged_strings(cooked, raw)`：把标签模板的 strings 参数由 wasm 数组换成**带 `.raw` 的宿主数组**（cooked 索引 + 非枚举 `raw`）→ 用户标签里的 `strings.raw` 可用（此前 undefined → `.raw.join` 抛错）。
 - 发射：raw 文本用与 `String.raw` 相同的「源码原文去定界符」提取（`rawOf` 提升为分支级 helper）；已知形参标签按形参表落栈（`strings` 手工压入 + 其余走 `_emitCallArgs`，rest 仍打包）；通用标签走 `tagged_strings` + 第 6 参 ovf。

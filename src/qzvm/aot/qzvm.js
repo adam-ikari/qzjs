@@ -311,6 +311,9 @@ function makeQzvm(strings, opts) {
   const orderMap = new Map();              // POJO/实例偏移 → 插入序名字表（Object.keys/JSON/for-in 用）
   let orderAt = -1;
   const syncOrder = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < orderAt) orderMap.clear(); orderAt = v; };
+  const propFlags = new Map();             // off|name → {w, c}（Object.defineProperty 的 writable/configurable）
+  let propFlagsAt = -1;
+  const syncPropFlags = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < propFlagsAt) propFlags.clear(); propFlagsAt = v; };
   const dynAcc = new Map();                // off|name → {g, s}（运行时 defineProperty 访问器的闭包/宿主函数句柄）
   let dynAccAt = -1;
   const syncDynAcc = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < dynAccAt) dynAcc.clear(); dynAccAt = v; };
@@ -612,6 +615,8 @@ function makeQzvm(strings, opts) {
   // 写保护（Object.freeze/seal/preventExtensions）：strict 语义抛 TypeError（经 __err 转入 wasm catch）
   const protGuard = (off, name) => {
     syncProt();
+    syncPropFlags();
+    if ((propFlags.get(off + "|" + name) || {}).w === false) { throwValue(new TypeError("Cannot assign to read only property '" + name + "' of object")); return true; }
     if (frozen.has(off) || sealed.has(off) || nonExt.has(off)) {
       if (frozen.has(off)) { throwValue(new TypeError("Cannot assign to read only property '" + name + "' of object")); return true; }
       const e = fieldEntries.find(([n]) => n === name);
@@ -1112,15 +1117,37 @@ function makeQzvm(strings, opts) {
             const gH = (gv && typeof gv === "function" && gv.__qzClo !== undefined) ? gv.__qzClo : (gv === undefined ? undefined : bitsOf(gv));
             const sH = (sv && typeof sv === "function" && sv.__qzClo !== undefined) ? sv.__qzClo : (sv === undefined ? undefined : bitsOf(sv));
             dynAcc.set(off0 + "|" + key, { g: gH, s: sH });
-            if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(off0 + "|" + key, true); }
+            syncPropFlags(); propFlags.set(off0 + "|" + key, { w: desc.writable !== false, c: desc.configurable !== false });
+          syncPropFlags(); propFlags.set(off0 + "|" + key, { w: desc.writable !== false, c: desc.configurable !== false });
+          if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(off0 + "|" + key, true); }
             return a0;
           }
           const val = bitsOf(desc.value);
           const e2 = fieldEntries.find(([n]) => n === key);
           if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(off0 + e2[1], val, true);
           else { syncExtras(); extras.set(off0 + "|" + key, val); }
+          syncPropFlags(); propFlags.set(off0 + "|" + key, { w: desc.writable !== false, c: desc.configurable !== false });
+          syncPropFlags(); propFlags.set(off0 + "|" + key, { w: desc.writable !== false, c: desc.configurable !== false });
           if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(off0 + "|" + key, true); }
           return a0;
+        }
+      }
+      // Object.getOwnPropertyDescriptor(o, k)：POJO/实例 → 组装描述符（含 writable/configurable/enumerable）
+      if (name === "Object.getOwnPropertyDescriptor" && a0 !== undefined) {
+        const h0 = BigInt.asUintN(64, a0) >> 48n, off0 = Number(BigInt.asUintN(64, a0) & MASK32);
+        if ((h0 === TAG_HI && off0 >= 8) || h0 === INST_HI) {
+          const key = String(toJS(a1));
+          const e2 = fieldEntries.find(([n]) => n === key);
+          let has = false, val = undefined;
+          if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) {
+            const raw = BigInt.asUintN(64, new DataView(mem.buffer).getBigInt64(off0 + e2[1], true));
+            if (raw !== TAG) { has = true; val = toJS(raw); }
+          }
+          if (!has) { syncExtras(); const x2 = extras.get(off0 + "|" + key); if (x2 !== undefined) { has = true; val = toJS(x2); } }
+          if (!has) return TAG;
+          syncPropFlags(); syncNonEnum(bumpRef ? Number(bumpRef.value) : -1);
+          const fl = propFlags.get(off0 + "|" + key) || {};
+          return tagHandle({ value: val, writable: fl.w !== false, enumerable: !nonEnum.has(off0 + "|" + key), configurable: fl.c !== false });
         }
       }
       // Object.getOwnPropertyNames(o)：预登记字段（已赋值）+ extras（含非枚举）

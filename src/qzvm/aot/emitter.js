@@ -4058,6 +4058,22 @@ Emitter.prototype.emitTaggedRem = function () {
 // 属性/索引赋值：值已在栈（i64）。注意会重新求值 receiver（读+写各一次；无副作用表达式安全）。
 Emitter.prototype._emitStoreProp = function (left) {
     const M = this.m, t = this._expEnter();       // 值/接收者须存活于嵌套求值
+    if (ts.isPropertyAccessExpression(left) && ts.isSuperKeyword(left.expression)) {   // super.v = x：父类 setter 优先，否则按父类字段槽直写
+        const parent = this._curClassObj && this._curClassObj.parent;
+        if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
+        M.localSet(t.w);
+        let owner = parent, acc = null;
+        while (owner && !acc) {
+            const cl = this.classes.get(owner);
+            acc = (cl.methods || []).find(m => m.accessor === "set" && m.name === left.name.text) || null;
+            if (!acc) owner = cl.parent;
+        }
+        if (acc) { this.m.localGet(0); this.m.localGet(t.w); for (let i = 0; i < 3; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name + "$set")); }
+        else { this.m.localGet(0); this.m.i32WrapI64(); this.m.localGet(t.w); this.m.i64Store(3, this._fieldIndex(left.name.text)); }
+        this.m.localGet(t.w);
+        this._expLeave();
+        return;
+    }
     const privName = ts.isPrivateIdentifier(left.name) && this._curClass ? "#" + this._curClass + "#" + left.name.text : null;
     if (privName) {                               // 私有字段写：类名限定名（普通字段槽）
         M.localSet(t.w);
