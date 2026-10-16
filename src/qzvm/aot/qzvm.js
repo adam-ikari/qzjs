@@ -505,6 +505,20 @@ function makeQzvm(strings, opts) {
       return tagHandle(out);
     },
     // 对象展开的宿主源（JSON.parse 结果等非 POJO）：物化后逐键写进目标（预登记字段 → 内存槽；其余 → extras）。
+    // 含方法/访问器的对象字面量 → 宿主对象：get/set 回调 wasm 闭包（宿主 JS 侧亦按 JS 语义工作）
+    obj_new: () => tagHandle({}),
+    typeof_host: (v) => (typeof handles[idxOf(v)] === "function" ? 1 : 0),
+    // 对象字面量的方法（闭包，第一个形参为 self）：宿主调用时转发接收者
+    object_set_method: (o, k, v) => {
+      const obj = handles[idxOf(o)];
+      obj[strings[k]] = function (...args) { return toJS(closureCall(v, o, ret(args[0]), ret(args[1]), ret(args[2]))); };
+    },
+    obj_accessor: (o, k, g, s2) => {
+      const name = strings[k], obj = handles[idxOf(o)], opt = {};
+      if (BigInt.asUintN(64, g) >> 48n === CLO_HI) opt.get = () => toJS(closureCall(g, o, TAG, TAG, TAG));
+      if (BigInt.asUintN(64, s2) >> 48n === CLO_HI) opt.set = (v) => { closureCall(s2, o, ret(v), TAG, TAG); };
+      if (opt.get || opt.set) Object.defineProperty(obj, name, { get: opt.get, set: opt.set, configurable: true, enumerable: true });
+    },
     obj_merge: (target, src) => {
       const o = toJS(src);
       if (o == null) return;

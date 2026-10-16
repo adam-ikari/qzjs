@@ -3,6 +3,15 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 对象字面量方法/访问器（宿主对象 + 闭包回调）**。
+  - `{ get v(){...}, set v(x){...}, m(){...}, k: v }` 现编译为**宿主对象**（0x7FFD）：访问器经 `Object.defineProperty` 回调 wasm 闭包（`qz.obj_accessor`），方法经 `qz.object_set_method`（调用时转发接收者作为 self）；字段经 `qz.object_set`。宿主 JS 侧同样按 JS 语义可用（JSON/`Object.keys` 等）。
+  - 合成箭头把 self 作为名为 `this` 的形参 → 体内 `this.x` 解析到该参数（`_capturesOf` 对已具名 `this` 形参不再视为捕获）。
+  - `typeof <宿主函数>` → "function"（新 `qz.typeof_host`）。
+  差分：语料 1 = 46/47（余 1 为 POJO 键序差异），语料 2 = 40/40。
+- **feat(aot): 对象展开改内存级浅拷贝（JS 别名语义）+ `for...of` 支持字符串**。
+  - `{...o}`：新对象分配同容量后按槽 memcpy → **嵌套对象保持同一引用**（此前经宿主物化 → 深拷贝，`b.y.z=9` 不影响 `a.y.z`，静默违背 JS 别名语义）；宿主对象源退化为 `qz.obj_merge`（物化逐键写，未知键入 extras）。
+  - `for (const ch of "abc")`：字符串按 UTF-16 码元经宿主 `charAt` 迭代（此前按数组语义读内存 → 越界 trap）。
+  差分：语料 1 = 44/47（余为 loud：对象字面量访问器/函数 rest 形参；及键序差异），语料 2 = **40/40**。
 - **feat(aot): POJO/实例统一容量（支持运行期新增字段）+ 解构赋值 + 宿主 extras 旁表**。
   - **预登记字段表**：编译期先扫描全程序属性名冻结 `fieldMap`，POJO/实例一律按**统一容量**分配并把槽全写为 undefined 句柄 → `o.newField = v`、`memo[k] = v`（k 运行期决定）不再越界写/错位读；未赋值字段读 = undefined（JS 语义）。
   - **运行期新键旁表**：未预登记的名字存宿主 `extras`（key = 内存偏移|名字），`bump` 复位即失效；`get/set_index`、`prop_get/set`、`delete_index`、物化（Object.keys/JSON）全链可见。

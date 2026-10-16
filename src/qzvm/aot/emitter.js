@@ -79,6 +79,10 @@ const QZ = {
   arr_delete_index: { params: ["i64", "i64"], results: ["i64"] },       // delete a[i]
   delete_index: { params: ["i64", "i64"], results: ["i64"] },           // delete o[k] / a[i]
   obj_merge: { params: ["i64", "i64"], results: [] },           // {...hostObj} 物化合并
+  obj_new: { params: [], results: ["i64"] },                    // 新宿主对象（含方法/访问器的字面量）
+  obj_accessor: { params: ["i64", "i32", "i64", "i64"], results: [] },   // defineProperty(get/set 闭包回调)
+  object_set_method: { params: ["i64", "i32", "i64"], results: [] },     // 对象方法（闭包 + self 转发）
+  typeof_host: { params: ["i64"], results: ["i32"] },                    // 宿主值是否 JS 函数 → 0/1
   elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
   // wasm 侧仅用于 0x7FFB 数组；字符串/其它不适用。
@@ -298,7 +302,8 @@ class Emitter {
         const seen = new Set();
         const walk = (n) => {
             if (ts.isThis(n)) {   // 箭头函数继承 this → 视作捕获 "this"
-                if (!lambdaIsArrow ? false : !seen.has("this")) { seen.add("this"); out.push("this"); }
+                // 合成的访问器/方法闭包把 self 作为名为 "this" 的**形参** → 不作捕获
+                if (!local.has("this") && (lambdaIsArrow && !seen.has("this"))) { seen.add("this"); out.push("this"); }
                 ts.forEachChild(n, walk); return;
             }
             if (ts.isIdentifier(n)) {
@@ -577,6 +582,15 @@ class Emitter {
         M.call("qz.closure_call");
         this._expLeave();
     }
+    // 由访问器/方法声明合成箭头函数节点（其体即闭包体 → 得到闭包句柄，供宿主 defineProperty 回调）。
+    _synthArrow(paramNames, body) {
+        const ps = paramNames.map(n => ts.factory.createParameterDeclaration(undefined, undefined, ts.factory.createIdentifier(n), undefined, undefined, undefined));
+        const ar = ts.factory.createArrowFunction(undefined, undefined, ps, undefined,
+            ts.factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken), body);
+        ar.pos = body.pos; ar.end = body.end;
+        return ar;
+    }
+
     // 解构默认值：栈顶值 === undefined 则替换为 init（JS 语义：仅 undefined 触发，null 不触发）。
     _emitDefaultIfUndef(init) {
         const M = this.m, t = this._expEnter();
@@ -1874,6 +1888,7 @@ function compileTS(input, outWasm, opts = {}) {
         for (const st of fns) { if (interpSet.has(st.name.text)) continue; em.sf = fnSf.get(st) || sf; em.emitFunc(st); }
         em.emitLambdaBodies();
         if (hasClasses) em.emitClassBodies();
+        em.emitLambdaBodies();   // 类体发射期间惰性登记的闭包（对象字面量访问器/方法）
         for (const cname of em._classList) {
             const c = em.classes.get(cname);
             for (const mth of c.methods) { const en = methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name); m.exportFn(en, en); }
@@ -2347,6 +2362,16 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this.emitTaggedExpr(e.expression); M.localSet(this.scratch);
         M.block("i64");
+        // 宿主值（0x7FFD）：可能是 JS 函数（对象字面量方法 / 宿主回调）→ 由宿主判定
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
+        M.ifBlock("i64");
+        M.localGet(this.scratch); M.call("qz.typeof_host");
+        M.ifBlock("i64");
+        this._emitStrLitHandle("function");
+        M.else_();
+        this._emitStrLitHandle("object");
+        M.end();
+        M.else_();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();
         M.ifBlock("i64");
         this._emitStrLitHandle("function");   // 闭包值（函数）
@@ -2380,7 +2405,40 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._emitStrLitHandle("number");
         M.end(); M.end(); M.end();   // 关 ifBool / ifObj / ifStr
         M.end();                     // 关 ifClo
+        M.end();                     // 关 ifHost 外层
         M.end();                     // 关 block(i64)
+        return;
+    }
+    if (ts.isObjectLiteralExpression(e)
+        && e.properties.some(p => ts.isMethodDeclaration(p) || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p))) {
+        if (e.properties.some(p => ts.isSpreadAssignment(p))) throw new Error("[tagged] 含方法/访问器的对象字面量暂不支持展开");
+        // 宿主对象(0x7FFD)：方法 → 闭包包装值；访问器 → defineProperty(get/set 回调 wasm 闭包)。
+        const M = this.m, t = this._expEnter();
+        M.call("qz.obj_new"); M.localSet(t.v);
+        const doneA = new Set();
+        for (const p of e.properties) {
+            const nm = p.name && p.name.text;
+            if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+                M.localGet(t.v); M.i32Const(this._strId(nm));
+                this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);
+                M.call("qz.object_set");
+            } else if (ts.isMethodDeclaration(p)) {
+                M.localGet(t.v); M.i32Const(this._strId(nm));
+                this.emitTaggedExpr(this._synthArrow(["this"].concat(p.parameters.map(q => q.name.text)).slice(0, 4), p.body));
+                M.call("qz.object_set_method");   // 宿主侧调用时把接收者作为 self 传入
+            } else if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
+                if (doneA.has(nm)) continue;
+                doneA.add(nm);
+                const g = e.properties.find(q => ts.isGetAccessorDeclaration(q) && q.name.text === nm);
+                const st = e.properties.find(q => ts.isSetAccessorDeclaration(q) && q.name.text === nm);
+                M.localGet(t.v); M.i32Const(this._strId(nm));
+                if (g) this.emitTaggedExpr(this._synthArrow(["this"], g.body)); else this._emitUndefined();
+                if (st) this.emitTaggedExpr(this._synthArrow(["this", st.parameters[0] ? st.parameters[0].name.text : "v"], st.body)); else this._emitUndefined();
+                M.call("qz.obj_accessor");
+            } else throw new Error("[tagged] 对象字面量属性形式不支持");
+        }
+        M.localGet(t.v);
+        this._expLeave();
         return;
     }
     if (ts.isObjectLiteralExpression(e)) {
@@ -3085,8 +3143,12 @@ Emitter.prototype._emitArrayPop = function (rx) {
 // 捕获变量逐个求值存入 cell，返回句柄 0x7FF9|off。
 Emitter.prototype._emitLambdaNew = function (lam) {
     const M = this.m;
-    const meta = this._lamById.get(lam);
-    if (!meta) throw new Error("未登记的 lambda");
+    let meta = this._lamById.get(lam);
+    if (!meta) {                                   // 惰性登记（合成箭头/访问器闭包，不在预扫描列表内）
+        this._lamAuto = (this._lamAuto || 0) + 1;
+        this.emitLambda(lam, "x" + this._lamAuto);
+        meta = this._lamById.get(lam);
+    }
     const fidx = this.m._funcIdx[meta.fname];
     // 闭包值 = [funcidx:i32][envIdx:i32]（envIdx=0 表示无捕获）；捕获值不再拷贝（共享环境）。
     emitBumpAlloc(M, () => M.i32Const(8));            // → off(i32)（越界 trap）

@@ -33,7 +33,12 @@ function jsFn(src, fn) {
       qz.bindClosures(instance.exports, r.lamMeta);
       qz.bindClasses(instance.exports, r.classMeta);
       const m = (r.funcMeta || []).find(f => f.name === c.fn);
-      const args = (c.args || []).map(x => qz._fromJS(x));
+      // wasm 导出为固定元数：调用方（glue/测试）须补足到形参个数（JS 少传 = undefined；
+      // num 模式无法表示 undefined → 补 NaN，与 JS 少传后的算术行为一致）。
+      const raw = (c.args || []).slice();
+      const nPar = m ? m.params : raw.length;
+      while (raw.length < nPar) raw.push(m && m.mode === "num" ? NaN : undefined);
+      const args = raw.slice(0, nPar).map(x => qz._fromJS(x));
       const res = instance.exports[c.fn](...args);
       got = m && m.mode === "num" ? res : qz._toJS(res);
     } catch (e) { aotErr = "AOT:" + String(e.message).split("\n")[0].slice(0, 70); }
