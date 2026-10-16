@@ -1625,6 +1625,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));
     if (ts.isVariableStatement(s)) {
         for (const d of s.declarationList.declarations) {
+            if (!ts.isIdentifier(d.name)) throw new Error("[tagged] 暂不支持解构声明（数组/对象解构 `const [a,b]=…` / `const {a}=……`）");
             if (d.initializer) { this.emitTaggedExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
         }
         return;
@@ -2407,7 +2408,11 @@ Emitter.prototype._emitSuperCallForward = function (c) {
 Emitter.prototype._emitDynMethod = function (rx, method, args) {
     const M = this.m;
     if (args.length > 4) throw new Error("[tagged] 方法最多 4 参");
-    // 静态精确接收者：沿父链解析方法 owner 后直调导出 __m_<Owner>$<m>，跳过 qz.method_call。
+    // 静态方法（C.m()）：类名 C 不是变量 → _staticRecvClass 返回 null → 走动态路径会读「未定义捕获变量 C」。
+    // 静态方法尚未实现（需收集 static 成员并导出 __m_<C>$<m>）→ 显式报错（loud 优于误导性「未定义捕获变量」）。
+    if (ts.isIdentifier(rx) && this.classes.has(this._className(rx.text))) {
+        throw new Error(`[tagged] 静态方法 ${rx.text}.${method}() 未实现（类静态成员暂不支持）`);
+    }
     const cls = this._staticRecvClass(rx);
     if (cls) {
         const owner = this._methodOwner(cls, method);
@@ -2484,6 +2489,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         return;
     }
     if (op === ts.SyntaxKind.QuestionQuestionEqualsToken) {
+        if (!ts.isIdentifier(e.left)) throw new Error("[tagged] 暂不支持字段/索引上的 ??=（仅 `x ??= v`）");
         this.emitNullish(e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
     }
