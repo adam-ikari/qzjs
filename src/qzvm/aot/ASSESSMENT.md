@@ -140,6 +140,9 @@
   已排除：`_emitBuiltinCall` 按序压栈（非逆序）、宿主 `[a0..a3].slice(0, arity || n).map(toJS)` 参数顺序正确、双源/字面量源场景一致。
   指向：emitter 侧对 `Object.assign({}, …)` 的**对象字面量+展开**路径（`emitter.js` 展开分支按**槽序**做内存级合并 → 键序退化为 fieldMap 槽序）；或该路径与 builtin 路径的选择条件。
 - 另：`defineProperty(o,k,{enumerable:false})` 的元数据按 bump epoch 存（跨宿主调用可能失效）→ `Object.keys` 可能漏过滤（探针 /tmp/qzaux/corpus_p1.js 的 hasown-nonenum）。
+  - **根因已定位（2026-10-16）**：键序登记函数（`qz.field_order` / `qz.spread_order`）在 **start 段 `__module_init`** 期间不可用 —— 宿主 `mem` 尚未绑定（glue 在 `WebAssembly.instantiate` **之后**才调 `qz.bindMem(instance.exports.memory)`，而 start 函数在 instantiate **之中**执行）→ `toJS(键句柄)` 走 `strRead` → `Cannot read properties of null (reading 'buffer')`。因此**模块级**展开构造对象（如 `const over = { ...base, b: 99, c: 3 }`）在 start 段拿不到键序 → 物化时退化为**槽序**（fieldMap 序）→ `Object.assign({}, {d:4}, over)` 得 `a,b,c,d`（JS `a,b,d,c`）。
+  - **两条已验证修法**（下一轮实施，任选其一）：① **模块导入内存**（`wasm-encoder` 已支持导入 shared memory —— C++ 运行器走的就是这条）→ 实例化前宿主即持有内存；② glue 在 `qz.bindMem` 之后调用导出的 `__order_init` 做二次登记（emitter 编译期已知模块级对象键名，可发 `field_order_lit` 风格调用）。
+  - 配套约 32 行改动已试并回退（避免未验证复杂度）：`qz.spread_order(dst, src)`（按 `orderMap`/物化视图补登记：已存在保持原位、新键追加）+ 展开路径对**显式属性**也发 `qz.field_order`（此前只写槽不登记序）+ 两者在 `!mem` 时安全 return。
 
 **已修（2026-10-16，第二十一批后）**：`JSON.parse` 结果里的数组字段此前每次读得到不同实例（wasm box 与宿主数组分离）→ 写入丢失；现宿主数组保持**宿主句柄**（`object_get`/`prop_get` 对 `Array.isArray` 值返回 `tagHandle`），元素读/写就地作用于真实 JS 数组 → 读值与 `JSON.stringify` 视图一致（探针 corpus_j1 3/3）。
 
