@@ -3,6 +3,11 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 跨函数 throw 传播 + try-finally 重抛 + 对象字面量成员闭包捕获**（语料 3/5 全部对齐）。
+  - `throw` 在本函数无 try → 跑完待执行 finally（若函数为 void 则不压值）后 `return`，`__err` 全局置位；调用点（直调/闭包调用/值调用/构造器）检查 `__err` 并跳到最近 `$err`（无 try 则立即向上返回）→ 跨函数抛出（含构造器内 throw）语义完整。导出 `__err` 全局 + 宿主 `qz.take_err()`：glue 调用导出后检查并抛出，模拟 JS 异常。
+  - `try {…} finally {…}`（无 catch）在 finally 后**重新抛出**（此前静默吞掉）。
+  - 对象字面量 方法/访问器 的合成箭头现纳入捕获分析（`_collectLambdas` + 缓存同一节点实例）→ 成员闭包捕获外层局部（`log.push` / `log +=`）不再丢 env 而崩/丢副作用。
+  差分：语料 5 = **28/28**、语料 4 = 38/38、语料 2 = 40/40、语料 1/3 = 46/47、37/39（余 3 项为已记录限制：POJO 键序、`arguments` 对象、稀疏数组 `Object.keys`）。
 - **fix(aot): 展开实参 + rest 形参（拆包调用）**：`g(1, ...a)` / `g(...a)` 现按形参表拆包（固定形参取数组元素、rest 取 `slice`）后直调/闭包调用，元数天然匹配；此前把整个实参数组塞给第一个形参。
 - **fix(aot): `++obj.a`/`obj.a++` 遇宿主对象**（对象字面量方法里的 `this.x++`）→ 走 `qz.prop_get/prop_set`（运行时按 tag 分派），不再误写内存偏移。
   差分：语料 5 = 25/28。

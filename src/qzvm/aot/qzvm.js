@@ -230,6 +230,12 @@ function makeQzvm(strings, opts) {
   const syncExtras = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < extrasAt) extras.clear(); extrasAt = v; };
   if (opts && opts.fields) bindFields(opts.fields);   // 便于宿主物化 POJO/实例（等价 bindFields）
   const bindMem = (m) => { mem = m; memU8 = new Uint8Array(m.buffer); };
+  // 跨函数 throw 的宿主侧出口：调用导出后若 __err≠0 → 取出并抛出，模拟 JS 异常
+  const takeErr = () => {
+    if (!exportsRef || !exportsRef.__err) return;
+    const v = exportsRef.__err.value;
+    if (v !== 0n) { exportsRef.__err.value = 0n; throw toJS(v); }
+  };
   const bindBump = (g) => { bumpRef = g; };
   // 宿主侧 bump 分配：与 wasm 侧 STR_BASE(8MiB) 同界；越界抛错（绝不静默覆盖字面量段）。
   const ARENA_END = 16 << 20;          // 与 emitter 的 STR_BASE 一致（bump 堆上限）
@@ -750,6 +756,7 @@ function makeQzvm(strings, opts) {
     },
     // .length 宿主回退：宿主数组/宿主字符串句柄/POJO（物化后取 JS .length；无 length 字段 → undefined）
     length_of: (v) => { const x = toJS(v); return ret(x == null ? undefined : x.length); },
+    take_err: () => takeErr(),
     log:  (v) => console.log("  [qz]", typeof toJS(v) === "string" ? toJS(v) : String(toJS(v))),
     // 字符串方法：recv + 方法名 id + 2 参（undefined 句柄 = 缺省）→ 结果字符串句柄。
     str_method: (recv, mid, a0, a1) => doStrMethod(recv, mid, a0, a1),

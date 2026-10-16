@@ -310,6 +310,8 @@ class Emitter {
         const walk = (n) => {
             if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) out.push(n);
             else if (ts.isFunctionDeclaration(n) && n.name && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n);
+            else if ((ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n))
+                     && ts.isObjectLiteralExpression(n.parent)) out.push(this._memberLambda(n));
             ts.forEachChild(n, walk);
         };
         walk(node);
@@ -590,6 +592,24 @@ class Emitter {
         M.localGet(t.w);
         this._expLeave();
     }
+    // 调用点错误检查（try 内）：栈顶是调用结果 → 存入临时槽，__err≠0 则跳到最近的 $err；否则恢复结果。
+    // 跨函数 throw 的落地点：被调函数设 __err 并正常返回，调用方在此转成异常路径。
+    _emitErrCheck(keepValue = true) {
+        const M = this.m, t = this._expEnter();
+        if (keepValue) M.localSet(t.v);
+        M.globalGet(1); M.i64Eqz(); M.i32Eqz();                  // __err != 0 ?
+        M.ifBlock("void");
+        if (this._tryStack.length) {
+            M.br((this.depth + 1) - this._tryStack[this._tryStack.length - 1].errBrk);   // +1：本 if 自身多一层 block
+        } else {
+            this._emitPendingFinally(true, false);                // 无 try → 跑完 finally 后立即向上返回
+            if (!this._fnVoid) this._emitUndefined();
+            M.return_();
+        }
+        M.end();
+        if (keepValue) M.localGet(t.v);
+        this._expLeave();
+    }
     // 值调用：被调值求值到可重入槽 → 参数压栈 → qz.call_value（闭包 → closure_call；宿主函数 → 调用）
     _emitValueCall(calleeExpr, args) {
         const M = this.m, t = this._expEnter();
@@ -599,6 +619,7 @@ class Emitter {
             if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
         }
         M.call("qz.call_value");
+        this._emitErrCheck();
         this._expLeave();
     }
 
@@ -721,6 +742,7 @@ class Emitter {
             }
         }
         M.call("qz.closure_call");
+        this._emitErrCheck();
         this._expLeave();
     }
     // JS `let`/`const` 循环绑定：闭包捕获循环变量时**每次迭代**一个新绑定。
@@ -863,6 +885,18 @@ class Emitter {
     }
 
     // 由访问器/方法声明合成箭头函数节点（其体即闭包体 → 得到闭包句柄，供宿主 defineProperty 回调）。
+    // 对象字面量 方法/访问器 → 合成箭头（缓存：捕获分析与发射必须用同一节点实例）
+    _memberLambda(member) {
+        this._synthLambdas = this._synthLambdas || new WeakMap();
+        let f = this._synthLambdas.get(member);
+        if (f) return f;
+        const nm = member.name && member.name.text;
+        if (ts.isMethodDeclaration(member)) f = this._synthArrow(["this"].concat(member.parameters.map(q => q.name.text)).slice(0, 4), member.body);
+        else if (ts.isGetAccessorDeclaration(member)) f = this._synthArrow(["this"], member.body);
+        else f = this._synthArrow(["this", member.parameters[0] ? member.parameters[0].name.text : "v"], member.body);
+        this._synthLambdas.set(member, f);
+        return f;
+    }
     _synthArrow(paramNames, body) {
         const ps = paramNames.map(n => ts.factory.createParameterDeclaration(undefined, undefined, ts.factory.createIdentifier(n), undefined, undefined, undefined));
         const ar = ts.factory.createArrowFunction(undefined, undefined, ps, undefined,
@@ -923,8 +957,10 @@ class Emitter {
         const savedFnVars = this._fnVars; this._fnVars = new Set();   // 本函数的「持有闭包的变量」集合
         const savedFnNodes = this._fnNodes; this._fnNodes = new Map(savedFnNodes || []);
         const savedBody = this._curBody; this._curBody = f.body;
+        const savedVoid = this._fnVoid;
         this._curClass = undefined; this.capListActive = false;
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
+        this._fnVoid = isVoid;
         this.mode = funcMode(f);
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
@@ -1006,7 +1042,7 @@ class Emitter {
         this.m.exportFn(f.name.text, f.name.text);
         this.varMap.clear();
         this._curClass = savedCurClass; this.capListActive = savedCapActive; this._staticVars = savedStatic;
-        this._fnVars = savedFnVars; this._fnNodes = savedFnNodes; this._curBody = savedBody;
+        this._fnVars = savedFnVars; this._fnNodes = savedFnNodes; this._curBody = savedBody; this._fnVoid = savedVoid;
     }
 
 
@@ -1079,6 +1115,7 @@ class Emitter {
         const savedEnvRef = this.envRef;
         const savedFnVars2 = this._fnVars; this._fnVars = new Set();
         this.mode = "tagged";
+        this._fnVoid = false;                                  // lambda 恒返回 i64
         // locals：用户局部（i64）+ scratch 系列同 emitFunc tagged 布局
         const locals = this._collectLocals(lam.body);
         for (const p of lam.parameters) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
@@ -1289,6 +1326,7 @@ class Emitter {
             blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef, fnVars: this._fnVars,
         };
         this.mode = "tagged";
+        this._fnVoid = !!isVoid;
         const nParams = 1 + params.length;
         const locals = this._collectLocals(body);
         for (const p of (astParams || [])) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
@@ -2215,6 +2253,7 @@ function compileTS(input, outWasm, opts = {}) {
         if (m.memory !== null) m.exportMemory();
         if (anyTagged) {
             m.exportGlobal("__bump", m.globalIdx());
+            m.exportGlobal("__err", 1);                       // 跨函数 throw 出口：glue 调用后检查，非 0 则向宿主抛出
             // __bump_reset()：把 bump 堆指针重置到起点。glue 在每次宿主 __call 前调用，
             // 使一次调用的 arena 占用与调用时长解耦（否则长循环累加耗尽 arena）。
             m.declareFunc("__bump_reset", [], []);
@@ -2524,8 +2563,15 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isThrowStatement(s)) {
         if (this.mode !== "tagged") throw new Error("[num] throw 不支持（仅 tagged）");
         this.emitTaggedExpr(s.expression); this.m.globalSet(1);   // __err = 值
-        this._emitPendingFinally(true, true);                     // 穿出的 finally：JS 语义
-        if (!this._tryStack.length) throw new Error("throw 不在 try 内（跨函数 throw 不支持）");
+        if (!this._tryStack.length) {
+            // 跨函数传播：本函数无 try → 跑完待执行 finally（异常离开函数）后 return undefined；
+            // 调用方（try 内的调用点）检查 __err 并跳到其 catch。
+            this._emitPendingFinally(true, false);
+            if (!this._fnVoid) this._emitUndefined();
+            this.m.return_();
+            return;
+        }
+        this._emitPendingFinally(true, true);                     // 同函数内：穿出的 finally
         this.m.br(this.depth - this._tryStack[this._tryStack.length - 1].errBrk);
         return;
     }
@@ -2677,6 +2723,7 @@ Emitter.prototype.emitTry = function (s, tagged) {
     M.block(); this.depth++;                       // $done
     M.block(); this.depth++;                       // $err
     this._tryStack.push({ errBrk: this.depth, tok: finTok });   // 记录 $err 相对深度（throw 用）
+    M.i64Const(0n); M.globalSet(1);                              // 进入 try：清 __err
     if (tagged) this.emitTaggedBlock(s.tryBlock); else this.emitBlock(s.tryBlock);
     M.br(this.depth - (this.depth - 1));           // 正常 → 跳 $done 后（跳过 catch）
     this._tryStack.pop();
@@ -2688,11 +2735,13 @@ Emitter.prototype.emitTry = function (s, tagged) {
             if (idx !== undefined) { M.globalGet(1); M.localSet(idx); }   // catch 变量 = __err
         }
         if (tagged) this.emitTaggedBlock(c.block); else this.emitBlock(c.block);
+        M.i64Const(0n); M.globalSet(1);                          // catch 处理完：清 __err
     }
     this.depth--; M.end();                         // end $done
     if (fin) {
         this._finallyStack.pop();
         if (tagged) this.emitTaggedBlock(fin); else this.emitBlock(fin);
+        if (!c) this._emitErrCheck(false);         // try-finally（无 catch）：finally 后必须重新抛出
     }
 };
 // 运行待执行 finally 块（return/throw 鳚出 try 时由 JS 语义要求；最内层先跑）
@@ -2790,6 +2839,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             else this._emitUndefined();
         }
         M.call("qz.closure_call");
+        this._emitErrCheck();
         this._expLeave();
         return;
     }
@@ -2895,7 +2945,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 M.call("qz.object_set");
             } else if (ts.isMethodDeclaration(p)) {
                 M.localGet(t.v); M.i32Const(this._strId(nm));
-                this.emitTaggedExpr(this._synthArrow(["this"].concat(p.parameters.map(q => q.name.text)).slice(0, 4), p.body));
+                this.emitTaggedExpr(this._memberLambda(p));
                 M.call("qz.object_set_method");   // 宿主侧调用时把接收者作为 self 传入
             } else if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
                 if (doneA.has(nm)) continue;
@@ -2903,8 +2953,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 const g = e.properties.find(q => ts.isGetAccessorDeclaration(q) && q.name.text === nm);
                 const st = e.properties.find(q => ts.isSetAccessorDeclaration(q) && q.name.text === nm);
                 M.localGet(t.v); M.i32Const(this._strId(nm));
-                if (g) this.emitTaggedExpr(this._synthArrow(["this"], g.body)); else this._emitUndefined();
-                if (st) this.emitTaggedExpr(this._synthArrow(["this", st.parameters[0] ? st.parameters[0].name.text : "v"], st.body)); else this._emitUndefined();
+                if (g) this.emitTaggedExpr(this._memberLambda(g)); else this._emitUndefined();
+                if (st) this.emitTaggedExpr(this._memberLambda(st)); else this._emitUndefined();
                 M.call("qz.obj_accessor");
             } else throw new Error("[tagged] 对象字面量属性形式不支持");
         }
@@ -3301,7 +3351,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             }
         }
         this.m.call(this._fnName(fn));
-        this._retFromCallee(fn); return;
+        this._retFromCallee(fn);
+        this._emitErrCheck();                                     // 被调函数可能跨函数抛出
+        return;
     }
     if (ts.isConditionalExpression(e)) {                                                     // a ? b : c
         this.emitCondI32(e.condition);
@@ -3851,6 +3903,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     M.localGet(te.v);
     for (let i = 0; i < 4; i++) M.localGet([te.w, te.x, te.y, te.z][i]);
     M.call(ctorName(cname));                                // 写 __cls、字段、执行体
+    this._emitErrCheck(false);                              // 构造器 void：检查 __err 但不留值
     M.localGet(te.v);                                       // 表达式值 = 实例
     this._expLeave();
 };

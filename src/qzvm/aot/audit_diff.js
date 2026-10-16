@@ -40,6 +40,7 @@ function jsFn(src, fn) {
       while (raw.length < nPar) raw.push(m && m.mode === "num" ? NaN : undefined);
       const args = raw.slice(0, nPar).map(x => qz._fromJS(x));
       const res = instance.exports[c.fn](...args);
+      if (qz.take_err) qz.take_err();          // 跨函数 throw 的宿主出口（glue 约定）
       got = m && m.mode === "num" ? res : qz._toJS(res);
     } catch (e) { aotErr = "AOT:" + String(e.message).split("\n")[0].slice(0, 70); }
     try {
