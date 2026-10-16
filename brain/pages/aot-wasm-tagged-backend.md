@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T18:57:50"
+updated: "2026-10-16T19:19:08"
 ---
 
 <!-- compiled_truth -->
@@ -311,4 +311,9 @@ updated: "2026-10-16T18:57:50"
 - time: 2026-10-16T18:57:50
   kind: evidence
   summary: "宿主数组句柄统一：JSON.parse 数组写丢失修复（521/530）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-16T19:19:08
+  kind: evidence
+  summary: "类方法 >4 形参与 rest 形参打通（局部布局 bug 修复）"
   affects: [aot-wasm-tagged-backend]
