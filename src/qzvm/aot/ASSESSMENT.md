@@ -118,7 +118,7 @@
 **残余 loud 清单（键序修复后，按类别 7 项 / 按语料案例 8 例，全部 loud）**
 
 **第二十二批后新能力/修复（2026-10-16）**
-- **顶层函数作值**（已支持，探针 2/3）：`arr.map(namedFn)`、`const h = fn; h()`、`fn.call/apply/bind` 与 JS 一致。实现：`qz.fn_value(nameId, arity)`（包装为宿主函数句柄、按 arity 补 TAG、同名缓存 `fnCacheMap`）+ 值位置发射 + `closureCall` 宿主函数句柄分支（只传真传实参）+ 函数名接收者的属性写走 `qz.prop_set`（内存快路径会把句柄低 32 位当地址 → 静默越界）。**已知残余**：`fn.prop = 5` 再读回得 0（模块级属性写在函数包装句柄上，读路径 `object_get` 拿到的句柄下标不一致——待查，loud 边界内）。
+- **顶层函数作值**（已支持，探针 2/3）：`arr.map(namedFn)`、`const h = fn; h()`、`fn.call/apply/bind` 与 JS 一致。实现：`qz.fn_value(nameId, arity)`（包装为宿主函数句柄、按 arity 补 TAG、同名缓存 `fnCacheMap`）+ 值位置发射 + `closureCall` 宿主函数句柄分支（只传真传实参）+ 函数名接收者的属性写走 `qz.prop_set`（内存快路径会把句柄低 32 位当地址 → 静默越界）。**已完成 3/3**：`fn.prop` 读回问题的根因 = `_emitStoreProp` 的 fn-value 分支在读取 `t.w`（值槽）前**未先 `localSet(t.w)`**（该函数的值入槽只发生在其它分支内）→ 写到宿主属性的值是 B 残留的 0/undefined；补一行 `M.localSet(t.w)` 即修复。
 - **模块级非声明语句执行**（静默 bug 修复）：`__module_init` 此前只收集变量语句 → 模块级副作用（如 `fx.extra = 5`、任意表达式语句/if/for/try）被**静默丢弃**；现纳入 init（排除 function/class/interface/type/module/import/export/enum 声明）。
 **第二十二批新暴露的两类 loud（2026-10-16）**：
 - **模块级对象含访问器/方法**（`const M = (function(){ … return { get value(){…}, on(){…} } })()`）：在 start 段物化挂访问器/方法时宿主 `mem` 尚未绑定 → `Cannot read properties of null (reading 'buffer')`（与键序同源：start 段无内存）。

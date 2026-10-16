@@ -707,7 +707,7 @@ function makeQzvm(strings, opts) {
     object_set: (o, k, v) => { handles[idxOf(o)][strings[k]] = toJS(v); },
     // 值经 ret（string→0x7FFA、array→0x7FFB、其它→0x7FFD）；**数组保持宿主句柄** → 元素读/写就地作用于真实
     // JS 数组（否则 wasm box 与宿主数组分离：h.c[0]=v 写入 box，JSON.stringify(h) 仍见旧值）。
-    object_get: (o, k) => { const v = handles[idxOf(o)][strings[k]]; return Array.isArray(v) ? tagHandle(v) : ret(v); },
+    object_get: (o, k) => { if (process.env.QZDBG && strings[k]==="extra") console.error("[dbg] object_get extra off=", Number(BigInt.asUintN(64, o) & MASK32), "val=", String(handles[Number(BigInt.asUintN(64, o) & MASK32)] && handles[Number(BigInt.asUintN(64, o) & MASK32)]["extra"])); const v = handles[idxOf(o)][strings[k]]; return Array.isArray(v) ? tagHandle(v) : ret(v); },
     string_new: (id) => tagHandle(strings[id]),
     string_concat: (a, b) => strWriteback(toJS(a) + toJS(b)),
     to_string: (v) => strWriteback(String(toJS(v))),           // ToString：对象走 string hint（toString 优先）
@@ -907,7 +907,7 @@ function makeQzvm(strings, opts) {
       }
       return ret(toJS(recv)[name]);
     },
-    prop_set: (recv, id, v) => {
+    prop_set: (recv, id, v) => { if (process.env.QZDBG && strings[id]==="extra") console.error("[dbg] prop_set extra off=", Number(BigInt.asUintN(64, recv) & MASK32), "vRaw=", String(v), "hi=", (BigInt.asUintN(64, v) >> 48n).toString(16));
       const name = strings[id];
       const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
       if (hi === TAG_HI && off < 8) { throwValue(new TypeError("Cannot set properties of " + (off === 1 ? "null" : "undefined") + " (setting '" + name + "')")); return; }   // undefined/null 写属性 → TypeError（JS 语义）
@@ -1648,6 +1648,7 @@ function makeQzvm(strings, opts) {
       const n = arity | 0;
       fnCacheMap = fnCacheMap || new Map();
       const hit = fnCacheMap.get(nm);
+      if (process.env.QZDBG) console.error("[dbg] fn_value", nm, "arity=", n, "cached=", hit !== undefined);
       if (hit !== undefined) return hit;                       // 同名 → 同一宿主句柄（属性/身份稳定）
       const hv = tagHandle(function (...as) {
         const f = exportsRef && exportsRef[nm];

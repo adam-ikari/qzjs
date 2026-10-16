@@ -4404,6 +4404,7 @@ Emitter.prototype._emitStoreProp = function (left) {
         && !this.capMap.has(left.expression.text) && this._local(left.expression.text) === undefined
         && !(this.moduleGlobals && this.moduleGlobals.get(left.expression.text) !== undefined)) {
         // 顶层函数作值（宿主函数句柄）：属性写走宿主 qz.prop_set（内存快路径会写到句柄低 32 位 → 静默错/越界）
+        M.localSet(t.w);                                  // 值入槽（本分支前未被保存）
         this.emitTaggedExpr(left.expression); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set");
         M.localGet(t.w);
         this._expLeave();

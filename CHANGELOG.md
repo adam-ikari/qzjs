@@ -4,6 +4,9 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 顶层函数作值 —— 收尾（2026-10-16）
+- `fn.prop = 5` 读回 0 的根因：`_emitStoreProp` 的顶层函数分支读取值槽 `t.w` 前**未先 `localSet(t.w)`**（值入槽只发生在其它分支）→ 写入宿主属性的值是残留的 0/undefined。补一行后探针 `corpus_fv.js` **3/3**（`arr.map(namedFn)` / 别名 / `fn.prop` 全一致）。
+
 ### 顶层函数作值 + 模块级语句执行（2026-10-16）
 - **顶层函数作值**：`[1,2,3].map(namedFn)`、`const h = fn; h()`、`fn.call/apply/bind` 与 JS 一致。`qz.fn_value(nameId, arity)` 把顶层函数包装为宿主函数句柄（按 arity 补 TAG、同名缓存）；`closureCall` 支持宿主函数句柄（只传真传实参）；函数名接收者的属性写走 `qz.prop_set`（此前内存快路径把句柄低 32 位当地址 → 静默越界）。探针 `corpus_fv.js` 2/3（`fn.prop` 再读回得 0，待查）。
 - **模块级非声明语句执行（静默 bug 修复）**：`__module_init` 此前只收集变量语句 → 模块级副作用（`fx.extra = 5`、表达式/if/for/try 语句）被**静默丢弃**；现纳入 init（排除 function/class/interface/type/module/import/export/enum 声明）。
