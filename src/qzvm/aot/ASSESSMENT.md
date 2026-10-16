@@ -113,9 +113,13 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
-结果：**522/530 一致（98.5%）**；残余 8 项（按语料案例计）：**全部 loud**（零已知静默）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**539/549 一致（98.2%）**；残余 10 项（按语料案例计）：**全部 loud**（零已知静默）（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
 **残余 loud 清单（键序修复后，按类别 7 项 / 按语料案例 8 例，全部 loud）**
+
+**第二十二批新暴露的两类 loud（2026-10-16）**：
+- **顶层函数作值**：`[1,2,3].map(namedFn)`、`fn.prop`、`const h = fn` —— 顶层函数名出现在**值**位置时编译期 loud（`未定义捕获变量: <name>`）。原型已写并验证：宿主 `qz.fn_value(nameId, arity)`（包装为宿主函数句柄、按 arity 补 TAG、同名缓存句柄）+ 值位置发射该调用 + `closureCall` 对宿主函数句柄分支。**别名场景（`const h = g; h()`）已通过**；剩余两处：① 回调调用约定（`arr.map(fn)` 报 `Cannot convert undefined to a BigInt`：宿主回调路径需与包装器的 arity 对齐）；② 属性宿主身份（`fn.prop = 5` 后再读为 undefined：需同名句柄缓存生效）。原型快照：`/tmp/qzaux/{emitter,qzvm}_with_fnvalue.js`。
+- **模块级对象含访问器/方法**（`const M = (function(){ … return { get value(){…}, on(){…} } })()`）：在 start 段物化挂访问器/方法时宿主 `mem` 尚未绑定 → `Cannot read properties of null (reading 'buffer')`（与键序同源：start 段无内存）。
 
 **方法/对象方法 >4 形参 / rest（类路径已通，对象字面量 rest 未通）**：ABI 铺路已提交（`qz.method_call` 增第 7 参 `ovf`=实参 4..，7 处发射点补位，行为中性）。剩余补丁见 `/tmp/qzaux/patch_mo2.js`（方法/静态方法签名 +`i64` 槽、`$ovf` 形参槽、`_mEnter` 的 `$ovfArg` 预留 local 与 varMap `i<4?1+i:1+params.length+(i-4)`、`_emitOvfParamUnpack` 解包、动态分派传真实溢出数组、删「方法最多 4 参」守卫）。**第二轮尝试的结论（重要，可直接复用）**：
 - **local 布局 bug 已定位并修复**：`params` 必须是「前 4 个实参形参 + 补位 + `$ovf`」，即 `realParams.slice(0, 4).concat(["$p1"..].slice(0, max(0,4-len))).concat(len>4?["$ovf"]:[])`；此前写成 `realParams.concat(补位)` 导致 `params.length` 比 wasm 形参数多 1 → 之后所有 local（scratch/sT/objPool）错位 → 校验报 `expected [f64] but got [i64]`。修好后 wasm-validate 通过。

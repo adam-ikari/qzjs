@@ -4911,7 +4911,20 @@ Emitter.prototype.emitTaggedBinary = function (e) {
     }
     if (op === ts.SyntaxKind.BarBarEqualsToken || op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) {
         // a ||= b → a = a || b（值语义短路，与 emitShortCircuit 一致）；a &&= b → a = a && b
-        this.emitShortCircuit(op === ts.SyntaxKind.AmpersandAmpersandEqualsToken, e.left, e.right);
+        // 支持字段/索引目标（与 ??= 同款：接收者读+写各求值一次，无副作用表达式安全）
+        const isAnd2 = op === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
+        if (ts.isPropertyAccessExpression(e.left)) {
+            if (e.left.name.text === "length") { this.emitShortCircuit(isAnd2, e.left, e.right); this._emitStoreLength(e.left); return; }
+            if (this._hasSideEffects(e.left.expression))
+                throw new Error("[tagged] 属性逻辑赋值 o.f ||=/&&= v 中 o 带副作用：求值顺序未实现");
+            this.emitShortCircuit(isAnd2, e.left, e.right); this._emitStoreProp(e.left); return;
+        }
+        if (ts.isElementAccessExpression(e.left)) {
+            if (this._hasSideEffects(e.left.expression) || this._hasSideEffects(e.left.argumentExpression))
+                throw new Error("[tagged] 元素逻辑赋值 o[带副作用] ||=/&&= v 的求值顺序未实现");
+            this.emitShortCircuit(isAnd2, e.left, e.right); this._emitStoreElem(e.left); return;
+        }
+        this.emitShortCircuit(isAnd2, e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {

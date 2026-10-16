@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十二批差分审计（2026-10-16）
+- 新增 `audit_corpus22.js`（19 例：默认参数间依赖、原型链 + `Object.create`、类字段/静态块顺序、正则分组与标志、错误链与 finally、Map/Set 对象键、迭代协议（Map/Set/entries/解构循环）、描述符与原型、字符串比较与排序、模块模式闭包、Math 取整与浮点、**逻辑赋值 `||= &&= ??=`（字段/索引）**、类继承覆写与 `super`、数组聚合、复杂 switch、循环内 try/finally+continue、`toJSON`/replacer、多键排序、函数形参嵌套解构）。
+- **修复：`||=` / `&&=` 支持字段/索引目标**（此前按标识符处理 → `_emitVarStore(undefined)` → loud `未定义变量: undefined`）；与 `??=` 同款（接收者读+写各求值一次，带副作用则 loud）。探针 `corpus_la.js` **4/4**。
+- **新暴露 loud（已记录）**：① 顶层函数作值（`arr.map(namedFn)` / `fn.prop` / `const h = fn`）——原型已写并验证别名场景，剩回调约定与属性身份两处；② 模块级对象含访问器/方法（start 段 `mem` 未绑定）。
+- 结果：**539/549（98.2%）**；残余按语料案例 10 例，**全部 loud（零已知静默）**。
+
 ### 内建调用 >4 实参（2026-10-16）
 - `qz.builtin` 增第 7 参 `ovf`（实参 3..，与 `call_value`/`method_call` 同款约定）；`_emitBuiltinCall` 统一「4 槽 + ovf」；宿主按 `[a0..a3].concat(ovf.slice(1))` 重建实参后按 `arity || n` 截断。
 - 移除「内建调用超过 4 个实参」loud：`Math.max(1,9,3,4,5)`、6 实参等与 JS 一致（探针 `corpus_b5.js` **3/3**）。
