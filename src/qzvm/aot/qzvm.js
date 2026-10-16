@@ -252,7 +252,11 @@ function makeQzvm(strings, opts) {
         if (!mm) continue;
         const val = (sn === "toStringTag")
           ? toJS(exportsRef[mm.name](TAG | BigInt(off), TAG, TAG, TAG, TAG))
-          : function (...as2) { return toJS(exportsRef[mm.name](TAG | BigInt(off), ...as2.map(bitsOf), TAG, TAG, TAG)); };
+          : function (...as2) {                                // wasm 方法签名恒 (self, a0..a3)：实参数不足须补 TAG（否则 undefined → BigInt 转换抛错）
+              const aa = [TAG | BigInt(off)].concat(as2.slice(0, 4).map(bitsOf));
+              while (aa.length < 5) aa.push(TAG);
+              return toJS(exportsRef[mm.name](...aa.slice(0, 5)));
+            };
         Object.defineProperty(o, Symbol[sn], { value: val, enumerable: false, configurable: true, writable: true });
       }
       const vs = hook("valueOf") ? mk("valueOf") : null;

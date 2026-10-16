@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十批补充（2026-10-16）
+- **`Symbol.<wellknown>` 元素访问规范化**：`o[Symbol.iterator]` / `o[Symbol.iterator]()` ≡ `o["@@iterator"]`（读走 `_emitPropReadFromLocal`、调用走 `_emitDynMethod`）——此前按运行期 symbol 句柄查表 → 取到 undefined → 调用报 `call_value: 被调值不是函数`。
+- **`@@<Symbol>` 物化回调参数补位**：物化对象上挂的 `[Symbol.x]` 包装器恒按 wasm 方法签名 `(self, a0..a3)` 传 5 个实参（不足补 TAG）——此前实参不足 5 个 → `Cannot convert undefined to a BigInt`。
+- 结果：**502/512（98.0%）**；残余 10 项全部 loud（零静默错值）。
+
 ### 第二十批差分审计（2026-10-16）
 - 新增 `audit_corpus20.js`（19 例：Error 子类与 instanceof、**自定义 `[Symbol.iterator]`**（对象/类）、位运算负数与移位、Math 方法矩阵、字符串负索引切片（slice/substring/substr）、splice 变体、NaN 与 includes/indexOf、toString/valueOf 覆盖、私有方法/私有静态字段、defineProperty 描述符、seal/isSealed、提升与块作用域、IIFE 与互递归、字段初始化顺序、静态继承、嵌套解构默认值、do/while+continue、逗号与嵌套三元、JSON 深/Unicode 转义、**TS 参数属性**）。
 - **TS 参数属性**（`constructor(public x: any, private y: any)`）：`collectClasses` 把带修饰符的构造器形参登记为隐式字段（初值 = 形参局部读，置于字段表首位，符合 TS「参数属性先于字段初值赋值」）→ 此前 `this.x` 静默 undefined（**静默错值，已修**）。

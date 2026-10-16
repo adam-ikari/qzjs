@@ -692,6 +692,12 @@ class Emitter {
     }
     // 值调用：被调值求值到可重入槽 → 参数压栈 → qz.call_value（闭包 → closure_call；宿主函数 → 调用）
     // 第 6 参 = 溢出实参数组（args[3..]）：闭包形参 >4 时宿主按 meta.n 展开（本 ABI 仅 4 个实参槽）
+    // o[Symbol.<wellknown>] ≡ o["@@<name>"]：类/对象字面量的 [Symbol.x] 成员在 this.classes 里登记为 @@<x>（物化时挂真 Symbol）。
+    _symKeyName(expr) {
+        if (!expr || !ts.isPropertyAccessExpression(expr) || !ts.isIdentifier(expr.expression) || expr.expression.text !== "Symbol") return null;
+        const n = expr.name.text;
+        return /^(iterator|asyncIterator|toPrimitive|toStringTag|hasInstance|isConcatSpreadable|species|match|replace|search|split|matchAll)$/.test(n) ? "@@" + n : null;
+    };
     _emitValueCall(calleeExpr, args) {
         const M = this.m, t = this._expEnter();
         this.emitTaggedExpr(calleeExpr); M.localSet(t.v);
@@ -3615,6 +3621,14 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isElementAccessExpression(e)) {
+        const sk0 = this._symKeyName(e.argumentExpression);
+        if (sk0) {                                            // o[Symbol.iterator] ≡ o["@@iterator"]
+            const ts2 = this._expEnter();
+            this.emitTaggedExpr(e.expression); ts2 && this.m.localSet(ts2.v);
+            this._emitPropReadFromLocal(ts2.v, sk0);
+            this._expLeave();
+            return;
+        }
         // o[k]：字符串键（动态）→ 宿主 qz.get_index（POJO 按字段名表 / 宿主对象按索引）；
         //       数值键 → wasm 内存快路径（数组 dataOff + i*8）。
         const Mi = this.m, t = this._expEnter();
@@ -3846,6 +3860,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitErrCheck();
             this._expLeave();
             return;
+        }
+        if (ts.isElementAccessExpression(e.expression)) {
+            const sk1 = this._symKeyName(e.expression.argumentExpression);
+            if (sk1) { this._emitDynMethod(e.expression.expression, sk1, e.arguments); return; }   // o[Symbol.x](…) ≡ o["@@x"](…)
         }
         if (!ts.isIdentifier(e.expression)) {
             this._emitValueCall(e.expression, e.arguments);   // 值调用：宿主按句柄类型分派（闭包/宿主函数）
