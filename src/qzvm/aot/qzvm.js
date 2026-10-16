@@ -22,6 +22,7 @@ const STR_HI = 0x7ffan;                   // 字符串句柄高 16 位
 const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低32=0/1）
 const INST_HI = 0x7ffen;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 const HOST_TAG = 0x7ffd_0000_0000_0000n;  // 宿主对象句柄标记（0x7FFD|低32=handles 索引）
+const CLO_HI = 0x7fffn;                   // 闭包值（函数）句柄高 16 位（0x7FFF|低32=cell offset）
 const HOST_HI = 0x7ffdn;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 // 内建全局分派：名 → JS 函数（参数个数由调用点传入的 n 决定，见 builtin）。
 // AOT 产物经 qz.builtin(nameId, a0..a3) 调；未列出的报「未实现」。
@@ -122,6 +123,9 @@ function makeQzvm(strings, opts) {
   const numToBits = (n) => _writeF64(n, true);
   const bitsToNum = (b) => _readF64(BigInt.asIntN(64, b), true);
   const isH = (b) => (BigInt(b) >> 48n) === TAG_HI;
+  const isCloH = (b) => (BigInt(b) >> 48n) === CLO_HI;
+  // 闭包值 → JS 函数包装（宿主侧调用回调，如 sort(cmp)/map(fn)）
+  const cloWrap = (b) => (...args) => toJS(closureCall(b, ...args.map(ret)));
   const isStrH = (b) => (BigInt(b) >> 48n) === STR_HI;
   const idxOf = (b) => Number(BigInt(b) & MASK32);
   const strRead = (b) => {
@@ -142,7 +146,7 @@ function makeQzvm(strings, opts) {
     return out;
   };
   const isBoolH = (b) => (BigInt(b) >> 48n) === BOOL_HI;
-  const isObjHandle = (u) => { const h = u >> 48n; if (h === TAG_HI) return (u & MASK32) >= 8n; return h === INST_HI || h === HOST_HI; };
+  const isObjHandle = (u) => { const h = u >> 48n; if (h === TAG_HI) return (u & MASK32) >= 8n; return h === INST_HI || h === HOST_HI || h === CLO_HI; };
   const statics = new Map();
   let fieldEntries = [];                  // [[name, byteOffset], ...]（bindFields 设；与 emitter _fieldIndex 一致）
   const bindFields = (fields) => { fieldEntries = (fields || []).map((n, i) => [n, (i + 1) * 8]); };
@@ -163,7 +167,7 @@ function makeQzvm(strings, opts) {
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
   const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
-  const toJS = (b) => (isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b)) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b)) : {}) : bitsToNum(b));
+  const toJS = (b) => (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b)) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b)) : {}) : bitsToNum(b));
   // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
   const tagHandle = (x) => x === undefined ? TAG : x === null ? (TAG | 1n) : (HOST_TAG | BigInt(handles.push(x) - 1));
   const box = (n) => numToBits(n);
@@ -557,6 +561,7 @@ function makeQzvm(strings, opts) {
       if (hi === 0x7ffbn) return 1;                                 // 0x7FFB：wasm 原生数组（恒真；Boolean([])=true）
       if (hi === BOOL_HI) return Number(u & 1n);                    // 0x7FFC：布尔（复用低 32 = 0/1）
       if (hi === INST_HI) return 1;                                 // 0x7FFE：类实例（恒真）
+      if (hi === CLO_HI) return 1;                                  // 0x7FFF：闭包值（函数，恒真）
       if (hi === HOST_HI) return handles[idxOf(v)] ? 1 : 0;         // 0x7FFD：宿主对象（查 handles）
       return bitsToNum(v) ? 1 : 0;
     },
@@ -596,6 +601,17 @@ function makeQzvm(strings, opts) {
         }
       }
       const off = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
+      // POJO/实例：字段持有闭包值（0x7FFF）→ 直接调用该闭包（对象字面量里的方法 / 模块模式）
+      {
+        const h = BigInt.asUintN(64, recv) >> 48n;
+        if ((h === TAG_HI && off >= 8) || h === INST_HI) {
+          const fe = fieldEntries.find(([n]) => n === name);
+          if (fe && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= fe[1] + 8) {
+            const fv = new DataView(mem.buffer).getBigInt64(off + fe[1], true);
+            if (BigInt.asUintN(64, fv) >> 48n === CLO_HI) return closureCall(fv, a0, a1, a2, a3);
+          }
+        }
+      }
       const clsId = new DataView(mem.buffer).getInt32(off, true);   // 免 4 对齐
       let c = classMeta && classMeta[clsId];
       while (c) {
@@ -620,11 +636,31 @@ function makeQzvm(strings, opts) {
       return v;
     },
     // delete a[i] → 槽置 undefined（长度不变；JS 的「洞」在本表示里等同 undefined）
+    // delete o[k]（数组 → 槽置 undefined；POJO/实例 → 字段置 undefined；宿主对象 → delete）
+    delete_index: (o, k) => {
+      const u = BigInt.asUintN(64, o), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi === 0x7ffbn) {                                  // wasm 数组：槽置 undefined（长度不变）
+        const a = arrRead(o);
+        const idx = Math.trunc(toJS(k));
+        if (idx >= 0 && idx < a.length) { a[idx] = undefined; arrSetInPlace(o, a); }
+        return 1n;
+      }
+      if (hi === HOST_HI) { const obj = handles[off]; if (obj != null) delete obj[toJS(k)]; return 1n; }
+      if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {    // POJO/实例：字段槽置 undefined
+        const name = String(toJS(k));
+        const e = fieldEntries.find(([n]) => n === name);
+        if (e && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= e[1] + 8) {
+          new DataView(mem.buffer).setBigInt64(off + e[1], TAG, true);
+        }
+        return 1n;
+      }
+      return 1n;
+    },
     arr_delete_index: (recv, i) => {
       const a = arrRead(recv);
       const idx = Math.trunc(toJS(i));
       if (idx >= 0 && idx < a.length) { a[idx] = undefined; arrSetInPlace(recv, a); }
-      return 1;
+      return 1n;
     },
     arr_set_len: (recv, n) => {
       const off = Number(BigInt.asUintN(64, recv) & MASK32);

@@ -77,6 +77,7 @@ const QZ = {
   arr_set_len: { params: ["i64", "i64"], results: ["i64"] },
   arr_set_index: { params: ["i64", "i64", "i64"], results: ["i64"] },   // a[i]=v（越界扩容）
   arr_delete_index: { params: ["i64", "i64"], results: ["i64"] },       // delete a[i]
+  delete_index: { params: ["i64", "i64"], results: ["i64"] },           // delete o[k] / a[i]
   elem_get_guard: { params: ["i64", "i64"], results: ["i64"] },         // 保留
   // 数组 .length= 赋值特判：set_len(句柄, n_i64) → 新长度 i64。宿主处理截断/扩容（扩容补 undefined）。
   // wasm 侧仅用于 0x7FFB 数组；字符串/其它不适用。
@@ -2272,6 +2273,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this.emitTaggedExpr(e.expression); M.localSet(this.scratch);
         M.block("i64");
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();
+        M.ifBlock("i64");
+        this._emitStrLitHandle("function");   // 闭包值（函数）
+        M.else_();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
         M.ifBlock("i64");
         this._emitStrLitHandle("string");
@@ -2299,8 +2304,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._emitStrLitHandle("boolean");
         M.else_();
         this._emitStrLitHandle("number");
-        M.end(); M.end(); M.end();
-        M.end();
+        M.end(); M.end(); M.end();   // 关 ifBool / ifObj / ifStr
+        M.end();                     // 关 ifClo
+        M.end();                     // 关 block(i64)
         return;
     }
     if (ts.isObjectLiteralExpression(e)) {
@@ -2554,14 +2560,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         // delete obj.k：宿主对象(0x7FFD) → qz.object_delete；POJO → 槽写 undefined sentinel（等价删除）。返回 true。
         const M = this.m;
         const op = e.expression;
-        if (!ts.isPropertyAccessExpression(op)) throw new Error("[tagged] delete 仅支持对象属性（delete obj.k）");
-        this.emitTaggedExpr(op.expression); M.localSet(this.scratch);
-        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
-        M.ifBlock("void");
-        M.localGet(this.scratch); M.i32Const(this._strId(op.name.text)); M.call("qz.object_delete");
-        M.else_();
-        M.localGet(this.scratch); M.i32WrapI64(); M.i64ConstBits(0, 0x7ff90000); M.i64Store(3, this._fieldIndex(op.name.text));
-        M.end();
+        const t = this._expEnter();
+        this.emitTaggedExpr(op.expression); M.localSet(t.v);
+        if (ts.isElementAccessExpression(op)) {          // delete o[k] / delete a[i] → 宿主按 tag 删除
+            this.emitTaggedExpr(op.argumentExpression); M.localSet(t.w);
+            M.localGet(t.v); M.localGet(t.w); M.call("qz.delete_index");
+            M.drop();
+        } else if (ts.isPropertyAccessExpression(op)) {
+            // 宿主对象 → object_delete；POJO/实例 → 槽写 undefined（经宿主，越界即报错，不静默越界写）
+            M.localGet(t.v); this._emitStrLitHandle(op.name.text); this._emitUndefined(); M.call("qz.set_index");
+        } else throw new Error("[tagged] delete 仅支持属性/下标（delete obj.k / delete a[i]）");
+        this._expLeave();
         M.i64ConstBits(1, 0x7ffc0000);   // true（tagged bool）
         return;
     }
@@ -2691,6 +2700,8 @@ Emitter.prototype._emitIsHandle = function (scratch) {
     M.i32Or();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
     M.i32Or();
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();   // 闭包值（函数）
+    M.i32Or();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();   // 宿主对象(JSON.parse 结果/函数等)
     M.i32Or();
 };
@@ -2705,6 +2716,7 @@ Emitter.prototype._emitIsPureNum = function (scratch) {
     M.localGet(this.sT[0]); M.i32Const(0x7ffc); M.i32Eq(); M.i32Or();
     M.localGet(this.sT[0]); M.i32Const(0x7ffe); M.i32Eq(); M.i32Or();
     M.localGet(this.sT[0]); M.i32Const(0x7ffd); M.i32Eq(); M.i32Or();
+    M.localGet(this.sT[0]); M.i32Const(0x7fff); M.i32Eq(); M.i32Or();   // 闭包值
     M.i32Eqz();
 };
 Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
@@ -2985,7 +2997,7 @@ Emitter.prototype._emitLambdaNew = function (lam) {
     M.localGet(this.cloOff); M.i32Const(fidx); M.i32Store(2, 0);
     M.localGet(this.cloOff); (this.envRef !== undefined ? M.localGet(this.envRef) : M.i32Const(0)); M.i32Store(2, 4);
     M.localGet(this.cloOff); M.i64ExtendI32U();
-    M.i64ConstBits(0, 0x7ff90000); M.i64Or();
+    M.i64ConstBits(0, 0x7fff0000); M.i64Or();
 };
 // 类实例分配：size 覆盖全局字段表最大偏移（+8 头），clsId 写 [0]；返回 self 句柄。
 Emitter.prototype._instSize = function () {

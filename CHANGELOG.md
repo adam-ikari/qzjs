@@ -3,6 +3,11 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **feat(aot): 闭包值独立 tag 0x7FFF（函数作对象属性/模块模式）+ delete 下标 + 两批差分**。
+  - 闭包句柄由 0x7FF9（与 POJO 同 tag，运行时不可区分）改为 **0x7FFF**：`typeof f`→"function"、宿主 `method_call` 对 POJO/实例字段持有闭包时直接调用（对象字面量方法 / IIFE 模块模式）、`===` 按 (tag|off) 身份比较（toJS 每次新建包装函数会恒不等）、`toJS` 还原为可调用包装。
+  - `delete a[i]` / `delete o[k]`（宿主 `qz.delete_index`）；`delete o.k` 改经宿主（越界即报错，不再静默越界写）。
+  - 宿主返回 i64 的 `arr_delete_index`/`delete_index` 曾返回 JS number → wasm 边界报 `Cannot convert 1 to a BigInt`。
+  - 差分：语料 1 = 44/47，语料 2 = 33/40。
 - **fix(aot): 位运算守卫栈失衡（虚留 i32 → 产物类型非法）+ 下标越界/类型分派 + 内建元数表项**。
   - `emitGuardedBit` 守卫条件此前少一次 `i32.or` 合并 → 栈上遗留 i32 → `(3.9|0)+(2.1&3)` 之类产物 `local.set` 类型非法（wasm2wat 报错、实例化失败）。现累进合并为单条件。
   - `a[i]` 越界/NaN/负数 → undefined（此前裸读内存 → trap 或静默错值）；接收者非 wasm 数组（宿主数组/字符串/POJO）→ 宿主 `qz.get_index`。
