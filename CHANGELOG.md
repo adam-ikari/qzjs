@@ -3,6 +3,7 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
+- **test(aot): 语义回归入快速门**（`test_aot.js` +9：finally 穿透 / 字面量访问器 / 展开别名 / for-of 字符串 / 解构赋值 / 位运算混合 / 嵌套 new / 数组越界）。
 - **feat(aot): 对象字面量方法/访问器（宿主对象 + 闭包回调）**。
   - `{ get v(){...}, set v(x){...}, m(){...}, k: v }` 现编译为**宿主对象**（0x7FFD）：访问器经 `Object.defineProperty` 回调 wasm 闭包（`qz.obj_accessor`），方法经 `qz.object_set_method`（调用时转发接收者作为 self）；字段经 `qz.object_set`。宿主 JS 侧同样按 JS 语义可用（JSON/`Object.keys` 等）。
   - 合成箭头把 self 作为名为 `this` 的形参 → 体内 `this.x` 解析到该参数（`_capturesOf` 对已具名 `this` 形参不再视为捕获）。

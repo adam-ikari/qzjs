@@ -742,12 +742,46 @@ async function runInterp() {
     check("interp.多文件同名导入执行 r2(5)", fnR2(5), 7);
 }
 
+
+// 语义回归（差分审计扫出的静默错值/非法产物 → 固化为快速门）：
+// try/finally 穿透、对象字面量访问器/方法、展开别名、for-of 字符串、解构赋值、位运算守卫栈平衡、new 实参槽。
+async function runSemantics() {
+    const src = path.join(os.tmpdir(), "qz_aot_sem.ts");
+    fs.writeFileSync(src,
+        "export function finRet(): any { const o: any = []; function g(x: any) { try { if (x) return \"ret\"; o.push(\"no\"); return \"end\"; } finally { o.push(\"F\"); } } o.push(g(1)); o.push(g(0)); return o.join(\"|\"); }\n"
+      + "export function finThrow(): any { const o: any = []; try { try { throw \"s1\"; } catch (e: any) { o.push(\"in:\" + e); throw \"s2\"; } finally { o.push(\"f1\"); } } catch (e: any) { o.push(\"out:\" + e); } return o.join(\"|\"); }\n"
+      + "export function litAccessor(): any { const o: any = { n: 5, get v() { return this.n * 2; }, set v(x: any) { this.n = x + 1; }, inc() { this.n = this.n + 1; return this.n; } }; const out: any = []; out.push(o.v); o.v = 10; out.push(o.n); out.push(o.v); out.push(o.inc()); out.push(typeof o.inc); return out.join(\"|\"); }\n"
+      + "export function spreadAlias(): any { const a: any = { y: { z: 2 }, x: 1 }; const b: any = { ...a, w: 3 }; b.y.z = 9; return a.y.z + \"|\" + b.w + \"|\" + b.x; }\n"
+      + "export function forOfStr(): any { let s = \"\"; for (const ch of \"abc\") s += ch + \".\"; return s; }\n"
+      + "export function destrAssign(): any { let a = 1, b = 2; [a, b] = [b, a]; let x = 0, y = 0; ({ m: x, n: y } = { m: 7, n: 8 }); return a + \"|\" + b + \"|\" + x + \"|\" + y; }\n"
+      + "export function bitMixed(): any { const out: any = []; out.push((3.9 | 0) + (2.1 & 3)); out.push(NaN | 0); out.push(1e9 * 1e9 | 0); out.push(\"12\" | 0); return out.join(\"|\"); }\n"
+      + "export function nestedNew(): any { class P { name: any = \"a\"; } class Q { tag(p: any) { return \"q:\" + p.name; } } const q = new Q(); return q.tag(new P()); }\n"
+      + "export function arrOOB(): any { const a: any = [1,2]; const out: any = []; out.push(a[5] === undefined ? 1 : 0); a[4] = 9; out.push(a.length); out.push(a[4]); return out.join(\"|\"); }\n");
+    const wasm = path.join(os.tmpdir(), "qz_aot_sem.wasm");
+    const r = compileTS(src, wasm, {});
+    const qz = makeQzvm(r.strings, { fields: r.fields });
+    const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasm), { qz });
+    qz.bindMem(instance.exports.memory); if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
+    qz.bindClosures(instance.exports, r.lamMeta); qz.bindClasses(instance.exports, r.classMeta);
+    const call = (n) => { if (instance.exports.__bump_reset) instance.exports.__bump_reset(); return qz._toJS(instance.exports[n]()); };
+    check("finally.return 穿透", call("finRet"), "F|ret|no|F|end");
+    check("finally.throw 穿透", call("finThrow"), "in:s1|f1|out:s2");
+    check("字面量.访问器+方法", call("litAccessor"), "10|11|22|12|function");
+    check("展开.别名共享", call("spreadAlias"), "9|3|1");
+    check("for-of.字符串", call("forOfStr"), "a.b.c.");
+    check("解构.赋值", call("destrAssign"), "2|1|7|8");
+    check("位运算.混合表达式", call("bitMixed"), "5|0|-1486618624|12");
+    check("new.嵌套实参槽", call("nestedNew"), "q:a");
+    check("数组.越界读/写扩容", call("arrOOB"), "1|5|9");
+}
+
 (async () => {
     await runNum();
     await runTagged();
     await runClasses();
     await runMultiFile();
     await runInterp();
+    await runSemantics();
     await runDwarf();
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
     process.exit(failures === 0 ? 0 : 1);
