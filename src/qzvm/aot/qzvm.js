@@ -454,7 +454,8 @@ function makeQzvm(strings, opts) {
       if (meta.rest) {                                // rest：固定参之外的实参（slots 尾部 + 溢出数组）打包成数组
         const tail = [];
         for (let i = nFix; i < 4; i++) if (slots[i] !== undefined && slots[i] !== TAG) tail.push(toJS(slots[i]));
-        for (let i = 1; i < ex.length; i++) tail.push(ex[i]);   // ex[0] = 实参 3（已在 slots）
+        for (let i = (meta.synthThis ? 0 : 1); i < ex.length; i++) tail.push(ex[i]);   // synthThis 时 receiver 由宿主前置 → slots 已右移，ex[0]（实参 3）不再在 slots 中
+                                                                                     // 否则 ex[0] = 实参 3（已在 slots）→ 跳过
         args.push(arrWriteback(tail));
       } else {
         for (let i = 4; i < meta.n; i++) args.push((i - 3) < ex.length ? bitsOf(ex[i - 3]) : TAG);   // ex[0] = 实参 3（已在 slots）
@@ -1436,7 +1437,7 @@ function makeQzvm(strings, opts) {
           const fe = fieldEntries.find(([n]) => n === name);
           if (fe && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= fe[1] + 8) {
             const fv = new DataView(mem.buffer).getBigInt64(off + fe[1], true);
-            if (BigInt.asUintN(64, fv) >> 48n === CLO_HI) return closureCall(fv, a0, a1, a2, a3, undefined, recv);   // 方法位置的闭包值：receiver = recv
+            if (BigInt.asUintN(64, fv) >> 48n === CLO_HI) return closureCall(fv, a0, a1, a2, a3, ovf, recv);   // 方法位置的闭包值：receiver = recv，ovf 透传（rest/>4 形参）
           }
         }
       }
@@ -1448,6 +1449,23 @@ function makeQzvm(strings, opts) {
         const m = own(c.methods, name);
         if (m) {
           const fn = exportsRef[m.name];
+          {   // 平坦实参 = a0..a3 + ovf[1..]（ovf[0] = 实参 3，已在 a3）；rest 形参把尾部打包成数组
+            const ex = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
+            const flat = [a0, a1, a2, a3].concat(ex.slice(1).map(bitsOf));   // 统一为 tagged（ex 元素是 JS 值）
+            if (m.rest) {
+              const nFix = (m.n || 1) - 1;
+              const tail = flat.slice(nFix).filter(givenSlot);   // tagged
+              const head = flat.slice(0, nFix);
+              const out2 = [recv].concat(head, [arrWriteback(tail.map(toJS))]);   // rest 数组落在其形参槽；arrWriteback 收 JS 值
+              while (out2.length < 5) out2.push(TAG);
+              return fn(...out2);
+            }
+            if ((m.n || 0) > 4) {
+              const n2 = m.n;
+              const ovfA2 = flat.slice(3, n2).map(x => x === undefined ? TAG : x);   // ovf[0] = 实参 3（与 callee 的 ovf[i-3] 约定一致；tagged）
+              return fn(recv, flat[0], flat[1], flat[2], flat[3], arrWriteback(ovfA2.map(toJS)));   // arrWriteback 收 JS 值；flat 为 tagged → toJS
+            }
+          }
           return fn(recv, a0, a1, a2, a3);
         }
         c = c.parent != null ? classMeta[c.parent] : null;

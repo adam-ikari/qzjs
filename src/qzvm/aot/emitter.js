@@ -1048,7 +1048,12 @@ class Emitter {
         let f = this._synthLambdas.get(member);
         if (f) return f;
         const nm = member.name && member.name.text;
-        if (ts.isMethodDeclaration(member)) f = this._synthArrow(["this"].concat(member.parameters.map(q => q.name.text)).slice(0, 4), member.body);
+        if (ts.isMethodDeclaration(member)) {
+            f = this._synthArrow(["this"].concat(member.parameters.map(q => q.name.text)).slice(0, 4), member.body);
+            // 合成的形参表只有名字（丢 rest 标记）→ 显式标出，供 lamMeta.rest 与 ABI 打包使用
+            const lp = member.parameters[member.parameters.length - 1];
+            if (lp && lp.dotDotDotToken) f._qzRest = true;
+        }
         else if (ts.isGetAccessorDeclaration(member)) f = this._synthArrow(["this"], member.body);
         else f = this._synthArrow(["this", member.parameters[0] ? member.parameters[0].name.text : "v"], member.body);
         this._synthLambdas.set(member, f);
@@ -1226,7 +1231,7 @@ class Emitter {
         const params = astParams.map(p => p.name.text);
         // 捕获名先分析并记录（emitLambdaBody 内 identifier 读写用 capMap 路由）
         const caps = this._capturesOf(lam);
-        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(astParams.length && astParams[astParams.length - 1].dotDotDotToken), synthThis: thisSlot });
+        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(lam._qzRest || (astParams.length && astParams[astParams.length - 1].dotDotDotToken)), synthThis: thisSlot });
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
         this._pendingLambdas.push({ lam, fname, params, caps, astParams });
         return { fname, caps };
@@ -1481,13 +1486,15 @@ class Emitter {
             for (const mth of c.methods) {
                 const voidRet = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
                 this.m.declareFunc(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name),
-                                   ["i64", "i64", "i64", "i64", "i64"],
+                                   ["i64", "i64", "i64", "i64", "i64"].concat(mth.node.parameters.length > 4 ? ["i64"] : []),   // >4 形参 → 第 6 槽 = 实参 4.. 数组
                                    mth.accessor === "set" || voidRet ? [] : ["i64"]);
             }
             this.m.declareFunc(ctorName(cname), ["i64", "i64", "i64", "i64", "i64"], []);
             for (const sm of c.staticMethods) {
                 const voidRet = !!sm.node.type && sm.node.type.kind === ts.SyntaxKind.VoidKeyword;
-                this.m.declareFunc(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), ["i64", "i64", "i64", "i64", "i64"], voidRet ? [] : ["i64"]);
+                this.m.declareFunc(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")),
+                                   ["i64", "i64", "i64", "i64", "i64"].concat(sm.node.parameters.length > 4 ? ["i64"] : []),   // >4 形参 → 第 6 槽 voidRet ? [] : ["i64"]);
+                                   voidRet ? [] : ["i64"]);
             }
         }
     }
@@ -1505,10 +1512,12 @@ class Emitter {
         const M = this.m;
         const isVoid = !!sm.node.type && sm.node.type.kind === ts.SyntaxKind.VoidKeyword;
         const realParams = sm.node.parameters.map(p => p.name.text);
-        const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
+        const params = realParams.slice(0, 4).concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)))
+            .concat(realParams.length > 4 ? ["$ovf"] : []);
         this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
         this._inStaticMethod = true;                       // 静态方法体内 this ≡ 类（_classOfExpr）
         this._emitParamPrologue(sm.node.parameters, 1);    // 静态方法形参同上
+        this._emitOvfParamUnpack(sm.node.parameters, params);
         this._curClassObj = this.classes.get(cname);
         this._emitFnDeclClosures(sm.node.body);
         this.emitTaggedBlock(sm.node.body);
@@ -1518,6 +1527,31 @@ class Emitter {
         this._mExit();
     }
     // 构造器 __m_<C>$ctor(self:i64, a0..a3:i64) → 无返回：self 由调用方 _emitNewCall 内联 bump 分配后传入
+    // 方法/静态方法 >4 形参：从第 6 槽（$ovf 数组）解包实参 4.. 到各自 local（含默认值/解构/rest 语义）。
+    _emitOvfParamUnpack(astParams, params) {
+        if (!astParams || astParams.length <= 4) return;
+        const M = this.m;
+        const ovfLocal = 1 + params.length - 1;                  // $ovf 槽（最后一个 wasm 形参）
+        for (let i = 4; i < astParams.length; i++) {
+            const p = astParams[i];
+            const dst = 1 + params.length + (i - 4);             // 与 _mEnter 的 varMap 一致（params.length 含 $ovf）
+            this._emitElemOf(ovfLocal, ts.factory.createNumericLiteral(i - 3)); M.localSet(dst);   // ovf[0] = 实参 3（已在 a3）
+            if (p.dotDotDotToken) {                              // rest：调用方已打包为数组（未传 → 空数组）
+                M.localGet(dst); M.call("qz.is_undef");
+                M.ifBlock("void"); M.call("qz.empty_array"); M.localSet(dst); M.end();
+            }
+            if (p.initializer) {
+                M.localGet(dst); M.call("qz.is_undef");
+                M.ifBlock("void"); this.emitTaggedExpr(p.initializer); M.localSet(dst); M.end();
+            }
+            if (!ts.isIdentifier(p.name)) {
+                const t = this._expEnter();
+                M.localGet(dst); M.localSet(t.v);
+                this._emitDestructurePattern(p.name, t.v);
+                this._expLeave();
+            }
+        }
+    }
     _emitCtorBody(c, ctor) {
         const M = this.m;
         const realParams = ctor ? ctor.parameters.map(p => p.name.text) : [];
@@ -1554,10 +1588,12 @@ class Emitter {
         const M = this.m;
         const isVoid = !!mth.node.type && mth.node.type.kind === ts.SyntaxKind.VoidKeyword;
         const realParams = mth.node.parameters.map(p => p.name.text);
-        const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
+        const params = realParams.slice(0, 4).concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)))
+            .concat(realParams.length > 4 ? ["$ovf"] : []);            // 前 4 槽 + 可选 $ovf（实参 4.. 数组）
         this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters);
         this._inStaticMethod = false;
-        this._emitParamPrologue(mth.node.parameters, 1);   // 方法形参：默认值/解构/>4 溢出解包
+        this._emitParamPrologue(mth.node.parameters, 1);   // 方法形参：默认值/解构
+        this._emitOvfParamUnpack(mth.node.parameters, params);   // >4 形参：从 $ovf 数组解包到各自 local
         this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);
         { const stmts = mth.node.body.statements; const last = stmts[stmts.length - 1];   // tagged：落空 → undefined
@@ -1577,11 +1613,13 @@ class Emitter {
         const nParams = 1 + params.length;
         const locals = this._collectLocals(body);
         for (const p of (astParams || [])) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
+        for (let i2 = 4; i2 < (astParams ? astParams.length : 0); i2++) locals.unshift("$ovfArg" + (i2 - 4));   // 实参 4.. 的 local（由 _emitOvfParamUnpack 写入）
         const nLoc = nParams + locals.length;
         this._lamThisParam = false;                       // 类方法/构造器：this 走 local 0（不受上一个 lambda 标记影响）
         this.varMap = new Map();
         this.varMap.set("this", 0);
-        if (astParams) astParams.forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, 1 + i); });
+        // 实参 0..3 → local 1..4；实参 4.. → local 1+params.length+(i-4)（= $ovf 槽之后的预留槽）
+        if (astParams) astParams.forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, i < 4 ? 1 + i : 1 + params.length + (i - 4)); });
         else params.forEach((p, i) => this.varMap.set(p, 1 + i));
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map(); this.blkLocal = null;
@@ -2660,7 +2698,8 @@ function compileTS(input, outWasm, opts = {}) {
         for (const mth of c.methods) {
             if (mth.accessor === "set") setters[mth.name] = { name: methName(cname, mth.name + "$set"), n: mth.node.parameters.length };
             else if (mth.accessor === "get") getters[mth.name] = { name: methName(cname, mth.name), n: 0 };
-            else methods[mth.name] = { name: methName(cname, mth.name), n: mth.node.parameters.length };
+            else methods[mth.name] = { name: methName(cname, mth.name), n: mth.node.parameters.length,
+                                       rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken) };
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
 
@@ -4644,9 +4683,33 @@ Emitter.prototype._emitBuiltinCall = function (name, args) {
 };
 // 动态方法分派：method_call(recv, mid, a0..a3) → i64（qz 侧按 recv 类型派发：字符串→str_method；
 // 类实例（内存[0]=__cls）→ classMeta 沿继承链调 wasm 导出方法）。未知类型/无方法 → 宿主抛错。
+// 方法直调实参：self + 前 4 槽（不足补 undefined）；形参 >4 → 追加 ovf 数组（含实参 3，与闭包 ABI 同款）；
+// rest 收尾形参（索引 <4）→ 尾部实参打包为数组落在该槽。
+Emitter.prototype._emitMethodArgs = function (params, args) {
+    const M = this.m;
+    const n = params ? params.length : 0;
+    const restIdx = (n && params[n - 1] && params[n - 1].dotDotDotToken) ? n - 1 : -1;
+    if (restIdx >= 4) throw new Error("[tagged] rest 形参在索引 ≥4 的方法未支持");
+    for (let i = 0; i < 4; i++) {
+        if (i === restIdx) {
+            const tail = args.slice(i);
+            if (tail.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] rest 与展开实参混用暂不支持");
+            const lit0 = ts.factory.createArrayLiteralExpression(tail);
+            lit0.pos = args.length ? args[0].pos : 0; lit0.end = args.length ? args[args.length - 1].end : 0;
+            this.emitTaggedExpr(lit0);
+        } else if (i < args.length) this.emitTaggedExpr(args[i]);
+        else this._emitUndefined();
+    }
+    if (n > 4) {
+        const ovfA = args.slice(3);
+        if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 方法调用的溢出实参与展开混用暂不支持");
+        const lit = ts.factory.createArrayLiteralExpression(ovfA);
+        lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+        this.emitTaggedExpr(lit);
+    }
+};
 Emitter.prototype._emitDynMethod = function (rx, method, args) {
     const M = this.m;
-    if (args.length > 4) throw new Error("[tagged] 方法最多 4 参");
     if (/^#[^#]+$/.test(method)) {                      // 私有方法：类名限定（PrivateIdentifier.text 自带 #）
         const cnP = ts.isIdentifier(rx) ? this._className(rx.text) : this._curClass;
         if (cnP) method = "#" + cnP + "#" + method;
@@ -4661,9 +4724,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         this._checkStaticThis(owner, cnS, (this.classes.get(owner).staticMethods || []).find(s => s.name === method), method);
         this._emitStaticsGuard(cnS);
         this._emitUndefined();
-        for (let i = 0; i < 4; i++) {
-            if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
-        }
+        this._emitMethodArgs(((this.classes.get(owner).staticMethods || []).find(s => s.name === method) || {}).node ? (this.classes.get(owner).staticMethods || []).find(s => s.name === method).node.parameters : null, args);
         M.call(staticMethName(owner, method));
         return;
     }
@@ -4676,9 +4737,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         if (owner && meta && meta.accessor !== "set" && !voidRet) {
             // 纯值栈：self + 4 参按形参序压栈（实参可为嵌套调用，天然按深度隔离，无需暂存槽）。
             this.emitTaggedExpr(rx);                                // self
-            for (let i = 0; i < 4; i++) {
-                if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
-            }
+            this._emitMethodArgs(meta.node.parameters, args);
             M.call(methName(owner, method));
             return;
         }
@@ -4689,7 +4748,13 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
     for (let i = 0; i < 4; i++) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
     }
-    this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
+    {   // ovf：实参 4..（被调形参 >4 时由宿主按其 arity 解包；否则忽略）
+        const ovfA = args.slice(3);   // 与闭包 ABI 同款：ex[0] = 实参 3（已在 a3）
+        if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 方法调用的溢出实参与展开混用暂不支持");
+        const lit = ts.factory.createArrayLiteralExpression(ovfA);
+        lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+        this.emitTaggedExpr(lit);
+    }
     M.call("qz.method_call");
     this._emitErrCheck();          // 宿主方法可能抛出（如空数组 reduce）→ 转入本函数 catch
 };

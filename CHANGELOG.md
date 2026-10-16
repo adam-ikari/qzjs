@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 方法 >4 形参 / rest 形参（类路径，2026-10-16）
+- **方法签名**：类方法与静态方法在形参 >4 时追加第 6 槽 `ovf`（实参 3.. 数组，与闭包 ABI 同款约定）；`_emitMethodArgs` 统一「前 4 槽 + ovf + rest 打包」。
+- **关键修复**：`params` 计算须为「前 4 个实参形参 + 补位 + `$ovf`」（此前把实参 4.. 的名字也留在参数表 → `nParams` 多 1 → scratch/sT/objPool 全体错位，wasm 校验报 `expected [f64] but got [i64]`）。
+- **宿主**：类方法路径按 `m.n`/`m.rest` 重建平坦实参并把 ovf 交回第 6 槽；`flat` 统一 tagged，`arrWriteback` 只收 JS 值；rest 数组落在其形参槽（`[recv].concat(head,[restArray])` 补足 5 槽）；`classMeta.methods[name]` 增 `rest`。
+- **合成方法箭头**：`_memberLambda` 显式标 `_qzRest`（合成形参表丢 `dotDotDotToken`）→ `lamMeta.rest` 用上。
+- 效果：类方法 **5 形参**、类方法 **rest + 5 实参** 与 JS 一致（探针 `corpus_rest.js` 3/4；仅对象字面量方法的 rest 未通）。
+- 结果：**521/530（98.3%）**（本次为能力新增，21 批语料无回归）。
+
 ### 宿主数组句柄统一（2026-10-16）
 - **宿主数组保持宿主句柄**：`object_get` / `prop_get` 对宿主对象的数组字段改返回 `tagHandle(jsArray)`（此前经 `ret` → `arrWriteback` 转 wasm box）→ 元素读/写经 `get_index`/`set_index` **就地**作用于真实 JS 数组。
 - **宿主来源数组的句柄别名**：`ret` 对宿主数组按 `WeakMap`+bump 世代缓存（`arrOfHost`）→ 同一 JS 数组在同一 bump 世代恒同一句柄（此前每次读新建 box → 写入丢失）。
