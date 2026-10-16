@@ -355,6 +355,10 @@ function makeQzvm(strings, opts) {
     let r;
     switch (name) {
       case "charAt":       r = s.charAt(arg(a0)); break;
+      case "toString":     r = s; break;
+      case "valueOf":      r = s; break;
+      case "trimLeft":     r = s.trimStart(); break;
+      case "trimRight":    r = s.trimEnd(); break;
       case "charCodeAt":   r = s.charCodeAt(arg(a0)); break;
       case "indexOf":      r = s.indexOf(String(arg(a0))); break;
       case "lastIndexOf":  r = s.lastIndexOf(String(arg(a0))); break;
@@ -617,6 +621,21 @@ function makeQzvm(strings, opts) {
     builtin: (id, n, a0, a1, a2, a3) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
+      if (name === "String" && a0 !== undefined) {                  // String(实例) → 调其 toString（JS ToPrimitive）
+        const h = BigInt.asUintN(64, a0) >> 48n;
+        if (h === TAG_HI || h === INST_HI) {
+          const off2 = Number(BigInt.asUintN(64, a0) & MASK32);
+          if (off2 >= 8 && mem) {
+            const clsId = new DataView(mem.buffer).getInt32(off2, true);
+            let c = classMeta && classMeta[clsId];
+            while (c) {
+              const m = c.methods && c.methods["toString"];
+              if (m) return exportsRef[m.name](a0, TAG, TAG, TAG, TAG);
+              c = c.parent != null ? classMeta[c.parent] : null;
+            }
+          }
+        }
+      }
       let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
       let arity = 0;                                  // 表项 [fn, arity] = 固定元数（调用点按此裁剪实参）
       if (Array.isArray(fn)) { arity = fn[1]; fn = fn[0]; }
@@ -672,6 +691,24 @@ function makeQzvm(strings, opts) {
         const fn = obj == null ? undefined : obj[name];
         if (typeof fn !== "function") throw new Error("method_call: 宿主对象无方法 " + name);
         return ret(fn.call(obj, ...[a0, a1, a2, a3].slice(0, 4).map(toJS)));
+      }
+      // POJO/实例：Object.prototype 内建方法（hasOwnProperty / toString / valueOf …）
+      {
+        const h0 = BigInt.asUintN(64, recv) >> 48n;
+        const off0 = Number(BigInt.asUintN(64, recv) & MASK32);
+        if ((h0 === TAG_HI && off0 >= 8) || h0 === INST_HI) {
+          if (name === "hasOwnProperty") {
+            const key = String(toJS(a0));
+            const e2 = fieldEntries.find(([n]) => n === key);
+            if (e2 && mem && new DataView(mem.buffer).getInt32(off0 + 4, true) >= e2[1] + 8) {
+              const v = new DataView(mem.buffer).getBigInt64(off0 + e2[1], true);
+              if (BigInt.asUintN(64, v) !== TAG) return boxBool(true);
+            }
+            syncExtras();
+            return boxBool(extras.has(off0 + "|" + key));
+          }
+          if (name === "toString" || name === "toLocaleString" || name === "valueOf") return ret("[object Object]");
+        }
       }
       // 纯数值接收者（高16位非任何句柄 tag）→ Number.prototype 方法
       {
@@ -752,6 +789,37 @@ function makeQzvm(strings, opts) {
       const idx = Math.trunc(toJS(i));
       if (idx >= 0 && idx < a.length) { a[idx] = undefined; arrSetInPlace(recv, a); }
       return 1n;
+    },
+    // 变参数组方法：实参数组 + 名 → push/unshift/splice/concat（含就地变更与返回值语义）
+    arr_apply: (recv, mid, arr) => {
+      if ((BigInt.asUintN(64, recv) >> 48n) !== 0x7ffbn) throw new Error("arr_apply: 非 wasm 数组接收者");
+      const name = strings[mid], args = toJS(arr) || [], a = arrRead(recv);
+      let r;
+      switch (name) {
+        case "push":    r = a.push(...args); arrSetInPlace(recv, a); return box(r);
+        case "unshift": r = a.unshift(...args); arrSetInPlace(recv, a); return box(r);
+        case "splice":  r = a.splice(...args); arrSetInPlace(recv, a); return ret(r);
+        case "concat":  return ret(a.concat(...args));
+        default: throw new Error("arr_apply: 不支持 " + name);
+      }
+    },
+    // 字符串 → 码点字符数组（for…of 按码点迭代，与 JS 一致）
+    str_chars: (v) => arrWriteback(Array.from(strRead(v))),
+    // 内建函数值读取（Math.expm1 / JSON.stringify 之类，作为值而非调用）→ 宿主函数句柄
+    // 内建成员读（作为值）：常量 → 值；函数 → 宿主函数句柄；未知 → undefined
+    builtin_member: (id) => {
+      const name = strings[id];
+      if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);
+      const e = BUILTIN_FNS[name];
+      const f = Array.isArray(e) ? e[0] : (e || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
+      return typeof f === "function" ? tagHandle(f) : TAG;
+    },
+    builtin_fn: (id) => {
+      const name = strings[id];
+      const e = BUILTIN_FNS[name];
+      const f = Array.isArray(e) ? e[0] : (e || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
+      if (typeof f !== "function") throw new Error("builtin_fn: 非函数 " + name);
+      return tagHandle(f);
     },
     arr_set_len: (recv, n) => {
       const off = Number(BigInt.asUintN(64, recv) & MASK32);

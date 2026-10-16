@@ -113,6 +113,10 @@ const QZ = {
   set_index: { params: ["i64", "i64", "i64"], results: [] }, // o[k] = v
   env_new: { params: ["i32"], results: ["i64"] },        // 闭包环境：parentIdx(-1=根) → 环境句柄
   env_def: { params: ["i32", "i32", "i64"], results: [] },   // 直接写入该环境层（每迭代绑定种子）
+  arr_apply: { params: ["i64", "i32", "i64"], results: ["i64"] },     // 变参数组方法（实参数组）
+  str_chars: { params: ["i64"], results: ["i64"] },                   // 字符串 → 码点字符数组
+  builtin_fn: { params: ["i32"], results: ["i64"] },                  // 内建函数值（作为值读取）
+  builtin_member: { params: ["i32"], results: ["i64"] },              // 内建成员当作值读
   env_get: { params: ["i32", "i32"], results: ["i64"] }, // (envIdx, nameId) → tagged（沿 __parent 链）
   env_set: { params: ["i32", "i32", "i64"], results: [] },
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
@@ -2345,6 +2349,11 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         const lenL = arrL + 2;                                   // 本层长度 local（专用，避免被 sT 复用覆盖）
         this.forOfCount++;
         this.emitTaggedExpr(s.expression); M.localSet(arrL);     // 数组句柄（i64）
+        // 字符串 → 码点字符数组（for…of 按**码点**迭代："😀".length=2 但迭代 1 次）
+        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+        M.ifBlock("void");
+        M.localGet(arrL); M.call("qz.str_chars"); M.localSet(arrL);
+        M.end();
         this._emitLengthOf(arrL); M.f64ReinterpretI64(); M.i32TruncF64S(); M.localSet(lenL);   // len（专用 local）
         M.i32Const(0); M.localSet(idxL);                         // i = 0
         M.block(); this.depth++; M.loop(); this.depth++;
@@ -2670,6 +2679,14 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.localGet(slot); this.m.i32WrapI64(); this._emitFillUndef(size);
         for (let i = 0; i < NF; i++) {
             const p = e.properties[i];
+            if (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)) {
+                // {[k]: v}：运行期键 → 宿主按名写入（预登记槽命中走内存，未命中进 extras）
+                this.m.localGet(slot);
+                this.emitTaggedExpr(p.name.expression);
+                this.emitTaggedExpr(p.initializer);
+                this.m.call("qz.set_index");
+                continue;
+            }
             this.m.localGet(slot);                    // [h]
             this.m.i32WrapI64();                      // 低32位=offset
             this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);   // 简写 {x} ≡ {x: x}
@@ -2736,7 +2753,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     // 内建全局成员读（非调用）：Math.PI / Number.MAX_SAFE_INTEGER / … → qz.builtin（常量表）
     if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && ts.isIdentifier(e.expression)
         && BUILTIN_GLOBALS.has(e.expression.text)) {
-        this._emitBuiltinCall(e.expression.text + "." + e.name.text, []); return;
+        // 常量（Math.PI）→ 值；函数（Math.expm1 / JSON.stringify）→ 宿主函数句柄（truthy、typeof function）
+        this.m.i32Const(this._strId(e.expression.text + "." + e.name.text));
+        this.m.call("qz.builtin_member");
+        return;
     }
     if (ts.isElementAccessExpression(e)) {
         // o[k]：字符串键（动态）→ 宿主 qz.get_index（POJO 按字段名表 / 宿主对象按索引）；
@@ -2830,6 +2850,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             }
             // 类静态方法优先：C.push/C.pop 等与数组方法同名，不能走数组快路径
             if (this._isClassName(rx)) { this._emitDynMethod(rx, method, e.arguments); return; }
+            // 多参变参数组方法（push/unshift/splice/concat 超 4 参）：实参合成数组 → 宿主 arr_apply
+            if (["push", "unshift", "splice"].includes(method) && e.arguments.length > 1) {   // concat 双份（字符串/数组）→ 仍走宿主 method_call
+                const M = this.m, t = this._expEnter();
+                this.emitTaggedExpr(rx); M.localSet(t.v);
+                const lit = ts.factory.createArrayLiteralExpression(e.arguments);
+                lit.pos = e.pos; lit.end = e.end;
+                this.emitTaggedExpr(lit); M.localSet(t.w);
+                M.localGet(t.v); M.i32Const(this._strId(method)); M.localGet(t.w); M.call("qz.arr_apply");
+                this._expLeave();
+                return;
+            }
             if (method === "push" && e.arguments.length === 1) { this._emitArrayPush(rx, e.arguments[0]); return; }
             if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
             this._emitDynMethod(rx, method, e.arguments); return;
