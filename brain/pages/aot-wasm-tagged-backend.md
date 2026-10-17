@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T12:06:04"
+updated: "2026-10-17T12:29:57"
 ---
 
 <!-- compiled_truth -->
@@ -551,4 +551,9 @@ updated: "2026-10-17T12:06:04"
 - time: 2026-10-17T12:06:04
   kind: evidence
   summary: "第三十三批语料 + 5 项新修：757/768（98.6%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T12:29:57
+  kind: evidence
+  summary: "bitsOf 句柄直通 + 宿主 closure_call 溢出实参：758/768 不变（语义改进）"
   affects: [aot-wasm-tagged-backend]
