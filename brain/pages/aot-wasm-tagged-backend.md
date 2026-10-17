@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T03:43:46"
+updated: "2026-10-17T04:01:56"
 ---
 
 <!-- compiled_truth -->
@@ -401,4 +401,9 @@ updated: "2026-10-17T03:43:46"
 - time: 2026-10-17T03:43:46
   kind: evidence
   summary: "类名作值 + 静态 super 调用：657/673（97.6%），+3 例（corpus23/27/28）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T04:01:56
+  kind: evidence
+  summary: "Reflect.construct + static{} 内 this ≡ 定义类：658/673（97.8%）"
   affects: [aot-wasm-tagged-backend]
