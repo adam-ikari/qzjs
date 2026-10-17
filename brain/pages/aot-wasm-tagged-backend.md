@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T16:48:09"
+updated: "2026-10-17T17:05:44"
 ---
 
 <!-- compiled_truth -->
@@ -606,4 +606,9 @@ updated: "2026-10-17T16:48:09"
 - time: 2026-10-17T16:48:09
   kind: evidence
   summary: "reduce 显式 undefined 初值：816/820（99.5%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T17:05:44
+  kind: evidence
+  summary: "批37 语料 + TypeError 修复：830/837（99.2%）"
   affects: [aot-wasm-tagged-backend]
