@@ -1,5 +1,11 @@
 # AOT 路线评估汇总（2026-10-08，实验数据消化）
 
+### `arguments` 续作结论（2026-10-17，三次尝试均回退）
+
+- **助手机制**：`qzs_*` 助手在 `emitStringHelpers(m)`（`emitter.js:~2247+`）内 `declareFunc` + `startBody/endBody` 内联；宿主需调用的助手（如新增 `qzs_setargs`）必须补 `exportFn`。
+- **已验证可行的设计**（三次尝试中编译均通过）：新全局 `__args`（排在模块全局之后，不影响既有索引）作 scratch 通道 → 函数/lambda 末尾插 i64 本地（env 之前，索引 = `参数数 + decls.length - 1 - envDecls.length`）→ 入口 `globalGet → localSet` + `varMap.set("arguments", …)` → `arguments` 标识符解析该本地 → 调用点（顶层直调点 `emitter.js:` `this.m.call(this._fnName(fn))` 前）写全局；宿主 `closureCall` 对 `lamMeta.needsArgs` 的闭包经导出 `qzs_setargs` 写入。
+- **卡点（第三次实测）**：`function g() { … arguments … }` 声明在 `f` 内（emitter 提升为闭包）时，`g(9,8)` 调用**未经过宿主 `closureCall`**（QZDBG 钩子未触发）→ 宿主写入路径不生效，结果从 loud 退化为**静默错值**（`undefined:undefined`）→ 按判据（静默错值劣于 loud）立即回退。
+- **下一步**：先定位该调用的实际发射路径（`_emitClosureCall` 发出的 `qz.closure_call`/`qz.call_value` 之外的分支，或嵌套函数被内联为直调 `__lam_N`），再按上述设计一次完成；`lamMeta.needsArgs` 标记本身已验证正确（探针输出 `[{n:__lam_0, a:true}]`）。
 ## 结论（一句话）
 
 自研 TS→wasm（不依赖 Perry/AssemblyScript）已跑通全链，**计算密集 ~130x、对象计算 ~50x、字符串 wasm 内原生（无跨界）**。tagged 值采用 f64 NaN-box（精确 53 位，32/64 位宿主统一）；字符串句柄 `0x7FFA`|offset，内存 `[len][utf8]`（2026-10-11 落地）。AOT 是"数值/计算热点加速器"，也是通用 TS 加速。
