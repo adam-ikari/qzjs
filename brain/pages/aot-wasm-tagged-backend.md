@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T02:09:44"
+updated: "2026-10-17T02:27:16"
 ---
 
 <!-- compiled_truth -->
@@ -361,4 +361,9 @@ updated: "2026-10-17T02:09:44"
 - time: 2026-10-17T02:09:44
   kind: evidence
   summary: "第二十五批：598/610（98.0%）；6 项修复含 2 项静默错值（for-in 继承键、类 getter 被调用）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T02:27:16
+  kind: evidence
+  summary: "for-of 惰性迭代：消除最后一项已知静默错值（急切快照）"
   affects: [aot-wasm-tagged-backend]
