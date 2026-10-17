@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十二批差分审计（2026-10-17）
+- 新增 `audit_corpus32.js`（19 例：模块级初始化模式（闭包调用/IIFE/计数器——start-段修复后新解锁的面）、模块级状态机、迭代协议（Map/Set/Array 的 keys/values/entries + for-of）、字符串格式化算法、数值算法（素数/阶乘/gcd/斐波那契/Collatz/数位和）、类层次（面积/instanceof/constructor 比较）、错误恢复（tryParse/withRetry/嵌套 try）、闭包循环捕获（var/let/for-of/while）、对象字面量全形态、数组迭代进阶、switch 控制流、JSON 往返、Map/Set 重度使用、高阶管线、字符串解析、bigint/symbol 探针、深层嵌套数据、混合程序 v2、数值精度运算）。
+- 结果：**728/750（97.1%）**；corpus32 17/19。ctest 32/32。
+- 新增 2 项残余：
+  - **silent（待查）**：`s.constructor === Circle` 在**嵌套闭包（如 `shapes.map(s => …)`）**内恒为 false（直接在同层函数体内读 `b.constructor === B` 是对的）。插桩显示两侧**句柄完全相同**（`class_value(1)` 两次都返回 `0x7FFD|2`），故问题在比较发射路径（该上下文下的 `===`），需 dump 该表达式的发射。
+  - **loud**：含方法/访问器的对象字面量 + 展开（`{ m(){}, ...x }`）→「含方法/访问器的对象字面量暂不支持展开」。
+
 ### 模块初始化移出 start 段（2026-10-17，重大修复）
 - **根因**：`emitter.js` 用 `m.setStart("__module_init")` 把模块初始化放进 **start 段**，而 start 段在 `WebAssembly.instantiate` 时执行——此时宿主尚未 `bindMem`。于是**任何模块级闭包/值调用**（`const y = f(2)`、`const x = makeThing()`、mixin 工厂调用）都会在 `qz.closure_call` 读闭包头（`new DataView(mem.buffer)…`）时崩 `Cannot read properties of null (reading buffer)`。
 - **修复（两处，极简）**：
