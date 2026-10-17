@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T06:26:14"
+updated: "2026-10-17T06:48:10"
 ---
 
 <!-- compiled_truth -->
@@ -471,4 +471,9 @@ updated: "2026-10-17T06:26:14"
 - time: 2026-10-17T06:26:14
   kind: evidence
   summary: "链式 mixin 全通：root cause 是 _emitStaticsGuard 在无静态成员时提前返回（声明式类动态父链未发射）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T06:48:10
+  kind: evidence
+  summary: "动态 instanceof 零回归落地：dynR 排除已知类名是关键（模块级类亦登记 moduleGlobals）"
   affects: [aot-wasm-tagged-backend]
