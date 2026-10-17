@@ -263,7 +263,7 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 
 验证目标：`mixin-class-factory` / `curried-class-factory`（各 1 例）；回归面 = 全语料 + ctest（class 机制用例多，须逐批核对）。
 
-**实现进展（2026-10-17，已落地且零回归）**（4 处改动，详见 CHANGELOG）；单层 mixin 全通；链式 mixin 卡在声明式类的 guard 链接未执行（插桩：`class_value_dyn` 未触发）：4 处改动均已落地且互不冲突——发射器侧：`dynParentNode` 记录、`_emitClassValue` 统一类值发射、两处 super 调用分支、statics guard 内动态链接；宿主侧：`classRuntimeParent`、`class_value_dyn`、`super_ctor`、`chainNext` 替换 4 处类链遍历。`test_aot` 全绿、无编译错误。
+**实现进展（2026-10-17，已落地且零回归）**（4 处改动，详见 CHANGELOG）；单层 mixin 全通；链式 mixin 已修复（2026-10-17）：根因是 `_emitStaticsGuard` 在类无静态成员时提前返回 → 声明式类的动态父链未发射；现 `needsDynLink` 时必发。：4 处改动均已落地且互不冲突——发射器侧：`dynParentNode` 记录、`_emitClassValue` 统一类值发射、两处 super 调用分支、statics guard 内动态链接；宿主侧：`classRuntimeParent`、`class_value_dyn`、`super_ctor`、`chainNext` 替换 4 处类链遍历。`test_aot` 全绿、无编译错误。
 
 - **单层 mixin**（`const T = Tagged(Base); new T()`）：越过了 `call 未定义 __m_*$ctor`，改为卡在 `instanceof T`（动态 instanceof，已回退）→ 说明 ctor 转发 + 运行时父链 + 单级方法继承均已通。
 - **链式 mixin**（`class Final extends B2(A(Root)) {}` 后 `x.r()`）：报 `method_call: 类 3 无方法 r` → **运行时父链未逐级记录**。链上每一级类值的创建（`B2(A(Root))` 与 `A(Root)` 的求值）都必须在其自身构造前完成 `class_value_dyn` 记录。

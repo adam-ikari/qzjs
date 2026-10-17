@@ -2873,7 +2873,8 @@ Emitter.prototype._expLeave = function () { this._expDepth--; };
 // 类静态字段：C.x 前确保静态已初始化（lazy 内联初始值 → 宿主表 qz.static_set / statics_mark）。
 Emitter.prototype._emitStaticsGuard = function (cname) {
     const c = this.classes.get(cname);
-    if (!c || (!(c.staticFields || []).length && !(c.staticBlocks || []).length)) return;
+    const needsDynLink = !!(c && this._dynParentExpr(c));   // 动态父（mixin）即便无静态成员也须发链接
+    if (!c || (!needsDynLink && !(c.staticFields || []).length && !(c.staticBlocks || []).length)) return;
     if (this._inStaticsGuard) return;                     // 守卫体内再访问同类静态 → 不再嵌套（避免无限展开）
     this._inStaticsGuard = true;
     try { this._emitStaticsGuardBody(c); } finally { this._inStaticsGuard = false; }

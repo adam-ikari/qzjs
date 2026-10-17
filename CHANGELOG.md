@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 链式 mixin 全通（2026-10-17）
+- **根因**：`_emitStaticsGuard` 在类**无静态字段/块**时提前返回 → 声明式类（如 `class Final extends B2(A(Root)) {}`）的动态父链链接（写在 guard body 内）从未发射。
+- **修复**：guard 的提前返回条件放宽——`needsDynLink = !!_dynParentExpr(c)` 时即便无静态成员也发射 guard（body 内 `class_value_dyn` 幂等）。
+- **验证**：`mixin_chain`（三层链）`x.r()+x.a()+x.b()` = `rab` ✓；`mixin_inst`（声明式动态父类）`(x instanceof Root)+(x instanceof Final)` = `true,true` ✓ + `ra` ✓；`mixin1` = `base,tagged` ✓；普通继承 `pn` ✓。
+- 结果：**708/731（96.9%）**（语料未变——mixin 语料用例的 `instanceof <mixin 结果>` 属动态类值判定，仍缺）；全语料 + ctest 32/32 零回归。
+
 ### 动态父类构造前建立运行时父链（2026-10-17）
 - `new C()`（C 为动态父类）时先发 `_emitStaticsGuard(cname)`，使 statics guard 内的 `class_value_dyn` 链接在构造前执行（此前声明式类从未链接 → 继承方法派发失败）。
 - 关键批次回归 + ctest 全绿（零回归）。链式 mixin 仍未通（`class Final extends B2(A(Root))` → `x.r()` loud），下一步需插桩 `class_value_dyn` 确认声明式类 guard 的发射/执行时机。
