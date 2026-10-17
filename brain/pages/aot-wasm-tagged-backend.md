@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-16T20:38:18"
+updated: "2026-10-17T02:09:44"
 ---
 
 <!-- compiled_truth -->
@@ -356,4 +356,9 @@ updated: "2026-10-16T20:38:18"
 - time: 2026-10-16T20:38:18
   kind: evidence
   summary: "第二十四批：577/590（97.8%）；typeof 类表达式修复；记录 reduce 显式-undefined 窄面差异"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T02:09:44
+  kind: evidence
+  summary: "第二十五批：598/610（98.0%）；6 项修复含 2 项静默错值（for-in 继承键、类 getter 被调用）"
   affects: [aot-wasm-tagged-backend]
