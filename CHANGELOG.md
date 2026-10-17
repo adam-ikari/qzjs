@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 句柄直通与宿主函数溢出实参（2026-10-17）
+- `bitsOf(x)`：输入已是 **tagged bigint 句柄**（实例/POJO/数组）时直通，不再被 `tagHandle` 再包一层宿主句柄（此前会把实例句柄当 self 传回 wasm → 类方法内 `this.k` 读到宿主包装对象）。
+- 宿主 `closure_call` 的**宿主函数句柄**分支此前只传 4 个实参槽、忽略溢出实参数组 → 经 `.bind`/`.call` 调用 >4 形参的函数时第 5+ 实参丢失。改为 `slots.filter(givenSlot) ++ ovf[1..]`。
+- 结果：**758/768（98.7%）** 不变（c12 `class-method-many-params` 的 `.bind`+>4 参仍为残余）；ctest 32/32 零回归。
+
 ### 计算属性名解构（2026-10-17）
 - 症状：`const { ["k" + 1]: dyn } = obj` → 编译期 loud「暂不支持计算属性名的解构」（两处：`{...rest}` 键名汇总预检 + 元素发射）。
 - 两处修复（corpus33 17→18/18）：

@@ -414,7 +414,8 @@ function makeQzvm(strings, opts) {
   // 闭包句柄 → 可重入宿主包装（带 length/name，便于宿主内省；调用即 closureCall）
   const wrapCb = (f) => (f.__qzCb ? f.__qzCb : Object.defineProperty(f, "__qzCb", { value: (...xs) => f(...xs), enumerable: false }), f.__qzCb);
   const own = (o, k) => (o && Object.prototype.hasOwnProperty.call(o, k)) ? o[k] : undefined;
-  const bitsOf = (e) => Array.isArray(e) && arrOf.has(e) ? arrOf.get(e)   // 来自 wasm 的数组 → 原句柄（别名）
+  const bitsOf = (e) => typeof e === "bigint" ? e                       // 已是 tagged wasm 值（实例/POJO/数组句柄）→ 直通（此前被 tagHandle 再包一层 → 宿主句柄当 self）
+                     : Array.isArray(e) && arrOf.has(e) ? arrOf.get(e)   // 来自 wasm 的数组 → 原句柄（别名）
                      : typeof e === "function" && cloOf.has(e) ? cloOf.get(e)
                      : (e !== null && typeof e === "object" && pojoOf.has(e) && pojoOf.get(e).mem === mem)
                        ? ((pojoOf.get(e).isInst ? (0x7ffen << 48n) : TAG) | BigInt(pojoOf.get(e).off))   // 实例 → 实例 tag（回调里方法调用需要）
@@ -464,7 +465,8 @@ function makeQzvm(strings, opts) {
       const hf = handles[idxOf(handle)];
       if (typeof hf !== "function") throw new Error("closure_call: 非函数值");
       const selfArg = (recv === undefined || recv === TAG) ? undefined : toJS(recv);   // thisArg（map/filter 第 2 实参、.call 的 receiver）→ JS this
-      return ret(hf.apply(selfArg, [a0, a1, a2, a3].filter(givenSlot).map(toJS)));   // 只传真传了的实参
+      const exA = (ovfArr === undefined || ovfArr === TAG) ? [] : (toJS(ovfArr) || []);   // 溢出实参（ovf[0] = 实参 3，已在 a3）
+      return ret(hf.apply(selfArg, [a0, a1, a2, a3].filter(givenSlot).map(toJS).concat(exA.slice(1))));   // 只传真传了的实参
     }
     const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
     const funcidx = new DataView(mem.buffer).getUint32(off, true);   // 免 4 对齐（bump 偏移可非 4 倍数）
