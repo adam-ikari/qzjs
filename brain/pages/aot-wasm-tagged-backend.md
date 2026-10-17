@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T05:14:34"
+updated: "2026-10-17T05:25:01"
 ---
 
 <!-- compiled_truth -->
@@ -441,4 +441,9 @@ updated: "2026-10-17T05:14:34"
 - time: 2026-10-17T05:14:34
   kind: evidence
   summary: "计算属性名插入序静默错值修复：704/731（96.3%），corpus31 18/18"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T05:25:01
+  kind: evidence
+  summary: "rest 闭包形参修复（第三轮成功）：按 a[nFix] 是否 wasm 数组判定已打包——706/731（96.6%）"
   affects: [aot-wasm-tagged-backend]
