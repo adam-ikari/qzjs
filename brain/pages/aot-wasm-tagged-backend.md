@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T09:25:13"
+updated: "2026-10-17T09:44:04"
 ---
 
 <!-- compiled_truth -->
@@ -516,4 +516,9 @@ updated: "2026-10-17T09:25:13"
 - time: 2026-10-17T09:25:13
   kind: evidence
   summary: "自递归直调第三轮成功：闭包深递归不再吃宿主栈（731/750，97.5%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T09:44:04
+  kind: evidence
+  summary: "类 .name 属性 + Function 作值：732/750（97.6%）"
   affects: [aot-wasm-tagged-backend]
