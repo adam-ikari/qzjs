@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T02:48:59"
+updated: "2026-10-17T02:56:50"
 ---
 
 <!-- compiled_truth -->
@@ -376,4 +376,9 @@ updated: "2026-10-17T02:48:59"
 - time: 2026-10-17T02:48:59
   kind: evidence
   summary: "第二十七批：636/652（97.5%）；新增 4 残余含 1 待修 silent（Symbol.hasInstance）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T02:56:50
+  kind: evidence
+  summary: "Symbol.hasInstance 修复：instanceof_op 沿类链查 static @@hasInstance → 调 wasm 静态方法；消除最后一项静默错值"
   affects: [aot-wasm-tagged-backend]
