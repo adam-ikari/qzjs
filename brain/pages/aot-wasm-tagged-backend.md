@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T02:56:50"
+updated: "2026-10-17T03:01:11"
 ---
 
 <!-- compiled_truth -->
@@ -381,4 +381,9 @@ updated: "2026-10-17T02:56:50"
 - time: 2026-10-17T02:56:50
   kind: evidence
   summary: "Symbol.hasInstance 修复：instanceof_op 沿类链查 static @@hasInstance → 调 wasm 静态方法；消除最后一项静默错值"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T03:01:11
+  kind: evidence
+  summary: "第二十八批：652/673（97.0%）；新增 2 项 silent 待修：数组自定义字符串键属性、对象字面量方法闭包不共享 env"
   affects: [aot-wasm-tagged-backend]
