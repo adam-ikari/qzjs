@@ -628,7 +628,7 @@ function makeQzvm(strings, opts) {
       try {
         Object.defineProperty(ctor, nm === "@@hasInstance" ? Symbol.hasInstance : nm, {
           value: (...as) => { const aa = [0, 1, 2, 3].map(i => (i < as.length && as[i] !== undefined) ? bitsOf(as[i]) : TAG);   // 实参不足须补 TAG（wasm 调用参数个数固定 5/6）
-                             return toJS(exportsRef[sm.name](TAG, aa[0], aa[1], aa[2], aa[3], TAG)); },
+                             return toJS(exportsRef[sm.name](classValueImpl(clsId), aa[0], aa[1], aa[2], aa[3], TAG)); },   // self = 类值（this.tag 等运行时代）
           writable: true, configurable: true, enumerable: false });
       } catch (_) {}
     }
@@ -2169,6 +2169,19 @@ function makeQzvm(strings, opts) {
       return closureCall(handle, a0, a1, a2, a3, undefined, recv);
     },
     bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
+  };
+  // this.x 于静态方法内（运行时代）：沿宿主 ctor 的 __proto__ 链（= JS 静态继承链）查静态字段
+  api.static_get_dyn = (selfH, id) => {
+    const key = strings[id];
+    let cur = handles[idxOf(selfH)];
+    while (cur && typeof cur === "function") {
+      const nm = cur.name;
+      const cid = nm ? strings.indexOf(String(nm)) : -1;   // statics_has/static_get 收字符串 id
+      if (cid >= 0 && !/^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(String(nm))
+          && api.statics_has(cid, id)) return api.static_get(cid, id);
+      cur = Object.getPrototypeOf(cur);
+    }
+    return TAG;
   };
   // 展开实参传给动态接收者方法：obj.m(...args)（实参数组已在 wasm 侧构造成 qz 数组）
   api.method_spread = (recv, mid, arr) => {

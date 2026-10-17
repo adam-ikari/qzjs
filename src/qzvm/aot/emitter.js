@@ -131,6 +131,7 @@ const QZ = {
   statics_has: { params: ["i32", "i32"], results: ["i32"] },     // 该类是否有该静态（运行时父链查找）
   statics_mark: { params: ["i32"], results: [] },
   static_get: { params: ["i32", "i32"], results: ["i64"] },    // (classId, fieldId) → tagged
+  static_get_dyn: { params: ["i64", "i32"], results: ["i64"] },   // this.x 于静态方法内（运行时代）：(self句柄, fieldId) → tagged    // (classId, fieldId) → tagged
   static_set: { params: ["i32", "i32", "i64"], results: [] },
   get_index: { params: ["i64", "i64"], results: ["i64"] },   // o[k]（动态键）：宿主按名/索引取值
   set_index: { params: ["i64", "i64", "i64"], results: [] }, // o[k] = v
@@ -3035,8 +3036,8 @@ Emitter.prototype._emitStaticsGuard = function (cname) {
 Emitter.prototype._emitStaticsGuardBody = function (c) {
     const cname = c.name;
     const M = this.m;
-    const savedCCO = this._curClassObj, savedSM2 = this._inStaticMethod;
-    this._curClassObj = c; this._inStaticMethod = true;   // static{} 内 this ≡ 定义类（_classOfExpr/_isClassName）
+    const savedCCO = this._curClassObj, savedSM2 = this._inStaticMethod, savedSI2 = this._inStaticInit;
+    this._curClassObj = c; this._inStaticMethod = true; this._inStaticInit = true;   // static{} 内 this ≡ 定义类（非运行时代）   // static{} 内 this ≡ 定义类（_classOfExpr/_isClassName）
     { const dynN = this._dynParentExpr(c);              // 动态父（声明式类）：先链接运行时父链（宿主缓存，幂等）
       if (dynN) { this._emitClassValue(c); M.drop(); } }
     M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
@@ -3056,7 +3057,7 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
     }
     M.i32Const(this._strId(cname)); M.call("qz.statics_mark");
     M.end();
-    this._curClassObj = savedCCO; this._inStaticMethod = savedSM2;
+    this._curClassObj = savedCCO; this._inStaticMethod = savedSM2; this._inStaticInit = savedSI2;
 };
 // 类名（标识符）是否为已收集的类
 // 沿继承链找静态访问器（kind: "get"|"set"）→ { cname, acc }（静态属性读/写分派）
@@ -3586,8 +3587,19 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isThis(e)) {
         if (this.capMap.has("this")) { this._emitCapturedRead("this"); return; }   // 方法内闭包捕获 this → 经 env
         // 声明了 `this` 形参的函数/闭包：this = receiver 槽（被调方按约定前置；无 receiver 时该槽即 undefined，与 JS 严格模式等价）
-        if (this._inStaticMethod && this._curClassObj) {          // 静态方法/static{} 内 this ≡ 定义类（JS 语义）
-            this.m.i32Const(this._curClassObj.id); this.m.call("qz.class_value"); return;
+        if (this._inStaticMethod && this._curClassObj && !this._inStaticInit) {   // 静态方法：this = self 槽（调用点传接收者类）；未传 → 回退定义类
+            const M = this.m, tS = this._expEnter();
+            M.localGet(0); M.localSet(tS.v);
+            M.localGet(tS.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
+            M.localGet(tS.v); M.i64Const(0xffffffffn); M.i64And(); M.i64Const(8n); M.i64LtU();
+            M.i32And();
+            M.ifBlock("i64");
+            M.i32Const(this._curClassObj.id); M.call("qz.class_value");
+            M.else_();
+            M.localGet(tS.v);
+            M.end();
+            this._expLeave();
+            return;
         }
         const idx = this._local("this");
         if (idx === undefined) throw new Error("[tagged] this 仅在类方法/构造器内可用");
@@ -4058,13 +4070,20 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._expLeave();
         return;
     }
+    if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._inStaticMethod && !this._inStaticInit && ts.isThis(e.expression)) {
+        // this.x 于静态方法内：接收者为运行时代（B.describe() 继承自 A 时 this = B）→ 宿主沿句柄 __qzClsId 的原型链查静态字段
+        this._emitThisReceiver();
+        this.m.i32Const(this._strId(e.name.text));
+        this.m.call("qz.static_get_dyn");
+        return;
+    }
     if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._isClassName(e.expression)) {
         const cn = this._classOfExpr(e.expression);
         const got = this._findStaticAccessor(cn, e.name.text, "get");
         if (got && got.acc) this._checkStaticThis(got.cname, cn, got.acc, e.name.text);
         if (got) {                                            // 静态 getter（含继承）→ 直调 __sm_<owner>$<name>
             this._emitStaticsGuard(got.cname);
-            this._emitUndefined();
+            this._emitClassValue(this.classes.get(cn));   // self = 接收者类（子类调用父 getter 时 this = 子类）
             for (let i = 0; i < 4; i++) this._emitUndefined();
             this.m.call(staticMethName(got.cname, got.acc.name));
             return;
@@ -4221,9 +4240,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             c = cl.parent;
         }
         if (!c) throw new Error(`[tagged] super.${method}() 在父类链上未定义`);
-        if (isStaticM) {                                     // 静态父方法：self 占位（静态方法不使用 this）
+        if (isStaticM) {                                     // 静态父方法：self = 当前 self 槽（super 静态调用保持原接收者）
             this._emitStaticsGuard(c);
-            this._emitUndefined();
+            this.m.localGet(0);
             for (let i = 0; i < 4; i++) {
                 if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
             }
@@ -5157,7 +5176,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         if (!owner) throw new Error(`[tagged] 静态方法 ${cnS}.${method}() 未定义`);
         this._checkStaticThis(owner, cnS, (this.classes.get(owner).staticMethods || []).find(s => s.name === method), method);
         this._emitStaticsGuard(cnS);
-        this._emitUndefined();
+        this._emitClassValue(this.classes.get(cnS));   // self = 接收者类（JS：B.describe() 内 this = B，含继承自 A 的方法）
         this._emitMethodArgs(((this.classes.get(owner).staticMethods || []).find(s => s.name === method) || {}).node ? (this.classes.get(owner).staticMethods || []).find(s => s.name === method).node.parameters : null, args);
         M.call(staticMethName(owner, method));
         this._emitErrCheck();   // 被调内 throw（跨函数 __err）→ 调用点转异常路径（此前静默吞掉）

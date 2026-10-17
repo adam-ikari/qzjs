@@ -4,6 +4,17 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 静态方法内 `this` 的运行时代（2026-10-17）
+- 症状：`class B extends A { static describe() { return "B+" + super.describe(); } }` → `B.describe()` 得 `"B+A:A"`（应 `"B+A:B"`）——静态方法内 `this` 恒为**定义类**。
+- 四处修复（corpus35 15→16/17）：
+  1. 静态方法体 `this` → 读 **self 槽**（local 0，调用点传接收者类）；未传（TAG/undefined/null）→ 回退定义类（保持既有调用者兼容）。
+  2. 静态**直调**调用点：self 由占位 `undefined` 改为 `class_value(接收者类)`（`B.describe()` 继承自 A 时 this = B）。
+  3. `super.<静态方法>`：self = 当前 self 槽（保持原接收者）。
+  4. 宿主静态方法包装器：self = `classValueImpl(clsId)`（而非 TAG 占位）；静态 getter 读路径同样传接收者类。
+  5. `this.x` 于静态方法内新增宿主 `qz.static_get_dyn(self, fieldId)`：按句柄 `__qzClsId` 沿 ctor 的 `__proto__` 链查静态字段（派生类遮蔽/继承）。
+- 期间发现并修复两处回归（`static{}` 块内 `this` 应仍为定义类 → 新增 `_inStaticInit` 标记排除；静态 getter 路径未传接收者）→ c20/c34 恢复全绿。
+- 结果：**794/803（98.9%）**；ctest 32/32 零回归。
+
 ### do-while 每迭代绑定（2026-10-17）
 - 症状：`do { const k = i; fns.push(() => k * 10); i++; } while (i < 3)` → 三个闭包同值 20（应 0,10,20）。
 - 真因：`emitDoWhile` 缺 `_loopCaptured`/`_emitPerIterEnv` 调用（`while`/`for`/`for-of` 均有）。修：tagged 路径下先建每迭代 env 再发射体。
