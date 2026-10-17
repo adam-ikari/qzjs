@@ -237,4 +237,9 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 效果：修好 `const c = (...a) => a.length`（`undefined` → `3`）与 `fn(...restArr)`（`toJS(...) is not iterable` → 正确值），但**引入 5 例回归**（corpus3/5/10/11/27：`spread-call-mixed` `many-args-abi` `rest-spread-objects` 等——`(a, ...rest)` 调用后 `rest.length` 少 1）。
 根因线索：`hasEx` 分支同样用 `nFix = meta.n - 1` 且工作正常 → 两分支对 `meta.n` 的假设不一致（`lamMeta.n` 对 `(a, ...rest)` 的实际值需实测；可能含 `$ovf`/`blk` 计数差异）。
 结论：**已回退**（净收益为负）。下一步用探针打印 `lamMeta.n`/`rest` 实测值再决定拆包位置。
+### 已尝试并回退：动态 instanceof（2026-10-17）
+
+尝试：QZ 表加 `instanceof_dyn(x, clsObj)` + 宿主 `instanceById(obj, clsId)`（抽出 `instanceof_op` 的原型链/@@hasInstance 逻辑，二者共用）+ 发射器在 `instanceof` 右操作数非用户类名但可解析为局部/捕获/模块全局/属性访问时改走动态判定。
+效果：`WebAssembly.instantiate` 报 `Import #6 qz new_dynamic: function import require…`（**导入签名/调用点不匹配**）；且 `const C = class{…}; new C() instanceof C` 由 loud 变为**静默 false**（比 loud 更差）。
+结论：**已回退**。重做要点：(1) 先单独加 host 方法 + 只做发射器改动，逐步 instantiate 验证导入签名（勿一次并入 `new_dynamic` 上下文）；(2) `boxBool(false)` 兜底（`__qzClsId` 缺失时）会把 loud 降级为静默 false → 兜底应 **throw loud**；(3) 需实测 `new C()`（动态 new）产出的实例 clsId 与类对象 `__qzClsId` 是否同一（`dyn_inst` 实测 `c instanceof C` = false，`c instanceof Object` = true）。
 
