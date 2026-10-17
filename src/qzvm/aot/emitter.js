@@ -201,6 +201,19 @@ function stripTsTypes(node, sf) {
     }
     return txt;
 }
+// 函数体是否引用 arguments（箭头继承外层；嵌套 function/method 有自己的绑定 → 不下探）
+function usesArguments(node) {
+    let hit = false;
+    const walk = (n, isRoot) => {
+        if (hit) return;
+        if (!isRoot && (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isMethodDeclaration(n)
+            || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n) || ts.isConstructorDeclaration(n))) return;
+        if (ts.isIdentifier(n) && n.text === "arguments") { hit = true; return; }
+        ts.forEachChild(n, (c) => walk(c, false));
+    };
+    if (node) walk(node, true);
+    return hit;
+}
 function ctorName(cls) { return MTH_PREFIX + cls + "$ctor"; }
 // [Symbol.<name>] 计算属性名 → "@@name"；非 well-known Symbol → null（暂不支持）
 function symbolNameOf(expr) {
@@ -1310,12 +1323,15 @@ class Emitter {
         const capNames = this.mode === "tagged"
             ? this._probeCaptured(f.body, f.parameters.map(p => p.name.text), locals) : [];
         const envDecls = capNames.length ? ["i32"] : [];
+        const needsArgs0 = this.mode === "tagged" && !!(this._fnArgs && f.name && this._fnArgs.has(f.name.text));
         const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool)
-            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(needsArgs0 ? ["i64"] : []).concat(envDecls);
+        this._argsLocal = needsArgs0 ? f.parameters.length + decls.length - 1 - envDecls.length : undefined;
         this.m.startBody(f.name.text, decls, localNames, this._line(f));
         this.envLocal = capNames.length ? f.parameters.length + decls.length - 1 : undefined;   // 参数在 local 0..n-1 之后
         this.capMap = new Map(capNames.map(n => [n, this.envLocal]));   // 捕获名 → 所在 env 的 i32 local
         this.envRef = this.envLocal;
+        if (needsArgs0) { const MA = this.m; MA.globalGet(this._argGlobal); MA.localSet(this._argsLocal); this.varMap.set("arguments", this._argsLocal); }
         if (capNames.length) {
             const M = this.m;
             M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // 根环境（parentIdx=-1）
@@ -1486,13 +1502,17 @@ class Emitter {
         // 本 lambda 的局部若被（嵌套）lambda 捕获 → 建自身 env（__parent 链到 blk）
         const ownCap = this._probeCaptured(lam.body, params, locals);
         const envDecls = ownCap.length ? ["i32"] : [];
+        const lamNeedsArgs = usesArguments(lam.body);
+        lam._qzNeedsArgs = lamNeedsArgs;
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool)
-            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(lamNeedsArgs ? ["i64"] : []).concat(envDecls);
+        this._argsLocal = lamNeedsArgs ? (1 + params.length) + bodyLocals.length - 1 - envDecls.length : undefined;
         const localNames = this.m.debug ? ["blk"].concat(params).concat(locals) : null;
         M.startBody(fname, bodyLocals, localNames);
         this.envLocal = ownCap.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;   // blk+参数之后
         this.envRef = ownCap.length ? this.envLocal : this.blkLocal;   // 嵌套 lambda 的 env：自身 env（链到 blk）或直接 blk
         M.i64Const(0n); M.globalSet(1);                     // 入口清 __err
+        if (lamNeedsArgs) { M.globalGet(this._argGlobal); M.localSet(this._argsLocal); this.varMap.set("arguments", this._argsLocal); }
         this._emitParamPrologue(astParams || lam.parameters, 1);   // 默认值 / 解构形参（先于写 env；已剔除 TS `this` 注解形参）
         if (ownCap.length) {
             M.localGet(0); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // parent = blk(0)
@@ -2836,10 +2856,11 @@ function compileTS(input, outWasm, opts = {}) {
         em.protNameId = (n) => em._strId(n);
 
         em._fnHasThis = new Map();       // 顶层函数名 → 是否带 TS this 形参（receiver 由宿主前置）
+        em._fnArgs = new Set();   // 顶层函数名 → 函数体引用 arguments（需全量实参数组）
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
         em._fnNodes = new Map();         // 顶层函数名 → 声明节点（rest 形参打包用）
         for (const st of fns) em._fnNodes.set(st.name.text, st);
-        for (const st of fns) { em.fnNames.add(st.name.text); em._fnHasThis.set(st.name.text, st.parameters.some(p2 => ts.isIdentifier(p2.name) && p2.name.text === "this")); em._fnParams.set(st.name.text, st.parameters.length); }
+        for (const st of fns) { if (st.body && usesArguments(st.body)) em._fnArgs.add(st.name.text); em.fnNames.add(st.name.text); em._fnHasThis.set(st.name.text, st.parameters.some(p2 => ts.isIdentifier(p2.name) && p2.name.text === "this")); em._fnParams.set(st.name.text, st.parameters.length); }
         for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
         em.moduleGlobals = em.moduleGlobals || new Map();
         em._modObjKeys = modObjKeys;    // 模块级 const 的静态键序（对象字面量 + 已知 const 展开）
@@ -2855,6 +2876,17 @@ function compileTS(input, outWasm, opts = {}) {
             em.moduleGlobals = new Map();                    // 模块级变量名 → wasm 全局索引（i64 tagged，索引 2 起）
             em._modInitNames = new Set(modVars.map(v => v.name.text));
             for (const v of modVars) em.moduleGlobals.set(v.name.text, m.addGlobal("i64", 0));
+            em._argGlobal = m.addGlobal("i64", 0);      // __args：调用点写入「全量实参数组」（arguments 支持）
+            m.declareFunc("qzs_setargs", ["i64"], []);  // 宿主侧写入（闭包调用经 closureCall）
+            m.exportFn("qzs_setargs", "qzs_setargs");
+            m.startBody("qzs_setargs", []);
+            m.localGet(0); m.globalSet(em._argGlobal);
+            m.endBody();
+            m.declareFunc("qzs_getargs", [], ["i64"]);   // 诊断导出（只读）
+            m.exportFn("qzs_getargs", "qzs_getargs");
+            m.startBody("qzs_getargs", []);
+            m.globalGet(em._argGlobal);
+            m.endBody();
             emitStringHelpers(m);
         }
         for (const st of fns) {
@@ -2934,7 +2966,7 @@ function compileTS(input, outWasm, opts = {}) {
     for (const [lamNode, meta] of em._lamById.entries()) {
         let src = null;
         try { const sf0 = lamNode.getSourceFile && lamNode.getSourceFile(); if (sf0) src = stripTsTypes(lamNode, sf0); } catch (_) {}
-        lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis, src };
+        lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis, src, needsArgs: !!(lamNode && lamNode._qzNeedsArgs) };
     }
     // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
     const classMeta = em._classList.map(cname => {
@@ -3715,7 +3747,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isIdentifier(e)) {
-        if (e.text === "arguments") throw new Error("[tagged] `arguments` 对象未实现（建议 rest 形参）；闭包/方法/顶层函数内的 `arguments` 均需 ABI 透传实参，属已知 loud——见 ASSESSMENT");
+        if (e.text === "arguments") {
+            const ai = this._local("arguments");
+            if (ai !== undefined) { this.m.localGet(ai); return; }   // 全量实参数组（调用点/宿主经 __args 写入）
+            throw new Error("[tagged] `arguments` 仅支持顶层函数体与闭包体（类方法内为已知 loud——见 ASSESSMENT）");
+        }
         if (this.capMap.has(e.text)) { this._emitCapturedRead(e.text); return; }   // 捕获名优先走 env（与本体共享）
         const idx = this._local(e.text);
         if (idx !== undefined) { this.m.localGet(idx); return; }
@@ -4395,6 +4431,13 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 if (i < e.arguments.length) { this.emitTaggedExpr(e.arguments[i]); if (xt) this._argToCallee(fn); }
                 else this._emitUndefined();
             }
+        }
+        if (this._fnArgs && this._fnArgs.has(this._fnName(fn)) && this._argGlobal !== undefined
+            && !e.arguments.some(a2 => ts.isSpreadElement(a2))) {   // 被调需要 arguments：构造全量实参数组写入 __args
+            const litA = ts.factory.createArrayLiteralExpression(e.arguments);
+            litA.pos = e.pos; litA.end = e.end;
+            this.emitTaggedExpr(litA);
+            this.m.globalSet(this._argGlobal);
         }
         this.m.call(this._fnName(fn));
         this._retFromCallee(fn);

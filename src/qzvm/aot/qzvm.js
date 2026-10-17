@@ -1326,6 +1326,7 @@ function makeQzvm(strings, opts) {
       const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
       const funcidx = new DataView(mem.buffer).getUint32(off, true);
       const meta = lamMeta && lamMeta[funcidx];
+
       if (!meta) throw new Error("closure_call_spread: 未知 funcidx " + funcidx);
       const blk = new DataView(mem.buffer).getInt32(off + 4, true);
       const jsArr = toJS(arr) || [];
@@ -2161,6 +2162,17 @@ function makeQzvm(strings, opts) {
     _handles: handles, _TAG: TAG,
     // 闭包调用：闭包句柄 → wasm；宿主函数句柄（bind 结果/宿主回调）→ 直接调用（调用点无法静态区分）
     closure_call: (handle, a0, a1, a2, a3, recv) => {
+      { const uA = BigInt.asUintN(64, handle), hiA = uA >> 48n;   // 闭包体用 arguments → 先写 __args（此层由 wasm 直接调用，内部 closureCall 未必进入）
+        if (hiA === CLO_HI && mem && exportsRef && typeof exportsRef.qzs_setargs === "function" && lamMeta) {
+          const offA = Number(uA & 0xffff_ffffn);
+          if (offA + 4 <= mem.buffer.byteLength) {
+            const mA = lamMeta[new DataView(mem.buffer).getUint32(offA, true)];
+            if (mA && mA.needsArgs) {
+              const flatA = [a0, a1, a2, a3].map(toJS).filter(x => x !== undefined);
+              exportsRef.qzs_setargs(arrWriteback(mA.synthThis ? flatA.slice(1) : flatA));
+            }
+          }
+        } }
       if (BigInt.asUintN(64, handle) >> 48n === HOST_HI) {
         const f = handles[idxOf(handle)];
         if (typeof f !== "function") throw new Error("closure_call: 非函数值");

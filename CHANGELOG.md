@@ -4,6 +4,17 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### `arguments` 对象（2026-10-17，第五次尝试成功）
+- 症状：`function g() { return arguments.length + ":" + arguments[0]; } … g(9, 8)` → 编译期 loud（`arguments` 未实现）。
+- 实现（全局 scratch 通道，避免改 ABI 局部索引）：
+  1. `usesArguments(node)` 静态检测（箭头继承外层；嵌套 `function`/方法有自己的绑定 → 不下探）；顶层函数记入 `_fnArgs`，闭包在 `_emitLambdaBody` 记 `lam._qzNeedsArgs` → `lamMeta.needsArgs`。
+  2. 新全局 `__args`（排在模块全局之后）作通道 + 导出 `qzs_setargs(i64)`（宿主/发射器写入）。
+  3. `emitFunc`/`_emitLambdaBody`：末尾（env 之前）插 i64 本地，入口 `globalGet(__args) → localSet` 并 `varMap.set("arguments", …)`；`arguments` 标识符解析该本地。
+  4. 写入点：**宿主 API `closure_call`**（wasm 直接调用该层，内部 `closureCall` 未必进入）按句柄 funcidx 查 `lamMeta.needsArgs` 后 `qzs_setargs(arrWriteback(全量实参))`（synthThis 时剔除 receiver）；顶层函数直调点由发射器写全局。
+- 关键调试结论：机制本身可用（手动 `qzs_setargs([7,8])` 后结果正确）；写入钩子必须挂在**API `closure_call` 层**（内部 `closureCall` 未被进入）。
+- 验证：`g(9,8)` → `2:9`；corpus3 38→39/39（该批全绿）。
+- 结果：**815/820（99.4%）**（36 批）；ctest 32/32 零回归。
+
 ### `finally` 重复执行（2026-10-17）
 - 症状：`try { return X } finally { throw Y }` → `finally` **执行两次**（日志 `t,f1,f1,c`）。
 - 真因：`return` 触发 `_emitPendingFinally` 跑一次 finally；finally 内抛错置 `__err` 并经 `br` 跳到**该 try 的 `$err` 块**（throw 发射时的动态 try 范围仍含本 try）→ 落回 `emitTry` **正常路径** finally → 第二次。
