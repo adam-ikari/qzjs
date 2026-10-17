@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T05:40:35"
+updated: "2026-10-17T05:46:56"
 ---
 
 <!-- compiled_truth -->
@@ -456,4 +456,9 @@ updated: "2026-10-17T05:40:35"
 - time: 2026-10-17T05:40:35
   kind: evidence
   summary: "可迭代对象解构修复（静默 undefined→正确）：707/731（96.7%），corpus30 +1"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T05:46:56
+  kind: evidence
+  summary: "副作用接收者属性赋值放宽：708/731（96.9%），corpus30 16→17/20"
   affects: [aot-wasm-tagged-backend]
