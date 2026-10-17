@@ -360,7 +360,11 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 - 建议实现：在 `collectClasses` 阶段就把「可捕获名」定死（用与 `_emitClassValue` 完全相同的谓词，但把 `_isCapturable` 换成「非内建/非类名/非模块全局/非 fnNames」这一保守近似），并把结果同时用于两处 —— 避免两处各自过滤导致条件不一致。
 - 另：`render()` 内含嵌套箭头 `(t) => …`，`_probeCaptured` 非空时的混合场景应保持**保守**（不启用类 env），以免与既有 env 机制冲突。
 
-## 【重要】模块级闭包调用在 start 段崩溃（先于类捕获特性存在的缺陷，2026-10-17 发现）
+## ✅ 已修复（2026-10-17）：模块级闭包调用在 start 段崩
+
+修法采用**最简版本**：发射器去掉 `setStart`（`__module_init` 保持普通导出）+ 宿主新增 `tryRunModuleInit()` 并在最后一次 bind（`bindClasses`）内触发（幂等）。早期尝试的两条弯路（wasm 全局 `__moddone` + 导出函数序言懒触发）因采集趟 `call` 不可解析、`declareFunc` 槽位重复等问题放弃——宿主触发无需触碰发射器控制流。
+
+（以下为历史分析）## 【重要】模块级闭包调用在 start 段崩溃（先于类捕获特性存在的缺陷，2026-10-17 发现）
 
 **最小复现**（与本轮特性无关，今天仍然如此）：
 ```

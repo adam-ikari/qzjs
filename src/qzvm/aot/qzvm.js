@@ -343,6 +343,13 @@ function makeQzvm(strings, opts) {
   // 跨函数 throw 的宿主侧出口：调用导出后若 __err≠0 → 取出并抛出，模拟 JS 异常
   // 宿主侧抛出：设 __err（经导出的 __set_err），产物内调用点检查后转入其 catch（JS 可捕获）
   const throwValue = (v) => { if (exportsRef && exportsRef.__set_err) exportsRef.__set_err(bitsOf(v)); };
+  let _modInitDone = false;
+  const tryRunModuleInit = () => {                      // 模块初始化：宿主各 bind 完成后调用一次（幂等）
+    if (_modInitDone) return;
+    _modInitDone = true;
+    const f = exportsRef && exportsRef.__module_init;
+    if (typeof f === "function") { try { f(); } catch (err) { throwValue(err); } }
+  };
   const takeErr = () => {
     if (!exportsRef || !exportsRef.__err) return;
     const v = exportsRef.__err.value;
@@ -2003,7 +2010,7 @@ function makeQzvm(strings, opts) {
       dv.setInt32(off, want, true);
       return numToBits(want);
     },
-    bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; },
+    bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; tryRunModuleInit(); },   // 最后一次 bind → 触发模块初始化
     bindFields,
     bindBump,
     // 供宿主检查用（不在 wasm import 面）

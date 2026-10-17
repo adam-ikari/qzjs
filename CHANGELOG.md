@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 模块初始化移出 start 段（2026-10-17，重大修复）
+- **根因**：`emitter.js` 用 `m.setStart("__module_init")` 把模块初始化放进 **start 段**，而 start 段在 `WebAssembly.instantiate` 时执行——此时宿主尚未 `bindMem`。于是**任何模块级闭包/值调用**（`const y = f(2)`、`const x = makeThing()`、mixin 工厂调用）都会在 `qz.closure_call` 读闭包头（`new DataView(mem.buffer)…`）时崩 `Cannot read properties of null (reading buffer)`。
+- **修复（两处，极简）**：
+  - 发射器：**去掉 `setStart`**，`__module_init` 保持普通导出（原样）。
+  - 宿主：新增 `tryRunModuleInit()`（幂等一次），在**最后一次 bind**（`bindClasses`，两个 harness 均最后调用）内触发；未绑定的错误经 `throwValue` 转成产物侧异常。
+- **连带收益**：类捕获特性对**模块级 mixin**（`const Mid = withVersion("1.0")(Root)`）的限制同时解除。
+- 验证：`const f = (x) => x+1; const y = f(2)` = 3；`withVersion("1.0")` 模块级 mixin = `r,1.0`。
+- 结果：**711/731（97.3%）**；corpus22 17→18/19、corpus30 18→19/20；31 批 + ctest 32/32 零回归。
+
 ### 类表达式方法捕获外围变量（2026-10-17，第六轮落地）
 - **能力**：`const withV = (v) => class { v() { return v; } }`、`(v) => (Base) => class extends Base { version() { return v; } }` 等方法内自由变量可直接读取（此前 loud「未定义捕获变量」）。
 - **实现（零新 import）**：`collectClasses` 一次性算出 `c.captured`（`_capturesOf(methodNode)`，排除内建/类名/`fnNames`/字面量 **以及嵌套函数形参**）；`_emitClassValue` 在创建点**总是**建 env（`env_new(-1)` + 逐名 `env_def(envIdx, strId(name), 值)`）并 `static_set(cname, "@@qzEnv", env)`；`_mEnter` 在唯一锚点把 `c.captured` 并入 `capNames`，无嵌套 lambda 捕获时 `envLocal = static_get(cname, "@@qzEnv")`（`i32WrapI64`），`capMap` 随之映射，方法体自由变量经既有 `_emitCapturedRead`(`env_get`) 读取。

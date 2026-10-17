@@ -2782,7 +2782,9 @@ function compileTS(input, outWasm, opts = {}) {
         }
         em.emitLambdaBodies();                                // __module_init 体内惰性登记的闭包
         for (const meta of em._lamById.values()) m.exportFn(meta.fname, meta.fname);
-        if (modStmts.length && anyTagged) m.setStart("__module_init");
+        // 模块初始化**不再**放入 start 段：start 段执行时宿主 mem/导出/类元尚未绑定，
+        // 任何模块级闭包调用（如 `const y = f(2)`）都会因 closure_call 读闭包头而崩。
+        // 保持 __module_init 为普通导出，由宿主在各 bind 完成后调用（qzvm.js: tryRunModuleInit）。
         return em;
     };
 
