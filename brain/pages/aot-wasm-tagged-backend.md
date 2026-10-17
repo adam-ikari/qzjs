@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T03:33:50"
+updated: "2026-10-17T03:43:46"
 ---
 
 <!-- compiled_truth -->
@@ -396,4 +396,9 @@ updated: "2026-10-17T03:33:50"
 - time: 2026-10-17T03:33:50
   kind: evidence
   summary: "数组自定义字符串键属性修复（arrMeta 旁表）——消除最后一项已知 silent 错值；654/673（97.2%），残余全 loud/窄面"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T03:43:46
+  kind: evidence
+  summary: "类名作值 + 静态 super 调用：657/673（97.6%），+3 例（corpus23/27/28）"
   affects: [aot-wasm-tagged-backend]
