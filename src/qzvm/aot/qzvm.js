@@ -549,6 +549,7 @@ function makeQzvm(strings, opts) {
   // array→0x7FFB、null/undefined→固定槽、其它→0x7FF9 句柄。
   const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
                    : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
+                   : r === Array.prototype ? tagHandle(r)   // Array.isArray(Array.prototype) === true → 不能当普通数组写回（否则原型变成 wasm 数组句柄，Object.getPrototypeOf([]) !== Array.prototype）
                    : Array.isArray(r) ? (arrOf.has(r) ? arrOf.get(r)                        // wasm 数组回程 → 原句柄（别名语义）
                      : (() => { const curB = bumpRef ? Number(bumpRef.value) : -1;
                                 const e0 = arrOfHost.get(r);

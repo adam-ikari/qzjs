@@ -719,7 +719,7 @@ class Emitter {
         M.localGet(t.a); M.i32Load(2, 4); M.i32Const(foff + 8); M.i32GeU();
         M.i32And();
         M.ifBlock("i64");
-        if (this.usesDynAcc) { M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get"); }   // 访问器表（运行时 defineProperty）
+        if (this.usesDynAcc || this.usesProto) { M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get"); }   // usesProto：需原型链回落   // 访问器表（运行时 defineProperty）
         else { M.localGet(t.a); M.i64Load(3, foff); }
         M.else_();
         // 未赋值/越界/undefined|null：交宿主（POJO 未赋值 → undefined；undefined/null → TypeError）
@@ -2521,6 +2521,7 @@ function compileTS(input, outWasm, opts = {}) {
     const preNames = [];
     let usesFreeze = false;
     let usesDynAcc = false;            // 程序内出现 Object.defineProperty → POJO/实例属性读改写走宿主（可能定义了访问器）
+    let usesProto = false;             // 程序内出现 __proto__ 字面量键 或 setPrototypeOf → POJO/实例属性读须回落真实原型链
     let usesKeyOrder = false;          // 程序是否观察对象键序（Object.keys/for-in/JSON/spread）→ 需要插入序跟踪                  // 程序内是否出现 freeze/seal/preventExtensions（写保护检查只在需要时发射）
     {
         const seenN = new Set(), push = (t) => { if (t !== undefined && t !== null && !seenN.has(t)) { seenN.add(t); preNames.push(t); } };
@@ -2533,6 +2534,9 @@ function compileTS(input, outWasm, opts = {}) {
                 && n.expression.expression.text === "Object" && /^(defineProperty|defineProperties)$/.test(n.expression.name.text)) usesDynAcc = true;
             if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
                 && n.expression.expression.text === "Object" && /^(freeze|seal|preventExtensions)$/.test(n.expression.name.text)) usesFreeze = true;
+            if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
+                && /^(Object|Reflect)$/.test(n.expression.expression.text) && n.expression.name.text === "setPrototypeOf") usesProto = true;
+            if ((ts.isPropertyAssignment(n) || ts.isShorthandPropertyAssignment(n)) && n.name && ts.isIdentifier(n.name) && n.name.text === "__proto__") usesProto = true;
             if (ts.isPropertyAccessExpression(n)) push(n.name.text);
             else if (ts.isPropertyAssignment(n) || ts.isPropertyDeclaration(n)) push(n.name.text);
             else if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)) push(n.name.text);
@@ -2794,6 +2798,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.clsExprMap = clsExprMap;      // 类表达式节点 → 合成类名（声明处跳过初值求值）
         em.usesKeyOrder = usesKeyOrder;
         em.usesDynAcc = usesDynAcc;
+        em.usesProto = usesProto;
         em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
         em.modConstLit = modConstLit;    // 模块级字面量 const（计算属性名折叠用）
         em.protNameId = (n) => em._strId(n);

@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### POJO 原型链（`__proto__` 字面量 / `setPrototypeOf`）+ `Array.prototype` 句柄（2026-10-17）
+- 症状：`Reflect.getPrototypeOf([]) === Array.prototype` 恒 false；`Reflect.setPrototypeOf(o, {y:2}); o.y` 读不到继承的数据属性。
+- 三处修复（corpus28 20→21/21）：
+  1. **`ret()` 特判 `Array.prototype`**：`Array.isArray(Array.prototype) === true`（ES 规范如此）→ 此前走 `arrWriteback` 把它变成 wasm 数组句柄 → 与 `builtin_member("Array.prototype")` 得到的宿主句柄不相等。
+  2. **发射器新增 `usesProto` 检测**（`__proto__` 字面量键 / `Object|Reflect.setPrototypeOf`）：命中时 POJO/实例属性读改走宿主 `qz.prop_get`（与 `usesDynAcc` 同路径），从而具备原型链回落。
+  3. 宿主 `prop_get` 对 POJO/实例本就以「物化对象取属性」收尾（含原型链），无需额外改动。
+- 验证：`Reflect.getPrototypeOf([]) === Array.prototype`=1；`Reflect.setPrototypeOf(o,{y:2})`=`true`、`o.y`=`2`、`getPrototypeOf(o) !== Object.prototype`=1。
+- 结果：**777/786（98.9%）**；ctest 32/32 零回归。
+
 ### 第三十四批语料 + 展开实参调动态方法（2026-10-17）
 - 新增 `audit_corpus34.js`（18 例）：强制转换（Symbol.toPrimitive/valueOf/toString）、数值格式化、数组进阶（splice/fill/copyWithin/at/findLast）、RegExp 状态与 lastIndex、Map/Set 迭代中修改、getter 抛错传播、稀疏数组、Object.is/getOwnPropertyDescriptors、类访问器继承 + super 访问器、delete/void/逗号、标签模板与 raw、for-in 键序（含原型链/数组）、String 构建、嵌套闭包状态、类静态块顺序、try/finally 顺序、对象展开深拷贝。**首跑即 17/18 → 18/18**。
 - 新修 2 项：
