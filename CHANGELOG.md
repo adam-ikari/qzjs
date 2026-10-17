@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类表达式作值 + 动态 new（2026-10-17）
+- **类表达式作值**（此前 loud「不支持的表达式: ClassExpression」）：`emitTaggedExpr` 新增 ClassExpression 分支 → 经 `clsExprMap` 取合成类名 → `qz.class_value(id)`；`const C = class {...}; typeof C` 得 `function`。
+- **动态 new**（此前 loud「new 未知类: A」）：`new X()` 当 X 非编译期已知类但可解析为局部/捕获/模块全局/属性访问时 → 求值出**类对象**（类表达式工厂 `const A = makeClass(); new A()`）→ `qz.new_dynamic(classObj, a0..a3)`（宿主按 `__qzClsId` → `buildInstance`）。参数序 `obj, a0..a3`（obj 先求值入槽）。
+- **已知限制**：类表达式**方法体捕获外围局部变量**（`const make = (label) => class { get label() { return label; } }`）→ loud「未定义捕获变量: label」（类方法未接外围 env）。`instanceof <动态类>` 亦未支持（loud）。
+- 结果：**672/693（96.9%）**（本批未改变语料计数，属能力扩展；无捕获的类表达式工厂 + 动态 new 已通）。ctest 32/32。
+
 ### 类原型方法挂载与提取语义（2026-10-17）
 - **`C.prototype.m`**（此前 undefined，`Object.getOwnPropertyNames(C.prototype)` 漏报）：`class_value` 构造类对象时把**实例方法**（含 `>4` 形参的 4 槽 ABI）与**访问器**（get/set → `__m_<C>$<name>` / `$set`）挂到 prototype 对象上；方法体内 `this` 经 `bitsOf(this)` 还原为 wasm 句柄。
 - **实例物化对象的原型**指向类 prototype（`Object.getPrototypeOf(new C()) === C.prototype`，此前为 `Object.prototype`）。

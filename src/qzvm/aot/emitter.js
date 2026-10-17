@@ -118,6 +118,7 @@ const QZ = {
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   class_value: { params: ["i32"], results: ["i64"] },                  // 类名作值：clsId → 宿主构造器对象句柄
+  new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
   statics_ready: { params: ["i32"], results: ["i32"] },        // 类静态字段：是否已初始化
   statics_has: { params: ["i32", "i32"], results: ["i32"] },     // 该类是否有该静态（运行时父链查找）
@@ -3529,6 +3530,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this._emitCapturedRead(e.text); return;
     }
+    if (ts.isClassExpression(e)) {                       // 类表达式作值 → 宿主构造器对象句柄（class_value）
+        const synth = this.clsExprMap && this.clsExprMap.get(e);
+        const cnC = synth && this.classes.get(synth);
+        if (cnC) { this.m.i32Const(cnC.id); this.m.call("qz.class_value"); return; }
+        throw new Error("[tagged] 类表达式作值未实现");
+    }
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) { this._emitLambdaNew(e); return; }
     if (ts.isParenthesizedExpression(e)) { this.emitTaggedExpr(e.expression); return; }
     // 纯类型层构造（运行时恒等，TS 会在 emit 前擦除）→ 直接透传：
@@ -4756,6 +4763,22 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.builtin（构造语义）；未登记者报错
     if (!this.classes.has(cname)) {
         if (EMITTER_BUILTIN_CTORS.has(tgt.text)) { this._emitBuiltinCall(tgt.text, e.arguments); return; }
+        {   // 动态类值（类表达式工厂 / 变量持有类）：运行时取类对象 → 宿主按 __qzClsId 建实例
+            const resolvable = this._local(tgt.text) !== undefined || this.capMap.has(tgt.text)
+                || (this.moduleGlobals && this.moduleGlobals.has(tgt.text))
+                || (ts.isPropertyAccessExpression(e.expression));
+            if (resolvable) {
+                const M2 = this.m, tg2 = this._expEnter();
+                this.emitTaggedExpr(tgt); M2.localSet(tg2.w);        // 类对象 → 槽（先求值，避免嵌套副作用）
+                M2.localGet(tg2.w);                                  // 参数序：obj, a0..a3
+                for (let i = 0; i < 4; i++) {
+                    if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+                }
+                M2.call("qz.new_dynamic");
+                this._expLeave();
+                return;
+            }
+        }
         throw new Error(BUILTIN_GLOBALS.has(tgt.text)
             ? `[tagged] 内建类 ${tgt.text} 未实现（支持 Error 族/Map/Set/Date/Array/RegExp）`
             : "[tagged] new 未知类: " + tgt.text);
