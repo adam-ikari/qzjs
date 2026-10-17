@@ -344,3 +344,14 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 - 再加 `!this._inModInit` 守卫后，**函数级**捕获又返回 `undefined` → 说明 `__clsExpr_` / `_inModInit` 两处全局收窄与「函数级创建点」的实际情形不一致。
 
 **下次路径**：只保留上述「可工作组合」三件，**不要**做 `__clsExpr_`/`_inModInit` 全局收窄；单独插桩 `mixed-realistic-program`（打印该类 `captured` 与 `_mEnter` 侧 `capNames`）定位其真实成因；模块级 mixin 的 start 段问题单独处理（延后类 env 构建到 mem 绑定之后，或 start 段只存非字符串捕获）。
+
+### 第五轮补充（2026-10-17，已回退）：`_mEnter` 分支必须与 `_emitClassValue` 的过滤条件**同构**
+
+复现（重落地「可工作组合」后）：`class TaskList { … add(){ const t = new Task(TaskList.nextId++); … } render(){ return this.items.map((t) => t.toString())… } }`
+→ `Cannot set properties of undefined (setting 't')`。
+
+要点：
+- `TaskList` 的 `captured` 只含**类名**（`Task`/`TaskList`）→ `_emitClassValue` 的 `names` 过滤后为空 → **未存类 env**；而 `_mEnter` 侧若仅按 `probeLenC === 0 && clsC.length` 判断，就会走 `static_get(name,"@@qzEnv")` 拿到 TAG → `i32WrapI64` 得到一个**非法 handles 索引** → 后续 `env_set(envIdx, "t", …)` 写到 `undefined` 上 → 即上述报错（`t` 是 `add()` 的局部名）。
+- 因此重落地时必须保证**同一条件**：只有「`_emitClassValue` 确实存了 env（其 `names` 过滤后非空）」的类，`_mEnter` 才允许用 `static_get` 取 env；否则应回退到 `env_new(-1)` 或保持不映射（loud）。
+- 建议实现：在 `collectClasses` 阶段就把「可捕获名」定死（用与 `_emitClassValue` 完全相同的谓词，但把 `_isCapturable` 换成「非内建/非类名/非模块全局/非 fnNames」这一保守近似），并把结果同时用于两处 —— 避免两处各自过滤导致条件不一致。
+- 另：`render()` 内含嵌套箭头 `(t) => …`，`_probeCaptured` 非空时的混合场景应保持**保守**（不启用类 env），以免与既有 env 机制冲突。
