@@ -501,6 +501,42 @@ function makeQzvm(strings, opts) {
     return !(u >> 48n === TAG_HI && (u & 0xffff_ffffn) <= 1n);
   };
   // 数组迭代器（values/keys/entries）：惰性读 wasm 内存 → 迭代期间的 push/length 变化可见（JS 迭代的是活数组）
+  // —— 类名作值：clsId → 缓存 JS 构造器（prototype 链 + 静态方法（含 @@hasInstance））——
+  const classObjs = new Map();             // clsId → JS 构造器对象
+  const classHandles = new Map();          // clsId → 宿主句柄（缓存 → === 同一）
+  const classObjImpl = (clsId) => {
+    let o = classObjs.get(clsId);
+    if (o) return o;
+    const meta = classMeta && classMeta[clsId];
+    if (!meta) return null;
+    const pc = meta.parent != null ? classObjImpl(meta.parent) : null;
+    const ctor = function () { throw new Error("类构造器：宿主侧不可直接调用（请用 new C(...)）"); };
+    Object.setPrototypeOf(ctor, pc || Function.prototype);
+    Object.defineProperty(ctor, "name", { value: meta.name || "C", configurable: true });
+    const proto = Object.create(pc ? pc.prototype : Object.prototype);
+    Object.defineProperty(proto, "constructor", { value: ctor, enumerable: false, writable: true, configurable: true });
+    ctor.prototype = proto;
+    if (classHandles.size >= 0) for (const nm of Object.keys(meta.staticMethods || {})) {
+      const sm = meta.staticMethods[nm];
+      if (!sm || !exportsRef || typeof exportsRef[sm.name] !== "function") continue;
+      try {
+        Object.defineProperty(ctor, nm === "@@hasInstance" ? Symbol.hasInstance : nm, {
+          value: (...as) => toJS(exportsRef[sm.name](TAG, ...as.slice(0, 4).map(bitsOf), TAG)),
+          writable: true, configurable: true, enumerable: false });
+      } catch (_) {}
+    }
+    classObjs.set(clsId, ctor);
+    return ctor;
+  };
+  const classValueImpl = (clsId) => {
+    let h = classHandles.get(clsId);
+    if (h !== undefined) return h;
+    const c = classObjImpl(clsId);
+    if (!c) return TAG;
+    h = ret(c);
+    classHandles.set(clsId, h);
+    return h;
+  };
   const liveIter = (recv, kind) => {
     let i = 0;
     const it = {
@@ -785,6 +821,7 @@ function makeQzvm(strings, opts) {
     is_nullish: (a) => { const u = BigInt.asUintN(64, a); if ((u >> 48n) !== TAG_HI) return 0; const idx = Number(u & MASK32); return (idx === 0 || idx === 1) ? 1 : 0; },
     // instanceof：obj 须为类实例句柄（专用 tag 0x7FFE|off，[off]=clsId）；沿「实例类 → 父链」查目标 clsId。
     // 非实例（数字/字符串/bool/null/数组/POJO/宿主对象）→ false。需 bindClasses 提供 classMeta。
+    class_value: (clsId) => classValueImpl(clsId),
     instanceof_op: (obj, clsId) => {
       // Symbol.hasInstance 优先（JS [[HasInstance]] 语义）：沿类继承链查 static @@hasInstance → 调 wasm 静态方法
       {
@@ -901,6 +938,10 @@ function makeQzvm(strings, opts) {
           }
         }
         return TAG;
+      }
+      if (hi === INST_HI && name === "constructor") {        // 实例 .constructor → 类对象（JS 语义）
+        const cid = mem ? new DataView(mem.buffer).getInt32(off, true) : -1;
+        return (cid >= 0 && classMeta && classMeta[cid]) ? classValueImpl(cid) : TAG;
       }
       if (hi === HOST_HI) {
         const o = handles[off], hv = o == null ? undefined : o[name];

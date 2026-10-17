@@ -117,6 +117,7 @@ const QZ = {
   builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // nameId, n, a0..a3, ovf（实参 3..）
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
+  class_value: { params: ["i32"], results: ["i64"] },                  // 类名作值：clsId → 宿主构造器对象句柄
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
   statics_ready: { params: ["i32"], results: ["i32"] },        // 类静态字段：是否已初始化
   statics_has: { params: ["i32", "i32"], results: ["i32"] },     // 该类是否有该静态（运行时父链查找）
@@ -624,6 +625,15 @@ class Emitter {
     _emitPropReadFromLocal(base, name) {
         const M = this.m;
         if (name === "stack") { M.localGet(base); M.call("qz.err_stack"); return; }   // Error 族 .stack → 宿主合成
+        if (name === "constructor") {                    // 实例 .constructor → 类对象（JS 语义）；非实例退回宿主 prop_get
+            M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
+            M.ifBlock("i64");
+            M.localGet(base); M.i32WrapI64(); M.i32Load(2, 0); M.call("qz.class_value");   // 实例内存[0] = __cls
+            M.else_();
+            M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
+            M.end();
+            return;
+        }
         if (this._hasAccessor(name, "get") || this._hasMethodName(name)
             || /^(hasOwnProperty|isPrototypeOf|propertyIsEnumerable|toLocaleString|valueOf)$/.test(name)) {   // 含 Object.prototype 方法
 
@@ -2758,7 +2768,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
 
-        return { id: c.id, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters, staticMethods };
+        return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters, staticMethods };
     });
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs };
 }
@@ -3502,7 +3512,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         // 数值全局常量（无需 import）：NaN/Infinity
         if (e.text === "NaN") { this.m.i64ConstBits(...f64Bits(NaN)); return; }
         if (e.text === "Infinity") { this.m.i64ConstBits(...f64Bits(Infinity)); return; }
-        if (this.classes.has(this._className(e.text))) throw new Error("[tagged] 类名作值未实现（仅支持 new C(...) / c instanceof C / C.m() / C.x；见 ASSESSMENT 限制）");
+        {   // 类名作值 → 宿主构造器对象句柄（prototype 链/静态方法）；new C(...) 仍走专用路径
+            const cnV = this._className(e.text);
+            const cV = cnV && this.classes.get(cnV);
+            if (cV) { this.m.i32Const(cV.id); this.m.call("qz.class_value"); return; }
+        }
         this._emitCapturedRead(e.text); return;
     }
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) { this._emitLambdaNew(e); return; }
@@ -3843,6 +3857,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.call(staticMethName(got.cname, got.acc.name));
             return;
         }
+        if (e.name.text === "prototype") {                     // C.prototype → 类对象上的 prototype（JS 语义）
+            this.m.i32Const(this.classes.get(cn).id); this.m.call("qz.class_value");
+            this.m.i32Const(this._strId("prototype")); this.m.call("qz.prop_get");
+            return;
+        }
         // 静态字段可继承/可被派生类遮蔽：先初始化父链各层，再**运行时**从当前类向上找持有者
         const chain = [];
         for (let x = cn; x; x = this.classes.get(x).parent) chain.push(x);
@@ -3970,9 +3989,23 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         && ts.isSuperKeyword(e.expression.expression)) {
         const owner = this._curClassObj && this._curClassObj.parent;
         const method = e.expression.name.text;
-        let c = owner;
-        while (c && !(this.classes.get(c).methods || []).some(m => m.name === method)) c = this.classes.get(c).parent;
+        let c = owner, isStaticM = false;
+        while (c) {                                          // 父链上查实例方法，其次静态方法（static super.m()）
+            const cl = this.classes.get(c);
+            if ((cl.methods || []).some(m => m.name === method)) { isStaticM = false; break; }
+            if ((cl.staticMethods || []).some(m => m.name === method)) { isStaticM = true; break; }
+            c = cl.parent;
+        }
         if (!c) throw new Error(`[tagged] super.${method}() 在父类链上未定义`);
+        if (isStaticM) {                                     // 静态父方法：self 占位（静态方法不使用 this）
+            this._emitStaticsGuard(c);
+            this._emitUndefined();
+            for (let i = 0; i < 4; i++) {
+                if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+            }
+            this.m.call(staticMethName(c, method));
+            return;
+        }
         this.m.localGet(0);                                  // self = this
         for (let i = 0; i < 4; i++) {
             if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();

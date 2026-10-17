@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类名作值 + 静态 super 调用（2026-10-17）
+- **类名作值**（此前 loud「类名作值未实现」）：新增宿主 `qz.class_value(clsId)` —— 惰性构造并**缓存** JS 构造器对象（clsId 键，保证 `===` 同一）；`Object.setPrototypeOf(ctor, 父类对象)` 复刻静态继承链；`ctor.prototype = Object.create(父类.prototype)` + `constructor` 非枚举属性（复刻实例原型链）；静态方法（含 `@@hasInstance` → 挂真 `Symbol.hasInstance`）与 `name` 一并挂载；`classMeta` 补 `name` 字段。
+- **`C.prototype`**：静态成员访问路径新增 `prototype` 分流 → `class_value(C)` 后宿主取 `prototype`（此前按静态字段查 → undefined）。
+- **实例 `.constructor`**：属性读新增 tag 守卫分支（0x7FFE 实例 → 类对象；否则退回宿主 `prop_get`），JS 语义 `new B().constructor === B`。
+- **静态 `super.m()`**：`super` 调用解析此前只查实例方法表（父类仅有静态方法 → loud「在父类链上未定义」）→ 改为先查实例方法、再查 `staticMethods`，命中静态则 `_emitStaticsGuard` + self 占位直调 `__sm_<Owner>$<m>`。
+- 结果：**657/673（97.6%）**；corpus23 19→20/20、corpus27 17→18/21、corpus28 18→19/21。ctest 32/32。
+- 已知窄面：内建类作值（`"x".constructor === String`）未支持（仅用户类）。
+
 ### 数组自定义字符串键属性（最后一项 silent 错值修复，2026-10-17）
 - **根因**：`a["k0"] = v`（wasm 数组 + 非数字键）在 `setIndexImpl` 落到兜底 `toJS(o)[toJS(k)] = v`——写的是**物化副本**，原件丢失；`a.k0` 亦读不到；`Object.keys` 漏报。
 - **修复**（复用既有 `arrMeta` 旁表，与正则 `exec`/`match` 的 `index`/`input` 读取路径一致）：
