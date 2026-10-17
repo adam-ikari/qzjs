@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 模块全局在闭包内按调用时读取（修复自递归/互递归箭头 const，2026-10-17）
+- **根因**：模块级 `const f = (n) => … f(n-1) …` 的闭包把 `f` 按**创建时值**捕获（`f` 此时未赋值 → undefined）→ 运行时 `closure_call` 拿到 undefined 句柄 → `未知 funcidx 0`。
+- **修复**：`_capturesOf` 排除**模块级全局**（`moduleGlobals`）→ 闭包体内对 `f` 的引用改走 `_emitCapturedRead` 的全局分支（`globalGet`）→ 调用时读取 → 自递归/互递归箭头 const 正确。
+- 结果：**671/693（96.8%）**；corpus29 12→13/20。ctest 32/32。
+- 已知窄面：箭头 const 深递归经 `closure_call` 走宿主 JS 栈 → `sumTo(500)`/`depth(200)` 触发「Maximum call stack size exceeded」（`function` 声明版走 wasm 直递归 → 正常）。
+
 ### 第二十九批差分审计（2026-10-17）
 - 新增 `audit_corpus29.js`（20 例：类值/原型链深化、闭包捕获 this、高阶函数与互递归、sort 稳定性、浮点累加、Object.prototype.toString 与 Symbol.toStringTag、String.raw、Array.from 与迭代器、原型 getter/setter 继承、delete 语义、JSON toJSON、递归深度、trampoline/柯里化、对象字面量 super、类表达式名、私有静态 + static 块、原型方法提取、模板字符串进阶、位运算边界、端到端真实程序）。
 - **修复（静默错值）**：类自定义 `toString`/`toLocaleString`/`valueOf` 此前被 `method_call` 的 Object.prototype 默认快捷分支遮蔽（类方法从不执行，返回 `[object Object]`）→ 先沿类原型链查自有方法，命中则直接派发 wasm 方法。

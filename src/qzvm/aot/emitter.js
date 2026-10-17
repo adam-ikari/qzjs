@@ -406,6 +406,7 @@ class Emitter {
                 if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
                 const name = n.text;
                 if (!local.has(name) && !seen.has(name) && !this.fnNames.has(name)
+                    && !(this.moduleGlobals && this.moduleGlobals.has(name))   // 模块级全局：闭包内改为调用时读全局（否则按创建时值捕获 → 自递归箭头 const 拿到 undefined）
                     && !/^(undefined|null|NaN|Infinity)$/.test(name)) { seen.add(name); out.push(name); }
                 return;
             }
