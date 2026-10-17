@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T05:06:39"
+updated: "2026-10-17T05:14:34"
 ---
 
 <!-- compiled_truth -->
@@ -436,4 +436,9 @@ updated: "2026-10-17T05:06:39"
 - time: 2026-10-17T05:06:39
   kind: evidence
   summary: "第三十一批：703/731（96.2%）；新发现真 silent——对象字面量计算属性名插入序排在静态键前"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T05:14:34
+  kind: evidence
+  summary: "计算属性名插入序静默错值修复：704/731（96.3%），corpus31 18/18"
   affects: [aot-wasm-tagged-backend]
