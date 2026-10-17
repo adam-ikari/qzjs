@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 函数 `toString` 剥离 TS 类型注解（2026-10-17）
+- 症状：`String(fn)` 返回含类型标注的 **TS 源文本**（`(x: any) => x instanceof Function`），而 oracle 是 tsc **转译后的 JS**（`(x) => x instanceof Function`）→ 窄面 diff。
+- 修：新增 `stripTsTypes(node, sf)` —— 遍历 AST 收集「参数/函数返回/属性/变量声明的类型节点」与「`as`/`<T>`/`satisfies` 断言」，在源码文本上按位置**降序删除**（类型节点的 `pos` 不含前导冒号 → 一并剥掉冒号与空白）。`lamMeta.src` 改用该函数。
+- 验证：`String((x: any) => x instanceof Function)` = `(x) => x instanceof Function`，corpus27 19→20/21。
+- 结果：**778/786（99.0%）**；ctest 32/32 零回归。
+
 ### POJO 原型链（`__proto__` 字面量 / `setPrototypeOf`）+ `Array.prototype` 句柄（2026-10-17）
 - 症状：`Reflect.getPrototypeOf([]) === Array.prototype` 恒 false；`Reflect.setPrototypeOf(o, {y:2}); o.y` 读不到继承的数据属性。
 - 三处修复（corpus28 20→21/21）：

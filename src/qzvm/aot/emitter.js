@@ -176,6 +176,30 @@ function registerQz(m, only) { for (const k of Object.keys(QZ)) { if (only && !o
 
 // 类方法/构造器在函数名中的编码（内部前缀，避免与用户函数名冲突）。
 const MTH_PREFIX = "__m_";
+// 函数源码文本（Function.prototype.toString 语义）：按 AST 剥离 TS 类型注解（参数/返回类型/类型断言），
+// 与 tsc 转译后的 JS 文本一致（oracle 即 tsc 转译后运行）。
+function stripTsTypes(node, sf) {
+    const removals = [];
+    const walk = (n) => {
+        if (n.type && (ts.isParameter(n) || ts.isFunctionLike(n) || ts.isPropertyDeclaration(n)
+            || ts.isVariableDeclaration(n) || ts.isPropertySignature(n))) {
+            let s1 = n.type.pos;                       // 类型节点 pos 不含前导冒号 → 一并剥掉（含空白）
+            const ft = sf.text;
+            while (s1 > 0 && (ft[s1 - 1] === ":" || ft[s1 - 1] === " " || ft[s1 - 1] === "\t")) s1--;
+            removals.push([s1, n.type.end]);
+        }
+        if ((ts.isAsExpression(n) || ts.isTypeAssertionExpression(n) || ts.isSatisfiesExpression(n)) && n.type) removals.push([n.expression.end, n.type.end]);
+        ts.forEachChild(n, walk);
+    };
+    walk(node);
+    const base = node.getStart(sf);
+    let txt = node.getText(sf);
+    for (const [s0, e0] of removals.sort((a, b) => b[0] - a[0])) {
+        const a1 = s0 - base, b1 = e0 - base;
+        if (a1 >= 0 && b1 <= txt.length && a1 < b1) txt = txt.slice(0, a1) + txt.slice(b1);
+    }
+    return txt;
+}
 function ctorName(cls) { return MTH_PREFIX + cls + "$ctor"; }
 // [Symbol.<name>] 计算属性名 → "@@name"；非 well-known Symbol → null（暂不支持）
 function symbolNameOf(expr) {
@@ -2901,7 +2925,7 @@ function compileTS(input, outWasm, opts = {}) {
     const lamMeta = {};
     for (const [lamNode, meta] of em._lamById.entries()) {
         let src = null;
-        try { const sf0 = lamNode.getSourceFile && lamNode.getSourceFile(); if (sf0) src = lamNode.getText(sf0); } catch (_) {}
+        try { const sf0 = lamNode.getSourceFile && lamNode.getSourceFile(); if (sf0) src = stripTsTypes(lamNode, sf0); } catch (_) {}
         lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis, src };
     }
     // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
