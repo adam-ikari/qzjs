@@ -525,6 +525,26 @@ function makeQzvm(strings, opts) {
   // 数组迭代器（values/keys/entries）：惰性读 wasm 内存 → 迭代期间的 push/length 变化可见（JS 迭代的是活数组）
   // —— 类名作值：clsId → 缓存 JS 构造器（prototype 链 + 静态方法（含 @@hasInstance））——
   const classObjs = new Map();             // clsId → JS 构造器对象
+  const instanceById = (obj, clsId) => {     // 原型链判定（@@hasInstance 优先，含运行时父链）→ tagged bool
+    let cc = classMeta && classMeta[clsId];
+    while (cc) {
+      const sm = cc.staticMethods && cc.staticMethods["@@hasInstance"];
+      if (sm && exportsRef) { const fn0 = exportsRef[sm.name];
+        if (typeof fn0 === "function") return boxBool(!!toJS(fn0(TAG, obj, TAG, TAG, TAG))); }
+      cc = chainNext(cc);
+    }
+    const u = BigInt.asUintN(64, obj);
+    if ((u >> 48n) !== INST_HI) return boxBool(false);
+    const off = Number(u & MASK32);
+    if (!mem || off + 4 > mem.buffer.byteLength) return boxBool(false);
+    let c = new DataView(mem.buffer).getInt32(off, true);
+    while (c !== null && c !== undefined) {
+      if (c === clsId) return boxBool(true);
+      const m = classMeta && classMeta[c];
+      c = classRuntimeParent.has(c) ? classRuntimeParent.get(c) : (m ? m.parent : null);
+    }
+    return boxBool(false);
+  };
   const classHandles = new Map();          // clsId → 宿主句柄（缓存 → === 同一）
   const classRuntimeParent = new Map();    // clsId → 运行时父 clsId（动态 extends / mixin）
   const chainNext = (cc) => {              // 类链下一跳：优先运行时父（mixin），否则静态 parent
@@ -918,6 +938,36 @@ function makeQzvm(strings, opts) {
       return;
     },
     class_value: (clsId) => classValueImpl(clsId),
+    instanceof_dyn: (x, rhs) => {                // 动态右值 instanceof：用户类值 → 运行时父链；内建函数值 → 按名回退；否则 loud
+      const c = handles[idxOf(rhs)];
+      const cid = (c && typeof c === "function") ? c.__qzClsId : undefined;
+      if (cid !== undefined) return instanceById(x, cid);
+      const nm = (c && typeof c === "function" && c.name) ? c.name : null;
+      if (nm) {                                   // 内建函数值 → 按名判定（与 instanceof_builtin 同语义，内联以避免自引用）
+        const j = toJS(x);
+        const hi2 = BigInt.asUintN(64, x) >> 48n;
+        switch (nm) {
+          case "Array":    return boxBool(hi2 === 0x7ffbn || Array.isArray(j));
+          case "Object":   return boxBool(j !== null && (typeof j === "object" || typeof j === "function"));
+          case "Function": return boxBool(typeof j === "function");
+          case "String":   return boxBool(typeof j === "object" && j !== null && j instanceof String);
+          case "Number":   return boxBool(typeof j === "object" && j !== null && j instanceof Number);
+          case "Boolean":  return boxBool(typeof j === "object" && j !== null && j instanceof Boolean);
+          case "Map":      return boxBool(j instanceof Map);
+          case "Set":      return boxBool(j instanceof Set);
+          case "WeakMap":  return boxBool(j instanceof WeakMap);
+          case "WeakSet":  return boxBool(j instanceof WeakSet);
+          case "Promise":  return boxBool(j instanceof Promise);
+          case "RegExp":   return boxBool(j instanceof RegExp);
+          case "Date":     return boxBool(j instanceof Date);
+          default:
+            if (/^(Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError)$/.test(nm)) {
+              return boxBool(typeof globalThis[nm] === "function" && j instanceof globalThis[nm]);
+            }
+        }
+      }
+      throw new Error("instanceof: 右操作数不是类或内建类");
+    },
     instanceof_op: (obj, clsId) => {
       // Symbol.hasInstance 优先（JS [[HasInstance]] 语义）：沿类继承链查 static @@hasInstance → 调 wasm 静态方法
       {

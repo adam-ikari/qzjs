@@ -121,6 +121,7 @@ const QZ = {
   new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
   class_value_dyn: { params: ["i32", "i64"], results: ["i64"] },             // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
   super_ctor: { params: ["i32", "i64", "i64", "i64", "i64", "i64"], results: [] },   // 动态父构造转发：clsId + self + a0..a3
+  instanceof_dyn: { params: ["i64", "i64"], results: ["i64"] },                 // 运行时类值/内建值 instanceof：值 + 右值 → tagged bool
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
   statics_ready: { params: ["i32"], results: ["i32"] },        // 类静态字段：是否已初始化
   statics_has: { params: ["i32", "i32"], results: ["i32"] },     // 该类是否有该静态（运行时父链查找）
@@ -5002,6 +5003,22 @@ Emitter.prototype.emitTaggedBinary = function (e) {
             this.m.call("qz.instanceof_builtin");
             this.emitBoxBool();
             return;
+        }
+        {   // 动态右值（类表达式变量 / mixin 结果 / 内建值）：运行时宿主判定（用户类 → 运行时父链；内建 → 按名回退）
+            const dynR = !this.classes.has(this._className(right.text))   // 已知类名 → 静态路径（模块级类亦会登记为 moduleGlobals，勿误判）
+                && (ts.isPropertyAccessExpression(right)
+                    || ts.isCallExpression(right)
+                    || (ts.isIdentifier(right) && (this._local(right.text) !== undefined || this.capMap.has(right.text)
+                        || (this.moduleGlobals && this.moduleGlobals.get(right.text) !== undefined))));
+            if (dynR) {
+                const M2 = this.m, t2 = this._expEnter();
+                this.emitTaggedExpr(e.left); M2.localSet(t2.v);
+                this.emitTaggedExpr(right); M2.localSet(t2.w);
+                M2.localGet(t2.v); M2.localGet(t2.w);
+                M2.call("qz.instanceof_dyn");
+                this._expLeave();
+                return;
+            }
         }
         if (!ts.isIdentifier(right) || !this.classes.has(this._className(right.text))) {
             throw new Error(right && BUILTIN_GLOBALS.has(right.text)

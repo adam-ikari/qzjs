@@ -286,5 +286,5 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 - corpus22 `prototype-chain-call` → 新 loud「`new 未知类: Dog`」：说明该改动同时干扰了类名→静态 new 的解析路径（需一并核对 `classAlias`/`_className` 与绑定初值的关系）。
 其余 3 例（corpus11/15 已绿、corpus14/22 仍报 `instanceof: 右操作数不是类或内建类`）表明还有**第二类**类表达式值来源未物化（局部/别名场景）。
 
-结论：此项需**分两步**做——(1) 先把类对象物化从 start 段移出（惰性或延后），(2) 再启用动态 `instanceof`（判定 + 内建回退的补丁已在 `/tmp/qzaux/patch_dyninst3.js`、`patch_dyninst4.js` 成形，单测全对：`const T=Array; [] instanceof T`、`{} instanceof Object`、`new Final() instanceof Root/Final/A(Root)`、`const T=P; p instanceof T`）。三轮「直接启动态 instanceof」均因值未物化而回归，不要再重复该顺序。
+结论：此项需**分两步**做——(1) 先把类对象物化从 start 段移出（惰性或延后），(2) 再启用动态 `instanceof`（判定 + 内建回退的补丁已在 `/tmp/qzaux/patch_dyninst3.js`、`patch_dyninst4.js` 成形，单测全对：`const T=Array; [] instanceof T`、`{} instanceof Object`、`new Final() instanceof Root/Final/A(Root)`、`const T=P; p instanceof T`）。**已修复（2026-10-17）**：动态 instanceof 落地（`dynR` 需排除**已知类名**——模块级类亦登记为 moduleGlobals，先前四例回归即此因；宿主 `instanceById` + 内建按名回退 + loud 兜底）。mixin 语料用例的剩余阻塞另有其二：mixin 类**字段默认值**未应用（`x.inc()` → NaN）、类表达式方法**捕获外围变量**（`未定义捕获变量: v`）。
 

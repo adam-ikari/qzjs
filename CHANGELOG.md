@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 动态 instanceof（运行时类值 / 内建值）（2026-10-17，第三轮后成功）
+- **判定**：`instanceof` 右值为**非已知类名**且为属性访问/调用式/可解析标识符（局部/捕获/模块全局）时 → `qz.instanceof_dyn(左, 右)`；**关键修正**：`dynR` 须排除**已知类名**（模块级类亦登记为 moduleGlobals，先前误判为动态 → corpus11/14/15/22 四例回归）。
+- **宿主**：`instanceById(obj, clsId)`（抽出 `instanceof_op` 的 @@hasInstance 优先 + 原型链，含**运行时父链** `classRuntimeParent`）；`instanceof_dyn` = 用户类值（`__qzClsId`）→ 运行时链判定；内建函数值 → 按名回退（Array/Object/Function/String/Number/Boolean/Map/Set/WeakMap/WeakSet/Promise/RegExp/Date/Error 族）；两者皆非 → loud（不静默 false）。
+- 验证：`const T=Array; [] instanceof T` = true；`{} instanceof Object` = true；`"s" instanceof Object` = false；`const T=P; p instanceof T` = true；`new Final() instanceof Root/Final/A(Root)` = 1/1/1；mixin 结果 `y instanceof T` = true。
+- 结果：**708/731（96.9%）**（语料未变——mixin 语料用例另有阻塞：mixin 类字段默认值、类表达式方法捕获外围变量）；31 批 + ctest 32/32 **零回归**。
+
 ### 链式 mixin 全通（2026-10-17）
 - **根因**：`_emitStaticsGuard` 在类**无静态字段/块**时提前返回 → 声明式类（如 `class Final extends B2(A(Root)) {}`）的动态父链链接（写在 guard body 内）从未发射。
 - **修复**：guard 的提前返回条件放宽——`needsDynLink = !!_dynParentExpr(c)` 时即便无静态成员也发射 guard（body 内 `class_value_dyn` 幂等）。
