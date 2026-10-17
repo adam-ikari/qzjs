@@ -306,3 +306,10 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 
 范围提示：`_capturesOf` 现对类方法无用（方法不是 lambda）；需在 `collectClasses` 阶段对类表达式的方法体做一次自由变量扫描，据此给该 clsid 打 `hasCapture` 标记，其余路径不变。回归面 = 全语料 + ctest（class 用例众多）。
 
+**细化实现步骤（2026-10-17 二次勘察，未实施）**：
+1. `collectClasses`：对类（含类表达式）的每个方法用 `_capturesOf(methodNode)` 收集自由名（该方法对 `lam.parameters`/`lam.body` 通用），存 `c.captured`。
+2. `_emitClassValue(c)`（创建点，外围作用域仍活动）：若 `c.captured` 非空 → 构造 env：`env_new(parentIdx = this.envLocal ?? -1)` → 对每个**在此处可解析**的名字（`_isCapturable(name) || moduleGlobals.has(name)`）发 `env_def(env, strId(name), <值表达式>)` → 再 `qz.class_env_set(clsId, env)`。未解析到的名字不发（方法侧读到 TAG → 仍是 loud，安全）。
+3. `_mEnter`（类方法体）：若该 clsid 有 env → 追加一个 `$qzEnv` local；prologue 发 `i32Const(clsId); call qz.cls_env; localSet($qzEnv)`；`capMap.set(name, $qzEnv)` → 方法体内自由变量自动走既有 `_emitCapturedRead`（`env_get`）。
+4. 宿主：`clsEnv: Map<clsId, handle>`、`class_env_set(clsId, env)`、`cls_env(clsId)`（未登记 → throw loud）。
+安全性质：漏挂任一名字 → 方法侧 `env_get` 得 TAG → 仍是 **loud「未定义捕获变量」**，不会静默错值。回归面 = 全语料 + ctest。
+
