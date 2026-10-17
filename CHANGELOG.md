@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十七批差分审计（2026-10-17）
+- 新增 `audit_corpus27.js`（21 例：类 super 方法/静态继承/getter-setter 副作用/计算属性 Symbol/私有字段、JSON 边界值（undefined/NaN/Infinity/函数）、RegExp 标志与捕获、运算符边角（**=/复合赋值/链式比较/0.1+0.2）、Error 子类 cause、解构默认值与 rest、spread 混用调用、Object.create 原型链、getter 链、try-finally-return 交互、Symbol.hasInstance instanceof、数组方法链、模板字符串强制转换、闭包捕获变异、in 运算符类型、Number 方法边界、Object.keys/entries/values 往返）。
+- 结果：**636/652（97.5%）**；ctest 32/32。
+- 新增 4 项残余（按语料案例）：
+  - **loud**：类名作值（静态 getter 跨类继承 `Derived.val` / `Object.getPrototypeOf(Derived) === Base`）——已知边界。
+  - **loud**：类实例上 `[Symbol.iterator]()` 计算属性方法访问（类收集为 @@iterator 但运行时实例访问未通）。
+  - **narrow**：`Object.create(Array.prototype)` 后手动设 `.length` —— 非数组外质对象，物化副本不回读手动 length（Array.isArray 仍正确返回 false）。
+  - **silent（待修）**：`x instanceof C` 当 C 有 `static [Symbol.hasInstance]` —— `instanceof_op` 仅查原型链，未调 `Symbol.hasInstance` 静态方法；同例函数入数组 join 的 toString 取物化包装器源（窄面）。
+
 ### 第二十六批差分审计（2026-10-17）
 - 新增 `audit_corpus26.js`（21 例：字符串搜索方法（startsWith/endsWith/includes + 第 2 实参）、pad/repeat/trim、replace/replaceAll 回调、at/charCodeAt/codePointAt、数组 at/flat/flatMap、splice/reverse/fill/slice、findLast/includes(NaN)/sort 比较器、Object.fromEntries/getOwnPropertyDescriptor/defineProperty(s)/getOwnPropertyNames（含非枚举）、Object.assign 源 getter、Reflect 基础、运算符强制转换矩阵、可选链调用、delete/void/逗号、标签 break/continue、switch(true) 模式、数值边界（EPSILON/MAX_SAFE/0.1+0.2/取整）、Math.hypot/atan2/展开 max/min、toString/join 链、copyWithin、Symbol.toPrimitive 强制转换）。
 - **修复 3 项（均为静默错值）**：
