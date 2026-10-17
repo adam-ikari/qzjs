@@ -314,6 +314,15 @@ class Emitter {
         if (!d.initializer) return;
         this.emitTaggedExpr(d.initializer); M.localSet(this.scratch);
         if (ts.isArrayBindingPattern(name)) {
+            // 非 wasm 数组/字符串的可迭代（Set/Map/自定义 @@iterator/类实例）→ 迭代协议收集为数组
+            // （JS 数组解构走 Iterator；此前直接按索引读 → 静默 undefined）
+            { const Mt = this.m;
+              Mt.localGet(this.scratch); Mt.i64Const(48n); Mt.i64ShrU(); Mt.i64Const(0x7ffbn); Mt.i64Eq();
+              Mt.localGet(this.scratch); Mt.i64Const(48n); Mt.i64ShrU(); Mt.i64Const(0x7ffan); Mt.i64Eq();
+              Mt.i32Or(); Mt.i32Eqz();
+              Mt.ifBlock("void");
+              Mt.localGet(this.scratch); Mt.call("qz.iter_array"); Mt.localSet(this.scratch);
+              Mt.end(); }
             let i = 0;
             for (const el of name.elements) {
                 if (ts.isOmittedExpression(el)) { i++; continue; }
@@ -999,6 +1008,14 @@ class Emitter {
     _emitDestructurePattern(pat, valLocal) {
         const M = this.m;
         if (ts.isArrayBindingPattern(pat)) {
+            // 非 wasm 数组/字符串的可迭代（Set/Map/自定义 @@iterator/类实例）→ 迭代协议收集为数组
+            // （JS 数组解构走 Iterator；此前直接按索引读 → 静默 undefined）
+            M.localGet(valLocal); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+            M.localGet(valLocal); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+            M.i32Or(); M.i32Eqz();
+            M.ifBlock("void");
+            M.localGet(valLocal); M.call("qz.iter_array"); M.localSet(valLocal);
+            M.end();
             let i = 0;
             for (const el of pat.elements) {
                 if (ts.isOmittedExpression(el)) { i++; continue; }

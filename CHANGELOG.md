@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 可迭代对象解构（静默错值修复，2026-10-17）
+- **根因**：数组解构（`const [p, q] = …`）只处理 wasm 数组(0x7FFB)与字符串(0x7FFA)，其它可迭代（Set/Map/自定义 `[Symbol.iterator]`/类实例）直接按索引读 → **静默 undefined**。
+- **修复**：两处数组解构路径（`_emitBindingDecl` 的绑定声明 + `_emitDestructurePattern`）在解构前按 tag 归一化——非 wasm 数组/字符串 → `qz.iter_array`（宿主手写迭代协议）收集为数组，再按索引/`slice` 解构（与 JS「解构走 Iterator」一致）。
+- 验证：`const [p,q] = new R(5)`（自定义 @@iterator）= `0,1`；`= new Set([7,8])` = `7,8`；`const [[k,v]] = new Map([["a",1]])` = `a:1`；字符串/数组/对象解构不变。
+- 结果：**707/731（96.7%）**；corpus30 15→16/20。ctest 32/32。
+
 ### 展开调用指向闭包（模块级 const 箭头）（2026-10-17）
 - **根因**：`_emitSpreadCall` 的闭包回退分支只查 `capMap`（捕获）/ `_local`（局部）→ 模块级 `const sum = (...a) => …` 的 `sum(...n)` 报 loud「未定义函数: sum」。
 - **修复两处**：
