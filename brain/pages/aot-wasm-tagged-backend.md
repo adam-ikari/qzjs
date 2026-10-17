@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T12:45:43"
+updated: "2026-10-17T13:06:09"
 ---
 
 <!-- compiled_truth -->
@@ -561,4 +561,9 @@ updated: "2026-10-17T12:45:43"
 - time: 2026-10-17T12:45:43
   kind: evidence
   summary: "第三十四批语料 18/18 + method_spread + 宿主数组 push：776/786（98.7%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T13:06:09
+  kind: evidence
+  summary: "POJO 原型链 + Array.prototype 句柄：777/786（98.9%）"
   affects: [aot-wasm-tagged-backend]
