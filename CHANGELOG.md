@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 对象字面量计算属性名插入序（静默错值修复，2026-10-17）
+- **根因**：属性循环中计算键**先**逐个登记序（`qz.field_order`），而静态键的批量登记（`field_order_lit`，编译期常量）在循环**之后**执行 → 计算键被挤到键序最前。
+- **修复**：`hasComputedKey` 时改为**逐属性按源码序**登记（静态键在自身槽位写完后 `field_order`；计算键沿用原路径），并跳过批量 `field_order_lit`（避免重复）。
+- 最小复现（已修）：`const key = "dyn"; const o: any = { a: 1, [key]: 2, z: 3 };` → 现为 `{"a":1,"dyn":2,"z":3}` / `a,dyn,z`（此前 `{"dyn":2,"a":1,"z":3}` / `dyn,a,z`）。
+- 结果：**704/731（96.3%）**；corpus31 17→18/18。ctest 32/32。
+
 ### 第三十一批差分审计（2026-10-17）
 - 新增 `audit_corpus31.js`（18 例：嵌套矩阵/转置/三维 flat、正则进阶（量化/捕获/exec 循环/回调替换）、错误处理矩阵（多级 Error 子类/非 Error 抛出/finally）、数值边界 2、Unicode 与编码（encodeURIComponent/代理对/codePointAt）、类静态进阶（静态方法 super/静态 getter/static 继承）、函数参数边界（默认值/5 参/spread 应用）、可迭代类模式、getter 与计算键混合、sort 比较器边界、闭包递归（factorial/gcd/flatten/pow）、Map/Set 进阶（构造自 Map/Unicode）、字符串管线（slugify/titleCase/pad）、稀疏数组进阶、对象工具实现（pick/omit/invert/groupBy/uniqBy/countBy）、真值强制转换矩阵、高阶函数（pipe/compose/curry/partial/memoize/once）。
 - 结果：**703/731（96.2%）**；corpus31 17/18。ctest 32/32。

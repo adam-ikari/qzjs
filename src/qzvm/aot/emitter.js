@@ -3710,6 +3710,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (e.properties.some(p => !ts.isPropertyAssignment(p) && !ts.isShorthandPropertyAssignment(p))) {
             throw new Error("[tagged] 对象字面量只支持 { x: v } / { x } 形式（方法/访问器/计算属性名不支持）");
         }
+        const hasComputedKey = e.properties.some(p => ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name));
         const NF = e.properties.length;
         // 字段偏移用全局 fieldMap（名→固定偏移，POJO 隐式形状）：与读取端 _fieldIndex 一致。
         // 分配 size = 最大字段字节偏移 + 8（偏移 0 保留给 __cls 头，POJO 留 0 亦无害）。
@@ -3739,8 +3740,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.i32WrapI64();                      // 低32位=offset
             this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);   // 简写 {x} ≡ {x: x}
             this.m.i64Store(3, this._fieldIndex(p.name.text));   // memory[off + 字段字节偏移] = val
+            if (this.usesKeyOrder && hasComputedKey) {   // 含计算键时逐属性按**源码序**登记（否则计算键会被批量登记挤到最前）
+                this.m.localGet(slot); this._emitStrLitHandle(p.name.text); this.m.call("qz.field_order");
+            }
         }
-        if (this.usesKeyOrder) {                       // 插入序：字面量名序（编译期常量，一次登记）
+        if (this.usesKeyOrder && !hasComputedKey) {    // 插入序：字面量名序（编译期常量，一次登记；含计算键时已逐属性登记）
             const nmList = e.properties.map(p => (p.name && p.name.text ? p.name.text : "")).filter(x => x !== "");
             if (nmList.length) { this.m.localGet(slot); this.m.i32Const(this._strId(nmList.join("\u0000"))); this.m.call("qz.field_order_lit"); }
         }
