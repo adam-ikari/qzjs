@@ -113,7 +113,7 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
-结果：**652/673 一致（97.0%）**；残余 21 项（按语料案例计；for-of 急切快照已消除；Symbol.hasInstance 已修；新增：类名作值×2 + static block（loud）、数组自定义字符串键属性 + 对象字面量方法闭包不共享 env（2 项 silent 待修））：11 项 loud + **1 项新发现静默差异**（`for...of` 急切快照 vs JS 惰性迭代，见「残余 loud 清单」注释）。（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**653/673 一致（97.0%）**；残余 21 项（按语料案例计；for-of 急切快照已消除；Symbol.hasInstance 已修；新增：类名作值×2 + static block（loud）、数组自定义字符串键属性 + 对象字面量方法闭包不共享 env（2 项 silent 待修））：11 项 loud + **1 项新发现静默差异**（`for...of` 急切快照 vs JS 惰性迭代，见「残余 loud 清单」注释）。（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
 **残余 loud 清单（键序修复后，按类别 7 项 / 按语料案例 8 例，全部 loud）**
 
@@ -214,7 +214,7 @@
 - （已修）**`String.raw`**：编译期按源码原文（raw 段）与 `ToString(插值)` 拼接 —— 无需 `strings.raw` 表。
 - 标签模板的 **`strings.raw`**（自定义 tag 读取）仍无 `.raw` 表（wasm 数组无附加属性）→ 宿主 TypeError（loud）。
 
-- （已修）**第 14 批发现的三项静默差异**：(1) `undefined/null` **写属性** → 走宿主 `prop_set`（TypeError）+ 链外 `_emitErrCheck`；(2) **块级 `let/const` 遮蔽** → 进入遮蔽块前把外层同名局部存入 `$shN` 槽，退出后恢复（`_collectLocals` 精确扫描遮蔽块）；(3) `find`/`pop`/`at` 等返回**元素**的方法 → `ret` 依据 `pojoOf` 还原原始 POJO/实例句柄（此前返回物化快照 → 方法调用报「无方法」、身份丢失）。### 已知 silent 缺陷：对象字面量方法闭包 + 捕获数组的 push 变异不可见（2026-10-17 深查，待修）
+- （已修）**第 14 批发现的三项静默差异**：(1) `undefined/null` **写属性** → 走宿主 `prop_set`（TypeError）+ 链外 `_emitErrCheck`；(2) **块级 `let/const` 遮蔽** → 进入遮蔽块前把外层同名局部存入 `$shN` 槽，退出后恢复（`_collectLocals` 精确扫描遮蔽块）；(3) `find`/`pop`/`at` 等返回**元素**的方法 → `ret` 依据 `pojoOf` 还原原始 POJO/实例句柄（此前返回物化快照 → 方法调用报「无方法」、身份丢失）。### 已修复：对象字面量方法闭包 + 捕获数组的 push 变异不可见（2026-10-17 深查 → 根因 push/pop 快路径误命中）
 
 最小复现：
 ```ts

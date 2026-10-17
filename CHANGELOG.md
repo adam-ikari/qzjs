@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 数组 push/pop 快路径误命中同名方法（静默错值修复，2026-10-17）
+- **根因**：`x.push(单个实参)` / `x.pop()` 的编译期快路径（`_emitArrayPush`/`_emitArrayPop`）**无条件命中**，未校验接收者是否为 wasm 数组——对象字面量/类实例上的同名方法 `o.push(x)` 被当作数组直写：把 POJO 句柄当数组头写入（`i32WrapI64` 后按 header 结构读写），**方法体从未执行**，另一闭包读到的数组不变（最小复现 `{push:(x)=>a.push(x), get:()=>a}` → `o.get().length` 得 0，应为 2）。
+- **修复**：快路径加**运行时 tag 守卫**——接收者只求值一次存入局部，`hi==0x7FFB`（wasm 数组）才走内存直写，否则退回 `_emitDynMethod` 通用派发；守卫的 `if` 块计入 `this.depth`（分支内含 errCheck/短路等 br 标签，否则 wasm 校验失败）。
+- `_emitArrayPush`/`_emitArrayPop` 新增可选 `hv` 形参（调用点已求值的句柄 local），避免接收者二次求值。
+- 结果：**653/673（97.0%）**；corpus28 16→17/21（`closure-memory-leak-safe` 由 silent 错值转为通过）。ctest 32/32。
+- 残余仅余 1 项 silent：数组自定义字符串键属性（`arr["k0"]=v` 不存不读、Object.keys 漏报）。
+
 ### 第二十八批差分审计（2026-10-17）
 - 新增 `audit_corpus28.js`（21 例：Map/Set 全方法、Object freeze/seal/preventExtensions、Reflect construct/ownKeys/getPrototypeOf、String matchAll/substring/substr/slice/localeCompare、Math 三角与常量、JSON replacer/reviver、Symbol for/keyFor/description、catch 无绑定、数组 reduceRight/keys/values/entries、动态键赋值、类 extends + super 构造、嵌套 try-catch-finally-throw、Number 常量与强制转换、数组 concat/spread/flat 嵌套、RegExp sticky/advance flags、String repeat/pad/compare、闭包栈/计数器/memoize、对象方法链深、类 static block、三元链与短路）。
 - 结果：**652/673（97.0%）**（新增 16 例 match，5 diff）。ctest 32/32。

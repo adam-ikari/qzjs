@@ -4016,8 +4016,22 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 this._expLeave();
                 return;
             }
-            if (method === "push" && e.arguments.length === 1) { this._emitArrayPush(rx, e.arguments[0]); return; }
-            if (method === "pop" && e.arguments.length === 0) { this._emitArrayPop(rx); return; }
+            // push/pop 快路径：运行时守卫——仅接收者为 wasm 数组(0x7FFB)时走内存直写；
+            // 否则退回通用方法派发（对象字面量/类实例的同名 push/pop 方法此前被误判 → 静默错值）。
+            if ((method === "push" && e.arguments.length === 1) || (method === "pop" && e.arguments.length === 0)) {
+                const Mg = this.m, tg = this._expEnter();
+                this.emitTaggedExpr(rx); Mg.localSet(tg.v);                 // 接收者只求值一次
+                Mg.localGet(tg.v); Mg.i64Const(48n); Mg.i64ShrU(); Mg.i64Const(0x7ffbn); Mg.i64Eq();
+                Mg.ifBlock("i64");
+                this.depth++;                       // 守卫的 if 块也要计入 br 深度（分支内含 errCheck/短路等 br）
+                if (method === "push") this._emitArrayPush(rx, e.arguments[0], tg.v); else this._emitArrayPop(rx, tg.v);
+                Mg.else_();
+                this._emitDynMethod(rx, method, e.arguments);
+                Mg.end();
+                this.depth--;
+                this._expLeave();
+                return;
+            }
             this._emitDynMethod(rx, method, e.arguments); return;
         }
         // IIFE（(() => 42)() / 函数表达式立即调用）：先求值为闭包句柄 → closure_call
@@ -4595,10 +4609,11 @@ Emitter.prototype._emitStoreElem = function (left, preObj, preKey) {
 Emitter.prototype._emitUndefined = function () { this.m.i64ConstBits(0, 0x7ff90000); };
 // null = 句柄 0x7FF9|1（qzvm handles[1]=null 固定槽）。与 undefined 区分：typeof/宽松 == 语义不同。
 Emitter.prototype._emitNull = function () { this.m.i64ConstBits(1, 0x7ff90000); };
-Emitter.prototype._emitArrayPush = function (rx, arg) {
+Emitter.prototype._emitArrayPush = function (rx, arg, hv) {
     const M = this.m;
     const t = this._expEnter();                               // 接收者/值用可重入槽（arg 求值可能覆盖 scratch）
-    this.emitTaggedExpr(rx); M.localSet(t.v);                 // 数组句柄
+    if (hv !== undefined) M.localGet(hv); else this.emitTaggedExpr(rx); M.localSet(t.v);   // 数组句柄（hv = 调用点已求值）
+    void rx;
     this.emitTaggedExpr(arg); M.localSet(t.w);                // 待压值
     M.localGet(t.v); M.i32WrapI64(); M.localSet(t.a);         // h
     M.localGet(t.a); M.i32Load(2,0);                          // len
@@ -4629,10 +4644,11 @@ Emitter.prototype._emitArrayPush = function (rx, arg) {
     this._expLeave();
 };
 // a.pop()：空 → undefined；否则取末元素 + len--。
-Emitter.prototype._emitArrayPop = function (rx) {
+Emitter.prototype._emitArrayPop = function (rx, hv) {
     const M = this.m;
     const t = this._expEnter();
-    this.emitTaggedExpr(rx); M.localSet(t.v);
+    if (hv !== undefined) M.localGet(hv); else this.emitTaggedExpr(rx); M.localSet(t.v);
+    void rx;
     M.localGet(t.v); M.i32WrapI64(); M.localSet(t.a);         // h
     M.localGet(t.a); M.i32Load(2,0); M.i32Eqz();
     M.ifBlock("i64");
