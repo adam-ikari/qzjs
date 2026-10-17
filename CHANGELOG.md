@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 展开调用指向闭包（模块级 const 箭头）（2026-10-17）
+- **根因**：`_emitSpreadCall` 的闭包回退分支只查 `capMap`（捕获）/ `_local`（局部）→ 模块级 `const sum = (...a) => …` 的 `sum(...n)` 报 loud「未定义函数: sum」。
+- **修复两处**：
+  - 发射器：闭包回退分支补查 `moduleGlobals`（`M.globalGet`）→ 句柄入槽 → `qz.closure_call_spread`。
+  - 宿主 `closure_call_spread`：`meta.rest` 时按惯例打包为 `[固定参…, rest 数组]`（此前把数组**摊平**成位置实参 → 形参拿到单值 → `a.reduce` 报「数值无方法 reduce」）。
+- 验证：`sum(...[1,2,3])` = 6、`sum(1,2)` = 3、`sum()` = 0；`const g=(x,...a)=>x+":"+a.join("-")` 的 `g(1,...[2,3])` = `1:2-3`、`g(...[9])` = `9:`；非 rest 的 `g(...[3,4])` = 7（不变）。
+- 结果：**706/731（96.6%）**（isolated 修复，语料未新增覆盖）；ctest 32/32。
+
 ### rest 闭包形参（箭头 const）+ `fn(...restArr)`（2026-10-17）
 - **惯例（实测确立）**：rest 闭包的调用方传 `[固定参…, rest 数组, 余参…]`（`function g(first, ...rest)` 实测 a0=固定参、a1=rest 数组）。
 - **根因**：`closureCall` 的简单分支（≤4 实参）用 `slice(0, 1+meta.n)` 只传固定参 → `const c = (...a) => a.length` 得 `undefined`（形参拿到单值而非数组）；`fn(...a)`（a 为 rest 形参）报 `toJS(...) is not iterable`。

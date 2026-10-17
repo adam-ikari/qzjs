@@ -825,6 +825,9 @@ class Emitter {
         }
         // 闭包：句柄（局部或 env_get）→ closure_call_spread
         if (this.capMap.has(cx.text)) { M.localGet(this.capMap.get(cx.text)); M.i32Const(this._strId(cx.text)); M.call("qz.env_get"); M.localSet(t.w); }
+        else if (this.moduleGlobals && this.moduleGlobals.get(cx.text) !== undefined) {
+            M.globalGet(this.moduleGlobals.get(cx.text)); M.localSet(t.w);   // 模块级 const 持有闭包（展开调用此前漏查 → 未定义函数）
+        }
         else {
             const hIdx = this._local(cx.text);
             if (hIdx === undefined) throw new Error("未定义函数: " + cx.text);

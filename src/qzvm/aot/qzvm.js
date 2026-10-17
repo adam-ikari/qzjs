@@ -1149,7 +1149,14 @@ function makeQzvm(strings, opts) {
       const meta = lamMeta && lamMeta[funcidx];
       if (!meta) throw new Error("closure_call_spread: 未知 funcidx " + funcidx);
       const blk = new DataView(mem.buffer).getInt32(off + 4, true);
-      const raw = (toJS(arr) || []).slice(0, 4).map(ret);
+      const jsArr = toJS(arr) || [];
+      if (meta.rest) {                                  // rest 闭包惯例：固定参… + rest 数组（否则会被摊平成单值）
+        const nFixS = Math.max(meta.n - 1, 0);
+        const fixedS = jsArr.slice(0, nFixS).map(ret);
+        const restS = arrWriteback(jsArr.slice(nFixS));
+        return exportsRef[meta.name](blk, ...fixedS, restS);
+      }
+      const raw = jsArr.slice(0, 4).map(ret);
       while (raw.length < 4) raw.push(TAG);
       return exportsRef[meta.name](blk, ...raw);
     },
