@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T09:44:04"
+updated: "2026-10-17T10:00:25"
 ---
 
 <!-- compiled_truth -->
@@ -521,4 +521,9 @@ updated: "2026-10-17T09:44:04"
 - time: 2026-10-17T09:44:04
   kind: evidence
   summary: "类 .name 属性 + Function 作值：732/750（97.6%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T10:00:25
+  kind: evidence
+  summary: "类计算 Symbol 访问器 + Symbol.toStringTag 物化：733/750（97.7%）"
   affects: [aot-wasm-tagged-backend]
