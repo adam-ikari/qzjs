@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T05:25:01"
+updated: "2026-10-17T05:32:19"
 ---
 
 <!-- compiled_truth -->
@@ -446,4 +446,9 @@ updated: "2026-10-17T05:25:01"
 - time: 2026-10-17T05:25:01
   kind: evidence
   summary: "rest 闭包形参修复（第三轮成功）：按 a[nFix] 是否 wasm 数组判定已打包——706/731（96.6%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T05:32:19
+  kind: evidence
+  summary: "展开调用指向模块级 const 闭包修复（发射器补查 moduleGlobals + closure_call_spread 打包 rest）"
   affects: [aot-wasm-tagged-backend]
