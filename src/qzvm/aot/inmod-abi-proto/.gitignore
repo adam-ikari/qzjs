@@ -1,0 +1,7 @@
+host
+host_async
+host_bench3
+guest.wasm
+guest_async.wasm
+bench3.wasm
+guest.txt

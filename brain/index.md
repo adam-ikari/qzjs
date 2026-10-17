@@ -1,53 +1,60 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-09T06:07:42.113Z._
+_Auto-generated. Last updated 2026-10-17T17:05:44.896Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
-- [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | <!-- compiled_truth -->
+- [aot-generic-compiler-target](pages/aot-generic-compiler-target.md) — category: decision | tags: [decision, aot, wasm, architecture, generic] | ## 结论
+- [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
+- [aot-wasm-tagged-backend](pages/aot-wasm-tagged-backend.md) — category: decision | tags: [aot, wasm, emitter, qzvm, perf] | # AOT tagged 后端（emitter.js → wasm）
+- [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
 - [branch-management](pages/branch-management.md) — category: decision | tags: [git, workflow, branch, protection] | ## 分支命名（7 前缀）
 - [brand-display-name](pages/brand-display-name.md) — category: decision | tags: [brand, docs] | Qz.js 品牌显示名 = **Qz.js**（内部标识 qzjs）。
-- [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | <current best understanding — replace this with the real content>
+- [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | ## 结论
 - [c-js-layering](pages/c-js-layering.md) — category: decision | tags: [arch, layering, policy] | # C/JS 分层原则与标准（判据摘要）
 - [ci-nightly-repair](pages/ci-nightly-repair.md) — category: decision | status: completed | tags: [ci, nightly, scheduling] | ## 完结状态（2026-09-09/10）
 - [code-quality-requirements](pages/code-quality-requirements.md) — category: decision | tags: [code-quality, readability, dry, review] | ## 代码质量硬性要求（项目级，用户 2026-09-13 追加，对全部产出生效）
 - [commit-workflow](pages/commit-workflow.md) — category: decision | tags: [git, workflow, commit] | ## 规则
 - [console-output-routing](pages/console-output-routing.md) — category: decision | tags: [console, cli, behavior] | ## compiled_truth
-- [cross-process-config-audit](pages/cross-process-config-audit.md) — category: decision | tags: [audit, cross-process, ipc, methodology] | <!-- compiled_truth -->
+- [cross-process-config-audit](pages/cross-process-config-audit.md) — category: decision | tags: [audit, cross-process, ipc, methodology] | ## 背景
 - [crypto-subtle-gtest](pages/crypto-subtle-gtest.md) — category: decision | tags: [crypto, gtest, webcrypto] | ## 决策
 - [crypto-subtle-wrapkey](pages/crypto-subtle-wrapkey.md) — category: decision | tags: [crypto, webcrypto, wrapkey] | - **背景**：crypto.subtle 此前缺 `wrapKey`/`unwrapKey`（WebCrypto 标准方法）。
 - [dap-feature-completion](pages/dap-feature-completion.md) — category: decision | tags: [dap, vscode, debugger] | ## Phase 1（已完成，e2e + ctest 绿）
 - [dap-pc2line-line-attribution](pages/dap-pc2line-line-attribution.md) — category: decision | tags: [dap, debugger, quickjs, bytecode, pc2line] | ## 决策：pc2line 行归属 + 行覆盖（DAP 断点行正确性，两轮修复）
 - [dap-setbreakpoints-scope](pages/dap-setbreakpoints-scope.md) — category: decision | tags: [dap, debugger] | ## 决策：setBreakpoints 按文件作用域替换
 - [dap-variables-expansion](pages/dap-variables-expansion.md) — category: decision | tags: [dap, vscode, debugger, variables] | ## 现状（已实现，gtest 7/7 + e2e 8/8 绿）
+- [debugging-layering](pages/debugging-layering.md) — category: decision | tags: [decision, debug, dap, qzvm, aot, wasm, dwarf, gdb-rsp, debug-interp] | <!-- compiled_truth -->
 - [decision-principles](pages/decision-principles.md) — category: decision | tags: [decision, principles, methodology] | ## 决策三原则 + 极简哲学（用户拍板，项目级约束）
+- [doc-comment-language](pages/doc-comment-language.md) — category: decision | tags: [doc, comments, i18n, convention] | ## 文档与注释语言规范（项目级，用户 2026-10-12 决策）
 - [examples-tree](pages/examples-tree.md) — category: decision | tags: [build, examples] | - 示例程序放在根目录 examples/ 下，每个示例一个子目录（examples/hello, examples/worker），不再放根目录 example.c。
 - [f4-security-audit](pages/f4-security-audit.md) — category: decision | tags: [security, audit] | ## F4 安全审计结论
 - [fetch-proxy-support](pages/fetch-proxy-support.md) — category: decision | tags: [fetch, proxy, connect, tls, uv_io] | - **背景**：B2「fetch 完善」剩余项「代理」—— 出站 fetch 需要能走公司/环境 HTTP 代理。
 - [fetch-request-body-bytes](pages/fetch-request-body-bytes.md) — category: decision | tags: [fetch, wintertc, http, polyfill] | - **背景**：`fetch(url, {body})` 请求体此前在 JS 层被 `String()` 强转，二进制（Uint8Array/ArrayBuffer）与流式 body（ReadableStream）语义丢失；C 桥接层 `http_request_stream`
 - [full-project-review-2026-09](pages/full-project-review-2026-09.md) — category: project | tags: [review, quality, security, ci, docs] | 六维全量评审（2026-09-23，静态核查 + 关键项亲自复现验证）。
 - [hit-conditional-breakpoints](pages/hit-conditional-breakpoints.md) — category: decision | tags: [dap, debugger, breakpoints] | ## 现状（已实现，合入 d0a94fed）
-- [host-bytecode-api](pages/host-bytecode-api.md) — category: decision | tags: [bytecode, host-api, compatibility] | **DAP CI 连败根因（2026-09-26 已修）**：8ac7ed7c 项目改名（am_→qz_）漏改
+- [host-bytecode-api](pages/host-bytecode-api.md) — category: decision | tags: [bytecode, host-api, compatibility] | ## 结论
 - [httpserver-perf-baseline](pages/httpserver-perf-baseline.md) — category: decision | tags: [httpserver, perf, serve] | M2-D3 连接生命周期完成：
 - [httpserver-perf-benchmark](pages/httpserver-perf-benchmark.md) — category: decision | ### Phase 4 优化（2026-08-19，分支 phase4-httpserver-perf）
 - [httpserver-streaming-body](pages/httpserver-streaming-body.md) — category: decision | tags: [http-server, streaming, serve] | D2 请求体流式（破坏性 API 变更）：serve() 的 req.body 从同步字符串改为 ReadableStream（Web 标准语义），新增 req.text()/req.arrayBuffer() 异步读取。
 - [httpserver-ws-fixes](pages/httpserver-ws-fixes.md) — category: decision | tags: [http-server, websocket, uvhttp, llhttp] | uvhttp 在 qzjs 中的底层修复（均改 deps/uvhttp 源码）：1) HPE_PAUSED_UPGRADE 时 llhttp 暂停未恢复——分发前显式 llhttp_resume；2) WS 握手 101 后 uvhttp 仍尝试 HTTP 解析导致状态错乱——升
 - [httpserver-ws-protocol](pages/httpserver-ws-protocol.md) — category: decision | tags: [http-server, websocket, protocol] | polyfill/src/http-server.js（纯 JS 层 WS 协议）：
+- [in-module-design](pages/in-module-design.md) — category: decision | tags: [decision, build, wasm, in-module, aot] | ## 结论
 - [interrupt-teardown-fixed](pages/interrupt-teardown-fixed.md) — category: project | status: archived | ## 本页说明
 - [interrupt-teardown-leak](pages/interrupt-teardown-leak.md) — category: project | status: archived | tags: [quickjs-ng, ctl, interrupt, teardown, leak] | ## 结论（2026-10-03 根因定案并根治：qzjs 侧漏释放 JS_GetException 的返回值）
 - [libuv-io-uring-workaround](pages/libuv-io-uring-workaround.md) — category: decision | tags: [libuv, io-uring, linux, workaround] | ## 现状（2026-09-20 更新）
-- [liveness-ping](pages/liveness-ping.md) — category: decision | tags: [liveness, ping, pong, host, worker] | <current best understanding — replace this with the real content>
+- [liveness-ping](pages/liveness-ping.md) — category: decision | tags: [liveness, ping, pong, host, worker] | ## 结论
 - [multi-process-model](pages/multi-process-model.md) — category: decision | ISOLATED 是缺省进程模型（M-P2，用户裁决最终态；-DQZ_PROCESS_MODEL=THREAD 回退）：宿主进程 ⇄ 独立主RT 进程（qzjs-rt）经单条 socketpair uv_pipe 通信，JS/loop/微任务全在主RT 进程内；worker 进程
 - [oss-library-policy](pages/oss-library-policy.md) — category: decision | tags: [deps, policy, oss] | # 开源库引入与替换原则
 - [plain-language](pages/plain-language.md) — category: decision | tags: [communication, style] | ## 结论
-- [platform-support](pages/platform-support.md) — category: decision | tags: [platform, linux, scope] | <!-- compiled_truth -->
+- [platform-support](pages/platform-support.md) — category: decision | tags: [platform, linux, scope] | ## 结论
 - [polyfill-bundling-policy](pages/polyfill-bundling-policy.md) — category: decision | tags: [polyfill, bundling, memory] | ## 启动加速决策链（2026-09-10 用户拍板）
-- [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | <!-- compiled_truth -->
+- [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## quickjs-ng 上游同步与改动分层策略
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
+- [qzvm-qzjs-layering](pages/qzvm-qzjs-layering.md) — category: decision | tags: [decision, architecture, qzvm, in-module, boundary] | ## 结论
 - [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑（2026-10-07/08 用户拍板）
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论
-- [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | <current best understanding — replace this with the real content>
+- [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | ## 结论
 - [runtime-perf-baseline](pages/runtime-perf-baseline.md) — category: reference | tags: [perf, worker, runtime, baseline] | > **测试策略（2026-09-09 用户拍板）：性能基准一律在 CI 环境（GitHub Actions ubuntu-latest）执行，不使用本机。
 - [service-worker-stack](pages/service-worker-stack.md) — category: decision | # Service Worker 栈（SW-0/1/2/3）
 - [standard-source-policy](pages/standard-source-policy.md) — category: decision | tags: [standard, policy, wintertc, webrtc, w3c] | # qzjs 标准来源策略（用户拍板 2026-09-09）
@@ -55,7 +62,7 @@ _Auto-generated. Last updated 2026-10-09T06:07:42.113Z._
 - [streams-b3-semantics](pages/streams-b3-semantics.md) — category: decision | tags: [streams, wintertc, ecma-429] | - **背景**：ROADMAP B3（streams 覆盖）对照 WHATWG Streams 语义审计 polyfill/src/streams.js，发现 pipeTo/tee/pipeThrough/releaseLock 四处真实缺口。
 - [strict-mode-sandbox](pages/strict-mode-sandbox.md) — category: decision | tags: [security, sandbox, P2] | ## 定位裁决
 - [test262-ctest-fix](pages/test262-ctest-fix.md) — category: decision | tags: [test262, ctest, cmake] | ## 现象
-- [tls-ca-trust-store](pages/tls-ca-trust-store.md) — category: decision | tags: [tls, security, api, mbedtls] | <!-- compiled_truth -->
+- [tls-ca-trust-store](pages/tls-ca-trust-store.md) — category: decision | tags: [tls, security, api, mbedtls] | ## 是什么
 - [urlpattern-modifier-fix](pages/urlpattern-modifier-fix.md) — category: decision | tags: [urlpattern, wintertc, ecma429, polyfill] | ## 问题
 - [wamr-init-lazy](pages/wamr-init-lazy.md) — category: decision | tags: [wamr, startup, lazy-init] | ## 决策
 - [wasm-engine-integration](pages/wasm-engine-integration.md) — category: decision | tags: [wasm, wamr, threading] | # WAMR 线程环境（关键坑）

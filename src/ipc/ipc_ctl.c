@@ -63,6 +63,11 @@ qz_ipc_ctl_kind_t qz_ipc_ctl_classify(const uint8_t *payload,
             /* 跨层 ping 转发失败：中间节点回 corr=seq（宿主快速 -1）。 */
             kind = QZ_IPC_CTL_PFAIL;
             *out_val = 1;
+        } else if (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(j, "gc"))) {
+            /* 显式 GC 驱动（qz_gc()）：与 ping/pong 同族的通道级系统消息，
+             * 主RT 读回调转 msgq 就地执行——不是控制面命令，不受档位门控。 */
+            kind = QZ_IPC_CTL_GC;
+            *out_val = 1;
         } else {
             /* 带 "qzjs" 标记但非 ready/idle/shutdown（M-P4 closing 等）：
              * 通道级系统消息，交通道层消费，不被当作控制面命令路由。 */

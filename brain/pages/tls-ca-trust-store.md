@@ -5,10 +5,9 @@ category: decision
 status: active
 tags: [tls, security, api, mbedtls]
 created: "2026-10-06T03:16:13"
-updated: "2026-10-06T04:16:28"
+updated: "2026-10-13T08:35:24"
 ---
 
-<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 是什么
 
@@ -180,4 +179,10 @@ CLI 没暴露（走 `QZ_DEBUG` env，子进程 exec 继承 environ）。**受害
   kind: decision
   summary: "补记 ISOLATED 跨进程陷阱与 QZ_CA_FILE 通道 + e2e 覆盖的环境陷阱"
   source: "2026-10 真实握手 e2e 落地时发现"
+  affects: [tls-ca-trust-store]
+
+- time: 2026-10-13T08:35:24
+  kind: decision
+  summary: "规范化存储标记：compiled_truth 区块开头重复的 <!-- compiled_truth --> 标记（CLI extractSection 会把它当正文首行）已去掉；正文无实质改动。"
+  source: "brain CLI 重复 marker 自愈"
   affects: [tls-ca-trust-store]

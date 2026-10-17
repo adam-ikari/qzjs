@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [bytecode, release, artifact, wasm, wintertc, abi]
 created: "2026-10-07T15:07:14"
-updated: "2026-10-09T06:07:42"
+updated: "2026-10-13T12:11:34"
 ---
 
 <!-- compiled_truth -->
@@ -168,7 +168,6 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
 函数即证据），故真实 AS 化率可能被低估；但被识别的 241 个函数全部因类型不兼容被拒，
 方向性结论成立。
 
-
 ## 真正 AOT 的定义（2026-10-07 用户澄清）
 
 **qzjs 实现真正 AOT 的方式 = 编译 TS 代码为 JS + wasm/so**（链路 A）。
@@ -223,6 +222,7 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
   WinterTC 是其核心组成但非全部。
 - 「字节码」= 链路 B 的 JS 引擎内部字节码；链路 A 的 TS→wasm 产物不含字节码。
 - 「AOT」= 链路 A 的实现（TS 双编译 + wasm/so）；字节码 native 翻译不叫 AOT。
+- **frontmatter title 的历史表述「唯一稳定 API = WinterTC」已过时**（`brain` CLI 无改 title 命令）：以本页正文为准——稳定面**不限于** WinterTC，WinterTC 只是其核心组成（见约束 2）。
 
 
 ## Timeline
@@ -358,3 +358,21 @@ bigint 与 typed array 恰好都落在 AS 子集之外。
   summary: "qzvm 独立 CMake（2026-10-09 用户裁决）：src/qzvm/CMakeLists.txt 独立构建单元，含 wasm 引擎选择 + debug 选项。wasm 引擎选择：QZ_WITH_WAMR（默认）/QZ_WITH_WASM3（替代），互斥。**wasm 引擎不允许关闭（AOT 关键）**——NOT WAMR AND NOT WASM3 时 FATAL_ERROR；minimal profile 不再关闭 QZ_WITH_WAMR（原顶层 174 行 set OFF 改为保留 ON）。debug 选项：QZ_BUILD_DEBUGGER 控制编译 debugger.c/debugger_dap.c + QZ_DEBUG_SUPPORT。源通过 QZVM_SOURCES（PARENT_SCOPE 绝对路径）交回顶层并入 libqzjs——避免 qzvm 与宿主扩展符号（ext_compress/ext_crypto/ext_textcodec 在 context.c 的 qz_default_exts[] 引用）的静态库循环链接（初试独立 qzvm STATIC 库 + qzjs 链接失败：undefined reference qz_compress_ext/qz_crypto_ext/qz_textcodec_ext + cli 的 qz_compile undefined）。顶层接线：add_subdirectory(src/qzvm) 移至 wasm deps 前（option 定义供 deps 消费），_qz_core_sources 加 ${QZVM_SOURCES}，删原 qzvm 源，恢复 debugger QZ_DEBUG_SUPPORT 段。验证：default 构建 + CLI eval + WAMR 真启用（wasm_runtime_init 2 符号）+ qzc 编译全过；minimal QZ_WITH_WAMR=ON；QZ_BUILD_DEBUGGER=ON 构建 debugger 编入（qz_dap_attach 2 符号）；全关 FATAL 逻辑就位（注：standard/minimal profile FORCE WAMR=ON，故显式全关被 profile 覆盖——wasm 恒开由 profile FORCE + qzvm FATAL 双层保证）。"
   source: "2026-10-09 qzvm 独立 CMake 实施 + 验证"
   affects: [release-artifact-topology]
+
+- time: 2026-10-13T08:21:12
+  kind: decision
+  summary: "删除 compiled_truth 中重复的「对象负载对比」子节（原 110-139 与 172-202 近逐字重复，仅 qzvm/qzrt 一词差）；保留 qzvm 版本。修正术语不一致。"
+  source: "本页 compiled_truth 去重"
+  affects: [release-artifact-topology]
+
+- time: 2026-10-13T08:22:49
+  kind: decision
+  summary: "在「术语澄清」显式标注 frontmatter title 的历史表述「唯一稳定 API = WinterTC」已过时（brain CLI 无改 title 命令），以正文约束 2 为准：稳定面不限于 WinterTC。"
+  source: "一致性修正：title vs 约束 2"
+  affects: [release-artifact-topology]
+
+- time: 2026-10-13T12:11:34
+  kind: reversal
+  summary: "推翻本页 2026-10-07T15:12:35 决策条目里的「JS 稳定 API 仅 WinterTC」表述：唯一稳定面 = qzjs 对外公开 API 集合，WinterTC 是其核心组成但非唯一（用户 2026-10-08 口径，见本页约束 2 与 standard-source-policy）。条目其余部分（永不保证二进制 ABI 兼容 / wasm 独立形态仅保证 WASI / 字节码必须绑定引擎）不变。"
+  source: "用户口径确认：唯一稳定的是 qzjs 公开 API"
+  affects: [release-artifact-topology, standard-source-policy]

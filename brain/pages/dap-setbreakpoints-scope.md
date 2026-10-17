@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [dap, debugger]
 created: "2026-09-27T05:21:34"
-updated: "2026-09-27T05:21:34"
+updated: "2026-10-13T08:18:12"
 ---
 
 <!-- compiled_truth -->
@@ -25,7 +25,7 @@ updated: "2026-09-27T05:21:34"
 - gtest `DapDebugger.PerFileBreakpointScope`（test/test_dap_gtest.cpp，复用 child_main）：`<initial>` 断点在 `<second>` 的 set+clear 之后仍命中 line 3；清空响应回 `"breakpoints":[]`。
 - 全量：ctest 26/26、npm 4/4（SMOKE / DEBUGGER-STMT / LINE-COVERAGE / BREAKPOINT-SCOPE）、tsc 干净；非调试器 `build/` 亦编译通过。
 
-**gotcha**：qzjs 没有文件模块 loader（`import()` 报 "could not load module"），测试想拿到第二个真实文件名只能用 `__native__.nativeEvalScript(code, filename)`（`src/host/bridge.c`；注释写 `pal.nativeEvalScript`，实际 CLI 全局名是 `__native__`，bootstrap cli.c:196-198 也是这么用的）。
+**gotcha**：qzjs 没有文件模块 loader（`import()` 报 "could not load module"），测试想拿到第二个真实文件名只能用 `__native__.nativeEvalScript(code, filename)`（`src/host/bridge.c`；注释写 `pal.nativeEvalScript`，实际 CLI 全局名是 `__native__`，bootstrap `src/cli/cli.c:261-262` 也是这么用的）。
 
 
 ## Timeline
@@ -40,4 +40,10 @@ updated: "2026-09-27T05:21:34"
   kind: decision
   summary: "定案：setBreakpoints 按 source.path 作用域替换 + 无 path 请求不碰表；qz_debug_clear_breakpoints_in_file；e2e/gTest 双验证全绿"
   source: "2026-09-27 setBreakpoints 作用域修复会话"
+  affects: [dap-setbreakpoints-scope]
+
+- time: 2026-10-13T08:18:12
+  kind: decision
+  summary: "修正失效行号引用：bootstrap nativeEvalScript 的 cli.c:196-198 → src/cli/cli.c:261-262。"
+  source: "grep -n nativeEvalScript src/cli/cli.c 实测"
   affects: [dap-setbreakpoints-scope]

@@ -13,10 +13,10 @@ call stack, locals, evaluate).
 ## How it works
 
 The debugger is a **library capability**, not a separate process. It lives in
-`src/debugger.c` (debug core) and `src/debugger_dap.c` (DAP protocol layer),
-compiled into `libqzjs.a` when `QZ_BUILD_DEBUGGER=ON`. A small patch to the
-QuickJS-ng engine (`deps/quickjs-ng-debugger.patch`) adds the breakpoint/step
-introspection primitives the core uses.
+`src/qzvm/debugger.c` (debug core) and `src/qzvm/debugger_dap.c` (DAP protocol
+layer), compiled into `libqzjs.a` when `QZ_BUILD_DEBUGGER=ON`. A small patch to
+the QuickJS-ng engine (`src/qzvm/patches/engine-dap-debugger.patch`) adds the
+breakpoint/step introspection primitives the core uses.
 
 Activation is **automatic via config or env** — your host code does not
 change. `qz_create` checks for debugging and, if enabled, attaches the DAP
@@ -25,13 +25,15 @@ attaches.
 
 ### Two-layer disable (zero overhead when off)
 
-- `QZ_BUILD_DEBUGGER=OFF` (default): the engine patch is **not** applied,
-  `src/debugger.c`/`src/debugger_dap.c` are **not** compiled, and `qz_create`
-  has no debug code path. Debugging does not exist; `libqzjs.a` is unchanged.
-- `QZ_BUILD_DEBUGGER=ON`: the patch is applied and the sources compile in,
-  but the engine's per-opcode `DEBUGGER_CHECK` is a no-op (one never-taken
-  branch) **unless a debugger is attached at runtime**. Non-debugged runs pay
-  essentially nothing.
+- The engine patch (`src/qzvm/patches/engine-dap-debugger.patch`) is applied
+  **unconditionally at configure time** — it is not gated by
+  `QZ_BUILD_DEBUGGER`. What the option gates is the qzjs-side debug sources.
+- `QZ_BUILD_DEBUGGER=OFF` (default): `src/qzvm/debugger.c` /
+  `src/qzvm/debugger_dap.c` are **not** compiled and `QZ_DEBUG_SUPPORT` is not
+  defined, so `qz_create` has no debug code path. Debugging does not exist.
+- `QZ_BUILD_DEBUGGER=ON`: the sources compile in, but the engine's per-opcode
+  `DEBUGGER_CHECK` is a no-op (one never-taken branch) **unless a debugger is
+  attached at runtime**. Non-debugged runs pay essentially nothing.
 
 ## Build
 
@@ -40,9 +42,10 @@ cmake -B build -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 ```
 
-This applies `deps/quickjs-ng-debugger.patch` to the QuickJS-ng submodule
-working tree at configure time (the submodule stays clean in git — the patch
-is the source of truth). `cmake -DQZ_BUILD_DEBUGGER=OFF` restores pristine.
+This applies `src/qzvm/patches/engine-dap-debugger.patch` to the QuickJS-ng
+submodule working tree at configure time (the submodule stays clean in git —
+the patch is the source of truth). This step runs for **every** build; the
+`QZ_BUILD_DEBUGGER` option does not gate it.
 
 ## Enable debugging in your program
 
@@ -257,6 +260,94 @@ pause fire only after you continue. This matches standard debugger
 freeze-on-break semantics and avoids PAL-driven re-entry into a stopped
 runtime (`debugger.c` has a re-entrancy guard as a second line of defense).
 
+## Debugging a WebAssembly module (WAMR debug-interp)
+
+The DAP debugger above debugs **QuickJS bytecode** (programs your host evals as
+JS). It cannot debug a raw **wasm module** loaded via `WebAssembly.instantiate`
+— that object is wasm instructions, not JS. For that, qzjs exposes a second,
+separate channel: WAMR's own debug-interp, which speaks the **GDB remote serial
+protocol (RSP)** over TCP.
+
+Enable it at **build time** (it forces WAMR's classic interpreter and turns
+Fast Interp off — the debugger is incompatible with Fast Interp):
+
+```bash
+cmake -B build-dbg -DQZ_WITH_WAMR=ON -DQZ_WITH_WAMR_DEBUG_INTERP=ON
+cmake --build build-dbg --target qzjs -j$(nproc)
+```
+
+At **run time**, every `WebAssembly.Instance` created from a bytecode module
+binds its cluster to a debug instance and opens a listening socket. The port
+and host come from env vars:
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `QZ_WAMR_DEBUG_PORT` | `0` | TCP port; `0` = OS-assigned. Printed to stderr on start. |
+| `QZ_WAMR_DEBUG_HOST` | `127.0.0.1` | Bind address. |
+
+```bash
+QZ_WAMR_DEBUG_PORT=33445 ./build-dbg/qzjs app.glue.js
+# [qzjs] wasm debug server listening on port 33445 (GDB RSP)
+```
+
+Attach a GDB-RSP client to that port. GDB's `wasm` target is **not** in stock
+GDB — WAMR's source-level flow uses a patched lldb (see
+`deps/wamr/doc/source_debugging_interpreter.md`). A plain GDB 12 client still
+works for instruction-level work if you ignore its `vMustReplyEmpty` probe
+warning (WAMR does not answer that packet):
+
+```bash
+gdb -q -ex 'set remotetimeout 20' -ex 'target remote 127.0.0.1:33445'
+```
+
+Behind the scenes: `wasm_debug_engine_init` runs only from
+`wasm_runtime_full_init` with a non-empty `ip_addr`, so this build routes
+`wamr_ensure_runtime` through `wasm_runtime_full_init` (see
+`wamr_runtime_init_once` in `src/qzvm/ext_wamr.c`).
+
+**Boundary — AOT is not debuggable this way.** `wasm_runtime_start_debug_instance*`
+rejects AOT module instances outright (`Attempt to create a debug instance for
+an AOT module`) and returns 0. The glue path (`build.js` → `<name>.glue.js`)
+prefers the `.aot` artifact when present, so debug runs must use the plain
+`.wasm`/bytecode path (no `options.aot`, or force a `.wasm`-only load).
+Source-level breakpoints: `build.js ... --debug` now emits **DWARF** custom
+sections (`.debug_info/.debug_line/.debug_abbrev/.debug_str`, DWARF4, addr_size=4)
+alongside the `name` section — `aot/wasm-dwarf.js`, with statement-level line
+markers (`emitter.markLine`). The patched lldb consumes these (WAMR's
+debug-engine does **not** parse DWARF; it only reports a PC).
+
+**Address convention (verified).** DWARF addresses are **relative to the start
+of the `code`-section payload** (matching clang's wasm backend: `low_pc 0x2` →
+file offset 65 with code-content start 63). WAMR's GDB server reports the PC
+as the **absolute file offset** of the instruction, encoded as `WasmObj<<62 |
+offset` — so `lldb` adds the code-section file offset to the DWARF address to
+form the breakpoint address. End-to-end proof (`strWork`, code-content start
+542): DWARF rows `0x216`(L4)/`0x34d`(L5) → breakpoint addresses `0x434`/`0x56b`
+→ both **hit** `T05 reason:breakpoint`.
+
+**Regression harness.** `test/test_wamr_debug_rsp.sh` fixes the whole chain in
+the repo (previously a throwaway `/tmp` script): configure
+`-DQZ_WITH_WAMR_DEBUG_INTERP=ON` → compile `strw` with `--debug` → load the
+plain `.wasm` via `build.js ... --no-aot` (WAMR rejects AOT instances) → read
+the line addresses from DWARF (`llvm-dwarfdump --debug-line`) → bare GDB-RSP
+client (`test/wamr-debug-e2e/rsp_break.py`) sets `Z0` breakpoints and asserts
+`reason:breakpoint`. This guards the DWARF-address↔file-offset convention: a
+drift in either the emitter or `ext_wamr.c` makes the breakpoint miss. Note the
+initial `reason:trace` stop already advances past the module entry, so the
+harness sets breakpoints on **every** line row — an entry-line address that is
+already behind the stop PC can never hit. CI job: `wamr-debug-rsp`.
+
+**Source-level consumption (lldb).** The end-to-end proof that a real frontend
+consumes the DWARF: `test/test_wamr_debug_source.sh` runs the prebuilt WAMR
+`wamr-lldb` (`process connect -p wasm connect://…`, then `b strwork.ts:4`)
+against the debug build, and asserts `stop reason = breakpoint` — lldb reads
+the module's DWARF over RSP, resolves file:line to address, and stops. lldb is
+**not** a build/runtime dependency; the script **skips** (exit 0) when absent.
+To obtain it: grab `wamr-lldb-<ver>-x86_64-ubuntu-<os>.tar.gz` from the WAMR
+releases and extract to `$ROOT/.tools/wamr-lldb` (gitignored) — the
+prebuilt binary is stock lldb **plus** `lldb_wasm.patch` (LLVM D78801, the
+`WasmProcess` plugin); stock lldb cannot debug wasm.
+
 ## Test
 
 ```bash
@@ -330,13 +421,13 @@ e2e tests (`QZJS_RUNTIME` points it at that job's `build/qzjs`).
 
 The engine's per-opcode breakpoint check is gated by a compile-time macro.
 If the macro the CMake passes to the engine differs from the one in
-`deps/quickjs-ng-debugger.patch`, `DEBUGGER_CHECK` compiles to a no-op and
+`src/qzvm/patches/engine-dap-debugger.patch`, `DEBUGGER_CHECK` compiles to a no-op and
 debugging silently does nothing — no error, breakpoints just never fire.
 
 1. Verify the macro matches in both places:
 
    ```bash
-   grep -n DEBUG_SUPPORT deps/quickjs-ng-debugger.patch | head -4
+   grep -n DEBUG_SUPPORT src/qzvm/patches/engine-dap-debugger.patch | head -4
    grep -n "QZ_DEBUG_SUPPORT_DEFINE" CMakeLists.txt
    ```
 
