@@ -320,3 +320,7 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 实施：`collectClasses` 存 `c.captured`（`_capturesOf(methodNode)`，过滤内建/模块全局/类名）；`_emitClassValue` 在创建点 `env_new(-1)` + 逐名 `env_def` + `class_env_set(clsId, env)`；`_mEnter` 把 `c.captured` 并入 `capNames` 并发 `qz.cls_env_into(envLocal, clsId)`；宿主加 `classEnv`/`class_env_set`/`cls_env_into`。
 结果：`wasm` 校验失败 `Compiling function #N failed: call[0] expected`（QZ 条目与两侧 i32 签名均已核对一致）。**下次先查编码器**：`Module.call(name)` 对「两趟采集（`collectImports`）后才注册的 import」的索引解析，以及 `call[0] expected` 的确切触发条件（疑似调用点/索引生成问题，而非签名）。
 
+**第三次尝试（2026-10-17，已回退）——换用既有 import 绕开编码器卡点**：把类捕获 env 存进 **statics 表**（键 `@@qzEnv`，用既有的 `env_new`/`env_def`/`static_set`/`static_get`，**零新 import**），并在「类有捕获且方法**无**嵌套 lambda 捕获」时令 `envLocal` 直接指向类 env（避免跨调用污染；混合场景保持 loud）。
+结果：踩到两个实现细节——(1) 锚点 `M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);` 在 **`_mEnter` 与 `_emitLambdaBody` 各出现一次**（替换命中 2 处 → lambda 体内 `cname` 未定义 → `cname is not defined`）；(2) 类捕获名仍未进 `capMap`（分支条件/位置不对），两例仍 loud。
+**下次正确做法**：先在 `_mEnter` 内用**唯一锚点**（如 `this.envLocal = capNames.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;` 这一行）插入 env 分支；再紧随其后按「`capNames.length === 0 && c.captured.length > 0`」把类捕获名写入 `capMap`；`_emitLambdaBody` 完全不动。
+
