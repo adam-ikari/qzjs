@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### Reflect.construct + 类 static {} 块内 this（2026-10-17）
+- **`Reflect.construct(用户类, args)`**：宿主 builtin 特殊化——识别类对象（`__qzClsId` 标记）→ `buildInstance` 分配 wasm 实例（`[0]=__cls`、`[4]=size`、字段槽填 undefined）+ 调 `__m_<C>$ctor`；`classMeta` 补 `ctor`/`size` 字段（size 与 `_instSize` 一致）。**初版漏写 `[4]=size` 与字段槽清空 → 字段读 undefined，已修**。
+- **类 `static { }` 初始化块内 `this` ≡ 定义类**（此前 loud「this 仅在类方法/构造器内可用」）：`_emitStaticsGuardBody` 期间设定类上下文（`_curClassObj` + `_inStaticMethod`）→ `this.x = v` 走 `qz.static_set`、`this.x` 读走静态路径、`this` 作值 → `qz.class_value`（类对象）。
+- 结果：**658/673（97.8%）**；corpus28 19→20/21。ctest 32/32。
+
 ### 类名作值 + 静态 super 调用（2026-10-17）
 - **类名作值**（此前 loud「类名作值未实现」）：新增宿主 `qz.class_value(clsId)` —— 惰性构造并**缓存** JS 构造器对象（clsId 键，保证 `===` 同一）；`Object.setPrototypeOf(ctor, 父类对象)` 复刻静态继承链；`ctor.prototype = Object.create(父类.prototype)` + `constructor` 非枚举属性（复刻实例原型链）；静态方法（含 `@@hasInstance` → 挂真 `Symbol.hasInstance`）与 `name` 一并挂载；`classMeta` 补 `name` 字段。
 - **`C.prototype`**：静态成员访问路径新增 `prototype` 分流 → `class_value(C)` 后宿主取 `prototype`（此前按静态字段查 → undefined）。

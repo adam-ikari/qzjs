@@ -2768,7 +2768,8 @@ function compileTS(input, outWasm, opts = {}) {
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
 
-        return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters, staticMethods };
+        return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters, staticMethods,
+                 ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };   // 与 _instSize 一致（__cls + 字段）
     });
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs };
 }
@@ -2855,6 +2856,8 @@ Emitter.prototype._emitStaticsGuard = function (cname) {
 Emitter.prototype._emitStaticsGuardBody = function (c) {
     const cname = c.name;
     const M = this.m;
+    const savedCCO = this._curClassObj, savedSM2 = this._inStaticMethod;
+    this._curClassObj = c; this._inStaticMethod = true;   // static{} 内 this ≡ 定义类（_classOfExpr/_isClassName）
     M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
     M.i32Eqz();
     M.ifBlock("void");
@@ -2865,11 +2868,14 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
             if (it.init) this.emitTaggedExpr(it.init); else this._emitUndefined();
             M.call("qz.static_set");
         } else {
+            const savedSM = this._inStaticMethod; this._inStaticMethod = true;   // static {} 内 this ≡ 定义类（JS 语义）
             for (const st of it.blk.body.statements) this.emitTaggedStmt(st);
+            this._inStaticMethod = savedSM;
         }
     }
     M.i32Const(this._strId(cname)); M.call("qz.statics_mark");
     M.end();
+    this._curClassObj = savedCCO; this._inStaticMethod = savedSM2;
 };
 // 类名（标识符）是否为已收集的类
 // 沿继承链找静态访问器（kind: "get"|"set"）→ { cname, acc }（静态属性读/写分派）
@@ -3399,6 +3405,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isThis(e)) {
         if (this.capMap.has("this")) { this._emitCapturedRead("this"); return; }   // 方法内闭包捕获 this → 经 env
         if (this._lamThisParam) { this._emitUndefined(); return; }   // 该函数声明了 this 形参（TS 注解）→ 运行时 this = undefined
+        if (this._inStaticMethod && this._curClassObj) {          // 静态方法/static{} 内 this ≡ 定义类（JS 语义）
+            this.m.i32Const(this._curClassObj.id); this.m.call("qz.class_value"); return;
+        }
         const idx = this._local("this");
         if (idx === undefined) throw new Error("[tagged] this 仅在类方法/构造器内可用");
         this.m.localGet(idx); return;

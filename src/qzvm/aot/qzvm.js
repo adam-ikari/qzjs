@@ -510,7 +510,8 @@ function makeQzvm(strings, opts) {
     const meta = classMeta && classMeta[clsId];
     if (!meta) return null;
     const pc = meta.parent != null ? classObjImpl(meta.parent) : null;
-    const ctor = function () { throw new Error("类构造器：宿主侧不可直接调用（请用 new C(...)）"); };
+    const ctor = function (...as3) { return buildInstance(clsId, as3); };
+    Object.defineProperty(ctor, "__qzClsId", { value: clsId, configurable: true });
     Object.setPrototypeOf(ctor, pc || Function.prototype);
     Object.defineProperty(ctor, "name", { value: meta.name || "C", configurable: true });
     const proto = Object.create(pc ? pc.prototype : Object.prototype);
@@ -527,6 +528,24 @@ function makeQzvm(strings, opts) {
     }
     classObjs.set(clsId, ctor);
     return ctor;
+  };
+  const buildInstance = (clsId, args) => {                    // Reflect.construct / 宿主侧构造 → wasm 实例句柄
+    const meta = classMeta && classMeta[clsId];
+    if (!meta || !mem) return TAG;
+    const size = Math.max(meta.size || 16, 16);
+    const off = bumpAlloc(size);
+    const dv = new DataView(mem.buffer);
+    dv.setInt32(off, clsId, true);
+    dv.setInt32(off + 4, size, true);                          // [4]=size（供宿主物化，与 emitter _emitNewCall 一致）
+    for (let k = 8; k < size; k += 8) dv.setBigInt64(off + k, TAG, true);   // 字段槽 = undefined
+    const self = (0x7ffen << 48n) | BigInt(off);
+    const fnC = exportsRef && meta.ctor && exportsRef[meta.ctor];
+    if (typeof fnC === "function") {
+      const as4 = (args || []).slice(0, 4).map(x => bitsOf(x));
+      while (as4.length < 4) as4.push(TAG);
+      fnC(self, as4[0], as4[1], as4[2], as4[3]);
+    }
+    return self;
   };
   const classValueImpl = (clsId) => {
     let h = classHandles.get(clsId);
@@ -1388,6 +1407,13 @@ function makeQzvm(strings, opts) {
           else { syncExtras(); extras.delete(off0 + "|" + key); }
           syncOrder(); { const l = orderMap.get(off0); if (l) { const ix = l.indexOf(key); if (ix >= 0) l.splice(ix, 1); } }
           return boxBool(true);
+        }
+      }
+      if (name === "Reflect.construct" && a0 !== undefined) {   // Reflect.construct(用户类, argsArray) → wasm 实例
+        if ((BigInt.asUintN(64, a0) >> 48n) === HOST_HI) {
+          const cobj = handles[idxOf(a0)];
+          const cid = cobj && cobj.__qzClsId;
+          if (cid !== undefined) return buildInstance(cid, toJS(a1) || []);
         }
       }
       // Object.keys/values/entries/getOwnPropertyNames(wasm 数组)：索引键（0..len-1，升序）+ 自定义字符串键（插入序）
