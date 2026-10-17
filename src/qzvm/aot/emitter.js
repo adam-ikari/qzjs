@@ -134,7 +134,11 @@ const QZ = {
   builtin_member: { params: ["i32"], results: ["i64"] },              // 内建成员当作值读
   regex: { params: ["i32"], results: ["i64"] },                        // 正则字面量 → 宿主 RegExp
   str_dup: { params: ["i64"], results: ["i64"] },                     // 字符串私有副本（不可变语义）
-  iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组
+  iter_array: { params: ["i64"], results: ["i64"] },                 // 非数组可迭代 → wasm 数组（for-of 已改走 iter_new/iter_pull，保留供旧路径）
+  iter_new: { params: ["i64"], results: ["i64"] },               // for-of: 目标 → 迭代器状态句柄
+  iter_pull: { params: ["i64"], results: ["i64"] },               // for-of: 推进一次；返回 1=done / 0=continue（BigInt）
+  iter_val: { params: ["i64"], results: ["i64"] },                // for-of: 取当前迭代值（已 pull）
+  iter_close: { params: ["i64"], results: [] },                   // for-of: 提前终止调用（break/return）→ iterator.return?.()
   fn_value: { params: ["i32", "i32"], results: ["i64"] },   // 顶层函数作值：包装为宿主函数句柄（arity = 形参数，缺省补 TAG）
   builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
   spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
@@ -3115,51 +3119,60 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         return;
     }
     if (ts.isForOfStatement(s)) {
-        // for (let x of arr) body：每嵌套层独立 local 对（arrL=i64 句柄, idxL=i32 索引）。
-        // 结构同 for：block(brk) loop block(cont) body end; i++; br 0 end end。
+        // for (let x of arr) body：惰性迭代（JS 语义）——wasm 数组按索引直读（长度每轮重读，
+        // 迭代期间 push/delete 可见）；字符串经 str_chars 转码点数组；其它可迭代（Set/Map/
+        // 自定义迭代器/迭代器对象）走 iter_new/iter_pull/iter_val（逐个 next()）；正常完成与
+        // break 时对宿主迭代器调用 iter_close（JS 迭代协议要求关闭）。
+        // 结构：block(brk) loop [cond→done flag; brIf(brk→close)] block(cont) body end cont br(0→loop)
+        //        end loop [close-on-completion] end brk。
         const M = this.m;
         if (!ts.isVariableDeclarationList(s.initializer) || s.initializer.declarations.length !== 1)
             throw new Error("[tagged] for-of 仅支持 let x of arr / let [a,b] of arr");
         const bindName = s.initializer.declarations[0].name;
         if (ts.isIdentifier(bindName) && this._local(bindName.text) === undefined) throw new Error("未定义 for-of 变量");
-        const arrL = this.forOfBase + this.forOfCount * 3;       // 本层数组句柄 local
-        const idxL = arrL + 1;                                   // 本层索引 local
-        const lenL = arrL + 2;                                   // 本层长度 local（专用，避免被 sT 复用覆盖）
+        const arrL = this.forOfBase + this.forOfCount * 3;       // 本层迭代目标 local（i64）
+        const idxL = arrL + 1;                                   // 本层索引 local（仅数组模式用）
+        const lenL = arrL + 2;                                   // 占位（保留以不破坏 forOfBase 步长）
+        void lenL;
         this.forOfCount++;
-        this.emitTaggedExpr(s.expression); M.localSet(arrL);     // 数组句柄（i64）
-        // 字符串 → 码点字符数组（for…of 按**码点**迭代："😀".length=2 但迭代 1 次）
+        this.emitTaggedExpr(s.expression); M.localSet(arrL);     // 迭代目标（i64）
+        // 字符串 → 码点字符数组（for…of 按码点迭代："😀".length=2 但迭代 1 次）
         M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
         M.ifBlock("void");
         M.localGet(arrL); M.call("qz.str_chars"); M.localSet(arrL);              // 字符串 → 码点数组
-        M.else_();
+        M.end();
+        // 非 wasm 数组（宿主可迭代）→ 建立宿主迭代器（惰性逐次 next()）
         M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
         M.i32Eqz();
         M.ifBlock("void");
-        M.localGet(arrL); M.call("qz.iter_array"); M.localSet(arrL);             // 其它可迭代（Map/Set/迭代器）→ 数组
+        M.localGet(arrL); M.call("qz.iter_new"); M.localSet(arrL);
         M.end();
-        M.end();
-        this._emitLengthOf(arrL); M.f64ReinterpretI64(); M.i32TruncF64S(); M.localSet(lenL);   // len（专用 local）
-        M.i32Const(0); M.localSet(idxL);                         // i = 0
+        M.i32Const(0); M.localSet(idxL);                         // i = 0（数组模式）
         M.block(); this.depth++; M.loop(); this.depth++;
+        // 条件：数组模式 = idx >= 本轮长度（live）；宿主模式 = iter_pull 返回 done（!=0）
+        //   两分支统一为 i32 done-flag；if/else 结束后单一 brIf(1)（br 1 = brk → 经 close 退出）
+        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+        M.ifBlock("i32");
         M.localGet(idxL);
-        M.localGet(lenL);
-        M.i32GeS(); M.brIf(1);                                   // i >= len → 退出
+        this._emitLengthOf(arrL); M.f64ReinterpretI64(); M.i32TruncF64S();
+        M.i32GeS();                                             // idx >= len → 1（done）
+        M.else_();
+        M.localGet(arrL); M.call("qz.iter_pull"); M.i64Const(0n); M.i64Ne();    // done flag = (pull != 0)
+        M.end();
+        M.brIf(1);                                              // done → 退出循环（→ close）
         M.block(); this.depth++;
         this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
-        // 元素：字符串(0x7FFA) → 宿主 charAt（UTF-16 码元）；wasm 数组(0x7FFB) → 内存 dataOff + i*8
+        // 元素：wasm 数组(0x7FFB) → 内存 dataOff + idx*8（并 idx++）；宿主迭代器 → iter_val
         { const cap = this._loopCaptured(this._headerNames(s), s.statement || s);              // let/const 每迭代绑定
           if (cap) this._emitPerIterEnv(cap.headerNames, cap.bodyNames); }
-        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
         M.ifBlock("i64");
-        M.localGet(arrL); M.i32Const(this._strId("charAt"));
-        M.localGet(idxL); M.f64ConvertI32U(); M.i64ReinterpretF64();
-        this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
-        this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
-        M.call("qz.method_call");
-        M.else_();
         M.localGet(arrL); M.i32WrapI64(); M.i32Load(2, 8);       // dataOff
-        M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // dataOff + i*8
-        M.i64Load(3, 0);
+        M.localGet(idxL); M.i32Const(8); M.i32Mul(); M.i32Add(); // dataOff + idx*8
+        M.i64Load(3, 0);                                         // 元素（i64）
+        M.localGet(idxL); M.i32Const(1); M.i32Add(); M.localSet(idxL);   // i++（下一轮）
+        M.else_();
+        M.localGet(arrL); M.call("qz.iter_val");                // 宿主迭代器当前值（i64）
         M.end();
         if (ts.isIdentifier(bindName)) {
             this._emitVarStore(bindName.text, this.scratchB); this.m.drop();     // x = arr[i]（被捕获则写 env）
@@ -3171,11 +3184,16 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         }
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
-        this.depth--; M.end();                                   // end cont
-        M.localGet(idxL); M.i32Const(1); M.i32Add(); M.localSet(idxL);   // i++
-        M.br(0);
-        this.depth--; M.end();                                   // end loop
-        this.depth--; M.end();                                   // end brk
+        this.depth--; M.end();                                  // end cont
+        M.br(0);                                                // 下一轮（→ loop 头 → 条件）
+        this.depth--; M.end();                                  // end loop
+        // 正常完成 / break：宿主迭代器 → iter_close（JS 迭代协议）；数组模式（0x7FFB）无操作
+        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+        M.ifBlock("void");
+        M.else_();
+        M.localGet(arrL); M.call("qz.iter_close");
+        M.end();
+        this.depth--; M.end();                                  // end brk
         this.forOfCount--;
         return;
     }

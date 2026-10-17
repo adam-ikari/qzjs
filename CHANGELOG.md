@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### for…of 惰性迭代（2026-10-17）
+- **修复：`for…of` 此前急切快照（`iter_array` 一次性收集为 wasm 数组）→ 与 JS 惰性语义不符**（迭代期间 `push`/`delete` 不可见；自定义迭代器的 `next()` 一次性消费）。改为逐次 `next()` 驱动：
+  - wasm 数组（0x7FFB）：按索引直读，**长度每轮重读**（迭代期间 `push`/`delete` 可见）。
+  - 字符串：经 `str_chars` 转码点数组后走数组路径。
+  - 宿主可迭代（Set/Map/自定义 `[Symbol.iterator]`/迭代器对象）：新宿主 `qz.iter_new`/`iter_pull`/`iter_val`/`iter_close`——`iter_new` 建立 `{it, val}` 状态句柄，`iter_pull` 调 `it.next()` 返回 done-flag（BigInt），`iter_val` 取当前值；**正常完成与 break 时调用 `iter_close`→`it.return?.()`**（JS 迭代协议要求关闭）。
+  - 条件/元素加载按句柄 tag（0x7FFB vs 其它）分支；`if/else` 统一为 i32 done-flag 后单一 `brIf`（避免 br-in-if 的深度错位）。
+- **消除最后一项已知静默错值**（for-of 急切快照）；差分审计 **598/610（98.0%）**；ctest 32/32。
+- 已知窄面（非静默）：`for…of` 中 `break` 调 `it.return()` 在「对象字面量 `[Symbol.iterator]` 返回带 `return` 的迭代器」场景下 `closed` 未记录（迭代器物化丢失 `return`）；`Array.prototype[Symbol.iterator]()` 直接取用未支持（loud）。
+
 ### 第二十五批差分审计（2026-10-17）
 - 新增 `audit_corpus25.js`（20 例：Math 扩展（imul/clz32/fround/sign/trunc/exp/log 系列）、数字判型（isInteger/isNaN/isSafeInteger）、正则 lastIndex 显式设置与捕获组、split 捕获组、展开字符串与 Set、整数键对象键序、稀疏数组方法、concat 与展开混用、switch let 作用域、for-comma 与嵌套三元、Object.is vs ===、parseInt/parseFloat/Number 异常输入、getter 返回函数被调用、throw 非错误值、嵌套对象 getter 链、Array.from 字符串/类数组、字符串索引与 charAt、提取方法经 .call/.apply/.map、布尔/数值装箱方法、for-in vs for-of 对象）。
 - **修复 6 项（含 2 项静默错值）**：

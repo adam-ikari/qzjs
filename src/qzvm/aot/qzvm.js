@@ -714,6 +714,21 @@ function makeQzvm(strings, opts) {
     string_concat: (a, b) => strWriteback(toJS(a) + toJS(b)),
     to_string: (v) => strWriteback(String(toJS(v))),           // ToString：对象走 string hint（toString 优先）
     is_nan_host: (v) => toJS(v) !== toJS(v) ? 1 : 0,   // JS "+" 语义（含 ToPrimitive(default)：对象优先 valueOf）
+    iter_new: (o) => {
+      const js = toJS(o);
+      if (js == null) throw new Error("for-of: 不可迭代（null/undefined）");
+      const it = typeof js[Symbol.iterator] === "function" ? js[Symbol.iterator]() : null;
+      if (!it || typeof it.next !== "function") throw new Error("for-of: 目标不可迭代");
+      return tagHandle({ it, val: undefined, done: false });
+    },
+    iter_pull: (h) => {
+      const st = handles[idxOf(h)];
+      const r = st.it.next();
+      st.val = r.value; st.done = !!r.done;
+      return st.done ? 1n : 0n;   // i64 flag（宿主返回 i64 必须 BigInt）
+    },
+    iter_val: (h) => ret(handles[idxOf(h)].val),
+    iter_close: (h) => { const st = handles[idxOf(h)]; if (st && typeof st.it.return === "function") try { st.it.return(); } catch (_) {} return; },
     iter_array: (v) => {                          // 非数组可迭代（Map/Set/迭代器等）→ wasm 数组（元素经 toJS/bitsOf）
       const x = toJS(v);
       if (x == null) throw new Error("for-of: 该值不可迭代");
