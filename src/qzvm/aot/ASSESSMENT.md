@@ -313,3 +313,6 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 4. 宿主：`clsEnv: Map<clsId, handle>`、`class_env_set(clsId, env)`、`cls_env(clsId)`（未登记 → throw loud）。
 安全性质：漏挂任一名字 → 方法侧 `env_get` 得 TAG → 仍是 **loud「未定义捕获变量」**，不会静默错值。回归面 = 全语料 + ctest。
 
+**首个实现尝试（2026-10-17，已回退）**：按上述 4 步落地（含 `$qzEnv` local + `capMap` + `class_env_set`/`cls_env`），`test_aot` 立即报 `Cannot read properties of null (reading 'body')`。两次修正（把 `$qzEnv` 的 `locals.push` 移到 `nLoc` 计算之前、用 `locals.indexOf("$qzEnv")` 取索引）后仍同错 → 说明 **`_mEnter` 的槽布局与 `locals` 存在额外耦合**（`locals` 还参与 `varMap`/`$ovfArg`/`forOf`/`clo` 计算），改 `locals` 会连带破坏既有布局。
+**下次正确做法**：不要动 `locals` 列表——改为在 `_mEnter` 里**独立预留一个专用 local**（例如在 `this.swIdx`/`this.forOfBase` 之后新增 `this.qzEnvLocal = nLoc + …`），或用**现成 scratch 槽**（`sT` 中一个固定槽）保存 env 句柄；`capMap.set(name, thatSlot)` 后 prologue 写入即可。回归面仍为全语料 + ctest。
+
