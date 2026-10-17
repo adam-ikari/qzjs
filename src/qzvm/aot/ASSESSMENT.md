@@ -214,4 +214,21 @@
 - （已修）**`String.raw`**：编译期按源码原文（raw 段）与 `ToString(插值)` 拼接 —— 无需 `strings.raw` 表。
 - 标签模板的 **`strings.raw`**（自定义 tag 读取）仍无 `.raw` 表（wasm 数组无附加属性）→ 宿主 TypeError（loud）。
 
-- （已修）**第 14 批发现的三项静默差异**：(1) `undefined/null` **写属性** → 走宿主 `prop_set`（TypeError）+ 链外 `_emitErrCheck`；(2) **块级 `let/const` 遮蔽** → 进入遮蔽块前把外层同名局部存入 `$shN` 槽，退出后恢复（`_collectLocals` 精确扫描遮蔽块）；(3) `find`/`pop`/`at` 等返回**元素**的方法 → `ret` 依据 `pojoOf` 还原原始 POJO/实例句柄（此前返回物化快照 → 方法调用报「无方法」、身份丢失）。
+- （已修）**第 14 批发现的三项静默差异**：(1) `undefined/null` **写属性** → 走宿主 `prop_set`（TypeError）+ 链外 `_emitErrCheck`；(2) **块级 `let/const` 遮蔽** → 进入遮蔽块前把外层同名局部存入 `$shN` 槽，退出后恢复（`_collectLocals` 精确扫描遮蔽块）；(3) `find`/`pop`/`at` 等返回**元素**的方法 → `ret` 依据 `pojoOf` 还原原始 POJO/实例句柄（此前返回物化快照 → 方法调用报「无方法」、身份丢失）。### 已知 silent 缺陷：对象字面量方法闭包 + 捕获数组的 push 变异不可见（2026-10-17 深查，待修）
+
+最小复现：
+```ts
+export function f(): any { let a: any = []; const o: any = { push: (x: any) => a.push(x), get: () => a };
+  o.push(1); o.push(2); return o.get().length; }   // JS 期望 2；当前得 0
+```
+
+隔离结论（均实测）：
+- `a[0]=x`（索引写）跨方法可见 ✓；`a = newArr`（重赋值，env_set）跨方法可见 ✓；只读 `a[0]`/`a.length` ✓。
+- **同一方法内** `a.push(); a.push(); a.length` → 2 ✓；**顶层两个独立闭包** push/len → 2 ✓。
+- **仅对象字面量方法** push + 另一方法读 length → 0 ✗。
+- 捕获分析正确：`_capturesOf` 对两个方法都返回 `["a"]`。
+- 运行时探针：`env_get` 仅在 `get` 方法内触发（返回 0x7FFB|0x80），**push 方法内未触发** → push 的 `a.push(x)` 走的 `_emitArrayPush` 未经 env（疑似对象字面量方法体在**外围作用域内联发射**，用外围局部 `a`，与闭包 env 中捕获的 `a` 分成两条通道）。
+- `_emitArrayPush` 就地增长（更新 header 的 len/cap/dataOff，不改句柄）；`_emitLambdaBody` 先建 capMap 再发射体。
+
+下一步：定位对象字面量方法体的发射路径（是否 `_emitLambdaNew` + 延迟 lambda pass，或在外围内联），使方法体内标识符解析与闭包 env 一致。
+
