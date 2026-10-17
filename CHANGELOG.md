@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 恢复 `qz.new_dynamic` 宿主方法（2026-10-17）
+- **缺陷**：`new_dynamic` 在 QZ 契约表中、发射器亦会发射（类表达式工厂 `const A = maker(); new A()`），但**宿主缺少该方法** → `WebAssembly.instantiate` 报 `function import requires a callable`（该特性此前实际不可用）。
+- **修复**：补齐宿主 `new_dynamic(obj, a0..a3)`（类对象句柄 → 经 `__qzClsId` 的 `buildInstance`）。验证：`const mk = () => class { v(){return 7;} }; const A = mk(); new A().v()` = 7。
+- **动态 `instanceof` 再次尝试后回退**：按「右操作数可解析为局部/捕获/模块全局/属性访问」过于宽泛（内建/非类值场景被误判）→ 4 例回归（corpus11/14/15/22）→ 已回退（保留 `new_dynamic`）。重做要点：判定需限定为**确知的类对象**（如仅有 `__qzClsId` 的宿主类值），并保留 loud 兜底。
+- 结果：**708/731（96.9%）**；无回归。ctest 32/32。
+
 ### 属性赋值含副作用接收者（放宽 loud，2026-10-17）
 - **根因**：`o.f = v` 当接收者带副作用（`(deep.a ??= {}).b = 1` / `(o.a = {}).b = 2`）时一律 loud「求值顺序未实现」；但 JS 顺序差异**仅当 RHS 也带副作用时**才可观察。
 - **修复**：改为**仅当接收者与 RHS 都带副作用**才 loud（保守保留真顺序依赖场景）；RHS 无副作用时按现有顺序（RHS → 接收者求值 + 写）——语义等价。

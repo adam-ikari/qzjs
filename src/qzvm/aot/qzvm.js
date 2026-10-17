@@ -884,6 +884,11 @@ function makeQzvm(strings, opts) {
     is_nullish: (a) => { const u = BigInt.asUintN(64, a); if ((u >> 48n) !== TAG_HI) return 0; const idx = Number(u & MASK32); return (idx === 0 || idx === 1) ? 1 : 0; },
     // instanceof：obj 须为类实例句柄（专用 tag 0x7FFE|off，[off]=clsId）；沿「实例类 → 父链」查目标 clsId。
     // 非实例（数字/字符串/bool/null/数组/POJO/宿主对象）→ false。需 bindClasses 提供 classMeta。
+    new_dynamic: (obj, a0, a1, a2, a3) => {          // 运行时类值构造（类表达式工厂）：类对象 → 实例句柄
+      const f = handles[idxOf(obj)];
+      if (typeof f !== "function") throw new Error("new: 目标不是类（期望类对象）");
+      return f(...[a0, a1, a2, a3].map(x => toJS(x)));
+    },
     class_value: (clsId) => classValueImpl(clsId),
     instanceof_op: (obj, clsId) => {
       // Symbol.hasInstance 优先（JS [[HasInstance]] 语义）：沿类继承链查 static @@hasInstance → 调 wasm 静态方法
