@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类计算属性名经模块级常量解析（2026-10-17）
+- 症状：`const _iter: any = Symbol.iterator; class Range { [_iter]() { … } }` → 编译期 loud「类计算属性名方法仅支持 Symbol.<well-known>」（`symbolNameOf` 只认 `Symbol.x` 属性访问）。
+- 修：新增 `modSymLit`（模块级 const 持有 `Symbol.<well-known>` → `"@@<sym>"`），在类成员收集处对**标识符**键名回退查表（方法与访问器两处）。corpus27 20→21/21。
+- 结果：**796/803（99.1%）**（35 批）；ctest 32/32 零回归。
+
 ### 原型上的运行时访问器（2026-10-17）
 - 症状：`Object.defineProperty(proto, "computed", {get(){return this._v*2}, set(x){this._v=x+1}})` + `Object.create(proto)` → `o.computed` = NaN、`o._v` 未更新、`getOwnPropertyNames(proto)` 缺 `computed`。
 - 两处修复（corpus35 16→17/17，全批首次全绿）：

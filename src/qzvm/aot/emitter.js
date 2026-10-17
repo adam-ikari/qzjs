@@ -1562,12 +1562,12 @@ class Emitter {
                     (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
                 } else if (ts.isMethodDeclaration(mem) && ts.isComputedPropertyName(mem.name)) {
                     // [Symbol.iterator] / [Symbol.toPrimitive] …：编译为 @@<symbol 名> 方法；物化时挂到真 Symbol 上
-                    const sx = symbolNameOf(mem.name.expression);
-                    if (!sx) throw new Error("[tagged] 类计算属性名方法仅支持 Symbol.<well-known>（如 [Symbol.iterator]）");
+                    const sx = symbolNameOf(mem.name.expression) || (ts.isIdentifier(mem.name.expression) && this._modSymLit && this._modSymLit.get(mem.name.expression.text)) || null;   // Symbol.x 或持有它的模块级常量
+                    if (!sx) throw new Error("[tagged] 类计算属性名方法仅支持 Symbol.<well-known>（如 [Symbol.iterator]）或持有它的模块级常量");
                     (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem });
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isComputedPropertyName(mem.name)) {
-                    const sx = symbolNameOf(mem.name.expression);   // [Symbol.toStringTag] get → @@toStringTag 访问器
-                    if (!sx) throw new Error("[tagged] 类计算属性名访问器仅支持 Symbol.<well-known>（如 [Symbol.toStringTag]）");
+                    const sx = symbolNameOf(mem.name.expression) || (ts.isIdentifier(mem.name.expression) && this._modSymLit && this._modSymLit.get(mem.name.expression.text)) || null;   // Symbol.x 或持有它的模块级常量
+                    if (!sx) throw new Error("[tagged] 类计算属性名访问器仅支持 Symbol.<well-known>（如 [Symbol.toStringTag]）或持有它的模块级常量");
                     (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" });
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isIdentifier(mem.name)) {
                     if (isStatic(mem)) { staticMethods.push({ name: mem.name.text, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" }); }
@@ -2468,6 +2468,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         return null;
     };
+    const modSymLit = new Map();     // 模块级 const 持有 Symbol.<well-known>（名字 → "@@<sym>"），供类计算属性名解析
     const modConstLit = new Map();   // 模块级字面量 const（名字 → 字符串/数值），供计算属性名折叠
     const modVars = [];          // 模块级变量声明（含初值）
     const modStmts = [];         // 模块级变量语句（合成 __module_init 的函数体）
@@ -2498,6 +2499,7 @@ function compileTS(input, outWasm, opts = {}) {
                     modVars.push(d);
                     if (ts.isStringLiteral(d.initializer)) modConstLit.set(d.name.text, d.initializer.text);   // 字面量 const → 计算属性名可折叠
                     else if (ts.isNumericLiteral(d.initializer)) modConstLit.set(d.name.text, Number(d.initializer.text.replace(/_/g, "")));
+                    else if (ts.isPropertyAccessExpression(d.initializer)) { const sx0 = symbolNameOf(d.initializer); if (sx0) modSymLit.set(d.name.text, sx0); }   // const s = Symbol.iterator → 类计算属性名可静态解析
                 }
                 modStmts.push(st);
             } else if (!ts.isFunctionDeclaration(st) && !ts.isClassDeclaration(st) && !ts.isInterfaceDeclaration(st)
@@ -2828,6 +2830,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.usesProto = usesProto;
         em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
         em.modConstLit = modConstLit;    // 模块级字面量 const（计算属性名折叠用）
+        em._modSymLit = modSymLit;       // 模块级 Symbol.<well-known> 常量
         em.protNameId = (n) => em._strId(n);
 
         em._fnHasThis = new Map();       // 顶层函数名 → 是否带 TS this 形参（receiver 由宿主前置）
