@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 计算属性名解构（2026-10-17）
+- 症状：`const { ["k" + 1]: dyn } = obj` → 编译期 loud「暂不支持计算属性名的解构」（两处：`{...rest}` 键名汇总预检 + 元素发射）。
+- 两处修复（corpus33 17→18/18）：
+  1. `{...rest}` 的静态键名汇总仅在**确实存在 rest** 时执行（无 rest 时计算键名合法）；存在 rest 时的计算键仍 loud。
+  2. 元素发射：`name` 为 `ComputedPropertyName` → `o[expr]`（`_emitElemOf` 运行期键）而非报错；两处解构发射点均已支持。
+- 结果：**758/768（98.7%）**（33 批）；ctest 32/32 零回归。
+
 ### 第三十三批语料 + 4 项新修（2026-10-17）
 - 新增 `audit_corpus33.js`（18 例）：Object/Array 组合方法、defineProperty、sort 比较器、String 方法、JSON replacer、标签循环、try/finally、switch、解构、Map/Set、数值与位运算、Math、freeze/seal、私有字段、Symbol、可选链/逻辑赋值、Array.from、闭包循环变量、正则组。首跑 14/18 → **17/18**。
 - 新修 4 项：

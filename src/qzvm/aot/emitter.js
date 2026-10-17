@@ -355,18 +355,28 @@ class Emitter {
         } else {   // ObjectBindingPattern
             // {...rest} 需排除「其余解构键」→ 先汇总（最多 4 个，超出报错）
             const restExcl = [];
-            for (const el of name.elements) {
-                if (!ts.isBindingElement(el) || el.dotDotDotToken) continue;
-                const k = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
-                                          : (ts.isIdentifier(el.name) ? el.name.text : null);
-                if (k === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
-                restExcl.push(k);
+            if (name.elements.some(el => ts.isBindingElement(el) && el.dotDotDotToken)) {   // 仅含 {...rest} 时才需静态键名汇总（无 rest 时计算键名合法）
+                for (const el of name.elements) {
+                    if (!ts.isBindingElement(el) || el.dotDotDotToken) continue;
+                    const k = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
+                                              : (ts.isIdentifier(el.name) ? el.name.text : null);
+                    if (k === null) throw new Error("[tagged] {...rest} 与计算属性名解构混用暂不支持");
+                    restExcl.push(k);
+                }
             }
             for (const el of name.elements) {
                 if (!ts.isBindingElement(el)) continue;
                 const key = el.propertyName ? (ts.isIdentifier(el.propertyName) ? el.propertyName.text : null)
                                             : (ts.isIdentifier(el.name) ? el.name.text : null);
-                if (key === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
+                if (key === null) {
+                    if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {   // 计算键名：o[expr]（运行期键）
+                        this._emitElemOf(this.scratch, el.propertyName.expression);
+                        if (el.initializer) this._emitDefaultIfUndef(el.initializer);
+                        this._emitBindingTarget(el.name);
+                        continue;
+                    }
+                    throw new Error("[tagged] 暂不支持计算属性名的解构");
+                }
                 if (el.dotDotDotToken) {                               // {...rest} → 宿主 object_rest
                     if (restExcl.length > 4) throw new Error("[tagged] 对象 rest 解构最多排除 4 个键");
                     M.localGet(this.scratch);
@@ -1084,7 +1094,15 @@ class Emitter {
                     continue;
                 }
                 const key = el.propertyName ? el.propertyName.text : (ts.isIdentifier(el.name) ? el.name.text : null);
-                if (key === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
+                if (key === null) {
+                    if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {   // 计算键名：o[expr]（运行期键）
+                        this._emitElemOf(valLocal, el.propertyName.expression);
+                        if (el.initializer) this._emitDefaultIfUndef(el.initializer);
+                        this._emitBindingTarget(el.name);
+                        continue;
+                    }
+                    throw new Error("[tagged] 暂不支持计算属性名的解构");
+                }
                 this._emitPropReadFromLocal(valLocal, key);
                 if (el.initializer) this._emitDefaultIfUndef(el.initializer);
                 this._emitBindingTarget(el.name);
