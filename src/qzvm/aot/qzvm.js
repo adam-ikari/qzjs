@@ -682,6 +682,12 @@ function makeQzvm(strings, opts) {
           arrSetInPlace(o, a2);
           return;
         }
+        if (typeof kk === "string") {                  // 自定义字符串键（非索引）→ arrMeta 旁表（与既有读取路径一致）+ 插入序表（Object.keys/for-in）
+          if (protGuard(off, kk)) return;
+          syncArrMeta(); { let am = arrMeta.get(off); if (!am) { am = {}; arrMeta.set(off, am); } am[kk] = toJS(v); }
+          syncOrder(); { let l = orderMap.get(off); if (!l) { l = []; orderMap.set(off, l); } if (l.indexOf(kk) < 0) l.push(kk); }
+          return;
+        }
       }
       if (hi === TAG_HI || hi === INST_HI) {
         if (off < 8) { handles[off] = toJS(v); return; }
@@ -1342,6 +1348,33 @@ function makeQzvm(strings, opts) {
           syncOrder(); { const l = orderMap.get(off0); if (l) { const ix = l.indexOf(key); if (ix >= 0) l.splice(ix, 1); } }
           return boxBool(true);
         }
+      }
+      // Object.keys/values/entries/getOwnPropertyNames(wasm 数组)：索引键（0..len-1，升序）+ 自定义字符串键（插入序）
+      if ((name === "Object.keys" || name === "Object.values" || name === "Object.entries" || name === "Object.getOwnPropertyNames")
+          && a0 !== undefined && (BigInt.asUintN(64, a0) >> 48n) === 0x7ffbn) {
+        const offA = Number(BigInt.asUintN(64, a0) & MASK32);
+        const dvA = mem ? new DataView(mem.buffer) : null;
+        const lenA = dvA ? dvA.getInt32(offA, true) : 0;
+        const dataA = dvA ? dvA.getInt32(offA + 8, true) : 0;
+        const keysA = [];
+        const elemA = (i) => (dvA && dataA) ? dvA.getBigInt64(dataA + i * 8, true) : TAG;
+        for (let i = 0; i < lenA; i++) {                       // 稀疏：洞不计入 Object.keys/values/entries
+          const raw = elemA(i);
+          if (BigInt.asUintN(64, raw) === HOLE) { if (name === "Object.getOwnPropertyNames") keysA.push(String(i)); continue; }
+          keysA.push(String(i));
+        }
+        const enm = [];
+        for (const k of keysA) enm.push(k);
+        syncArrMeta(); syncOrder();
+        const amA = arrMeta.get(offA);
+        const ck = amA ? Object.keys(amA) : [];
+        for (const k of ck) if (enm.indexOf(k) < 0) enm.push(k);
+        if (name === "Object.getOwnPropertyNames") { enm.push("length"); return ret(enm); }
+        const keysOut = enm;
+        const valA = (k) => /^\d+$/.test(k) ? toJS(elemA(Number(k))) : (amA ? amA[k] : undefined);
+        if (name === "Object.keys") return ret(keysOut);
+        if (name === "Object.values") return ret(keysOut.map(valA));
+        return ret(keysOut.map(k => [k, valA(k)]));
       }
       if (name === "Object.assign" && a0 !== undefined) {          // 就地合并（POJO/实例为目标）并返回目标句柄
         const h = BigInt.asUintN(64, a0) >> 48n;

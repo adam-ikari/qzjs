@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 数组自定义字符串键属性（最后一项 silent 错值修复，2026-10-17）
+- **根因**：`a["k0"] = v`（wasm 数组 + 非数字键）在 `setIndexImpl` 落到兜底 `toJS(o)[toJS(k)] = v`——写的是**物化副本**，原件丢失；`a.k0` 亦读不到；`Object.keys` 漏报。
+- **修复**（复用既有 `arrMeta` 旁表，与正则 `exec`/`match` 的 `index`/`input` 读取路径一致）：
+  - `setIndexImpl`：wasm 数组 + 非索引字符串键 → `arrMeta[off][k] = v` + 插入序表 `orderMap`（`Object.keys`/`for-in` 用）；数字形态字符串键仍按索引写（`a["0"] ≡ a[0]`）。
+  - 宿主 `builtin`：`Object.keys`/`values`/`entries`/`getOwnPropertyNames`（接收者为 wasm 数组）→ 索引键 + 自定义键；**稀疏洞不计入** `keys/values/entries`（`getOwnPropertyNames` 含洞与 `length`，均与 JS 一致）。
+  - 初版误加 `prop_get` 数组分支屏蔽了既有 `arrMeta` 读取 → 正则 `index`/`input` 回归，已撤回。
+- 结果：**654/673（97.2%）**；corpus28 17→18/21。ctest 32/32。
+- **至此无已知 silent 错值**：残余 19 例全部为 loud（编译期显式报错）或已知窄面（文本表示/外质对象等），见 ASSESSMENT.md。
+
 ### 数组 push/pop 快路径误命中同名方法（静默错值修复，2026-10-17）
 - **根因**：`x.push(单个实参)` / `x.pop()` 的编译期快路径（`_emitArrayPush`/`_emitArrayPop`）**无条件命中**，未校验接收者是否为 wasm 数组——对象字面量/类实例上的同名方法 `o.push(x)` 被当作数组直写：把 POJO 句柄当数组头写入（`i32WrapI64` 后按 header 结构读写），**方法体从未执行**，另一闭包读到的数组不变（最小复现 `{push:(x)=>a.push(x), get:()=>a}` → `o.get().length` 得 0，应为 2）。
 - **修复**：快路径加**运行时 tag 守卫**——接收者只求值一次存入局部，`hi==0x7FFB`（wasm 数组）才走内存直写，否则退回 `_emitDynMethod` 通用派发；守卫的 `if` 块计入 `this.depth`（分支内含 errCheck/短路等 br 标签，否则 wasm 校验失败）。
