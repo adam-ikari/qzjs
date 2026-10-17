@@ -4,6 +4,10 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 动态父类构造前建立运行时父链（2026-10-17）
+- `new C()`（C 为动态父类）时先发 `_emitStaticsGuard(cname)`，使 statics guard 内的 `class_value_dyn` 链接在构造前执行（此前声明式类从未链接 → 继承方法派发失败）。
+- 关键批次回归 + ctest 全绿（零回归）。链式 mixin 仍未通（`class Final extends B2(A(Root))` → `x.r()` loud），下一步需插桩 `class_value_dyn` 确认声明式类 guard 的发射/执行时机。
+
 ### 动态 extends（mixin）——运行时父链（2026-10-17）
 - **实现**（4 处，零回归）：
   - 发射器：类条目记录 `dynParentNode`（extends 表达式）；`_emitClassValue(c)` 统一类值发射（动态父 → `qz.class_value_dyn(id, 父表达式)`）；两处 super 调用（显式 super / 合成转发）在动态父时改发 `qz.super_ctor(clsId, self, a0..a3)`；`_dynParentExpr(c)` 判定「父非已知类/内建」；`_methodOwner` 遇动态父**不做静态解析** → 退回动态派发。

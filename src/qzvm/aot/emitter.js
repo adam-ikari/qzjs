@@ -4813,6 +4813,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
             : "[tagged] new 未知类: " + tgt.text);
     }
     const c = this.classes.get(cname);
+    if (this._dynParentExpr(c)) this._emitStaticsGuard(cname);   // 动态父：构造前先建立运行时父链（statics guard 内）
     const args = e.arguments;
     if (args.length > 4) throw new Error("[tagged] new 最多 4 参");
     const te = this._expEnter();                            // 实例 off / ctor 实参用可重入槽（嵌套 new 不覆盖）
