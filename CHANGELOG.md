@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类计算 Symbol 访问器 + Symbol.toStringTag 物化（2026-10-17）
+- 现状：`class C { get [Symbol.toStringTag]() { return "C"; } }` → 编译期 loud「不支持的类成员: GetAccessor」（只有**方法**形式 `[Symbol.iterator]()` 被支持）。
+- 三处修复：
+  1. 发射器类成员收集：新增「计算属性名**访问器**」分支 → `@@<symbol>` 名（与计算方法同路径）；
+  2. 宿主 `materializeUncached` 的 `hook()` 只查 `meta.methods` → 补查 `meta.getters`（访问器形式的 `@@toStringTag` 才能物化）；
+  3. 宿主 `classObjImpl` 的实例方法/访问器挂载：`@@<symbol>` 名 → **真 `Symbol`**（`@@toStringTag` → `Symbol.toStringTag`），此前按字面量字符串挂 → `Object.prototype.toString.call(inst)` 得 `[object Object]`。
+- 验证：`Object.prototype.toString.call(new Tagged())`=`[object Tagged]`；`new Tagged()[Symbol.toStringTag]`=`Tagged`；内建标签 `[object Array]/Object/Number/String/Boolean/Null/Undefined/Function/Map/Set/RegExp/Date` 全对。
+- 结果：**733/750（97.7%）**；corpus29 17→18/20；32 批 + ctest 32/32 零回归。
+
 ### 类表达式命名/继承解析（2026-10-17）
 - 三处修复（`class-expression-names` 由编译期 loud「call 未定义: __m_Named$ctor」→ 仅剩 1 个子句 diff）：
   1. `extends` 父类名取原文（`parent.expression.text`）→ 现经 `_className()` 解析（类表达式绑定名/导入别名 → 真实类名），否则 `ctorName` 落空；

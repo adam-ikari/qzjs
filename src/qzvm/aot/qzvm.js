@@ -249,7 +249,7 @@ function makeQzvm(strings, opts) {
       let c = classMeta && classMeta[clsId];
       const hook = (nm) => {
         let cc = c;
-        while (cc) { const m = own(cc.methods, nm); if (m) return m; cc = chainNext(cc); }
+        while (cc) { const m = own(cc.methods, nm) || own(cc.getters, nm); if (m) return m; cc = chainNext(cc); }   // 访问器形式的 @@<Symbol>（get [Symbol.toStringTag]）亦物化
         return null;
       };
       const mk = (nm) => {
@@ -604,15 +604,16 @@ function makeQzvm(strings, opts) {
         const aa = [0, 1, 2, 3].map(i => (i < as.length && as[i] !== undefined) ? bitsOf(as[i]) : TAG);
         return toJS(fn(bitsOf(this), aa[0], aa[1], aa[2], aa[3]));
       };
+      const symKey = (nm0) => nm0.indexOf("@@") === 0 ? (Symbol[nm0.slice(2)] || nm0) : nm0;   // @@toStringTag → Symbol.toStringTag
       for (const nm of Object.keys(meta.methods || {})) {
         const mm = meta.methods[nm];
         if (!mm || !exportsRef || typeof exportsRef[mm.name] !== "function") continue;
-        try { Object.defineProperty(proto, nm, { value: mkMeth(mm.name), writable: true, configurable: true, enumerable: false }); } catch (_) {}
+        try { Object.defineProperty(proto, symKey(nm), { value: mkMeth(mm.name), writable: true, configurable: true, enumerable: false }); } catch (_) {}
       }
       for (const nm of Object.keys(meta.getters || {})) {
         const gg = meta.getters[nm], ss = (meta.setters || {})[nm];
         try {
-          Object.defineProperty(proto, nm, {
+          Object.defineProperty(proto, symKey(nm), {
             get: gg && exportsRef && exportsRef[gg.name] ? function () { return toJS(exportsRef[gg.name](bitsOf(this), TAG, TAG, TAG, TAG)); } : undefined,
             set: ss && exportsRef && exportsRef[ss.name] ? function (v) { return toJS(exportsRef[ss.name](bitsOf(this), bitsOf(v), TAG, TAG, TAG)); } : undefined,
             configurable: true, enumerable: false });

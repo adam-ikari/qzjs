@@ -1475,6 +1475,10 @@ class Emitter {
                     const sx = symbolNameOf(mem.name.expression);
                     if (!sx) throw new Error("[tagged] 类计算属性名方法仅支持 Symbol.<well-known>（如 [Symbol.iterator]）");
                     (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem });
+                } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isComputedPropertyName(mem.name)) {
+                    const sx = symbolNameOf(mem.name.expression);   // [Symbol.toStringTag] get → @@toStringTag 访问器
+                    if (!sx) throw new Error("[tagged] 类计算属性名访问器仅支持 Symbol.<well-known>（如 [Symbol.toStringTag]）");
+                    (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" });
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isIdentifier(mem.name)) {
                     if (isStatic(mem)) { staticMethods.push({ name: mem.name.text, node: mem, accessor: ts.isSetAccessorDeclaration(mem) ? "set" : "get" }); }
                     else
