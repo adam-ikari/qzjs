@@ -11,6 +11,7 @@
 
 - **助手机制**：`qzs_*` 助手在 `emitStringHelpers(m)`（`emitter.js:~2247+`）内 `declareFunc` + `startBody/endBody` 内联；宿主需调用的助手（如新增 `qzs_setargs`）必须补 `exportFn`。
 - **已验证可行的设计**（三次尝试中编译均通过）：新全局 `__args`（排在模块全局之后，不影响既有索引）作 scratch 通道 → 函数/lambda 末尾插 i64 本地（env 之前，索引 = `参数数 + decls.length - 1 - envDecls.length`）→ 入口 `globalGet → localSet` + `varMap.set("arguments", …)` → `arguments` 标识符解析该本地 → 调用点（顶层直调点 `this.m.call(this._fnName(fn))` 前）写全局；宿主 `closureCall` 对 `lamMeta.needsArgs` 的闭包经导出 `qzs_setargs` 写入。
+- **补充探针（第四次实测，编译期 QZDBG）**：嵌套函数 `g` 的调用在 emitter 中被编译为**对「提升后的顶层同名函数」的直接 wasm 调用**（`local` 槽 0、`fnVars=true`、`callNum=false`，最终落到 `this.m.call(this._fnName(fn))`）——因此**不是**经宿主 `closureCall`（与第三次结论一致）；写全局钩子（`this._fnName(fn)` 属于 `_fnArgs`）与 `emitFunc` 入口读（末尾 i64 本地 + `globalGet(__args)`）按代码检查均已就位，但实测值仍为 `undefined` → 续作需**运行时追踪全局**（在导出 `qzs_setargs` 与入口读处各加一条日志）以定位是「未写入」还是「写入后又被覆盖/读错槽」。
 - **卡点（第三次实测）**：`function g() { … arguments … }` 声明在 `f` 内（emitter 提升为闭包）时，`g(9,8)` 调用**未经过宿主 `closureCall`**（QZDBG 钩子未触发）→ 宿主写入路径不生效，结果从 loud 退化为**静默错值**（`undefined:undefined`）→ 按判据（静默错值劣于 loud）立即回退。
 - **下一步**：先定位该调用的实际发射路径（`_emitClosureCall` 发出的 `qz.closure_call`/`qz.call_value` 之外的分支，或嵌套函数被内联为直调 `__lam_N`），再按上述设计一次完成；`lamMeta.needsArgs` 标记本身已验证正确（探针输出 `[{n:__lam_0, a:true}]`）。
 ## 结论（一句话）
