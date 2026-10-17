@@ -942,9 +942,10 @@ function makeQzvm(strings, opts) {
       if (h === HOST_HI) {
         const f = handles[idxOf(v)];
         if (typeof f === "function") {
+          const exA = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);   // 溢出实参（ovf[0] = 实参 3，已在 a3）
           const as3 = [a0, a1, a2, a3].map(toJS);
           while (as3.length && as3[as3.length - 1] === undefined) as3.pop();   // 未传实参必须省略
-          return ret(f(...as3));
+          return ret(f(...as3.concat(exA.slice(1))));
         }
       }
       throw new Error("call_value: 被调值不是函数");

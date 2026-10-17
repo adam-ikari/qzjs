@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### `call_value` 宿主函数分支的溢出实参（2026-10-17）
+- 症状：`class C { m(a,b,c,d,e) {…} }` 后 `const f = c.m.bind(c); f(2,2,2,2,2)` → `Cannot convert undefined to a BigInt`（提取包装器只收到 4 个实参，第 5 个丢失）。
+- 真因：宿主 `call_value` 的**宿主函数句柄**分支只用 `a0..a3`、未使用 `ovf` 溢出数组（此前只修了 `closure_call` 的对应分支）。
+- 修：`as3.concat(exA.slice(1))`（ovf[0] = 实参 3，已在 a3）。corpus12 15→16/16。
+- 结果：**797/803（99.3%）**（35 批）；ctest 32/32 零回归。
+
 ### 类计算属性名经模块级常量解析（2026-10-17）
 - 症状：`const _iter: any = Symbol.iterator; class Range { [_iter]() { … } }` → 编译期 loud「类计算属性名方法仅支持 Symbol.<well-known>」（`symbolNameOf` 只认 `Symbol.x` 属性访问）。
 - 修：新增 `modSymLit`（模块级 const 持有 `Symbol.<well-known>` → `"@@<sym>"`），在类成员收集处对**标识符**键名回退查表（方法与访问器两处）。corpus27 20→21/21。
