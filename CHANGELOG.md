@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 对象展开与运行时访问器（2026-10-17）
+- 症状：`const s: any = {}; Object.defineProperty(s, "lazy", { get(){…}, enumerable: true }); const c: any = { ...s };` → `c.lazy` = undefined、`Object.keys(c)` = ""（**键值全部静默丢失**）。
+- 真因：对象字面量的展开分支对 POJO/实例源走**内存槽级浅拷贝**（`0x7FF9`/`0x7FFE` 分支），而访问器键只存在于宿主 `dynAcc` 表（不在内存槽）→ 无槽可拷 → 静默丢键。
+- 修：程序内存在运行时访问器（`usesDynAcc`）时，展开段一律走宿主 `qz.obj_merge`（物化源对象 → `Object.keys` + 逐键取值 → 自然触发访问器 getter 并保留键序）。
+- 验证：`c.lazy`=7、`Object.keys(c)`=`lazy`；corpus36 14→15/17。
+- 结果：**812/820（99.0%）**（36 批）；ctest 32/32 零回归。
+
 ### 第三十六批语料（2026-10-17）
 - 新增 `audit_corpus36.js`（17 例）：类内聚（`valueOf`/`toString` 强制转换、字段箭头函数、私有+静态 getter）、迭代器视图（Map/Set/Array entries/keys/values）、递归数据结构、`finally` 抛错、标签跳转、`==`/`===` 边界、`JSON.parse` reviver、闭包 getter、模块级 IIFE、可选链方法调用、数组迭代器方法、getter 返回闭包、深层标签、`replace` 函数替换、展开与 getter、数值边界、mixin 类工厂。**首跑 14/17**。
 - 新暴露 3 项残余（已定位）：

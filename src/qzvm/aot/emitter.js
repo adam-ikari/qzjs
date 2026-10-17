@@ -3881,6 +3881,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     Ma.localGet(ta.w); Ma.i64Const(48n); Ma.i64ShrU(); Ma.i64Const(0x7ff9n); Ma.i64Eq();
                     Ma.localGet(ta.w); Ma.i64Const(48n); Ma.i64ShrU(); Ma.i64Const(0x7ffen); Ma.i64Eq();
                     Ma.i32Or();
+                    Ma.i32Const(this.usesDynAcc ? 0 : 1); Ma.i32And();   // 程序内存在运行时访问器（defineProperty）→ 一律走 obj_merge（槽级合并会丢访问器键）
                     Ma.ifBlock("void");
                     // 槽级合并：仅当源槽≠undefined 才写入（JS：后展开段只覆盖其自有键；undefined 槽不覆盖）
                     Ma.localGet(ta.a); Ma.i32Const(8); Ma.i32Add(); Ma.localSet(ta.b);        // dst 游标（a 保留 = 新对象）
