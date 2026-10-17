@@ -392,3 +392,17 @@ export function g(): any { return y; }
 3. **重复导出**：`m.exportFn("__module_init", "__module_init")` → `Duplicate export name '__module_init'`（该函数已被默认导出）。→ 不要再 exportFn；只需保证**早声明**（在任何 prologue 发射之前）。
 
 顺序要点：早声明必须发生在**导出函数序言发射之前**（`fns` 声明循环之后即可），且 `__module_init` 自身序言要跳过（`_inModInit` 守卫）。
+
+### silent：闭包内 `obj.constructor === C` 恒为 false（2026-10-17 定位，待修）
+
+探针（同一模块内对照，Classes：`class Shape {} class Circle extends Shape {}`）：
+| 写法 | 结果 |
+|---|---|
+| 同层函数体内 `c.constructor === Circle` | **true** ✓ |
+| 箭头闭包内 `(s) => s.constructor === Circle` | **false** ✗ |
+| `[new Circle()].map((s) => s.constructor === Circle)[0]` | **false** ✗ |
+| 闭包内 `typeof s.constructor` | `"function"` ✓ |
+| 闭包内 `s instanceof Circle` | `true` ✓ |
+
+插桩结论：两侧的 `qz.class_value(id)` **返回同一句柄**（如 `class_value(1)` 两次都是 `0x7FFD|2`），且 `prop_get` 的兜底分支**未被走到** → 取值正确、`instanceof` 正确，问题在**闭包上下文里 `===` 的比较发射**（疑似该上下文取了 num/f64 路径或两侧其一走了不同解析）。
+下一步：dump 该表达式（`~/tmp/qzaux/probe_ctor.js` 的 `arrowType` 例）的发射指令，比较同层与闭包两种上下文下 `===` 的字节差异。
