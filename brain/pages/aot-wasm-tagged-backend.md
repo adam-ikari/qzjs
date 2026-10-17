@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T03:01:11"
+updated: "2026-10-17T03:21:10"
 ---
 
 <!-- compiled_truth -->
@@ -386,4 +386,9 @@ updated: "2026-10-17T03:01:11"
 - time: 2026-10-17T03:01:11
   kind: evidence
   summary: "第二十八批：652/673（97.0%）；新增 2 项 silent 待修：数组自定义字符串键属性、对象字面量方法闭包不共享 env"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T03:21:10
+  kind: evidence
+  summary: "push/pop 快路径误命中同名对象方法（静默错值）修复：加运行时 tag 守卫（仅 0x7FFB 直写，否则通用派发）"
   affects: [aot-wasm-tagged-backend]
