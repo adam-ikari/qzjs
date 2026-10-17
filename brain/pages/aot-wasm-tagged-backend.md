@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T05:46:56"
+updated: "2026-10-17T05:58:20"
 ---
 
 <!-- compiled_truth -->
@@ -461,4 +461,9 @@ updated: "2026-10-17T05:46:56"
 - time: 2026-10-17T05:46:56
   kind: evidence
   summary: "副作用接收者属性赋值放宽：708/731（96.9%），corpus30 16→17/20"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T05:58:20
+  kind: evidence
+  summary: "恢复 qz.new_dynamic 宿主方法（HEAD 潜在缺陷）；动态 instanceof 二次回退"
   affects: [aot-wasm-tagged-backend]
