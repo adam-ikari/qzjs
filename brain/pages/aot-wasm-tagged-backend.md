@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T04:11:44"
+updated: "2026-10-17T04:21:08"
 ---
 
 <!-- compiled_truth -->
@@ -411,4 +411,9 @@ updated: "2026-10-17T04:11:44"
 - time: 2026-10-17T04:11:44
   kind: evidence
   summary: "第二十九批：670/693（96.7%）；修类 toString 遮蔽静默错值；新暴露 2 项真 bug（递归箭头 const、提取原型方法 .call）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T04:21:08
+  kind: evidence
+  summary: "模块全局在闭包内按调用时读取：修复自递归/互递归箭头 const（此前 closure_call 未知 funcidx 0）"
   affects: [aot-wasm-tagged-backend]
