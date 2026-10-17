@@ -1561,6 +1561,7 @@ class Emitter {
         for (const cname of this._classList) {
             const c = this.classes.get(cname);
             for (const f of c.fields) this._fieldIndex(f.name);
+            if (c.parent && !this.classes.has(c.parent)) { this._fieldIndex("message"); this._fieldIndex("name"); }   // 内建父类（extends Error）：super() 写 message/name，须在所有 new 分配前登记（否则实例 size 偏小 → 物化时越界丢弃）
         }
         // 叶类 = 无子类的类。其方法/构造器内 `this` 静态类精确（new C 永不产 C 之外的实例）。
         this._leafClasses = new Set(this._classList);

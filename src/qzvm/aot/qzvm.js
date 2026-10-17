@@ -580,12 +580,13 @@ function makeQzvm(strings, opts) {
     if (o) return o;
     const meta = classMeta && classMeta[clsId];
     if (!meta) return null;
+    const bp = (meta.builtinParent && typeof globalThis[meta.builtinParent] === "function") ? globalThis[meta.builtinParent] : null;   // 内建父类（Error 族/Array/Map…）：原型链须接真内建原型（err.toString → "Name: msg"）
     const pc = baseOv !== undefined ? baseOv : (meta.parent != null ? classObjImpl(meta.parent) : null);
     const ctor = function (...as3) { return buildInstance(clsId, as3); };
     Object.defineProperty(ctor, "__qzClsId", { value: clsId, configurable: true });
-    Object.setPrototypeOf(ctor, pc || Function.prototype);
+    Object.setPrototypeOf(ctor, pc || bp || Function.prototype);
     Object.defineProperty(ctor, "name", { value: meta.name || "C", configurable: true });
-    const proto = Object.create(pc ? pc.prototype : Object.prototype);
+    const proto = Object.create(pc ? pc.prototype : (bp && bp.prototype ? bp.prototype : Object.prototype));
     Object.defineProperty(proto, "constructor", { value: ctor, enumerable: false, writable: true, configurable: true });
     ctor.prototype = proto;
     if (classHandles.size >= 0) for (const nm of Object.keys(meta.staticMethods || {})) {
@@ -1788,7 +1789,14 @@ function makeQzvm(strings, opts) {
             let cc0 = cid0 >= 0 && classMeta ? classMeta[cid0] : null;
             let hasOwnM = false;
             while (cc0) { if (own(cc0.methods, name)) { hasOwnM = true; break; } cc0 = chainNext(cc0); }
-            if (!hasOwnM) return ret("[object Object]");
+            if (!hasOwnM) {   // 无类自定义方法 → 按真实 JS 原型链（Error.prototype.toString → "Name: msg"；带 Symbol.toStringTag → "[object Tag]"）
+              try {
+                const oo0 = toJS(recv);
+                const fn0 = oo0 == null ? null : oo0[name];
+                if (typeof fn0 === "function") return ret(fn0.call(oo0));
+              } catch (_) {}
+              return ret("[object Object]");
+            }
             let cc1 = cid0 >= 0 ? classMeta[cid0] : null, mOwner = null;      // 类自定义同名方法 → 直接派发 wasm 方法
             while (cc1) { if (own(cc1.methods, name)) { mOwner = cc1; break; } cc1 = cc1.parent != null ? classMeta[cc1.parent] : null; }
             const mm0 = mOwner && mOwner.methods[name];

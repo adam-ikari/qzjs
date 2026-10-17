@@ -4,6 +4,16 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### extends 内建（Error 族）语义（2026-10-17）
+- 症状：`class AppError extends Error` 实例 `String(e)`/`e.toString()` = `[object Object]`（应 `"AppError: bad"`）。
+- 四处修复（corpus30 19→20/20 全绿）：
+  1. `_instSize()` 偏小：内建父类 `super(msg)` 写的 `message`/`name` 槽在**分配之后**才登记到 fieldMap → 实例 `[4]=size` 不含该槽 → 宿主物化时 `idx >= size` 被丢弃（`Error.prototype.toString` 读不到 `message`）。修：`collectClasses` 预登记阶段，对「父类非本程序类」的类先登记 `message`/`name`。
+  2. 宿主 `classObjImpl` 未接内建父类原型：`pc` 对 `extends Error` 为 null → `proto = Object.create(Object.prototype)` → 实例拿不到 `Error.prototype.toString`。修：引入 `bp = globalThis[builtinParent]`，ctor 的原型链与 `proto` 的父原型都接上真内建（`Error` 族/Array/Map…）；`instanceof Error` 语义随之天然正确。
+  3. 宿主 `method_call` 的 `toString`/`valueOf`/`toLocaleString` 分支在「类无自定义同名方法」时**硬编码**返回 `[object Object]`（静默错值）。修：回落物化对象的真实原型链实现（`Error.prototype.toString` → `"Name: msg"`；带 `Symbol.toStringTag` → `[object Tag]`）。
+  4. 伴随：`materializeUncached` 的 `idx >= size` 边界（见 1）。
+- 验证：`String(e)`/`e.toString()`=`AppError: bad`（子类 `NotFound: missing`）；`e instanceof Error/NotFound`=true；`{}`.toString()/`{a:1}`.toString() 仍 `[object Object]`；`Object.keys(err)` 不含 `message`（JS 语义：非枚举）。
+- 结果：**734/750（97.9%）**；32 批 + ctest 32/32 零回归。
+
 ### 类计算 Symbol 访问器 + Symbol.toStringTag 物化（2026-10-17）
 - 现状：`class C { get [Symbol.toStringTag]() { return "C"; } }` → 编译期 loud「不支持的类成员: GetAccessor」（只有**方法**形式 `[Symbol.iterator]()` 被支持）。
 - 三处修复：
