@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T14:42:36"
+updated: "2026-10-17T15:00:53"
 ---
 
 <!-- compiled_truth -->
@@ -571,4 +571,9 @@ updated: "2026-10-17T14:42:36"
 - time: 2026-10-17T14:42:36
   kind: evidence
   summary: "原型运行时访问器 + 静态 this 运行时代：795/803（99.0%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T15:00:53
+  kind: evidence
+  summary: "模块级 Symbol 常量的类计算属性名：796/803（99.1%）"
   affects: [aot-wasm-tagged-backend]
