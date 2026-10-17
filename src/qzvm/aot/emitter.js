@@ -1442,7 +1442,7 @@ class Emitter {
             const cname = st.name.text;
             const parent = st.heritageClauses && st.heritageClauses.length
                 ? st.heritageClauses[0].types[0] : null;
-            const parentName = parent ? parent.expression.text : null;
+            const parentName = parent ? this._className(parent.expression.text) : null;   // 类表达式绑定名/导入别名 → 真实类名（此前取原文 → ctorName 落空）
             const fields = [], methods = [], staticMethods = [], staticFields = [], staticBlocks = [], staticInits = [];
             let ctor = null;
             const isStatic = (mem) => !!mem.modifiers && mem.modifiers.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
@@ -2374,17 +2374,23 @@ function compileTS(input, outWasm, opts = {}) {
     const modVars = [];          // 模块级变量声明（含初值）
     const modStmts = [];         // 模块级变量语句（合成 __module_init 的函数体）
     const collectDecls = (f) => {
-        const walkCls = (n) => {          // class 仍整树提升（含函数内 class）
+        const walkCls = (n, bind) => {          // class 仍整树提升（含函数内 class）；bind = 最近绑定名（class 表达式名推断用，勿依赖 n.parent：collectDecls 阶段尚未类型绑定）
             if (ts.isClassDeclaration(n)) clsStmts.push(n);
             if (ts.isEnumDeclaration(n)) enumStmts.push(n);
             if (ts.isClassExpression(n) && !clsExprMap.has(n)) {   // 类表达式：合成类名（用于 new / instanceof）
-                const synth = n.name ? n.name.text : "__clsExpr_" + (++clsExprSeq);
+                let synth = n.name ? n.name.text : (bind || null);   // JS 名推断：`const C = class {}` → C.name === "C"
+                if (!synth || clsStmts.some(d2 => d2.name && d2.name.text === synth) || fns.some(f2 => f2.name.text === synth)) {
+                    synth = "__clsExpr_" + (++clsExprSeq);   // 无绑定名/重名 → 合成名
+                }
                 clsExprMap.set(n, synth);
                 const decl = ts.factory.createClassDeclaration(n.modifiers, ts.factory.createIdentifier(synth), n.typeParameters, n.heritageClauses, n.members);
                 decl.pos = n.pos; decl.end = n.end;
                 clsStmts.push(decl);
             }
-            ts.forEachChild(n, walkCls);
+            let childBind = bind;
+            if ((ts.isVariableDeclaration(n) || ts.isPropertyAssignment(n) || ts.isBindingElement(n))
+                && n.name && ts.isIdentifier(n.name)) childBind = n.name.text;
+            ts.forEachChild(n, (c) => walkCls(c, childBind));
         };
         for (const st of f.statements) {
             if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
@@ -2974,7 +2980,7 @@ Emitter.prototype._isClassName = function (node) {
     while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)
         || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node))) node = node.expression;
     if (node && ts.isThis(node) && this._inStaticMethod && this._curClassObj) return true;   // 静态方法内 this ≡ 类
-    return !!node && ts.isIdentifier(node) && this.classes.has(node.text);
+    return !!node && ts.isIdentifier(node) && this.classes.has(this._className(node.text));   // 与 _classOfExpr 一致：类表达式绑定名/导入别名 → 真实类名
 };
 // 字符串句柄 tag 测试：栈顶 i64 → i32（是字符串?）
 Emitter.prototype._emitIsStr = function () {

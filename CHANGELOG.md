@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类表达式命名/继承解析（2026-10-17）
+- 三处修复（`class-expression-names` 由编译期 loud「call 未定义: __m_Named$ctor」→ 仅剩 1 个子句 diff）：
+  1. `extends` 父类名取原文（`parent.expression.text`）→ 现经 `_className()` 解析（类表达式绑定名/导入别名 → 真实类名），否则 `ctorName` 落空；
+  2. `_isClassName()` 用 `classes.has(node.text)` 未做别名解析（与 `_classOfExpr()` 不一致）→ 补 `_className()`，`const Named = class Inner{}; Named.name` 由此走类静态访问路径；
+  3. 匿名/带超类的类表达式作名：`const Anon = class {}` 现有 `Anon.name === "Anon"`、`const Ext = class extends Named {}` → `Ext.name === "Ext"`（JS 名推断）。实现用 **walkCls 绑定名下传**（`VariableDeclaration`/`PropertyAssignment`/`BindingElement` 的名字），**不依赖 `n.parent`** —— collectDecls 阶段 program 尚未类型绑定，parent 为空。
+- 已知残余：**函数返回类表达式**（`const make = (l) => class { get x() { return l; } }`）每次调用应产生**新类**（各自闭包/独立 `instanceof`）；AOT 按单一提升类处理 → 两次调用的实例同为该类。
+- 结果：**732/750（97.6%）**；32 批 + ctest 32/32 零回归。
+
 ### 类的 .name 属性 + Function 作值（2026-10-17）
 - 症状：`A.name` 恒 `undefined`（`class A {}` + `A.name`）；且 `Function` 不在内建全局表 → `Object.getPrototypeOf(A) === Function.prototype` 报 loud「未定义捕获变量: Function」。
 - 两处修复：
