@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T08:46:53"
+updated: "2026-10-17T09:20:17"
 ---
 
 <!-- compiled_truth -->
@@ -506,4 +506,9 @@ updated: "2026-10-17T08:46:53"
 - time: 2026-10-17T08:46:53
   kind: evidence
   summary: "内建全局作值 + 原始值 .constructor 修复（零回归）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T09:20:17
+  kind: evidence
+  summary: "闭包 toString 返回源码原文（lamMeta.src + cloWrap 覆写）；零回归"
   affects: [aot-wasm-tagged-backend]
