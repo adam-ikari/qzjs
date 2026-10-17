@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### do-while 每迭代绑定（2026-10-17）
+- 症状：`do { const k = i; fns.push(() => k * 10); i++; } while (i < 3)` → 三个闭包同值 20（应 0,10,20）。
+- 真因：`emitDoWhile` 缺 `_loopCaptured`/`_emitPerIterEnv` 调用（`while`/`for`/`for-of` 均有）。修：tagged 路径下先建每迭代 env 再发射体。
+- 结果：**793/803（98.8%）**；corpus35 14→15/17；ctest 32/32 零回归。
+
 ### 批 35 残余修复（2026-10-17）
 - **synthThis 无溢出分支的 rest 切片基准错误**（上一批引入的回归）：`vals` = `[receiver, 实参 0..2]`，固定参（含 receiver）占 0..nV-1 → rest 应为 `vals.slice(nV)`，此前写成 `slice(nV - 1)` → **receiver 混入 rest 数组**（`o.j("a","b")` 的 `xs` = `[obj,"a","b"]`）。corpus35 13→14/17。
 - **`instanceof` 右值为宿主对象**（如 `B.prototype`）：`instanceof_op` 此前对非 `0x7FFE` 句柄一律 false → 增加 `HOST_HI` 分支，按 JS `instanceof`（对 `classObjImpl(clsId)` 构造器）判定。

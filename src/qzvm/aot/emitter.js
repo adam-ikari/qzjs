@@ -1982,7 +1982,9 @@ class Emitter {
         M.loop(); this.depth++;
         M.block(); this.depth++;
         this.labels.push({ brk: this.depth - 2, cont: this.depth, label: this._curLabel() });
-        if (tagged) this.emitTaggedStmt(s.statement); else this.emitStmt(s.statement);
+        if (tagged) { const cap = this._loopCaptured([], s.statement || s);   // do-while 体内 let/const 被闭包捕获 → 每迭代新绑定
+            if (cap) this._emitPerIterEnv(cap.headerNames, cap.bodyNames);
+            this.emitTaggedStmt(s.statement); } else this.emitStmt(s.statement);
         this.labels.pop();
         this.depth--; M.end();                             // end cont block
         if (tagged) this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
