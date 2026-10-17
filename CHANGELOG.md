@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### `Function.prototype.toString` 返回源码原文（2026-10-17）
+- `lamMeta` 每条新增 `src`（lambda 源码原文，取自 `node.getText(sourceFile)`）；宿主 `cloWrap` 在包装闭包为 JS 函数时覆写 `toString` → 返回该源码。
+- 此前闭包物化后的 `String(fn)`/`[fn].join()` 返回**物化包装器**的源（`(...args) => toJS(closureCall(b, ...))`）。
+- 验证：`const fn = (x:any) => x*2; [fn].join()` = `(x: any) => x * 2`；`String(function(a){return a;})` = `function (a: any) { return a; }`。
+- **已知残余**：返回的是 **TS 源码**（含类型标注），而 oracle 是 tsc **转译后的 JS**（`(x) => x * 2`）→ 相关窄面用例（如 corpus27 `instanceof-custom-hasinstance` 的最后一列）仍按 diff 计；要完全一致需为每个 lambda 生成转译后文本。
+- 结果：**730/750（97.3%）**；32 批 + ctest 32/32 零回归。
+
 ### 内建全局作值 + 原始值 `.constructor`（2026-10-17）
 - **内建全局作值**：标识符路径新增分支——`BUILTIN_GLOBALS` 名字作值 → `qz.builtin_value(strId)`（宿主句柄**缓存**，保证 `String === String`）；此前落到 `_emitCapturedRead` 的 loud「未定义捕获变量」。
 - **原始值 `.constructor`**：宿主 `prop_get` 对字符串/数字/布尔的 `constructor` → 返回对应内建句柄（`"x".constructor === String` 现为 true）。

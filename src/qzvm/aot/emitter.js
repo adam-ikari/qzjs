@@ -2806,7 +2806,11 @@ function compileTS(input, outWasm, opts = {}) {
         params: f.parameters.length,
     }));
     const lamMeta = {};
-    for (const meta of em._lamById.values()) lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis };
+    for (const [lamNode, meta] of em._lamById.entries()) {
+        let src = null;
+        try { const sf0 = lamNode.getSourceFile && lamNode.getSourceFile(); if (sf0) src = lamNode.getText(sf0); } catch (_) {}
+        lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis, src };
+    }
     // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
     const classMeta = em._classList.map(cname => {
         const c = em.classes.get(cname);

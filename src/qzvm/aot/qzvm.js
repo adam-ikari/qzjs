@@ -152,6 +152,12 @@ function makeQzvm(strings, opts) {
   const cloWrap = (b) => {
     const f = (...args) => toJS(closureCall(b, ...args.map(ret)));
     cloOf.set(f, b);            // 往返：再交回 wasm 时还原闭包句柄
+    try {                                        // Function.prototype.toString → 源码原文（JS 语义）
+      const off0 = Number(BigInt.asUintN(64, b) & 0xffff_ffffn);
+      const fi0 = mem ? new DataView(mem.buffer).getUint32(off0, true) : -1;
+      const src0 = lamMeta && lamMeta[fi0] && lamMeta[fi0].src;
+      if (src0) Object.defineProperty(f, "toString", { value: () => src0, configurable: true });
+    } catch (_) {}
     return f;
   };
   const isStrH = (b) => (BigInt(b) >> 48n) === STR_HI;
