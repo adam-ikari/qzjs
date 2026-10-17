@@ -345,7 +345,11 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 
 **下次路径**：只保留上述「可工作组合」三件，**不要**做 `__clsExpr_`/`_inModInit` 全局收窄；单独插桩 `mixed-realistic-program`（打印该类 `captured` 与 `_mEnter` 侧 `capNames`）定位其真实成因；模块级 mixin 的 start 段问题单独处理（延后类 env 构建到 mem 绑定之后，或 start 段只存非字符串捕获）。
 
-### 第五轮补充（2026-10-17，已回退）：`_mEnter` 分支必须与 `_emitClassValue` 的过滤条件**同构**
+### 已修复（第六轮，2026-10-17）：类方法捕获落地
+
+两处关键 bug：① `env_def` 首参为 handles 索引(i32)（此前传句柄 i64）；② `_capturesOf` 把嵌套函数形参误当自由变量（`_collectLocals` 不下探）→ `render(){ items.map((t) => …) }` 的 `t` 被误捕获 → 非法 env 索引 → `env_set` 崩。修：两处**共用同一过滤集** + 排除嵌套形参 + 创建点**总是**存 env。已知限制：模块级 mixin（start 段 mem 未绑定）仍需把 env 构建延后。
+
+（以下为历史记录）### 第五轮补充（2026-10-17，已回退）：`_mEnter` 分支必须与 `_emitClassValue` 的过滤条件**同构**
 
 复现（重落地「可工作组合」后）：`class TaskList { … add(){ const t = new Task(TaskList.nextId++); … } render(){ return this.items.map((t) => t.toString())… } }`
 → `Cannot set properties of undefined (setting 't')`。

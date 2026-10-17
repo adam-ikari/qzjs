@@ -1519,7 +1519,26 @@ class Emitter {
                 };
                 for (const sm of staticMethods) { sm.usesThis = usesThis(sm.node && sm.node.body); sm.thisNames = thisNames(sm.node && sm.node.body); }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
+            const capSetC = new Set();                      // 类方法外围自由变量（**单一来源**，两处共用）
+            for (const mth of methods.concat(staticMethods)) {
+                if (!mth || !mth.node || !mth.node.body) continue;
+                const nestedParams = new Set();             // 嵌套函数（含箭头）的形参：不是外层自由变量（_collectLocals 不下探）
+                { const walkN = (n2) => {
+                    if (ts.isArrowFunction(n2) || ts.isFunctionExpression(n2) || ts.isFunctionDeclaration(n2)
+                        || ts.isMethodDeclaration(n2) || ts.isGetAccessorDeclaration(n2) || ts.isSetAccessorDeclaration(n2))
+                      for (const p2 of n2.parameters) for (const np2 of this._patternNames(p2.name)) nestedParams.add(np2);
+                    ts.forEachChild(n2, walkN); };
+                  if (mth.node.body) for (const st2 of (mth.node.body.statements || [])) walkN(st2); }
+                for (const nm2 of this._capturesOf(mth.node)) {
+                    if (nestedParams.has(nm2)) continue;
+                    if (BUILTIN_GLOBALS.has(nm2)) continue;
+                    if (/^(undefined|null|NaN|Infinity)$/.test(nm2)) continue;
+                    if (this.classes.has(this._className(nm2))) continue;
+                    if (this.fnNames && this.fnNames.has(nm2)) continue;
+                    capSetC.add(nm2);
+                }
+            }
+            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
@@ -1701,6 +1720,9 @@ class Emitter {
         this.cloSlotsLen = cloSlots.length;
         // 方法体内被（嵌套）lambda 捕获的 this/参数/局部 → 共享环境（同 emitFunc）
         const capNames = this._probeCaptured(extraNodes ? [body].concat(extraNodes) : body, params, locals);
+        const probeLenC = capNames.length;
+        { const ciC = this.classes.get(cname);
+          if (probeLenC === 0 && ciC && ciC.captured) for (const n0 of ciC.captured) if (!capNames.includes(n0)) capNames.push(n0); }
         const envDecls = capNames.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
             .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
@@ -1713,7 +1735,10 @@ class Emitter {
         this.envRef = this.envLocal;
         if (capNames.length) {
             const M = this.m;
-            M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);
+            { const ciE = this.classes.get(cname);
+              if (probeLenC === 0 && ciE && ciE.captured && ciE.captured.length) {   // 纯类捕获 → envLocal 直接指向类 env（statics @@qzEnv）
+                M.i32Const(this._strId(ciE.name)); M.i32Const(this._strId("@@qzEnv")); M.call("qz.static_get"); M.i32WrapI64(); M.localSet(this.envLocal);
+              } else { M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal); } }
             for (const n of capNames) {
                 if (n === "this") { M.localGet(this.envLocal); M.i32Const(this._strId("this")); M.localGet(0); M.call("qz.env_set"); }
                 else { const li = this._local(n); if (li !== undefined && li < 1 + params.length) { M.localGet(this.envLocal); M.i32Const(this._strId(n)); M.localGet(li); M.call("qz.env_set"); } }
@@ -4861,6 +4886,20 @@ Emitter.prototype._emitSuperCall = function (c, args) {
 // 合成派生 ctor：local1..4 = 补齐后的参数槽，原样转发给父 ctor。
 Emitter.prototype._emitClassValue = function (c) {        // 类对象句柄：动态父 → class_value_dyn(id, 父表达式)；否则 class_value(id)
     const M = this.m;
+    if (c.captured && c.captured.length) {                 // 类方法捕获：创建点(外围作用域活动)复制其值到类 env，存 statics @@qzEnv（总是存 → 方法侧索引一定合法）
+        const envT = this._expEnter();
+        M.i32Const(-1); M.call("qz.env_new"); M.localSet(envT.v);
+        for (const n0 of c.captured) {
+            if (!(this._isCapturable(n0) || (this.moduleGlobals && this.moduleGlobals.get(n0) !== undefined))) continue;
+            const idNode = ts.factory.createIdentifier(n0);
+            idNode.pos = c.id; idNode.end = c.id;
+            M.localGet(envT.v); M.i32WrapI64(); M.i32Const(this._strId(n0));   // env_def 首参 = handles 索引(i32)
+            this.emitTaggedExpr(idNode);
+            M.call("qz.env_def");
+        }
+        M.i32Const(this._strId(c.name)); M.i32Const(this._strId("@@qzEnv")); M.localGet(envT.v); M.call("qz.static_set");
+        this._expLeave();
+    }
     M.i32Const(c.id);
     const dynN = this._dynParentExpr(c);
     if (dynN) { this.emitTaggedExpr(dynN); M.call("qz.class_value_dyn"); return; }

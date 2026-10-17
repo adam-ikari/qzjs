@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类表达式方法捕获外围变量（2026-10-17，第六轮落地）
+- **能力**：`const withV = (v) => class { v() { return v; } }`、`(v) => (Base) => class extends Base { version() { return v; } }` 等方法内自由变量可直接读取（此前 loud「未定义捕获变量」）。
+- **实现（零新 import）**：`collectClasses` 一次性算出 `c.captured`（`_capturesOf(methodNode)`，排除内建/类名/`fnNames`/字面量 **以及嵌套函数形参**）；`_emitClassValue` 在创建点**总是**建 env（`env_new(-1)` + 逐名 `env_def(envIdx, strId(name), 值)`）并 `static_set(cname, "@@qzEnv", env)`；`_mEnter` 在唯一锚点把 `c.captured` 并入 `capNames`，无嵌套 lambda 捕获时 `envLocal = static_get(cname, "@@qzEnv")`（`i32WrapI64`），`capMap` 随之映射，方法体自由变量经既有 `_emitCapturedRead`(`env_get`) 读取。
+- **两个关键 bug（本轮定位）**：① `qz.env_def` 首参是 handles **索引(i32)**，传句柄(i64) → V8 `call[0] expected type i32, found local.get of type i64`；② `_capturesOf` 会把**嵌套箭头/函数的形参**当作自由变量（`_collectLocals` 不下探）→ 如 `render(){ arr.map((t) => …) }` 的 `t` 被误捕获 → 方法侧 env 索引非法 → `env_set` 崩（`Cannot set properties of undefined (setting "t")`）。修：`_mEnter` 与 `_emitClassValue` **共用同一过滤集**，并排除嵌套形参。
+- **已知限制**：模块级创建的 mixin（`const Mid = withVersion("1.0")(…)`，类值在 `__module_init`/start 段产生）仍失败——start 段宿主 `mem` 未绑定，`env_def` 写**字符串**捕获值会触发 `strWriteback`（下一次把类 env 构建延后到 mem 绑定之后即可）。
+- 结果：**709/731（97.0%）**（语料未变——`curried-class-factory` 属上述模块级限制）；31 批 + ctest 32/32 零回归。
+
 ### mixin 类字段默认值（2026-10-17）
 - **根因**：动态父类（`class Final extends Counted(Root) {}`）在编译期 `c.parent = null` → 合成 ctor 的 super 转发条件 `else if (c.parent)` **不成立** → **父类 ctor 从不执行** → mixin 类（`class extends B { count = 0; … }`）的字段默认值未应用（`++this.count` → NaN）。
 - **修复**：条件放宽为 `else if (c.parent || this._dynParentExpr(c))`（动态父同样须转发 super）。
