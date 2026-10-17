@@ -1835,7 +1835,7 @@ function makeQzvm(strings, opts) {
           return ret(closureCall(fnH, as2[0], as2[1], as2[2], as2[3], ovfA2, recv));
         }
         const fn = fnH;
-        if (typeof fn !== "function") throw new Error("method_call: 宿主对象无方法 " + name);
+        if (typeof fn !== "function") { throwValue(new TypeError(name + " is not a function")); return TAG; }   // JS 语义（可捕获；此前内部 loud 不可捕获）
         const as = [a0, a1, a2, a3].map(toJS);
         if (ovf !== undefined && ovf !== TAG) as.push(...(toJS(ovf) || []).slice(1));   // ovf[0] = 实参 3（已在 a3）；其余接在 4 槽之后（rest/>4 形参）
         while (as.length && as[as.length - 1] === undefined) as.pop();   // 未传实参必须省略（否则 setFullYear(2021,undefined) → Invalid Date）

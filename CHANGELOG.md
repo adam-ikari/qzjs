@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十七批语料 + TypeError 修复（2026-10-17）
+- 新增 `audit_corpus37.js`（17 例）：Unicode 字符串、Math 扩展、数组空洞、`Object.create(null)`、描述符往返、迭代器提前退出、错误 cause/stack、标签块、switch 块级作用域、Map NaN 键、位运算截断、IIFE 记忆化、trampoline、字符串替换边缘、嵌套解构默认值、静态私有字段、可选深链。**首跑 13/17 → 14/17**。
+- 修复 1 项：宿主对象 `method_call` 在 `obj[name]` 非函数时**内部 loud 不可捕获** → 改为 `throwValue(new TypeError(...))`（JS 语义，可被 catch 捕获）。
+- 新暴露 3 项残余：
+  1. **描述符往返**（`Object.getOwnPropertyDescriptors` + `defineProperties`）：非枚举字段的 `writable`/`enumerable` 在往返中丢失；getter 往返后调用为空值；
+  2. **迭代器提前退出**（`for...of` + `break` → `return()` 未被调用）；
+  3. **类静态私有 + 跨实例比较**（`o.#name === this.#name` 在 `equals` 方法中 → wasm 校验失败 `function #26: expected 0 e...`）。
+- 结果：**830/837（99.2%）**（37 批）；ctest 32/32 零回归。
+
 ### `reduce`/`reduceRight` 显式 `undefined` 初值（2026-10-17）
 - 症状：`[].reduce((a,b)=>a+b, undefined)` → 抛 `TypeError`（应返回 `undefined`）；`[1].reduce(fn, undefined)` 的 `undefined` 被当作「未提供初值」。
 - 真因：ABI 无法区分「未传实参」与「显式传 `undefined` 实参」（两者都是 TAG）。
