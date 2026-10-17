@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T04:21:08"
+updated: "2026-10-17T04:39:27"
 ---
 
 <!-- compiled_truth -->
@@ -416,4 +416,9 @@ updated: "2026-10-17T04:21:08"
 - time: 2026-10-17T04:21:08
   kind: evidence
   summary: "模块全局在闭包内按调用时读取：修复自递归/互递归箭头 const（此前 closure_call 未知 funcidx 0）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T04:39:27
+  kind: evidence
+  summary: "类原型方法挂载与提取语义：C.prototype.m/访问器 + 实例原型 + 提取方法尊重 .call thisArg（672/693）"
   affects: [aot-wasm-tagged-backend]
