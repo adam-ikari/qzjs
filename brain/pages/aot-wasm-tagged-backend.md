@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T09:20:17"
+updated: "2026-10-17T09:25:13"
 ---
 
 <!-- compiled_truth -->
@@ -511,4 +511,9 @@ updated: "2026-10-17T09:20:17"
 - time: 2026-10-17T09:20:17
   kind: evidence
   summary: "闭包 toString 返回源码原文（lamMeta.src + cloWrap 覆写）；零回归"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T09:25:13
+  kind: evidence
+  summary: "自递归直调第三轮成功：闭包深递归不再吃宿主栈（731/750，97.5%）"
   affects: [aot-wasm-tagged-backend]
