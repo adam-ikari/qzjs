@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T11:19:01"
+updated: "2026-10-17T11:35:16"
 ---
 
 <!-- compiled_truth -->
@@ -541,4 +541,9 @@ updated: "2026-10-17T11:19:01"
 - time: 2026-10-17T11:19:01
   kind: evidence
   summary: "Object.create(Array.prototype) 的 length 修复：738/750（98.4%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T11:35:16
+  kind: evidence
+  summary: "类名作值 + 静态方法包装器参数补齐：740/750（98.7%）"
   affects: [aot-wasm-tagged-backend]
