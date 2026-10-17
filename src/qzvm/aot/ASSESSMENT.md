@@ -379,3 +379,12 @@ export function g(): any { return y; }
 2. **懒初始化**：加一个 wasm 全局 `__moddone`（须加在 `__bump`(0)/`__err`(1) **之后**），在每个导出函数 prologue 里 `if (!__moddone) { __module_init(); __moddone=1; }` —— 首次调用时必然已 bind 完毕。
 
 两条路线都能同时修好「模块级闭包调用」与「模块级 mixin（类 env 在 start 段构建）」；后者是本轮类捕获特性的唯一已知限制。
+
+### 懒模块初始化尝试（2026-10-17，已回退；三处耦合已探明）
+
+按「修法 2」实作（去 `setStart` + 加 `__moddone` 全局 + 导出函数序言懒触发）时踩到三处耦合，均已定位：
+1. **采集趟**：`emitAll(mc, null)`（`collectImports: true`）中 `call("__module_init")` 不是 `qz.*` → 编码器直接抛 `call 未定义`（`Module.call` 仅在 `this.collect` 且名字以 `qz.` 开头时记账）。→ 需在采集趟也能解析该名字（例如两趟都先 `declareFunc`，或让 `call()` 在采集模式对已声明名放行）。
+2. **`declareFunc` 签名**：`m.declareFunc("__module_init", [], [])` → `Cannot read properties of null (reading 'locals')`（`addFunc(name, params, results, locals)` 需要第 4 参）。→ 传 `[]` 作为 locals。
+3. **重复导出**：`m.exportFn("__module_init", "__module_init")` → `Duplicate export name '__module_init'`（该函数已被默认导出）。→ 不要再 exportFn；只需保证**早声明**（在任何 prologue 发射之前）。
+
+顺序要点：早声明必须发生在**导出函数序言发射之前**（`fns` 声明循环之后即可），且 `__module_init` 自身序言要跳过（`_inModInit` 守卫）。
