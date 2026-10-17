@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T05:58:20"
+updated: "2026-10-17T06:26:14"
 ---
 
 <!-- compiled_truth -->
@@ -466,4 +466,9 @@ updated: "2026-10-17T05:58:20"
 - time: 2026-10-17T05:58:20
   kind: evidence
   summary: "恢复 qz.new_dynamic 宿主方法（HEAD 潜在缺陷）；动态 instanceof 二次回退"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T06:26:14
+  kind: evidence
+  summary: "链式 mixin 全通：root cause 是 _emitStaticsGuard 在无静态成员时提前返回（声明式类动态父链未发射）"
   affects: [aot-wasm-tagged-backend]
