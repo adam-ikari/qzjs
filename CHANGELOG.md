@@ -4,6 +4,17 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 多参数（>4 形参）调用完整性（2026-10-17）
+- 症状：对象字面量方法 `o.m(a,b,c,d)` 第 4+ 实参**静默变 undefined**（`[a,b,c,d].join()` → `a,b,c,`）；类方法 `.bind` 后带 5 参调用抛 `Cannot convert undefined to a BigInt`。
+- 四处修复（corpus12 14→15/16）：
+  1. **发射器** `_memberLambda`：对象字面量方法的合成形参被 `.slice(0, 4)` 截断 → 第 4+ 形参从 lambda ABI（`lamMeta.n`）消失，`closureCall` 永远不向宿主索要这些实参。去掉截断（ABI 本已支持任意形参数：`["i32"] + n×i64`）。
+  2. 宿主 `closureCall` 的 `meta.n > 4` 分支：把 `a3` **一律**当作「溢出实参数组」（`toJS(a3).length`）→ 标量 `a3` 时 `length` 为 undefined → 实参 3/4 变 undefined。改为仅当 `a3` 是 wasm 数组（0x7FFB）时才解包（旧约定），否则它就是实参 3。
+  3. 宿主 `closureCall` 的 `synthThis` 路径：右移 `a3 = a2; a2 = a1; a1 = a0` **丢弃实参 3**；且 `hasEx` 收尾从 `ex[1]` 起（synthThis 时 `ex[0]` = 实参 3 并未进 slots）。修：右移前保存实参 3、新增「无溢出数组 + synthThis」分支按 `[this, 实参…]` 重排、`hasEx` 收尾按 synthThis 从 `ex[0]` 起。
+  4. 宿主 `prop_get` / `method_call` 的 `call`/`apply`/`bind` 与「提取的类方法包装器」：一律只传 3-4 个实参槽。改为按调用点约定补**溢出数组**（`ovf[0]` = 实参 3）+ 过滤未传槽（TAG 填充）。
+- 验证：`o.m(a,b,c,d)`=`a,b,c,d`；`o.m(1..5)`=`1,2,3,4,5`；`o.add5(1..5)`（用 `this.base`）=15；`c.m.call(c,1,2)`/`c.m.apply(c,[3,4])` 正确；`g.call(null,1..5)`（普通闭包）=`12345`。
+- 已知残余：`class C { m(a,b,c,d,e){} }` 的 **`.bind` 后再以 5 参调用**仍抛错（提取包装器的 `this` 物化回传链路，另案）。
+- 结果：**735/750（98.0%）**；32 批 + ctest 32/32 零回归。
+
 ### extends 内建（Error 族）语义（2026-10-17）
 - 症状：`class AppError extends Error` 实例 `String(e)`/`e.toString()` = `[object Object]`（应 `"AppError: bad"`）。
 - 四处修复（corpus30 19→20/20 全绿）：

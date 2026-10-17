@@ -1114,7 +1114,7 @@ class Emitter {
         if (f) return f;
         const nm = member.name && member.name.text;
         if (ts.isMethodDeclaration(member)) {
-            f = this._synthArrow(["this"].concat(member.parameters.map(q => q.name.text)).slice(0, 4), member.body);
+            f = this._synthArrow(["this"].concat(member.parameters.map(q => q.name.text)), member.body);   // 形参全留（此前 .slice(0,4) → 第 4+ 形参从 ABI 消失 → 实参静默 undefined）
             // 合成的形参表只有名字（丢 rest 标记）→ 显式标出，供 lamMeta.rest 与 ABI 打包使用
             const lp = member.parameters[member.parameters.length - 1];
             if (lp && lp.dotDotDotToken) f._qzRest = true;

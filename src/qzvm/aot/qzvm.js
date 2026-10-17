@@ -460,13 +460,14 @@ function makeQzvm(strings, opts) {
     const blk = new DataView(mem.buffer).getInt32(off + 4, true);   // env 索引（0 = 无捕获）
     let args;
     const hasEx = ovfArr !== undefined && ovfArr !== TAG;      // 调用点是否显式传了溢出实参数组
+    let synth3;                                                 // synthThis 右移时被挤出的「实参 3」（无溢出数组时）
     if (meta.synthThis) {                                       // 合成方法箭头 / 带 `this` 形参的闭包：槽 0 = receiver
       const rv = recv === undefined ? TAG : recv;
       if (hasEx) { const ex0 = toJS(ovfArr) || []; const s0 = [a0, a1, a2, a3];
         ovfArr = arrWriteback([a0, a1, a2, a3].concat(ex0).slice(0));   // 原样透传（下面按 slots 重排）
         a0 = rv; a1 = s0[0]; a2 = s0[1]; a3 = s0[2];
         ovfArr = arrWriteback([s0[2], s0[3]].concat(ex0).map(x => x === undefined ? TAG : x).slice(2));
-      } else { a3 = a2; a2 = a1; a1 = a0; a0 = rv; }
+      } else { synth3 = a3; a3 = a2; a2 = a1; a1 = a0; a0 = rv; }
     }
     if (hasEx) {
       // 新约定：slots a0..a3 = 实参 0..3（未传补 TAG），ovfArr = 实参 3.. 的数组 → 两种被调均可还原
@@ -482,13 +483,28 @@ function makeQzvm(strings, opts) {
                                                                                      // 否则 ex[0] = 实参 3（已在 slots）→ 跳过
         args.push(arrWriteback(tail));
       } else {
-        for (let i = 4; i < meta.n; i++) args.push((i - 3) < ex.length ? bitsOf(ex[i - 3]) : TAG);   // ex[0] = 实参 3（已在 slots）
+        // 非 synthThis：ex[0] = 实参 3（已在 slots a3）→ 从 ex[1] 起；synthThis：slots 已右移（a0=this），实参 3 = ex[0]
+        const exOff = meta.synthThis ? 4 : 3;
+        for (let i = 4; i < meta.n; i++) args.push((i - exOff) >= 0 && (i - exOff) < ex.length ? bitsOf(ex[i - exOff]) : TAG);
       }
+    } else if (meta.synthThis) {
+      // 无溢出数组 + synthThis：slots = [this, 实参 0..2]，synth3 = 实参 3（此前被右移丢弃 → 静默 undefined）
+      const vals = [a0, a1, a2, a3];
+      if (synth3 !== undefined && synth3 !== TAG) {
+        if ((BigInt.asUintN(64, synth3) >> 48n) === 0x7ffbn) for (const x of (toJS(synth3) || [])) vals.push(bitsOf(x));
+        else vals.push(synth3);
+      }
+      const nV = meta.rest ? meta.n - 1 : meta.n;
+      args = [blk];
+      for (let i = 0; i < nV; i++) args.push(i < vals.length ? vals[i] : TAG);
+      if (meta.rest) args.push(arrWriteback(vals.slice(nV - 1).map(toJS)));
     } else if (meta.n > 4) {
-      const ex = (a3 === undefined || a3 === TAG) ? [] : (toJS(a3) || []);
+      // a3 仅当为 wasm 数组(0x7FFB)时才是「溢出实参数组」；标量 a3 就是实参 3（此前一律当数组 → toJS(4).length undefined → 实参 3/4 静默变 undefined）
+      const a3IsArr = a3 !== undefined && a3 !== TAG && (BigInt.asUintN(64, a3) >> 48n) === 0x7ffbn;
+      const vals = a3IsArr ? (toJS(a3) || []).map(bitsOf) : (a3 === undefined || a3 === TAG ? [] : [a3]);
       args = [blk, a0, a1, a2];
-      if (meta.rest) args.push(arrWriteback(ex.slice(meta.n - 4)));
-      else for (let i = 0; i < meta.n - 3; i++) args.push(i < ex.length ? bitsOf(ex[i]) : TAG);
+      if (meta.rest) args.push(arrWriteback(vals.slice(meta.n - 4).map(toJS)));
+      else for (let i = 0; i < meta.n - 3; i++) args.push(i < vals.length ? vals[i] : TAG);
     } else if (meta.rest) {
       // 惯例（实测）：调用方传 [固定参…, rest 数组, 余参…]。判定「已打包」= a[nFix] 是 wasm 数组(0x7FFB)。
       // 未打包（如箭头 const 被直接调用）→ 固定参 + 剩余打包成数组。
@@ -1111,7 +1127,8 @@ function makeQzvm(strings, opts) {
                 const selfH = (this === undefined || this === null) ? recv2 : bitsOf(this);
                 const a2 = args.filter(x => x !== undefined && x !== null).map(bitsOf);
                 while (a2.length < 4) a2.push(TAG);
-                return toJS(exportsRef[m2.name](selfH, ...a2.slice(0, 4), TAG));
+                const ovf1 = a2.length > 4 ? arrWriteback(a2.slice(3).map(toJS)) : TAG;   // >4 实参：溢出数组（ovf[0] = 实参 3，与 callee 的 ovf[i-3] 约定一致；此前恒传 TAG → 第 4+ 实参静默丢失）
+                return toJS(exportsRef[m2.name](selfH, ...a2.slice(0, 4), ovf1));
               });
             }
             c2 = chainNext(c2);
@@ -1140,10 +1157,16 @@ function makeQzvm(strings, opts) {
         if (name === "valueOf") return recv;
         if (name === "toString") return tagHandle(() => "function " + (nm2 || "anonymous") + "() { [native code] }");
         if (name === "call" || name === "apply" || name === "bind") {
-          const cm = (this2, rest) => toJS(closureCall(recv, ...[0, 1, 2].map(i => rest[i] === undefined ? TAG : rest[i]), TAG, undefined, this2 === undefined ? TAG : this2));
-          if (name === "call") return tagHandle((this2, x0, x1, x2) => cm(bitsOf(this2), [bitsOf(x0), bitsOf(x1), bitsOf(x2)]));
-          if (name === "apply") return tagHandle((this2, arr3) => cm(bitsOf(this2), (arr3 === undefined ? [] : (toJS(arr3) || [])).map(bitsOf)));
-          return tagHandle((...xs) => (...ys) => cm(bitsOf(xs[0]), [...xs.slice(1), ...ys].slice(0, 3).map(bitsOf)));
+          // rest = 实参（JS 值，tagged 句柄位型）：slots a0..a3 = 实参 0..3；>3 时溢出数组（ovf[0] = 实参 3，与调用点约定一致）
+          const cm = (this2, rest) => {
+            const rs = rest || [];
+            const a = [0, 1, 2, 3].map(i => rs[i] === undefined ? TAG : rs[i]);
+            const ovfA = rs.length > 3 ? arrWriteback(rs.slice(3).map(toJS)) : TAG;
+            return toJS(closureCall(recv, a[0], a[1], a[2], a[3], ovfA, this2 === undefined ? TAG : this2));
+          };
+          if (name === "call") return tagHandle((this2, x0, x1, x2, x3, ...more) => cm(bitsOf(this2), [bitsOf(x0), bitsOf(x1), bitsOf(x2), bitsOf(x3), ...more.map(bitsOf)]));
+          if (name === "apply") return tagHandle((this2, arr3) => cm(bitsOf(this2), ((arr3 === undefined || arr3 === TAG) ? [] : (toJS(arr3) || [])).map(bitsOf)));
+          return tagHandle((...xs) => (...ys) => cm(bitsOf(xs[0]), [...xs.slice(1), ...ys].map(bitsOf)));
         }
         return TAG;                                            // 其它属性：闭包值无自有属性
       }
@@ -1734,24 +1757,20 @@ function makeQzvm(strings, opts) {
         if (hiR === CLO_HI || typeof rawFn === "function") {
           const callIt = (self2, rest) => {
             if (hiR === CLO_HI) {
-              const off0 = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
-              const mi = mem ? new DataView(mem.buffer).getUint32(off0, true) : -1;
-              const mm = lamMeta && lamMeta[mi];
-              const passSelf = !!(mm && mm.synthThis);            // 合成箭头（对象字面量方法/访问器）：this 为真实 receiver 槽
-              const a = rest.map(x => x === undefined ? TAG : x);
-              return toJS(closureCall(recv, a[0], a[1], a[2], TAG, undefined, self2 === undefined ? TAG : self2));   // receiver 走 recv（宿主按 synthThis 前置）
+              const a = [0, 1, 2, 3].map(i => rest[i] === undefined ? TAG : rest[i]);
+              const ovfA = rest.length > 3 ? arrWriteback(rest.slice(3).map(toJS)) : undefined;
+              return toJS(closureCall(recv, a[0], a[1], a[2], a[3], ovfA, self2 === undefined ? TAG : self2));   // receiver 走 recv（宿主按 synthThis 前置）
             }
-            return rawFn.apply(thisArgOf(self2), rest.slice(0, 3).map(toJS));
+            return rawFn.apply(thisArgOf(self2), rest.map(toJS));
           };
-          if (name === "call") return ret(callIt(a0, [a1, a2, a3]));
-          if (name === "apply") { const arr2 = a1 === undefined ? [] : (toJS(a1) || []).map(bitsOf); return ret(callIt(a0, arr2)); }
+          // 实参 = a1..a3 + ovf[1..]（ovf[0] = 实参 3，已在 a3）
+          const ovfV = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
+          const innerArgs = [a1, a2, a3].filter(givenSlot).concat(ovfV.slice(1).map(bitsOf));   // 未传的槽（TAG 填充）须滤掉，否则 bind 的预置实参会右移错位
+          if (name === "call") return ret(callIt(a0, innerArgs));
+          if (name === "apply") { const arr2 = (a1 === undefined || a1 === TAG) ? [] : (toJS(a1) || []).map(bitsOf); return ret(callIt(a0, arr2)); }
           // bind：返回宿主函数（thisArg 固定在前）——经 qz.call_value 可调用
-          const boundSelf = a0, boundPre = [a1, a2, a3];
-          return tagHandle(function (...xs) {
-            const rest = boundPre.filter(givenSlot).slice(0, 3);   // 只保留真正传入的实参（TAG = 未传）
-            const all = rest.concat(xs.map(bitsOf)).slice(0, 3);
-            return callIt(boundSelf, all);
-          });
+          const boundSelf = a0, boundPre = innerArgs.slice();
+          return tagHandle(function (...xs) { return callIt(boundSelf, boundPre.concat(xs.map(bitsOf))); });
         }
       }
       if (isHostH(recv)) {                                   // 宿主对象（JSON.parse 结果等）：调真实 JS 方法
