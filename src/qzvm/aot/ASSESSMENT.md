@@ -1,9 +1,19 @@
 # AOT 路线评估汇总（2026-10-08，实验数据消化）
 
+
+### 批 36 三项残余的机理（2026-10-17 记录，待修）
+
+1. **`try { return X } finally { throw Y }` → finally 执行两次**
+   - 观测：`log` = `t,f1,f1,c`（finally 跑两次）。
+   - 机理（已读通）：`return` 触发 `_emitPendingFinally(true, false)` 跑一次 finally（f1 #1），finally 内抛错置 `__err` 并 `br` 到**该 try 的 `$err` 块**（throw 的发射目标仍在动态 try 范围内）→ 落回 `emitTry` 的**正常路径** finally（`emitter.js:3510-3512`，未加防重入切片）→ f1 #2 → 其后的 `_emitErrCheck(false)` 再向外传播。
+   - 候选修法：`_emitPendingFinally` 发射 finally 体时把 `_tryStack` 同步切到 `slice(0, i)`（使体内 throw 归向外层 try）；或给正常路径 finally 加运行时一次性守卫。**风险高（try/finally 是核心路径），需成对验证**。
+2. **`{ ...src }` 不触发 `defineProperty` 访问器 getter**（结果空值、读取计数 0）：展开路径未取物化对象的访问器值（`obj_merge` 以 `Object.keys(o)`/`o[k]` 读，理论上应触发——需进一步确认发射侧是否走了静态折叠路径）。
+3. **getter 返回闭包**（`get builder() { return (x) => this.#base + x }`）→ NaN：访问器返回的闭包在调用时 `this`/私有字段捕获失效（疑与该访问器 lambda 的 synthThis/env 绑定有关）。
+
 ### `arguments` 续作结论（2026-10-17，三次尝试均回退）
 
 - **助手机制**：`qzs_*` 助手在 `emitStringHelpers(m)`（`emitter.js:~2247+`）内 `declareFunc` + `startBody/endBody` 内联；宿主需调用的助手（如新增 `qzs_setargs`）必须补 `exportFn`。
-- **已验证可行的设计**（三次尝试中编译均通过）：新全局 `__args`（排在模块全局之后，不影响既有索引）作 scratch 通道 → 函数/lambda 末尾插 i64 本地（env 之前，索引 = `参数数 + decls.length - 1 - envDecls.length`）→ 入口 `globalGet → localSet` + `varMap.set("arguments", …)` → `arguments` 标识符解析该本地 → 调用点（顶层直调点 `emitter.js:` `this.m.call(this._fnName(fn))` 前）写全局；宿主 `closureCall` 对 `lamMeta.needsArgs` 的闭包经导出 `qzs_setargs` 写入。
+- **已验证可行的设计**（三次尝试中编译均通过）：新全局 `__args`（排在模块全局之后，不影响既有索引）作 scratch 通道 → 函数/lambda 末尾插 i64 本地（env 之前，索引 = `参数数 + decls.length - 1 - envDecls.length`）→ 入口 `globalGet → localSet` + `varMap.set("arguments", …)` → `arguments` 标识符解析该本地 → 调用点（顶层直调点 `this.m.call(this._fnName(fn))` 前）写全局；宿主 `closureCall` 对 `lamMeta.needsArgs` 的闭包经导出 `qzs_setargs` 写入。
 - **卡点（第三次实测）**：`function g() { … arguments … }` 声明在 `f` 内（emitter 提升为闭包）时，`g(9,8)` 调用**未经过宿主 `closureCall`**（QZDBG 钩子未触发）→ 宿主写入路径不生效，结果从 loud 退化为**静默错值**（`undefined:undefined`）→ 按判据（静默错值劣于 loud）立即回退。
 - **下一步**：先定位该调用的实际发射路径（`_emitClosureCall` 发出的 `qz.closure_call`/`qz.call_value` 之外的分支，或嵌套函数被内联为直调 `__lam_N`），再按上述设计一次完成；`lamMeta.needsArgs` 标记本身已验证正确（探针输出 `[{n:__lam_0, a:true}]`）。
 ## 结论（一句话）
