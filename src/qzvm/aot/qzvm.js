@@ -150,7 +150,15 @@ function makeQzvm(strings, opts) {
   const isCloH = (b) => (BigInt(b) >> 48n) === CLO_HI;
   // 闭包值 → JS 函数包装（宿主侧调用回调，如 sort(cmp)/map(fn)）
   const cloWrap = (b) => {
-    const f = (...args) => toJS(closureCall(b, ...args.map(ret)));
+    const f = function (...args) {   // JS this → receiver（对象属性上的闭包作方法调用：obj.m() 的 this = obj）
+      const a0 = args[0] === undefined ? TAG : ret(args[0]);
+      const a1 = args[1] === undefined ? TAG : ret(args[1]);
+      const a2 = args[2] === undefined ? TAG : ret(args[2]);
+      const a3 = args[3] === undefined ? TAG : ret(args[3]);
+      const ovfA = args.length > 3 ? arrWriteback(args.slice(3)) : undefined;   // ovf[0] = 实参 3（已在 a3）
+      const rv = (this === undefined || this === null) ? TAG : bitsOf(this);
+      return toJS(closureCall(b, a0, a1, a2, a3, ovfA, rv));
+    };
     cloOf.set(f, b);            // 往返：再交回 wasm 时还原闭包句柄
     try {                                        // Function.prototype.toString → 源码原文（JS 语义）
       const off0 = Number(BigInt.asUintN(64, b) & 0xffff_ffffn);
@@ -954,7 +962,10 @@ function makeQzvm(strings, opts) {
     new_dynamic: (obj, a0, a1, a2, a3) => {          // 运行时类值构造（类表达式工厂）：类对象 → 实例句柄
       const f = handles[idxOf(obj)];
       if (typeof f !== "function") throw new Error("new: 目标不是类（期望类对象）");
-      return f(...[a0, a1, a2, a3].map(x => toJS(x)));
+      const as4 = [a0, a1, a2, a3].map(x => toJS(x));
+      if (typeof f.__qzClsId === "number") return f(...as4);                 // 用户类构造器：返回实例句柄（bigint，Reflect.construct 会丢弃原始值返回 → 必须直调）
+      const r0 = Reflect.construct(f, as4);                                  // 普通函数作类：JS new 语义（prototype 链；构造器返回对象则用之）
+      return typeof r0 === "bigint" ? r0 : ret(r0);
     },
     class_value_dyn: (clsId, baseObj) => {          // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
       const baseCtor = handles[idxOf(baseObj)];
@@ -991,6 +1002,9 @@ function makeQzvm(strings, opts) {
       const c = handles[idxOf(rhs)];
       const cid = (c && typeof c === "function") ? c.__qzClsId : undefined;
       if (cid !== undefined) return instanceById(x, cid);
+      if (typeof c === "function" && !(c.name && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(c.name))) {
+        return boxBool(toJS(x) instanceof c);     // 普通函数作类（function-as-class：Dog.prototype = Object.create(…)、Animal.prototype.m = …）
+      }
       const nm = (c && typeof c === "function" && c.name) ? c.name : null;
       if (nm) {                                   // 内建函数值 → 按名判定（与 instanceof_builtin 同语义，内联以避免自引用）
         const j = toJS(x);
@@ -1000,7 +1014,6 @@ function makeQzvm(strings, opts) {
           case "Object":   return boxBool(j !== null && (typeof j === "object" || typeof j === "function"));
           case "Function": return boxBool(typeof j === "function");
           case "String":   return boxBool(typeof j === "object" && j !== null && j instanceof String);
-          case "Number":   return boxBool(typeof j === "object" && j !== null && j instanceof Number);
           case "Boolean":  return boxBool(typeof j === "object" && j !== null && j instanceof Boolean);
           case "Map":      return boxBool(j instanceof Map);
           case "Set":      return boxBool(j instanceof Set);
@@ -1775,7 +1788,14 @@ function makeQzvm(strings, opts) {
       }
       if (isHostH(recv)) {                                   // 宿主对象（JSON.parse 结果等）：调真实 JS 方法
         const obj = handles[idxOf(recv)];
-        const fn = obj == null ? undefined : obj[name];
+        const fnH = obj == null ? undefined : obj[name];
+        if (typeof fnH === "bigint" && (BigInt.asUintN(64, fnH) >> 48n) === CLO_HI) {   // 属性上是闭包值（wasm 函数）→ 调用并传 receiver（JS 语义：obj.m() 的 this = obj）
+          const as2 = [a0, a1, a2, a3];
+          const ex2 = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
+          const ovfA2 = ex2.length > 1 ? arrWriteback(ex2.slice(1).map(toJS)) : undefined;
+          return ret(closureCall(fnH, as2[0], as2[1], as2[2], as2[3], ovfA2, recv));
+        }
+        const fn = fnH;
         if (typeof fn !== "function") throw new Error("method_call: 宿主对象无方法 " + name);
         const as = [a0, a1, a2, a3].map(toJS);
         if (ovf !== undefined && ovf !== TAG) as.push(...(toJS(ovf) || []).slice(1));   // ovf[0] = 实参 3（已在 a3）；其余接在 4 槽之后（rest/>4 形参）
@@ -2014,18 +2034,21 @@ function makeQzvm(strings, opts) {
       return acc;
     },
     // 顶层函数作值（回调/别名/属性宿主）：包装为宿主 JS 函数，调用时按 arity 补 TAG 后直调 wasm 导出
-    fn_value: (sid, arity) => {
+    fn_value: (sid, arity, hasThis) => {
       const nm = strings[sid];
       const n = arity | 0;
       fnCacheMap = fnCacheMap || new Map();
       const hit = fnCacheMap.get(nm);
-      if (process.env.QZDBG) console.error("[dbg] fn_value", nm, "arity=", n, "cached=", hit !== undefined);
       if (hit !== undefined) return hit;                       // 同名 → 同一宿主句柄（属性/身份稳定）
       const hv = tagHandle(function (...as) {
         const f = exportsRef && exportsRef[nm];
         if (typeof f !== "function") throw new Error("fn_value: 未导出函数 " + nm);
         const a2 = as.slice(0, n).map(x => (x === undefined || x === null) ? TAG : bitsOf(x));   // JS 少传 = undefined → TAG
         while (a2.length < n) a2.push(TAG);
+        if (hasThis) {   // 带 TS `this` 形参的顶层函数：receiver 由宿主前置于第一形参（ABI 恒 (this, 实参…)）
+          const rv = (this === undefined || this === null) ? TAG : bitsOf(this);
+          return toJS(f(rv, ...a2.slice(0, Math.max(n - 1, 0))));
+        }
         return toJS(f(...a2));
       });
       fnCacheMap.set(nm, hv);

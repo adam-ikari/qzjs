@@ -4,6 +4,18 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### function 作类族（`Animal.prototype.x = …` / `new (Dog as any)()`）（2026-10-17）
+- 症状：`new (Dog as any)("Rex")` → 编译期 loud「new 未知类: Dog」（顶层函数不是类）；`d instanceof (Animal as any)` → loud「instanceof 右操作数须为用户类」。
+- 六处修复（corpus22 18→19/19 全绿）：
+  1. `fn_value` 契约新增 `hasThis`（`["i32","i32"]` → 三参）：带 TS `this` 形参的顶层函数作值时，宿主包装器把 receiver **前置**到第一形参（与 ABI `(blk?/this, 实参…)` 一致）；发射器新增 `_fnHasThis` 表（按 `st.parameters` 是否有名为 `this` 的形参）。
+  2. `_emitNewCall`：`resolvable` 增加 `fnNames.has(tgt)` —— 顶层函数亦可作 `new` 目标。
+  3. `new_dynamic`：用户类构造器（有 `__qzClsId`）仍直调（`Reflect.construct` 会**丢弃**其返回的实例句柄 bigint）；普通函数改走 `Reflect.construct`（JS new 语义：prototype 链、构造器返回对象则用之）。
+  4. `instanceof` 右值先**去括号/as/非空断言**（`d instanceof (Animal as any)`）；动态右值判定补 `fnNames`；宿主 `instanceof_dyn` 对「非内建名的普通函数」直接用 JS `instanceof`。
+  5. `this` 读取：声明了 `this` 形参的函数不再硬编码返回 undefined（`_lamThisParam`），改为读 receiver 槽 —— 无 receiver 时该槽即 undefined，与 JS 严格模式等价；有 receiver（`.call`/`new`）时正确绑定。
+  6. 宿主对象属性上存放的**闭包值**：`method_call` 遇 `CLO_HI` 属性 → `closureCall(..., recv)`（传 receiver）；`cloWrap` 包装器转发 JS `this` → `closureCall` 的 recv（此前对象属性上的闭包作方法调用时 `this` 恒 undefined）。
+- 验证：`new (Animal as any)("Rex").name`=`Rex`；`Animal.call(this,name)` 链（Dog 继承）=`Rex`；`Animal.prototype.speak = function(this){…}` → `d.speak()`=`Rex makes a sound`；`d instanceof (Animal as any)`=1；`Object.getPrototypeOf(d) === Dog.prototype`=1。
+- 结果：**737/750（98.3%）**；32 批 + ctest 32/32 零回归。
+
 ### 箭头函数内的 super（2026-10-17）
 - 症状：`class B extends A { arrow() { const f = () => "a" + super.m(); return f(); } }` → 编译期 loud「super.m() 在父类链上未定义」（lambda 发射期无类上下文）。
 - 三处修复（corpus13 19→20/20 全绿）：

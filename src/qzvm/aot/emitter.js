@@ -145,7 +145,7 @@ const QZ = {
   iter_pull: { params: ["i64"], results: ["i64"] },               // for-of: 推进一次；返回 1=done / 0=continue（BigInt）
   iter_val: { params: ["i64"], results: ["i64"] },                // for-of: 取当前迭代值（已 pull）
   iter_close: { params: ["i64"], results: [] },                   // for-of: 提前终止调用（break/return）→ iterator.return?.()
-  fn_value: { params: ["i32", "i32"], results: ["i64"] },   // 顶层函数作值：包装为宿主函数句柄（arity = 形参数，缺省补 TAG）
+  fn_value: { params: ["i32", "i32", "i32"], results: ["i64"] },   // 顶层函数作值：包装为宿主函数句柄（arity = 形参数，缺省补 TAG）
   builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
   spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
   call_value: { params: ["i64", "i64", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // v, a0..a3, 溢出实参数组, recv   // 值调用（闭包/宿主函数）
@@ -549,7 +549,8 @@ class Emitter {
             if (g !== undefined) { M.globalGet(g); return; }   // 模块级变量
             if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
                 // 顶层函数作值（回调/别名/属性宿主）→ 包装为宿主函数句柄（此前 loud：未定义捕获变量）
-                M.i32Const(this._strId(this._fnName(name))); M.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0); M.call("qz.fn_value");
+                M.i32Const(this._strId(this._fnName(name))); M.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0);
+                M.i32Const(this._fnHasThis && this._fnHasThis.get(this._fnName(name)) ? 1 : 0); M.call("qz.fn_value");
                 return;
             }
             if (BUILTIN_GLOBALS.has(name)) { M.i32Const(this._strId(name)); M.call("qz.builtin_member"); return; }   // 内建全局作值（Symbol/Math/JSON…）
@@ -566,7 +567,8 @@ class Emitter {
             const g = this.moduleGlobals && this.moduleGlobals.get(name);
             if (g !== undefined) { this.m.globalGet(g); return; }   // 模块级变量
             if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
-                this.m.i32Const(this._strId(this._fnName(name))); this.m.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0); this.m.call("qz.fn_value");
+                this.m.i32Const(this._strId(this._fnName(name))); this.m.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0);
+                this.m.i32Const(this._fnHasThis && this._fnHasThis.get(this._fnName(name)) ? 1 : 0); this.m.call("qz.fn_value");
                 return;
             }
             if (BUILTIN_GLOBALS.has(name)) { this.m.i32Const(this._strId(name)); this.m.call("qz.builtin_member"); return; }
@@ -2760,10 +2762,11 @@ function compileTS(input, outWasm, opts = {}) {
         em.modConstLit = modConstLit;    // 模块级字面量 const（计算属性名折叠用）
         em.protNameId = (n) => em._strId(n);
 
+        em._fnHasThis = new Map();       // 顶层函数名 → 是否带 TS this 形参（receiver 由宿主前置）
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
         em._fnNodes = new Map();         // 顶层函数名 → 声明节点（rest 形参打包用）
         for (const st of fns) em._fnNodes.set(st.name.text, st);
-        for (const st of fns) { em.fnNames.add(st.name.text); em._fnParams.set(st.name.text, st.parameters.length); }
+        for (const st of fns) { em.fnNames.add(st.name.text); em._fnHasThis.set(st.name.text, st.parameters.some(p2 => ts.isIdentifier(p2.name) && p2.name.text === "this")); em._fnParams.set(st.name.text, st.parameters.length); }
         for (const local of importAlias.keys()) em.fnNames.add(local);   // 导入名也是「顶层函数」（排除闭包捕获误判）
         em.moduleGlobals = em.moduleGlobals || new Map();
         em._modObjKeys = modObjKeys;    // 模块级 const 的静态键序（对象字面量 + 已知 const 展开）
@@ -3515,7 +3518,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isThis(e)) {
         if (this.capMap.has("this")) { this._emitCapturedRead("this"); return; }   // 方法内闭包捕获 this → 经 env
-        if (this._lamThisParam) { this._emitUndefined(); return; }   // 该函数声明了 this 形参（TS 注解）→ 运行时 this = undefined
+        // 声明了 `this` 形参的函数/闭包：this = receiver 槽（被调方按约定前置；无 receiver 时该槽即 undefined，与 JS 严格模式等价）
         if (this._inStaticMethod && this._curClassObj) {          // 静态方法/static{} 内 this ≡ 定义类（JS 语义）
             this.m.i32Const(this._curClassObj.id); this.m.call("qz.class_value"); return;
         }
@@ -4903,6 +4906,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
         {   // 动态类值（类表达式工厂 / 变量持有类）：运行时取类对象 → 宿主按 __qzClsId 建实例
             const resolvable = this._local(tgt.text) !== undefined || this.capMap.has(tgt.text)
                 || (this.moduleGlobals && this.moduleGlobals.has(tgt.text))
+                || (this.fnNames && this.fnNames.has(tgt.text))     // 顶层函数作类（JS function-as-class：Dog.prototype = …）
                 || (ts.isPropertyAccessExpression(e.expression));
             if (resolvable) {
                 const M2 = this.m, tg2 = this._expEnter();
@@ -5114,7 +5118,9 @@ Emitter.prototype.emitTaggedBinary = function (e) {
     // 未实现的二元运算符：先于操作数求值报错（否则右操作数如类名 A 会先崩「未定义捕获变量: A」）
     if (op === ts.SyntaxKind.InstanceOfKeyword) {
         // a instanceof C：C 须为用户类（内建类不支持）→ qz.instanceof_op(a, clsId) → tagged bool
-        const right = e.right;
+        let right = e.right;
+        while (right && (ts.isParenthesizedExpression(right) || ts.isAsExpression(right) || ts.isNonNullExpression(right)
+            || ts.isTypeAssertionExpression(right) || ts.isSatisfiesExpression(right))) right = right.expression;   // d instanceof (Animal as any)
         if (ts.isIdentifier(right) && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(right.text)
             && !this.classes.has(this._className(right.text))) {
             // 内建类：宿主按 tag/物化判定（Array/Object/String/Number/Boolean/Function…）
@@ -5129,7 +5135,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
                 && (ts.isPropertyAccessExpression(right)
                     || ts.isCallExpression(right)
                     || (ts.isIdentifier(right) && (this._local(right.text) !== undefined || this.capMap.has(right.text)
-                        || (this.moduleGlobals && this.moduleGlobals.get(right.text) !== undefined))));
+                        || (this.moduleGlobals && this.moduleGlobals.get(right.text) !== undefined)
+                        || (this.fnNames && this.fnNames.has(right.text) && !this.classes.has(this._className(right.text))))));   // 顶层函数值（function 作类族）
             if (dynR) {
                 const M2 = this.m, t2 = this._expEnter();
                 this.emitTaggedExpr(e.left); M2.localSet(t2.v);
