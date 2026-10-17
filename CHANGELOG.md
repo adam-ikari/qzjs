@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十六批差分审计（2026-10-17）
+- 新增 `audit_corpus26.js`（21 例：字符串搜索方法（startsWith/endsWith/includes + 第 2 实参）、pad/repeat/trim、replace/replaceAll 回调、at/charCodeAt/codePointAt、数组 at/flat/flatMap、splice/reverse/fill/slice、findLast/includes(NaN)/sort 比较器、Object.fromEntries/getOwnPropertyDescriptor/defineProperty(s)/getOwnPropertyNames（含非枚举）、Object.assign 源 getter、Reflect 基础、运算符强制转换矩阵、可选链调用、delete/void/逗号、标签 break/continue、switch(true) 模式、数值边界（EPSILON/MAX_SAFE/0.1+0.2/取整）、Math.hypot/atan2/展开 max/min、toString/join 链、copyWithin、Symbol.toPrimitive 强制转换）。
+- **修复 3 项（均为静默错值）**：
+  - **String `startsWith`/`endsWith`/`includes` 第 2 实参**（fromIndex/endPosition）此前被丢弃 → 静默错值；补 `givenSlot(a1)` 分支传 `Number(arg(a1))`。
+  - **`Object.defineProperties` 对 POJO/实例**此前走原生 `Object.defineProperties`（物化副本）→ `getOwnPropertyNames`/`Object.keys` 静默漏报新键 → 改为就地注册（与 `Object.defineProperty` 同路径：内存槽/extras + nonEnum + propFlags）。
+- 结果：**619/631（98.1%）**；ctest 32/32。残余 12 例（全部 loud 或已知窄面）。
+
 ### for…of 惰性迭代（2026-10-17）
 - **修复：`for…of` 此前急切快照（`iter_array` 一次性收集为 wasm 数组）→ 与 JS 惰性语义不符**（迭代期间 `push`/`delete` 不可见；自定义迭代器的 `next()` 一次性消费）。改为逐次 `next()` 驱动：
   - wasm 数组（0x7FFB）：按索引直读，**长度每轮重读**（迭代期间 `push`/`delete` 可见）。

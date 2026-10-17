@@ -609,9 +609,9 @@ function makeQzvm(strings, opts) {
       case "trimStart":    r = s.trimStart(); break;
       case "trimEnd":      r = s.trimEnd(); break;
       case "repeat":       r = s.repeat(arg(a0)); break;
-      case "startsWith":   r = s.startsWith(String(arg(a0))); break;
-      case "endsWith":     r = s.endsWith(String(arg(a0))); break;
-      case "includes":     r = s.includes(String(arg(a0))); break;
+      case "startsWith":   r = givenSlot(a1) ? s.startsWith(String(arg(a0)), Number(arg(a1))) : s.startsWith(String(arg(a0))); break;   // 第 2 实参 = fromIndex
+      case "endsWith":     r = givenSlot(a1) ? s.endsWith(String(arg(a0)), Number(arg(a1))) : s.endsWith(String(arg(a0))); break;   // 第 2 实参 = endPosition
+      case "includes":     r = givenSlot(a1) ? s.includes(String(arg(a0)), Number(arg(a1))) : s.includes(String(arg(a0))); break;   // 第 2 实参 = fromIndex（与数组 includes 一致）
       case "padStart":     r = s.padStart(arg(a0), arg(a1)); break;
       case "padEnd":       r = s.padEnd(arg(a0), arg(a1)); break;
       case "replace":      { const pat = toJS(a0);   // 正则模式原样传（String() 会毁掉 RegExp / 回调函数）
@@ -1230,6 +1230,24 @@ function makeQzvm(strings, opts) {
           if (op2 === "seal") { sealed.add(off0); nonExt.add(off0); markAllProps(off0, undefined, false); return a0; }                     // 既有属性：configurable = false
           nonExt.add(off0); return a0;
         }
+      }
+      // Object.defineProperties(target, props)：对 POJO/实例就地注册（与 defineProperty 同路径；此前走原生物化副本 → getOwnPropertyNames 静默漏报）
+      if (name === "Object.defineProperties" && a0 !== undefined) {
+        const hD = BigInt.asUintN(64, a0) >> 48n, offD = Number(BigInt.asUintN(64, a0) & MASK32);
+        if ((hD === TAG_HI && offD >= 8) || hD === INST_HI) {
+          const props = toJS(a1) || {};
+          for (const key of Object.keys(props)) {
+            const desc = props[key] || {};
+            const val = bitsOf(desc.value);
+            const e2 = fieldEntries.find(([nn]) => nn === key);
+            if (e2 && mem && new DataView(mem.buffer).getInt32(offD + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(offD + e2[1], val, true);
+            else { syncExtras(); extras.set(offD + "|" + key, val); }
+            if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(offD + "|" + key, true); }
+            syncPropFlags(); propFlags.set(offD + "|" + key, { w: desc.writable !== false, c: desc.configurable !== false });
+          }
+          return a0;
+        }
+        if (hD === HOST_HI) { Object.defineProperties(handles[offD], toJS(a1)); return a0; }
       }
       // Object.defineProperty(target, key, desc)：就地定义；enumerable:false 记入 nonEnum（物化/keys 跳过）
       if (name === "Object.defineProperty" && a0 !== undefined) {
