@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T04:47:28"
+updated: "2026-10-17T05:06:39"
 ---
 
 <!-- compiled_truth -->
@@ -431,4 +431,9 @@ updated: "2026-10-17T04:47:28"
 - time: 2026-10-17T04:47:28
   kind: evidence
   summary: "第三十批：686/713（96.2%）；新暴露 6 项残余（箭头 rest 形参不解包、动态 extends/instanceof、可迭代解构、副作用接收者复合赋值等）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T05:06:39
+  kind: evidence
+  summary: "第三十一批：703/731（96.2%）；新发现真 silent——对象字面量计算属性名插入序排在静态键前"
   affects: [aot-wasm-tagged-backend]
