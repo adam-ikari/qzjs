@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T04:39:27"
+updated: "2026-10-17T04:45:35"
 ---
 
 <!-- compiled_truth -->
@@ -421,4 +421,9 @@ updated: "2026-10-17T04:39:27"
 - time: 2026-10-17T04:39:27
   kind: evidence
   summary: "类原型方法挂载与提取语义：C.prototype.m/访问器 + 实例原型 + 提取方法尊重 .call thisArg（672/693）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T04:45:35
+  kind: evidence
+  summary: "类表达式作值 + 动态 new：无捕获场景已通（672/693）；捕获外围局部的类表达式仍 loud"
   affects: [aot-wasm-tagged-backend]
