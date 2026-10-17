@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T04:45:35"
+updated: "2026-10-17T04:47:28"
 ---
 
 <!-- compiled_truth -->
@@ -426,4 +426,9 @@ updated: "2026-10-17T04:45:35"
 - time: 2026-10-17T04:45:35
   kind: evidence
   summary: "类表达式作值 + 动态 new：无捕获场景已通（672/693）；捕获外围局部的类表达式仍 loud"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T04:47:28
+  kind: evidence
+  summary: "第三十批：686/713（96.2%）；新暴露 6 项残余（箭头 rest 形参不解包、动态 extends/instanceof、可迭代解构、副作用接收者复合赋值等）"
   affects: [aot-wasm-tagged-backend]
