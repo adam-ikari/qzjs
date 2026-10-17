@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T10:30:56"
+updated: "2026-10-17T10:48:58"
 ---
 
 <!-- compiled_truth -->
@@ -531,4 +531,9 @@ updated: "2026-10-17T10:30:56"
 - time: 2026-10-17T10:30:56
   kind: evidence
   summary: "多参数（>4 形参）调用完整性修复：735/750（98.0%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T10:48:58
+  kind: evidence
+  summary: "箭头函数内的 super：736/750（98.1%）"
   affects: [aot-wasm-tagged-backend]
