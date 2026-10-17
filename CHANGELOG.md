@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类名作值（类方法内 return M）+ 静态方法包装器参数补齐（2026-10-17）
+- 症状 A：`class M { static inc() { return M; } }` → `M.inc()` 返回 **undefined**（静默错值）；进而 `M.inc().inc()` 报「method_call: 无方法 inc」。
+  真因：`collectClasses` 逐个 `classes.set` 期间，**尚未登记的类名**（含本类自身、后续声明的类）被 `_capturesOf` 误判为自由变量 → 进类 env 捕获表 → 方法体内标识符走 `env_get` 得 TAG。
+  修：`collectClasses` 开头一次性收集**本次全部类名**（`allClsNames`），捕获过滤增加该类名判定（含 `_className` 别名）。
+- 症状 B：静态方法包装器 `(...as) => exportsRef[...](TAG, ...as.slice(0,4).map(bitsOf), TAG)` 在实参不足 4 个时**少传 wasm 参数** → `Cannot convert undefined to a BigInt`。修：补齐 4 个槽（不足补 TAG，与实例方法包装器 `mkMeth` 一致）。
+- 验证：`M.inc()`=`typeof function`；`M.inc().inc().get()`=`2`、`M.n`=`2`。
+- 结果：**740/750（98.7%）**；corpus7 23→24/27；32 批 + ctest 32/32 零回归。
+
 ### 对象字面量方法内的 `super`（2026-10-17）
 - 症状：`const d = { __proto__: base, greet() { return "d+" + super.greet(); } }` → 编译期 loud「super.greet() 在父类链上未定义」（对象字面量方法没有类上下文）。
 - 三处修复（corpus29 18→19/20）：

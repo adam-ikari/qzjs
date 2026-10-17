@@ -1471,6 +1471,8 @@ class Emitter {
     // 静态分派：receiver 静态类型已知 → 沿父链直调导出 __m_<C>$<m>；动态 → qz.method_call。
     collectClasses(clsNodes) {   // clsNodes: 已收集的 ClassDeclaration 列表（含嵌套，见 collectDecls）
         const firstNew = this._classList.length;
+        const allClsNames = new Set();   // 本次收集的全部类名：捕获过滤须一次到位（逐个 classes.set 时后续类尚未登记 → 类名被误判为自由变量 → 方法内 return M 走 env_get 得 undefined）
+        for (const st0 of clsNodes) if (ts.isClassDeclaration(st0) && st0.name) allClsNames.add(st0.name.text);
         for (const st of clsNodes) {
             if (!ts.isClassDeclaration(st)) continue;
             if (!st.name) throw new Error("[tagged] 匿名类不支持");
@@ -1584,6 +1586,7 @@ class Emitter {
                     if (BUILTIN_GLOBALS.has(nm2)) continue;
                     if (/^(undefined|null|NaN|Infinity)$/.test(nm2)) continue;
                     if (this.classes.has(this._className(nm2))) continue;
+                    if (allClsNames.has(this._className(nm2)) || allClsNames.has(nm2)) continue;   // 类名（含尚未登记的本类/后续类）不是捕获
                     if (this.fnNames && this.fnNames.has(nm2)) continue;
                     capSetC.add(nm2);
                 }

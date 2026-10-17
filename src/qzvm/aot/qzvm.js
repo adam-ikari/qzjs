@@ -618,7 +618,8 @@ function makeQzvm(strings, opts) {
       if (!sm || !exportsRef || typeof exportsRef[sm.name] !== "function") continue;
       try {
         Object.defineProperty(ctor, nm === "@@hasInstance" ? Symbol.hasInstance : nm, {
-          value: (...as) => toJS(exportsRef[sm.name](TAG, ...as.slice(0, 4).map(bitsOf), TAG)),
+          value: (...as) => { const aa = [0, 1, 2, 3].map(i => (i < as.length && as[i] !== undefined) ? bitsOf(as[i]) : TAG);   // 实参不足须补 TAG（wasm 调用参数个数固定 5/6）
+                             return toJS(exportsRef[sm.name](TAG, aa[0], aa[1], aa[2], aa[3], TAG)); },
           writable: true, configurable: true, enumerable: false });
       } catch (_) {}
     }
