@@ -159,7 +159,7 @@ const QZ = {
 
 // JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。
 const BUILTIN_GLOBALS = new Set(["Math", "JSON", "Array", "Object", "String", "Number", "Boolean", "Date",
-    "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Symbol", "BigInt", "Error", "TypeError",
+    "Function", "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Symbol", "BigInt", "Error", "TypeError",
     "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", "Reflect", "Proxy",
     "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent",
     "encodeURI", "decodeURI", "structuredClone", "globalThis", "Intl", "Atomics", "SharedArrayBuffer"]);
@@ -669,6 +669,8 @@ class Emitter {
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
         M.i32Or();
         this._emitIsHandle(base); M.i32Eqz();
+        M.i32Or();
+        M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();   // 宿主对象（类值/内建实例/Map/Set…）→ 走 prop_get
         M.i32Or();
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();   // 闭包值（函数）→ 自身属性 length/name/toString/call…
         M.i32Or();
@@ -3968,7 +3970,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         for (let x = cn; x; x = this.classes.get(x).parent) chain.push(x);
         for (const x of chain.slice().reverse()) this._emitStaticsGuard(x);
         const M3 = this.m, ts2 = this._expEnter();
-        this._emitUndefined(); M3.localSet(ts2.v);
+        M3.i32Const(this.classes.get(cn).id); M3.call("qz.class_value"); M3.i32Const(this._strId(e.name.text)); M3.call("qz.prop_get"); M3.localSet(ts2.v);   // 初值 = 类对象属性（.name/.toString/prototype…），静态字段叠加上覆
         for (const x of chain.slice().reverse()) {          // 父 → 子：越派生越后写（遮蔽父类同名字段）
             M3.i32Const(this._strId(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.statics_has");   // 私有静态字段需类名限定
             M3.ifBlock("void");

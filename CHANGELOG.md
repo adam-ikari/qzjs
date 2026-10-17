@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类的 .name 属性 + Function 作值（2026-10-17）
+- 症状：`A.name` 恒 `undefined`（`class A {}` + `A.name`）；且 `Function` 不在内建全局表 → `Object.getPrototypeOf(A) === Function.prototype` 报 loud「未定义捕获变量: Function」。
+- 两处修复：
+  1. `BUILTIN_GLOBALS` 补 `Function`（宿主 `builtin_member`/`qzBuiltinValue` 早已支持 `globalThis['Function']`，仅发射器白名单缺）；
+  2. `C.prop` 的类静态访问路径（`ClassName.property`）**初值**由 `undefined` 改为 `class_value(cn)` + `prop_get(name)`（类对象属性：`.name`/`.toString`/`.prototype`/继承属性），静态字段仍按父→子叠加上覆（遮蔽语义不变）。
+- 验证：`A.name`=`A`；`A.name|B.name|C.name`=`A|B|C`（三层继承）；`Foo.x`(静态字段)=`42` 且 `Foo.name`=`Foo`；`typeof A.name`=`string`。
+- 结果：**732/750（97.6%）**；corpus29 16→17/20（`class-value-proto-deep` 转绿）；32 批 + ctest 32/32 零回归。
+
 ### 自递归直调（闭包深递归不再吃宿主栈）（第三轮成功，2026-10-17）
 - 现状：`const sumTo = (n) => n <= 0 ? 0 : n + sumTo(n-1)` 每层递归都经 `qz.closure_call`（宿主 JS 帧）→ 约数百层即 `Maximum call stack size exceeded`。
 - 修复：lambda 体内调用自身时改为直调自己的 wasm 函数（`blk:i32` + n 个 i64，不经 `closure_call`）。三处要点：
