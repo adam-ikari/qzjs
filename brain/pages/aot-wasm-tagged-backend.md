@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T08:06:17"
+updated: "2026-10-17T08:23:27"
 ---
 
 <!-- compiled_truth -->
@@ -491,4 +491,9 @@ updated: "2026-10-17T08:06:17"
 - time: 2026-10-17T08:06:17
   kind: evidence
   summary: "模块初始化移出 start 段：修复所有模块级闭包调用崩溃（711/731，97.3%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T08:23:27
+  kind: evidence
+  summary: "闭包内类名被误当自由变量捕获（silent）修复 + 第三十二批：729/750（97.2%）"
   affects: [aot-wasm-tagged-backend]
