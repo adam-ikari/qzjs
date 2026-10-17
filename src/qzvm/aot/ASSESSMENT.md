@@ -296,4 +296,13 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 因此问题在**运行期**：默认值写入的槽与读取端不一致，或 `super_ctor` 调用的父构造器在其之后再次清空字段槽。下一步：在 `_emitFieldDefaults` 后打印 self 与字段偏移，并在宿主 `super_ctor` 前后 dump 该实例的字段槽值（定位是「写错槽」还是「被父构造器覆盖」）。
 
 另一相关阻塞：类表达式**方法捕获外围变量**（`const withVersion = (v) => (Base) => class extends Base { version() { return v; } }` → loud「未定义捕获变量: v」）——类方法未接外围 env，需为类表达式的类方法建立捕获通道（工程量较大）。
+### 类表达式方法捕获外围变量（设计草案，未实现）
+
+复现：`const withVersion = (v) => (Base) => class extends Base { version() { return v; } };` → loud「未定义捕获变量: v」。类方法被编译为**独立 wasm 函数**，未接外围 env。
+
+两条可行路线：
+1. **env 通道（推荐）**：给「**有捕获的类表达式**」的类方法加一个 ABI 槽——类对象/实例携带该 env 句柄；宿主派发（`method_call` / `closure_call` 的类方法分支 / `buildInstance` 的 ctor 调用）在 `self` 之后多传 env；发射器侧：类方法体内的自由变量走 `_emitCapturedRead`（`env_get(blk...)`），并在类值创建点（`class_value_dyn`/`class_value`）记录 `clsId → env`。
+2. **闭包化类方法**：把有捕获的类表达式的实例方法编译为闭包（复用对象字面量方法机制），类对象仅作 new/instanceof 的骨架——改动面更大（`_methodOwner`/方法派发/`classMeta.methods` 全需并存闭包形态）。
+
+范围提示：`_capturesOf` 现对类方法无用（方法不是 lambda）；需在 `collectClasses` 阶段对类表达式的方法体做一次自由变量扫描，据此给该 clsid 打 `hasCapture` 标记，其余路径不变。回归面 = 全语料 + ctest（class 用例众多）。
 
