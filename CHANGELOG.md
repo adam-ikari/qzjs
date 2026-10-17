@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 动态 extends（mixin）——运行时父链（2026-10-17）
+- **实现**（4 处，零回归）：
+  - 发射器：类条目记录 `dynParentNode`（extends 表达式）；`_emitClassValue(c)` 统一类值发射（动态父 → `qz.class_value_dyn(id, 父表达式)`）；两处 super 调用（显式 super / 合成转发）在动态父时改发 `qz.super_ctor(clsId, self, a0..a3)`；`_dynParentExpr(c)` 判定「父非已知类/内建」；`_methodOwner` 遇动态父**不做静态解析** → 退回动态派发。
+  - 宿主：`classRuntimeParent: Map<clsId, baseCid>`、`class_value_dyn`（记录 + 以父构造器建原型链，缓存保证 `===`）、`super_ctor`（按 baseCid 转发 `classMeta[baseCid].ctor`）、`chainNext(cc)`（优先运行时父）并替换 **5 处**类链遍历（含 `method_call` 的类方法派发 + `instanceof_op`）。
+- **验证**：`class Base{hello()}` + `const Tagged=(B)=>class extends B {tag()}` → `const T=Tagged(Base); new T()` → `y.hello()+y.tag()` = `base,tagged` ✓（继承方法 + 自有方法 + ctor 转发 + 运行时父链全通）。
+- **已知缺口**：链式 mixin（`class Final extends B2(A(Root)) {}`）→ `x.r()` 仍 loud「类 3 无方法 r」：`Final` 是**声明式类**，其 statics guard 内的动态链接未执行（插桩显示 `class_value_dyn` 未触发）；单层（类表达式直接作值）已通。另：动态 `instanceof <类值>` 仍 loud（判定需限定「确知类对象」）。
+- 结果：**708/731（96.9%）**（语料未变——mixin 用例的 `instanceof` 断言仍缺）；31 批全绿 + ctest 32/32，**零回归**。
+
 ### 恢复 `qz.new_dynamic` 宿主方法（2026-10-17）
 - **缺陷**：`new_dynamic` 在 QZ 契约表中、发射器亦会发射（类表达式工厂 `const A = maker(); new A()`），但**宿主缺少该方法** → `WebAssembly.instantiate` 报 `function import requires a callable`（该特性此前实际不可用）。
 - **修复**：补齐宿主 `new_dynamic(obj, a0..a3)`（类对象句柄 → 经 `__qzClsId` 的 `buildInstance`）。验证：`const mk = () => class { v(){return 7;} }; const A = mk(); new A().v()` = 7。

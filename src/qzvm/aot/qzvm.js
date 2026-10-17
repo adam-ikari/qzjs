@@ -243,7 +243,7 @@ function makeQzvm(strings, opts) {
       let c = classMeta && classMeta[clsId];
       const hook = (nm) => {
         let cc = c;
-        while (cc) { const m = own(cc.methods, nm); if (m) return m; cc = cc.parent != null ? classMeta[cc.parent] : null; }
+        while (cc) { const m = own(cc.methods, nm); if (m) return m; cc = chainNext(cc); }
         return null;
       };
       const mk = (nm) => {
@@ -526,12 +526,19 @@ function makeQzvm(strings, opts) {
   // —— 类名作值：clsId → 缓存 JS 构造器（prototype 链 + 静态方法（含 @@hasInstance））——
   const classObjs = new Map();             // clsId → JS 构造器对象
   const classHandles = new Map();          // clsId → 宿主句柄（缓存 → === 同一）
-  const classObjImpl = (clsId) => {
+  const classRuntimeParent = new Map();    // clsId → 运行时父 clsId（动态 extends / mixin）
+  const chainNext = (cc) => {              // 类链下一跳：优先运行时父（mixin），否则静态 parent
+    if (!cc) return null;
+    const rp = classRuntimeParent.get(cc.id);
+    if (rp !== undefined) return classMeta[rp] || null;
+    return cc.parent != null ? (classMeta[cc.parent] || null) : null;
+  };
+  const classObjImpl = (clsId, baseOv) => {
     let o = classObjs.get(clsId);
     if (o) return o;
     const meta = classMeta && classMeta[clsId];
     if (!meta) return null;
-    const pc = meta.parent != null ? classObjImpl(meta.parent) : null;
+    const pc = baseOv !== undefined ? baseOv : (meta.parent != null ? classObjImpl(meta.parent) : null);
     const ctor = function (...as3) { return buildInstance(clsId, as3); };
     Object.defineProperty(ctor, "__qzClsId", { value: clsId, configurable: true });
     Object.setPrototypeOf(ctor, pc || Function.prototype);
@@ -889,6 +896,27 @@ function makeQzvm(strings, opts) {
       if (typeof f !== "function") throw new Error("new: 目标不是类（期望类对象）");
       return f(...[a0, a1, a2, a3].map(x => toJS(x)));
     },
+    class_value_dyn: (clsId, baseObj) => {          // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
+      const baseCtor = handles[idxOf(baseObj)];
+      if (typeof baseCtor !== "function") throw new Error("extends: 父类值不是类对象");
+      const bid = baseCtor.__qzClsId;
+      if (bid === undefined) throw new Error("extends: 父类值缺少 __qzClsId");
+      classRuntimeParent.set(clsId, bid);
+      let h = classHandles.get(clsId);
+      if (h !== undefined) return h;
+      const c = classObjImpl(clsId, baseCtor);
+      if (!c) return TAG;
+      h = ret(c); classHandles.set(clsId, h);
+      return h;
+    },
+    super_ctor: (clsId, self, a0, a1, a2, a3) => {   // 动态父构造转发（mixin 的合成 ctor）
+      const bid = classRuntimeParent.get(clsId);
+      if (bid === undefined) throw new Error("super_ctor: 无运行时父类（动态 extends 未链接）");
+      const m = classMeta && classMeta[bid];
+      const fn = m && exportsRef && exportsRef[m.ctor];
+      if (typeof fn === "function") fn(self, a0, a1, a2, a3);
+      return;
+    },
     class_value: (clsId) => classValueImpl(clsId),
     instanceof_op: (obj, clsId) => {
       // Symbol.hasInstance 优先（JS [[HasInstance]] 语义）：沿类继承链查 static @@hasInstance → 调 wasm 静态方法
@@ -900,18 +928,18 @@ function makeQzvm(strings, opts) {
             const fn = exportsRef[sm.name];
             if (typeof fn === "function") return boxBool(!!toJS(fn(TAG, obj, TAG, TAG, TAG)));   // self=TAG(占位)；a0=x=obj(tagged i64)
           }
-          cc = cc.parent != null ? classMeta[cc.parent] : null;
+          cc = chainNext(cc);
         }
       }
       const u = BigInt.asUintN(64, obj);
       if ((u >> 48n) !== INST_HI) return boxBool(false);
       const off = Number(u & MASK32);
       if (!mem || off + 4 > mem.buffer.byteLength) return boxBool(false);
-      let c = new DataView(mem.buffer).getInt32(off, true);   // 实例的 clsId
+      let c = new DataView(mem.buffer).getInt32(off, true);   // 实例的 clsId（含运行时父链：动态 extends/mixin）
       while (c !== null && c !== undefined) {
         if (c === clsId) return boxBool(true);
         const m = classMeta && classMeta[c];
-        c = m ? m.parent : null;
+        c = classRuntimeParent.has(c) ? classRuntimeParent.get(c) : (m ? m.parent : null);
       }
       return boxBool(false);
     },
@@ -1003,7 +1031,7 @@ function makeQzvm(strings, opts) {
                 return toJS(exportsRef[m2.name](selfH, ...a2.slice(0, 4), TAG));
               });
             }
-            c2 = c2.parent != null ? classMeta[c2.parent] : null;
+            c2 = chainNext(c2);
           }
         }
         return TAG;
@@ -1672,7 +1700,7 @@ function makeQzvm(strings, opts) {
             let cid0 = h0 === INST_HI && mem ? new DataView(mem.buffer).getInt32(off0, true) : -1;
             let cc0 = cid0 >= 0 && classMeta ? classMeta[cid0] : null;
             let hasOwnM = false;
-            while (cc0) { if (own(cc0.methods, name)) { hasOwnM = true; break; } cc0 = cc0.parent != null ? classMeta[cc0.parent] : null; }
+            while (cc0) { if (own(cc0.methods, name)) { hasOwnM = true; break; } cc0 = chainNext(cc0); }
             if (!hasOwnM) return ret("[object Object]");
             let cc1 = cid0 >= 0 ? classMeta[cid0] : null, mOwner = null;      // 类自定义同名方法 → 直接派发 wasm 方法
             while (cc1) { if (own(cc1.methods, name)) { mOwner = cc1; break; } cc1 = cc1.parent != null ? classMeta[cc1.parent] : null; }
@@ -1744,7 +1772,7 @@ function makeQzvm(strings, opts) {
           }
           return fn(recv, a0, a1, a2, a3);
         }
-        c = c.parent != null ? classMeta[c.parent] : null;
+        c = chainNext(c);
       }
       throw new Error("method_call: 类 " + clsId + " 无方法 " + name);
       } catch (e) {

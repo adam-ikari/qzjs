@@ -119,6 +119,8 @@ const QZ = {
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   class_value: { params: ["i32"], results: ["i64"] },                  // 类名作值：clsId → 宿主构造器对象句柄
   new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
+  class_value_dyn: { params: ["i32", "i64"], results: ["i64"] },             // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
+  super_ctor: { params: ["i32", "i64", "i64", "i64", "i64", "i64"], results: [] },   // 动态父构造转发：clsId + self + a0..a3
   in_op: { params: ["i64", "i64"], results: ["i64"] },   // k in o → tagged bool
   statics_ready: { params: ["i32"], results: ["i32"] },        // 类静态字段：是否已初始化
   statics_has: { params: ["i32", "i32"], results: ["i32"] },     // 该类是否有该静态（运行时父链查找）
@@ -488,6 +490,7 @@ class Emitter {
             const c = this.classes.get(cur);
             if (!c) return null;
             for (const m of c.methods) if (m.name === method) return cur;
+            if (this._dynParentExpr(c)) return null;      // 动态父（mixin）：运行时父链不可静态解析 → 退回动态派发
             cur = c.parent && this.classes.has(c.parent) ? c.parent : null;
         }
         return null;
@@ -1515,7 +1518,7 @@ class Emitter {
                 };
                 for (const sm of staticMethods) { sm.usesThis = usesThis(sm.node && sm.node.body); sm.thisNames = thisNames(sm.node && sm.node.body); }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
@@ -2880,6 +2883,8 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
     const M = this.m;
     const savedCCO = this._curClassObj, savedSM2 = this._inStaticMethod;
     this._curClassObj = c; this._inStaticMethod = true;   // static{} 内 this ≡ 定义类（_classOfExpr/_isClassName）
+    { const dynN = this._dynParentExpr(c);              // 动态父（声明式类）：先链接运行时父链（宿主缓存，幂等）
+      if (dynN) { this._emitClassValue(c); M.drop(); } }
     M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
     M.i32Eqz();
     M.ifBlock("void");
@@ -3546,14 +3551,14 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         {   // 类名作值 → 宿主构造器对象句柄（prototype 链/静态方法）；new C(...) 仍走专用路径
             const cnV = this._className(e.text);
             const cV = cnV && this.classes.get(cnV);
-            if (cV) { this.m.i32Const(cV.id); this.m.call("qz.class_value"); return; }
+            if (cV) { this._emitClassValue(cV); return; }
         }
         this._emitCapturedRead(e.text); return;
     }
     if (ts.isClassExpression(e)) {                       // 类表达式作值 → 宿主构造器对象句柄（class_value）
         const synth = this.clsExprMap && this.clsExprMap.get(e);
         const cnC = synth && this.classes.get(synth);
-        if (cnC) { this.m.i32Const(cnC.id); this.m.call("qz.class_value"); return; }
+        if (cnC) { this._emitClassValue(cnC); return; }
         throw new Error("[tagged] 类表达式作值未实现");
     }
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) { this._emitLambdaNew(e); return; }
@@ -4851,8 +4856,28 @@ Emitter.prototype._emitSuperCall = function (c, args) {
     this._emitFieldDefaults(c);                             // 子类字段默认值在 super 之后
 };
 // 合成派生 ctor：local1..4 = 补齐后的参数槽，原样转发给父 ctor。
+Emitter.prototype._emitClassValue = function (c) {        // 类对象句柄：动态父 → class_value_dyn(id, 父表达式)；否则 class_value(id)
+    const M = this.m;
+    M.i32Const(c.id);
+    const dynN = this._dynParentExpr(c);
+    if (dynN) { this.emitTaggedExpr(dynN); M.call("qz.class_value_dyn"); return; }
+    M.call("qz.class_value");
+};
+Emitter.prototype._dynParentExpr = function (c) {          // 动态父：extends 非「已知类名/内建」→ 返回父表达式（否则 null）
+    if (!c || !c.dynParentNode) return null;
+    const n = c.dynParentNode;
+    if (ts.isIdentifier(n) && (this.classes.has(this._className(n.text)) || BUILTIN_GLOBALS.has(n.text) || EMITTER_BUILTIN_CTORS.has(n.text))) return null;
+    return n;
+};
 Emitter.prototype._emitSuperCallForward = function (c) {
     const M = this.m;
+    if (this._dynParentExpr(c)) {                           // 动态父（mixin）：宿主按运行时父链转发 ctor
+        M.i32Const(c.id);
+        for (let i = 0; i <= 4; i++) M.localGet(i);
+        M.call("qz.super_ctor");
+        this._emitFieldDefaults(c);
+        return;
+    }
     M.localGet(0);
     for (let i = 1; i <= 4; i++) M.localGet(i);
     M.call(ctorName(c.parent));
