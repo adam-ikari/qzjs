@@ -5259,7 +5259,8 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
     }
     // 动态：压 recv + mid + 4 参入值栈（实参可为嵌套调用，无暂存槽覆盖问题）。
     this.emitTaggedExpr(rx);
-    M.i32Const(this._strId(method));
+    M.i32Const(this._strId(((method === "reduce" || method === "reduceRight") && args.length >= 2) ? method + "$i" : method));   // 显式提供初值（含 undefined）→ $i 变体
+
     for (let i = 0; i < 4; i++) {
         if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
     }

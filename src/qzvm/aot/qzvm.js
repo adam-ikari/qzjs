@@ -726,6 +726,9 @@ function makeQzvm(strings, opts) {
       case "push":        { const a = arr(); a.push(...[a0, a1, a2, a3].filter(givenSlot).map(toJS).concat(ex || [])); arrSetInPlace(recv, a); return box(a.length); }   // 展开/动态路径的 push（快路径见发射器）
       case "map":         r = arr().map((v, i) => cbv(a0, v, i)); break;
       case "filter":      r = arr().filter((v, i) => !!cbv(a0, v, i)); break;
+      case "reduce$i":    { const a = arr();   // 调用点确认「提供了初值」（即便值为 undefined）：空数组 → undefined 而非抛
+                            const rc = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
+                            r = a.reduce((acc, v, i) => rc(acc, v, i), toJS(a1)); break; }
       case "reduce":      { const a = arr();
                             const rc = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
                             if (a.length === 0 && toJS(a1) === undefined) { throwValue(new TypeError("Reduce of empty array with no initial value")); return TAG; }
@@ -740,6 +743,9 @@ function makeQzvm(strings, opts) {
       case "splice":      { const a = arr(); const del = a.splice(toJS(a0), toJS(a1) === undefined ? a.length : toJS(a1)); arrSetInPlace(recv, a); r = del; break; }
       case "flat":         r = arr().flat(toJS(a0) === undefined ? 1 : toJS(a0)); break;
       case "flatMap":      r = arr().flatMap((v, i) => cbv(a0, v, i)); break;   // cbv 已返回 JS 值，勿再 toJS
+      case "reduceRight$i": { const a = arr().slice();   // 同上（显式 undefined 初值）
+                            const rc = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
+                            r = a.reduceRight((acc, v, i) => rc(acc, v, i), toJS(a1)); break; }
       case "reduceRight":  { const a2 = arr();
                              const rc2 = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
                              r = toJS(a1) !== undefined ? a2.reduceRight((acc, v, i) => rc2(acc, v, i), toJS(a1))

@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### `reduce`/`reduceRight` 显式 `undefined` 初值（2026-10-17）
+- 症状：`[].reduce((a,b)=>a+b, undefined)` → 抛 `TypeError`（应返回 `undefined`）；`[1].reduce(fn, undefined)` 的 `undefined` 被当作「未提供初值」。
+- 真因：ABI 无法区分「未传实参」与「显式传 `undefined` 实参」（两者都是 TAG）。
+- 修（局部而精确）：发射器在 `_emitDynMethod` 中，对 `reduce`/`reduceRight` 且**实参 ≥2** 时改用 `reduce$i`/`reduceRight$i`；宿主这两个 case 把 `toJS(a1)`（可能为 undefined）**作为初值传入**（空数组 → 返回 undefined，非空 → 以 undefined 为累加器调用回调）。
+- 验证：`[].reduce(fn, undefined)` = undefined、`[1].reduce(fn)` = 1、`[].reduce(fn, 10)` = 10；corpus24 20→21/21。
+- 结果：**816/820（99.5%）**（36 批）；ctest 32/32 零回归。
+
 ### `arguments` 对象（2026-10-17，第五次尝试成功）
 - 症状：`function g() { return arguments.length + ":" + arguments[0]; } … g(9, 8)` → 编译期 loud（`arguments` 未实现）。
 - 实现（全局 scratch 通道，避免改 ABI 局部索引）：
