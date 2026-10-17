@@ -316,3 +316,7 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 **首个实现尝试（2026-10-17，已回退）**：按上述 4 步落地（含 `$qzEnv` local + `capMap` + `class_env_set`/`cls_env`），`test_aot` 立即报 `Cannot read properties of null (reading 'body')`。两次修正（把 `$qzEnv` 的 `locals.push` 移到 `nLoc` 计算之前、用 `locals.indexOf("$qzEnv")` 取索引）后仍同错 → 说明 **`_mEnter` 的槽布局与 `locals` 存在额外耦合**（`locals` 还参与 `varMap`/`$ovfArg`/`forOf`/`clo` 计算），改 `locals` 会连带破坏既有布局。
 **下次正确做法**：不要动 `locals` 列表——改为在 `_mEnter` 里**独立预留一个专用 local**（例如在 `this.swIdx`/`this.forOfBase` 之后新增 `this.qzEnvLocal = nLoc + …`），或用**现成 scratch 槽**（`sT` 中一个固定槽）保存 env 句柄；`capMap.set(name, thatSlot)` 后 prologue 写入即可。回归面仍为全语料 + ctest。
 
+**第二次尝试（2026-10-17，已回退）——重要发现**：`_mEnter` **本就自带**「方法内被嵌套 lambda 捕获」的 env 机制（`_probeCaptured` → `envDecls = ["i32"]` → `envLocal` = 最后一个 local → `capMap` 映射 → 入口 `env_new(-1)` + 把各 local `env_set` 进去）。因此**无需新增 local**：只要把类方法的**外围自由变量**并进 `capNames`，并在方法入口把「类捕获 env」的条目并入本方法 env，`capMap`/`_emitCapturedRead` 即自动打通。
+实施：`collectClasses` 存 `c.captured`（`_capturesOf(methodNode)`，过滤内建/模块全局/类名）；`_emitClassValue` 在创建点 `env_new(-1)` + 逐名 `env_def` + `class_env_set(clsId, env)`；`_mEnter` 把 `c.captured` 并入 `capNames` 并发 `qz.cls_env_into(envLocal, clsId)`；宿主加 `classEnv`/`class_env_set`/`cls_env_into`。
+结果：`wasm` 校验失败 `Compiling function #N failed: call[0] expected`（QZ 条目与两侧 i32 签名均已核对一致）。**下次先查编码器**：`Module.call(name)` 对「两趟采集（`collectImports`）后才注册的 import」的索引解析，以及 `call[0] expected` 的确切触发条件（疑似调用点/索引生成问题，而非签名）。
+
