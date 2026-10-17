@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 原型上的运行时访问器（2026-10-17）
+- 症状：`Object.defineProperty(proto, "computed", {get(){return this._v*2}, set(x){this._v=x+1}})` + `Object.create(proto)` → `o.computed` = NaN、`o._v` 未更新、`getOwnPropertyNames(proto)` 缺 `computed`。
+- 两处修复（corpus35 16→17/17，全批首次全绿）：
+  1. **物化的运行时访问器以「实际 `this`」为 receiver**：`materializeUncached` 生成 `get`/`set` 时此前把创建时的 POJO 句柄固定传入（`TAG | off`）→ 原型上的访问器经派生对象调用时 receiver 丢失（`this._v` 读到 undefined → NaN）。改为 `function () { … bitsOf(this) … }`（closure 走合成 this 槽、宿主函数走 `.call(this)`；`this` 为 null/undefined 时回退捕获句柄）。
+  2. `Object.getOwnPropertyNames` 补入 `dynAcc`（`defineProperty` 访问器）键 —— 访问器也是自有属性。
+- 结果：**795/803（99.0%）**（35 批）；ctest 32/32 零回归。
+
 ### 静态方法内 `this` 的运行时代（2026-10-17）
 - 症状：`class B extends A { static describe() { return "B+" + super.describe(); } }` → `B.describe()` 得 `"B+A:A"`（应 `"B+A:B"`）——静态方法内 `this` 恒为**定义类**。
 - 四处修复（corpus35 15→16/17）：

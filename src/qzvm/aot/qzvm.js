@@ -220,8 +220,8 @@ function makeQzvm(strings, opts) {
         const acc2 = dynAcc.get(off + "|" + name);
         if (acc2) {                                    // 运行时访问器 → 物化对象上定义 get/set（JSON.stringify 会调 getter）
           const opt = { configurable: true, enumerable: !nonEnum.has(off + "|" + name) };
-          if (acc2.g !== undefined) { const gh = acc2.g, ugh = BigInt.asUintN(64, gh); opt.get = ugh >> 48n === CLO_HI ? (() => toJS(closureCall(gh, TAG, TAG, TAG, TAG, undefined, TAG | BigInt(off)))) : (() => handles[idxOf(gh)].call(o)); }
-          if (acc2.s !== undefined) { const sh = acc2.s, ush = BigInt.asUintN(64, sh); opt.set = ush >> 48n === CLO_HI ? ((nv) => { closureCall(sh, ret(nv), TAG, TAG, TAG, undefined, TAG | BigInt(off)); }) : ((nv) => handles[idxOf(sh)].call(o, nv)); }
+          if (acc2.g !== undefined) { const gh = acc2.g, ugh = BigInt.asUintN(64, gh); opt.get = ugh >> 48n === CLO_HI ? (function () { return toJS(closureCall(gh, TAG, TAG, TAG, TAG, undefined, (this === undefined || this === null) ? (TAG | BigInt(off)) : bitsOf(this))); }) : (function () { return handles[idxOf(gh)].call(this); }); }
+          if (acc2.s !== undefined) { const sh = acc2.s, ush = BigInt.asUintN(64, sh); opt.set = ush >> 48n === CLO_HI ? (function (nv) { closureCall(sh, ret(nv), TAG, TAG, TAG, undefined, (this === undefined || this === null) ? (TAG | BigInt(off)) : bitsOf(this)); }) : (function (nv) { handles[idxOf(sh)].call(this, nv); }); }
           Object.defineProperty(o, name, opt); setNow.add(name);
           continue;
         }
@@ -1624,6 +1624,7 @@ function makeQzvm(strings, opts) {
             if (BigInt.asUintN(64, dv2.getBigInt64(off0 + idx, true)) !== TAG) out2.push(n);
           }
           for (const [k] of extras) { const bar = k.indexOf("|"); if (Number(k.slice(0, bar)) === off0) out2.push(k.slice(bar + 1)); }
+          { syncDynAcc(); for (const k of dynAcc.keys()) { const bar = k.indexOf("|"); if (Number(k.slice(0, bar)) === off0 && out2.indexOf(k.slice(bar + 1)) < 0) out2.push(k.slice(bar + 1)); } }   // defineProperty 访问器也是自有属性
           { const isIx = (k2) => /^(0|[1-9]\d*)$/.test(k2) && Number(k2) < 4294967295;   // JS 键序：整数键在前（升序），其余保持插入序
             const nums2 = out2.filter(isIx).sort((x2, y2) => Number(x2) - Number(y2));
             return ret(nums2.concat(out2.filter(k2 => !isIx(k2)))); }
