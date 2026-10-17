@@ -420,3 +420,12 @@ export function g(): any { return y; }
 卡点（插桩结论）：`lam._qzSelfName` 在 `emitLambda`（预登记趟）与 `_emitLambdaBody`（体发射）时均为 **undefined** —— 我加的「绑定处传名」只落在 `_bind` 的**模块级 const** 分支（约 299–309 行），而模块级 const 的初值实际由**另一条路径**发射（`emitTaggedExpr(d.initializer)` 的箭头分支，无名字），且 `_emitLambdaNew` 的实参在日志中恒为 `selfName=undefined`。
 
 下次做法：先在 `_emitLambdaNew` 里打印调用栈，定位模块级 `const f = () => …` 的 **真实发射点**（是 `emitStmt` 的 var 路径还是 `_emitBindingDecl`），确认后就地传绑定名；再核对 `_emitLambdaBody` 里 `_lamSelf` 的赋值时机（须早于体内调用发射）。
+
+### 自递归直调：第二次尝试（2026-10-17，已回退）
+
+按记录定位到**真实发射点**（栈：`_emitBindingDecl:309` → `emitTaggedExpr:3598` → `_emitLambdaNew`），补齐四处后：`sumTo(500)` **由溢出转为 125250**（corpus29 `recursion-depth-bounded` 通过，残余 5→4），`fib/fact/local/witness` 均正确。
+
+但引入 **corpus4 `closure-this-arrow-method` 的 wasm 校验失败**（`call[0] expected`）——该 lambda（方法内捕获 `this` 的箭头）其**闭包 ABI 有额外槽**（recv/ovf），直调只按「blk + 逻辑形参」推参 → 数目不符。加了两道守卫（`S.n <= 4`、`params.length === astParams.length`）仍未消除 → 说明该 lambda 的 wasm 形参数不等于 `astParams`（`this` 槽/`$ovf` 等）。
+
+净收益为零且失败性质更差（把可编译变成校验失败）→ **回退**。
+下次做法：在 `_emitLambdaBody` 里记录**该 lambda 的 wasm 形参数**（`1 + params.length`）而非逻辑形参数，直调时严格按该数目推参（含 recv=local0、ovf=TAG）；并用 corpus4 用例做守门测试。
