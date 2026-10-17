@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T05:32:19"
+updated: "2026-10-17T05:40:35"
 ---
 
 <!-- compiled_truth -->
@@ -451,4 +451,9 @@ updated: "2026-10-17T05:32:19"
 - time: 2026-10-17T05:32:19
   kind: evidence
   summary: "展开调用指向模块级 const 闭包修复（发射器补查 moduleGlobals + closure_call_spread 打包 rest）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T05:40:35
+  kind: evidence
+  summary: "可迭代对象解构修复（静默 undefined→正确）：707/731（96.7%），corpus30 +1"
   affects: [aot-wasm-tagged-backend]
