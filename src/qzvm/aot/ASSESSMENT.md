@@ -410,3 +410,13 @@ export function g(): any { return y; }
 
 插桩结论：两侧的 `qz.class_value(id)` **返回同一句柄**（如 `class_value(1)` 两次都是 `0x7FFD|2`），且 `prop_get` 的兜底分支**未被走到** → 取值正确、`instanceof` 正确，问题在**闭包上下文里 `===` 的比较发射**（疑似该上下文取了 num/f64 路径或两侧其一走了不同解析）。
 下一步：dump 该表达式（`~/tmp/qzaux/probe_ctor.js` 的 `arrowType` 例）的发射指令，比较同层与闭包两种上下文下 `===` 的字节差异。
+
+### 自递归直调（窄面：闭包深递归走宿主栈）——尝试记录，已回退（2026-10-17）
+
+目标：`const sumTo = (n) => n <= 0 ? 0 : n + sumTo(n-1)` 目前每次递归都经 `qz.closure_call`（宿主 JS 帧）→ `sumTo(1000)` 触发 `Maximum call stack size exceeded`；拟改为 lambda 体内**直调自身 wasm 函数**（`call __lam_N(blk=local0, a0..a3)`），从而只吃 wasm 栈。
+
+已实现并验证「调用侧」逻辑（`_lamSelf` + 在标识符调用处优先直调，需非 rest、非 synthThis、≤4 实参、无展开）——`fib(20)`/`fact(10)` 均正确，`sumTo(1000)` 仍溢出，说明**直调没有生效**。
+
+卡点（插桩结论）：`lam._qzSelfName` 在 `emitLambda`（预登记趟）与 `_emitLambdaBody`（体发射）时均为 **undefined** —— 我加的「绑定处传名」只落在 `_bind` 的**模块级 const** 分支（约 299–309 行），而模块级 const 的初值实际由**另一条路径**发射（`emitTaggedExpr(d.initializer)` 的箭头分支，无名字），且 `_emitLambdaNew` 的实参在日志中恒为 `selfName=undefined`。
+
+下次做法：先在 `_emitLambdaNew` 里打印调用栈，定位模块级 `const f = () => …` 的 **真实发射点**（是 `emitStmt` 的 var 路径还是 `_emitBindingDecl`），确认后就地传绑定名；再核对 `_emitLambdaBody` 里 `_lamSelf` 的赋值时机（须早于体内调用发射）。
