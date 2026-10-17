@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十一批差分审计（2026-10-17）
+- 新增 `audit_corpus31.js`（18 例：嵌套矩阵/转置/三维 flat、正则进阶（量化/捕获/exec 循环/回调替换）、错误处理矩阵（多级 Error 子类/非 Error 抛出/finally）、数值边界 2、Unicode 与编码（encodeURIComponent/代理对/codePointAt）、类静态进阶（静态方法 super/静态 getter/static 继承）、函数参数边界（默认值/5 参/spread 应用）、可迭代类模式、getter 与计算键混合、sort 比较器边界、闭包递归（factorial/gcd/flatten/pow）、Map/Set 进阶（构造自 Map/Unicode）、字符串管线（slugify/titleCase/pad）、稀疏数组进阶、对象工具实现（pick/omit/invert/groupBy/uniqBy/countBy）、真值强制转换矩阵、高阶函数（pipe/compose/curry/partial/memoize/once）。
+- 结果：**703/731（96.2%）**；corpus31 17/18。ctest 32/32。
+- **新增 1 项残余（真 silent 错值）**：**对象字面量中计算属性名的插入序排在静态键之前**（JS 保持源码序）。最小复现：`const key = "dyn"; const o: any = { a: 1, [key]: 2, z: 3 };` → 本实现 `JSON.stringify(o)` 得 `{"dyn":2,"a":1,"z":3}`、`Object.keys(o)` 得 `dyn,a,z`；JS 为 `a,dyn,z`。线索：`fields` 表无 `dyn` → 计算键走**先于静态字段写**的独立发射路径（疑似预遍历里先发射计算键）。
+
 ### 第三十批差分审计（2026-10-17）
 - 新增 `audit_corpus30.js`（20 例：mixin 类工厂、ES2023 数组方法（toSorted/toReversed/with）、Object.getOwnPropertyDescriptors/冻结深、私有品牌检查（`#x in obj`）、自定义迭代器协议（含 return()）、嵌套箭头 this、静态初始化序、Error 子类 instanceof、JSON 边界（`__proto__`/循环/日期）、柯里化类工厂、可选链与逻辑赋值混合、稀疏洞 vs undefined、getter/setter 对、展开求值顺序、闭包计数器/memoize、字符串方法矩阵、数值格式化、四层继承链、真实数据管线、try-finally 实战）。
 - 结果：**686/713（96.2%）**；corpus30 14/20。ctest 32/32。
