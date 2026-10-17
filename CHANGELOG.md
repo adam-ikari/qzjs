@@ -4,6 +4,17 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十批差分审计（2026-10-17）
+- 新增 `audit_corpus30.js`（20 例：mixin 类工厂、ES2023 数组方法（toSorted/toReversed/with）、Object.getOwnPropertyDescriptors/冻结深、私有品牌检查（`#x in obj`）、自定义迭代器协议（含 return()）、嵌套箭头 this、静态初始化序、Error 子类 instanceof、JSON 边界（`__proto__`/循环/日期）、柯里化类工厂、可选链与逻辑赋值混合、稀疏洞 vs undefined、getter/setter 对、展开求值顺序、闭包计数器/memoize、字符串方法矩阵、数值格式化、四层继承链、真实数据管线、try-finally 实战）。
+- 结果：**686/713（96.2%）**；corpus30 14/20。ctest 32/32。
+- 新增 6 项残余（多为真 bug）：
+  - **箭头 const 的 rest 形参不解包**（真 bug，高价值）：`const c = (...a:any) => a.length` → `undefined`（`function c(...a)` 正常 3）；`collect(1,2,3)` 内 `a.join` 报「数值无方法 join」→ `_emitOvfParamUnpack` 只在方法/构造器/静态方法处调用，**未在 `_emitLambdaBody` 调用**（`$ovfArg` 预留 local 亦缺）。
+  - **`fn(...restArr)` 展开展开**：`fn(...a)`（a 为 rest 形参）报 `toJS(...) is not iterable`（真 bug）。
+  - **动态 extends（mixin）**：`class Final extends Counted(Tagged(Base))` → `call 未定义: __m_Base2$ctor`（把 extends 的**运行时表达式/形参名**当类名）。
+  - **`instanceof <动态类值>`**：`m instanceof Mid`（Mid 由 mixin 得到）→ loud「instanceof 右操作数须为用户类」。
+  - **可迭代对象解构**：`const [p, q] = new Range(10, 20)` → 未走迭代器协议（空）。
+  - **副作用接收者的复合赋值**：`(deep.a ??= {}).b = 1` → loud「属性赋值中 o 带副作用：求值顺序未实现」；另 Error 子类 `Error.prototype.toString` 文本（窄面）。
+
 ### 类表达式作值 + 动态 new（2026-10-17）
 - **类表达式作值**（此前 loud「不支持的表达式: ClassExpression」）：`emitTaggedExpr` 新增 ClassExpression 分支 → 经 `clsExprMap` 取合成类名 → `qz.class_value(id)`；`const C = class {...}; typeof C` 得 `function`。
 - **动态 new**（此前 loud「new 未知类: A」）：`new X()` 当 X 非编译期已知类但可解析为局部/捕获/模块全局/属性访问时 → 求值出**类对象**（类表达式工厂 `const A = makeClass(); new A()`）→ `qz.new_dynamic(classObj, a0..a3)`（宿主按 `__qzClsId` → `buildInstance`）。参数序 `obj, a0..a3`（obj 先求值入槽）。
