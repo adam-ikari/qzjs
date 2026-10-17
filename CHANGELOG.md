@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十八批差分审计（2026-10-17）
+- 新增 `audit_corpus28.js`（21 例：Map/Set 全方法、Object freeze/seal/preventExtensions、Reflect construct/ownKeys/getPrototypeOf、String matchAll/substring/substr/slice/localeCompare、Math 三角与常量、JSON replacer/reviver、Symbol for/keyFor/description、catch 无绑定、数组 reduceRight/keys/values/entries、动态键赋值、类 extends + super 构造、嵌套 try-catch-finally-throw、Number 常量与强制转换、数组 concat/spread/flat 嵌套、RegExp sticky/advance flags、String repeat/pad/compare、闭包栈/计数器/memoize、对象方法链深、类 static block、三元链与短路）。
+- 结果：**652/673（97.0%）**（新增 16 例 match，5 diff）。ctest 32/32。
+- 新增 5 项残余：
+  - **loud**：类名作值（Reflect.construct / Object.getPrototypeOf(Dog.prototype)）×2。
+  - **loud**：类 `static { }` 初始化块内 `this`（当前报「this 仅在类方法/构造器内可用」）。
+  - **silent（待修）**：数组自定义字符串键属性（`arr["k0"]=v` 不存不读；Object.keys 漏报）。
+  - **silent（待修）**：**对象字面量方法闭包不共享 env**——`{ push: ()=>items.push(x), size: ()=>items.length }` 各方法得独立 env 快照，push 的变异 size 不可见（顶层独立闭包共享正常；对象字面量方法不共享）。
+
 ### Symbol.hasInstance 修复（2026-10-17）
 - **修复：`x instanceof C` 当 C 有 `static [Symbol.hasInstance]` 此前仅查原型链 → 静默错值**（`4 instanceof Even` 返 false 而非 true）。
   - emitter `classMeta` 新增 `staticMethods` 字段（与 `methods` 同构：`{name: 导出名, n: 参数量}`，仅普通方法，不含 accessor）。
