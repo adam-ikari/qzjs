@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十六批语料（2026-10-17）
+- 新增 `audit_corpus36.js`（17 例）：类内聚（`valueOf`/`toString` 强制转换、字段箭头函数、私有+静态 getter）、迭代器视图（Map/Set/Array entries/keys/values）、递归数据结构、`finally` 抛错、标签跳转、`==`/`===` 边界、`JSON.parse` reviver、闭包 getter、模块级 IIFE、可选链方法调用、数组迭代器方法、getter 返回闭包、深层标签、`replace` 函数替换、展开与 getter、数值边界、mixin 类工厂。**首跑 14/17**。
+- 新暴露 3 项残余（已定位）：
+  1. `{ ...src }`（src 的键由 `Object.defineProperty` 定义）**未触发访问器 getter**（结果空值、读取计数 0）→ 展开路径未取物化对象的访问器值；
+  2. `try { return X } finally { throw Y }` → `finally` **执行两次**（多打一条日志）；
+  3. **getter 返回闭包**（`get builder() { return (x) => this.#base + x }`）→ 调用结果为 NaN（闭包 `this`/私有字段捕获在访问器返回闭包时失效）。
+- 结果：**811/820（98.9%）**（36 批）；ctest 32/32 零回归。
+
 ### `call_value` 宿主函数分支的溢出实参（2026-10-17）
 - 症状：`class C { m(a,b,c,d,e) {…} }` 后 `const f = c.m.bind(c); f(2,2,2,2,2)` → `Cannot convert undefined to a BigInt`（提取包装器只收到 4 个实参，第 5 个丢失）。
 - 真因：宿主 `call_value` 的**宿主函数句柄**分支只用 `a0..a3`、未使用 `ovf` 溢出数组（此前只修了 `closure_call` 的对应分支）。
