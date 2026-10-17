@@ -5021,8 +5021,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         }
         if (ts.isPropertyAccessExpression(e.left)) {
             if (e.left.name.text === "length") { this.emitTaggedExpr(e.right); this._emitStoreLength(e.left); return; }
-            if (!ts.isSuperKeyword(e.left.expression) && this._hasSideEffects(e.left.expression))
-                throw new Error("[tagged] 属性赋值 o.f = v 中 o 带副作用：求值顺序未实现（JS 先 obj 后 v）");
+            if (!ts.isSuperKeyword(e.left.expression) && this._hasSideEffects(e.left.expression) && this._hasSideEffects(e.right))
+                throw new Error("[tagged] 属性赋值 o.f = v 中 o 带副作用且 RHS 亦带副作用：求值顺序未实现（JS 先 obj 后 v）");   // RHS 无副作用时可安全按现有顺序
             this.emitTaggedExpr(e.right); this._emitStoreProp(e.left); return;
         }
         if (ts.isElementAccessExpression(e.left)) {
