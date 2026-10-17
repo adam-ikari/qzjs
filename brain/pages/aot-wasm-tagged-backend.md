@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T16:14:45"
+updated: "2026-10-17T16:34:49"
 ---
 
 <!-- compiled_truth -->
@@ -596,4 +596,9 @@ updated: "2026-10-17T16:14:45"
 - time: 2026-10-17T16:14:45
   kind: evidence
   summary: "finally 重复执行修复：814/820（99.3%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T16:34:49
+  kind: evidence
+  summary: "arguments 对象实现（第五次成功）：815/820（99.4%）"
   affects: [aot-wasm-tagged-backend]
