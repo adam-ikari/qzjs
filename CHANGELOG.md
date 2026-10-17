@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 自递归直调（闭包深递归不再吃宿主栈）（第三轮成功，2026-10-17）
+- 现状：`const sumTo = (n) => n <= 0 ? 0 : n + sumTo(n-1)` 每层递归都经 `qz.closure_call`（宿主 JS 帧）→ 约数百层即 `Maximum call stack size exceeded`。
+- 修复：lambda 体内调用自身时改为直调自己的 wasm 函数（`blk:i32` + n 个 i64，不经 `closure_call`）。三处要点：
+  1. `_emitBindingDecl` 的 `const f = () => …` 绑定点把绑定名传给 `_emitLambdaNew`（此前只有函数声明点传名）；
+  2. `_emitLambdaBody` 记录 `_lamSelf = {name, fname, n, rest}`（仅非 synthThis）；
+  3. `_mEnter`（方法/构造器体）与顶层函数体内清空 `_lamSelf` —— 这是上一轮 corpus4 校验失败的真因：标记泄漏到方法体，方法里 `localGet(0)` 是 i64 `this`，而 lambda 的 blk 是 i32，类型不符。
+- 验证：`sumTo(500)` = 125250（原溢出）；`fib(20)`/`fact(10)` 不变；corpus4 `closure-this-arrow-method` = `5|5` 正常；`sumTo(2000)` 仍溢出（wasm 栈上限，窄面）。
+- 结果：**731/750（97.5%）**；corpus29 15→16/20；32 批 + ctest 32/32 零回归。
+
 ### `Function.prototype.toString` 返回源码原文（2026-10-17）
 - `lamMeta` 每条新增 `src`（lambda 源码原文，取自 `node.getText(sourceFile)`）；宿主 `cloWrap` 在包装闭包为 JS 函数时覆写 `toString` → 返回该源码。
 - 此前闭包物化后的 `String(fn)`/`[fn].join()` 返回**物化包装器**的源（`(...args) => toJS(closureCall(b, ...))`）。

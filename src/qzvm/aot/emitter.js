@@ -306,6 +306,11 @@ class Emitter {
                     this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text);
                     this._fnNodes = this._fnNodes || new Map(); this._fnNodes.set(name.text, d.initializer);
                 }
+                if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
+                    this._emitLambdaNew(d.initializer, name.text);   // 传绑定名 → 自递归可直调 wasm 函数
+                    this._emitVarStore(name.text, this.scratchB); this.m.drop();
+                    return;
+                }
                 this.emitTaggedExpr(d.initializer); this._emitVarStore(name.text, this.scratchB); this.m.drop();
                 if (this._inModInit && this.usesKeyOrder && this._modObjKeys && this._modObjKeys.has(name.text)) {
                     for (const k2 of this._modObjKeys.get(name.text)) {   // 模块级对象键序（start 段 mem 未绑定 → 用 order_note）
@@ -1364,6 +1369,8 @@ class Emitter {
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map();
         for (const n of caps) this.capMap.set(n, 0);        // 外层捕获名 → 创建方 env 索引（= blk 参数 local 0）
+        this._lamSelf = (!lam._qzSynthThis && lam._qzSelfName)
+            ? { name: lam._qzSelfName, fname, n: params.length, rest: !!(lam._qzRest || (astParams.length && astParams[astParams.length - 1].dotDotDotToken)) } : null;   // 自递归直调（blk:i32 + n×i64）
         this.blkLocal = 0;                                 // local 0 = env 索引（创建方环境）
         this.scratch = nLoc;
         this.scratchA = nLoc + 1;
@@ -1700,6 +1707,7 @@ class Emitter {
         else params.forEach((p, i) => this.varMap.set(p, 1 + i));
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map(); this.blkLocal = null;
+        this._lamSelf = null;   // 方法体内不得沿用上一个 lambda 的自递归标记（blk 类型不同）
         this.scratch = nLoc; this.scratchA = nLoc + 1; this.scratchB = nLoc + 2;
         const extra = ["f64", "f64"];
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
@@ -4193,6 +4201,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const fn = e.expression.text;
         // 内建全局函数调用 String(x) / parseInt(s) / isNaN(x) / JSON… → qz.builtin
         if (BUILTIN_GLOBALS.has(fn)) { this._emitBuiltinCall(fn, e.arguments); return; }
+        {   // 自递归直调：本 lambda 调自身 → 直接 call 自己的 wasm 函数（不经 closure_call，省宿主栈）
+            const S = this._lamSelf;
+            if (S && S.name === fn && !S.rest && S.n <= 4 && e.arguments.length <= 4 && !e.arguments.some((a2) => ts.isSpreadElement(a2))) {
+                const M2 = this.m;
+                M2.localGet(0);                          // blk（i32）
+                for (let i = 0; i < S.n; i++) { if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined(); }
+                M2.call(S.fname);
+                this._emitErrCheck();
+                return;
+            }
+        }
         // JS 作用域：局部/捕获名遮蔽同名顶层函数（如参数 g 遮蔽顶层 g）→ 优先按闭包处理
         if (this.capMap.has(fn) || this._local(fn) !== undefined) {
             this._emitClosureCall(fn, e.arguments);
@@ -4792,8 +4811,9 @@ Emitter.prototype._emitArrayPop = function (rx, hv) {
 // 结果 = 句柄（字符串 toJS 还原；数值方法如 charCodeAt/indexOf 结果亦 join handles 表 → toJS 为 number）。
 // 箭头/函数表达式求值：bump 分配 [funcidx:i32][nCaps:i32][cell×N]，
 // 捕获变量逐个求值存入 cell，返回句柄 0x7FF9|off。
-Emitter.prototype._emitLambdaNew = function (lam) {
+Emitter.prototype._emitLambdaNew = function (lam, selfName) {
     const M = this.m;
+    if (selfName && !lam._qzSelfName) lam._qzSelfName = selfName;   // 自递归直调用（绑定名）
     let meta = this._lamById.get(lam);
     if (!meta) {                                   // 惰性登记（合成箭头/访问器闭包，不在预扫描列表内）
         this._lamAuto = (this._lamAuto || 0) + 1;

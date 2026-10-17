@@ -421,7 +421,11 @@ export function g(): any { return y; }
 
 下次做法：先在 `_emitLambdaNew` 里打印调用栈，定位模块级 `const f = () => …` 的 **真实发射点**（是 `emitStmt` 的 var 路径还是 `_emitBindingDecl`），确认后就地传绑定名；再核对 `_emitLambdaBody` 里 `_lamSelf` 的赋值时机（须早于体内调用发射）。
 
-### 自递归直调：第二次尝试（2026-10-17，已回退）
+### ✅ 已修复（第三轮，2026-10-17）：自递归直调
+
+真因（上一轮 corpus4 校验失败）：`_lamSelf` 从 lambda 泄漏到方法体，方法里 `localGet(0)` 是 i64 `this` 而 lambda 的 blk 是 i32 → 类型不符。修：`_mEnter`/顶层函数体清空 `_lamSelf`；lambda 签名 = `[i32]+n×[i64] → i64`。
+
+（以下为历史记录）### 自递归直调：第二次尝试（2026-10-17，已回退）
 
 按记录定位到**真实发射点**（栈：`_emitBindingDecl:309` → `emitTaggedExpr:3598` → `_emitLambdaNew`），补齐四处后：`sumTo(500)` **由溢出转为 125250**（corpus29 `recursion-depth-bounded` 通过，残余 5→4），`fib/fact/local/witness` 均正确。
 
