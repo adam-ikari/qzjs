@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T06:58:13"
+updated: "2026-10-17T07:42:29"
 ---
 
 <!-- compiled_truth -->
@@ -481,4 +481,9 @@ updated: "2026-10-17T06:58:13"
 - time: 2026-10-17T06:58:13
   kind: evidence
   summary: "mixin 类字段默认值修复：动态父类 ctor 的 super 转发条件缺失——709/731（97.0%），corpus30 18/20"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T07:42:29
+  kind: evidence
+  summary: "类表达式方法捕获外围变量落地（第六轮）：env_def 索引类型 + 嵌套形参误捕获是关键；零回归"
   affects: [aot-wasm-tagged-backend]
