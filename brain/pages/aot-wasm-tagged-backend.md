@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T04:01:56"
+updated: "2026-10-17T04:11:44"
 ---
 
 <!-- compiled_truth -->
@@ -406,4 +406,9 @@ updated: "2026-10-17T04:01:56"
 - time: 2026-10-17T04:01:56
   kind: evidence
   summary: "Reflect.construct + static{} 内 this ≡ 定义类：658/673（97.8%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T04:11:44
+  kind: evidence
+  summary: "第二十九批：670/693（96.7%）；修类 toString 遮蔽静默错值；新暴露 2 项真 bug（递归箭头 const、提取原型方法 .call）"
   affects: [aot-wasm-tagged-backend]
