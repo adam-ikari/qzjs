@@ -120,6 +120,7 @@ const QZ = {
   class_value: { params: ["i32"], results: ["i64"] },
   builtin_value: { params: ["i32"], results: ["i64"] },
   brand_check: { params: ["i64", "i32"], results: ["i64"] },   // 私有名 in o（品牌检查）：非对象 → TypeError（JS 语义）
+  method_spread: { params: ["i64", "i32", "i64"], results: ["i64"] },   // obj.m(...args)：实参数组 → method_call 分派
   super_method: { params: ["i64", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 对象字面量 super.m()：按 receiver 原型链解析               // 内建全局作值（String/Number/Array/… → 宿主句柄，缓存保证 ===）                  // 类名作值：clsId → 宿主构造器对象句柄
   new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
   class_value_dyn: { params: ["i32", "i64"], results: ["i64"] },             // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
@@ -845,6 +846,14 @@ class Emitter {
         if (ts.isPropertyAccessExpression(cx) && ts.isIdentifier(cx.expression) && BUILTIN_GLOBALS.has(cx.expression.text)) {
             M.i32Const(this._strId(cx.expression.text + "." + cx.name.text)); M.localGet(t.v);
             M.call("qz.builtin_spread");
+            this._expLeave();
+            return;
+        }
+        if (ts.isPropertyAccessExpression(cx)) {     // 动态接收者方法：obj.m(...args) → 宿主 method_spread（复用 method_call 分派）
+            this.emitTaggedExpr(cx.expression); M.localSet(t.w);
+            M.localGet(t.w); M.i32Const(this._strId(cx.name.text)); M.localGet(t.v);
+            M.call("qz.method_spread");
+            this._emitErrCheck();
             this._expLeave();
             return;
         }

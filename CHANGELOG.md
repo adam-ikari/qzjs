@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十四批语料 + 展开实参调动态方法（2026-10-17）
+- 新增 `audit_corpus34.js`（18 例）：强制转换（Symbol.toPrimitive/valueOf/toString）、数值格式化、数组进阶（splice/fill/copyWithin/at/findLast）、RegExp 状态与 lastIndex、Map/Set 迭代中修改、getter 抛错传播、稀疏数组、Object.is/getOwnPropertyDescriptors、类访问器继承 + super 访问器、delete/void/逗号、标签模板与 raw、for-in 键序（含原型链/数组）、String 构建、嵌套闭包状态、类静态块顺序、try/finally 顺序、对象展开深拷贝。**首跑即 17/18 → 18/18**。
+- 新修 2 项：
+  1. **展开实参传给动态接收者方法**：`out.push(...[1,2,3].slice(1))` / `obj.m(...args)` 此前 loud「展开实参仅支持顶层函数/闭包/静态方法/内建调用」。新增宿主 `qz.method_spread(recv, mid, argsArr)`（`makeQzvm` 返回对象改为 `const api = {…}` + 挂载后 `return api`），发射器对 PropertyAccess 接收者动态分派，内部复用 `method_call` 分派。
+  2. **宿主数组 `push`**：`doArrMethod` 缺 `push` 且不收溢出实参 → 增加 `ex` 形参（`ovf[1..]`）与 `push` 分支（返回新长度，`arrSetInPlace` 写回）。
+- 结果：**776/786（98.7%）**（34 批）；ctest 32/32 零回归。
+
 ### 句柄直通与宿主函数溢出实参（2026-10-17）
 - `bitsOf(x)`：输入已是 **tagged bigint 句柄**（实例/POJO/数组）时直通，不再被 `tagHandle` 再包一层宿主句柄（此前会把实例句柄当 self 传回 wasm → 类方法内 `this.k` 读到宿主包装对象）。
 - 宿主 `closure_call` 的**宿主函数句柄**分支此前只传 4 个实参槽、忽略溢出实参数组 → 经 `.bind`/`.call` 调用 >4 形参的函数时第 5+ 实参丢失。改为 `slots.filter(givenSlot) ++ ovf[1..]`。

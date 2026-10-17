@@ -704,7 +704,7 @@ function makeQzvm(strings, opts) {
     };
     return tagHandle(it);
   };
-  const doArrMethod = (recv, mid, a0, a1, a2, a3) => {
+  const doArrMethod = (recv, mid, a0, a1, a2, a3, ex) => {   // ex = 溢出实参（ovf[1..]，ovf[0] 已在 a3）
     const extra = (first) => [a0, a1, a2, a3].slice(first).filter(givenSlot).map(toJS);
     const name = strings[mid];
     const arr = () => arrRead(recv);
@@ -722,6 +722,7 @@ function makeQzvm(strings, opts) {
       case "reverse":     r = arrSetInPlace(recv, arr().reverse()); return recv;
       case "shift":       { const a = arr(); r = a.length ? a.shift() : undefined; arrSetInPlace(recv, a); return ret(r); }
       case "unshift":     { const a = arr(); a.unshift(toJS(a0)); arrSetInPlace(recv, a); return box(a.length); }
+      case "push":        { const a = arr(); a.push(...[a0, a1, a2, a3].filter(givenSlot).map(toJS).concat(ex || [])); arrSetInPlace(recv, a); return box(a.length); }   // 展开/动态路径的 push（快路径见发射器）
       case "map":         r = arr().map((v, i) => cbv(a0, v, i)); break;
       case "filter":      r = arr().filter((v, i) => !!cbv(a0, v, i)); break;
       case "reduce":      { const a = arr();
@@ -890,7 +891,7 @@ function makeQzvm(strings, opts) {
       if (hi === HOST_HI) { handles[off][toJS(k)] = toJS(v); return; }   // 键原样（符号键可用）
       toJS(o)[toJS(k)] = toJS(v);
   };
-  return {
+  const api = {
     // POJO 分配：返回 wasm 内存偏移（裸 i32），字段由 wasm i64.store 写入（零跨界）
     alloc: (nbytes) => { const off = bump; bump += nbytes; return off; },
     bindMem,
@@ -1774,7 +1775,7 @@ function makeQzvm(strings, opts) {
       }
       try {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1, a2, a3);
-      if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3);
+      if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3, (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []).slice(1));
       const name = strings[mid];
       if ((BigInt.asUintN(64, recv) >> 48n) === CLO_HI && (name === "toString" || name === "valueOf")) {
         const dv4 = mem ? new DataView(mem.buffer) : null;
@@ -2161,6 +2162,14 @@ function makeQzvm(strings, opts) {
     },
     bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
   };
+  // 展开实参传给动态接收者方法：obj.m(...args)（实参数组已在 wasm 侧构造成 qz 数组）
+  api.method_spread = (recv, mid, arr) => {
+    const a = (toJS(arr) || []).map(bitsOf);
+    const a0 = a.length > 0 ? a[0] : TAG, a1 = a.length > 1 ? a[1] : TAG, a2 = a.length > 2 ? a[2] : TAG, a3 = a.length > 3 ? a[3] : TAG;
+    const ovfA = a.length > 3 ? arrWriteback(a.slice(3).map(toJS)) : TAG;   // ovf[0] = 实参 3（已在 a3）
+    return api.method_call(recv, mid, a0, a1, a2, a3, ovfA);
+  };
+  return api;
 }
 module.exports = { makeQzvm };
 
