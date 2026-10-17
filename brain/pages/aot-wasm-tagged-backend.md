@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T15:00:53"
+updated: "2026-10-17T15:12:22"
 ---
 
 <!-- compiled_truth -->
@@ -576,4 +576,9 @@ updated: "2026-10-17T15:00:53"
 - time: 2026-10-17T15:00:53
   kind: evidence
   summary: "模块级 Symbol 常量的类计算属性名：796/803（99.1%）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T15:12:22
+  kind: evidence
+  summary: "call_value 宿主分支溢出实参：797/803（99.3%）"
   affects: [aot-wasm-tagged-backend]
