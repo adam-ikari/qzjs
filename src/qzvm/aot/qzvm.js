@@ -234,6 +234,9 @@ function makeQzvm(strings, opts) {
     { const m = symProps.get(off);                       // 符号键属性（own enumerable symbol）
       if (m) for (const [sy, tv] of m) Object.defineProperty(o, sy, { value: toJS(tv), enumerable: true, writable: true, configurable: true }); }
     pojoOf.set(o, { off, mem, isInst });
+    if (isInst && mem) {   // 类实例物化对象 → 原型指向类原型（JS 语义：Object.getPrototypeOf(inst) === C.prototype）
+      try { const cidP = new DataView(mem.buffer).getInt32(off, true); const cP = classObjImpl(cidP); if (cP && cP.prototype) Object.setPrototypeOf(o, cP.prototype); } catch (_) {}
+    }
     // 类方法驱动的强制转换钩子（JSON.stringify 用 toJSON；String()/+ 用 toString/valueOf）——非枚举，不进 Object.keys/JSON
     if (mem && isInst) {                             // 仅实例才有类方法钩子（POJO 的 clsId 恒为 0，会撞第一个类的 id）
       const clsId = new DataView(mem.buffer).getInt32(off, true);
@@ -525,6 +528,28 @@ function makeQzvm(strings, opts) {
           value: (...as) => toJS(exportsRef[sm.name](TAG, ...as.slice(0, 4).map(bitsOf), TAG)),
           writable: true, configurable: true, enumerable: false });
       } catch (_) {}
+    }
+    if (classHandles.size >= 0) {   // 实例方法/访问器挂到 prototype（JS 语义：C.prototype.get / Object.getOwnPropertyNames(C.prototype)）
+      const mkMeth = (exName) => function (...as) {
+        const fn = exportsRef && exportsRef[exName];
+        if (typeof fn !== "function") return undefined;
+        const aa = [0, 1, 2, 3].map(i => (i < as.length && as[i] !== undefined) ? bitsOf(as[i]) : TAG);
+        return toJS(fn(bitsOf(this), aa[0], aa[1], aa[2], aa[3]));
+      };
+      for (const nm of Object.keys(meta.methods || {})) {
+        const mm = meta.methods[nm];
+        if (!mm || !exportsRef || typeof exportsRef[mm.name] !== "function") continue;
+        try { Object.defineProperty(proto, nm, { value: mkMeth(mm.name), writable: true, configurable: true, enumerable: false }); } catch (_) {}
+      }
+      for (const nm of Object.keys(meta.getters || {})) {
+        const gg = meta.getters[nm], ss = (meta.setters || {})[nm];
+        try {
+          Object.defineProperty(proto, nm, {
+            get: gg && exportsRef && exportsRef[gg.name] ? function () { return toJS(exportsRef[gg.name](bitsOf(this), TAG, TAG, TAG, TAG)); } : undefined,
+            set: ss && exportsRef && exportsRef[ss.name] ? function (v) { return toJS(exportsRef[ss.name](bitsOf(this), bitsOf(v), TAG, TAG, TAG)); } : undefined,
+            configurable: true, enumerable: false });
+        } catch (_) {}
+      }
     }
     classObjs.set(clsId, ctor);
     return ctor;
@@ -947,10 +972,11 @@ function makeQzvm(strings, opts) {
             const m2 = own(c2.methods, name);
             if (m2) {
               const recv2 = recv;
-              return tagHandle(function (...args) {   // 提取的类方法：过滤未传实参（apply/call 会带入 undefined）→ TAG 补足
+              return tagHandle(function (...args) {   // 提取的类方法：JS this 优先（.call/.apply 的 thisArg）；this 为 undefined/null 时回退原接收者
+                const selfH = (this === undefined || this === null) ? recv2 : bitsOf(this);
                 const a2 = args.filter(x => x !== undefined && x !== null).map(bitsOf);
                 while (a2.length < 4) a2.push(TAG);
-                return toJS(exportsRef[m2.name](recv2, ...a2.slice(0, 4), TAG));
+                return toJS(exportsRef[m2.name](selfH, ...a2.slice(0, 4), TAG));
               });
             }
             c2 = c2.parent != null ? classMeta[c2.parent] : null;

@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 类原型方法挂载与提取语义（2026-10-17）
+- **`C.prototype.m`**（此前 undefined，`Object.getOwnPropertyNames(C.prototype)` 漏报）：`class_value` 构造类对象时把**实例方法**（含 `>4` 形参的 4 槽 ABI）与**访问器**（get/set → `__m_<C>$<name>` / `$set`）挂到 prototype 对象上；方法体内 `this` 经 `bitsOf(this)` 还原为 wasm 句柄。
+- **实例物化对象的原型**指向类 prototype（`Object.getPrototypeOf(new C()) === C.prototype`，此前为 `Object.prototype`）。
+- **提取的类方法尊重 `.call/.apply` 的 thisArg**：包装器优先用 JS `this`（`bitsOf(this)`），仅当 `this` 为 undefined/null 时回退到提取时的接收者 → `const g = m.get; g.call({v:7})` 得 7（此前 42）。
+  - 注：`(...args, _t)` 非法（rest 必须是最后形参），改用 `function (...args)` + JS `this`。
+- 结果：**672/693（96.9%）**；corpus29 13→14/20。ctest 32/32。
+
 ### 模块全局在闭包内按调用时读取（修复自递归/互递归箭头 const，2026-10-17）
 - **根因**：模块级 `const f = (n) => … f(n-1) …` 的闭包把 `f` 按**创建时值**捕获（`f` 此时未赋值 → undefined）→ 运行时 `closure_call` 拿到 undefined 句柄 → `未知 funcidx 0`。
 - **修复**：`_capturesOf` 排除**模块级全局**（`moduleGlobals`）→ 闭包体内对 `f` 的引用改走 `_emitCapturedRead` 的全局分支（`globalGet`）→ 调用时读取 → 自递归/互递归箭头 const 正确。
