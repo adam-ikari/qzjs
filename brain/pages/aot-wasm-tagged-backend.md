@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T02:40:43"
+updated: "2026-10-17T02:48:59"
 ---
 
 <!-- compiled_truth -->
@@ -371,4 +371,9 @@ updated: "2026-10-17T02:40:43"
 - time: 2026-10-17T02:40:43
   kind: evidence
   summary: "第二十六批：619/631（98.1%）；修复 String 方法第 2 实参与 Object.defineProperties 就地注册"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T02:48:59
+  kind: evidence
+  summary: "第二十七批：636/652（97.5%）；新增 4 残余含 1 待修 silent（Symbol.hasInstance）"
   affects: [aot-wasm-tagged-backend]
