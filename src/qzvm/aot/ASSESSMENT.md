@@ -278,4 +278,13 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 **结论：先修前置缺口**——绑定声明路径对 ClassExpression 初值应发射 `_emitClassValue(c)`（存宿主类对象句柄），而非跳过/存放包装器。位置线索：`_emitBindingDecl` 顶层 `ts.isClassExpression(d.initializer)` 分支现为「声明处跳过初值求值 → 存 undefined」（约 296–300 行），局部绑定另有一处同类处理。修完后再启用动态 `instanceof`（判定 + 内建回退已在 /tmp/qzaux/patch_dyninst3.js、patch_dyninst4.js 中成形且单测全对）。
 
 （其余动态 instanceof 单测均正确：`const T=Array; [] instanceof T`、`{} instanceof Object`、`new Final() instanceof Root/Final/A(Root)`、`const T=P; p instanceof T`。）
+### 类表达式作值：模块级绑定与模块初始化期约束（2026-10-17 第四轮定位，全部回退）
+
+尝试 1（已回退）：模块级 `const C = class {…}` 的绑定处现为「跳过初值求值 → 存 undefined」（约 296–300 行）；改为存 `_emitClassValue(c)`（宿主类对象）。
+结果：`instanceof <模块级类表达式>` 场景修好 2 例（corpus11/15 仍全绿），但**引入 2 例新错**：
+- corpus22 `closures-module-pattern` → 宿主 `Cannot read properties of null (reading 'buffer')`：`_emitClassValue` 位于 **start 段（__module_init）**，此时宿主 **`mem` 尚未 bindMem** → 任何触内存的宿主路径都会炸。结论：模块级类对象的物化**必须延后**（例如惰性到首次取用，或在 `__module_init` 之后单发一个小函数）。
+- corpus22 `prototype-chain-call` → 新 loud「`new 未知类: Dog`」：说明该改动同时干扰了类名→静态 new 的解析路径（需一并核对 `classAlias`/`_className` 与绑定初值的关系）。
+其余 3 例（corpus11/15 已绿、corpus14/22 仍报 `instanceof: 右操作数不是类或内建类`）表明还有**第二类**类表达式值来源未物化（局部/别名场景）。
+
+结论：此项需**分两步**做——(1) 先把类对象物化从 start 段移出（惰性或延后），(2) 再启用动态 `instanceof`（判定 + 内建回退的补丁已在 `/tmp/qzaux/patch_dyninst3.js`、`patch_dyninst4.js` 成形，单测全对：`const T=Array; [] instanceof T`、`{} instanceof Object`、`new Final() instanceof Root/Final/A(Root)`、`const T=P; p instanceof T`）。三轮「直接启动态 instanceof」均因值未物化而回归，不要再重复该顺序。
 
