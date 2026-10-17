@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T03:21:10"
+updated: "2026-10-17T03:33:50"
 ---
 
 <!-- compiled_truth -->
@@ -391,4 +391,9 @@ updated: "2026-10-17T03:21:10"
 - time: 2026-10-17T03:21:10
   kind: evidence
   summary: "push/pop 快路径误命中同名对象方法（静默错值）修复：加运行时 tag 守卫（仅 0x7FFB 直写，否则通用派发）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T03:33:50
+  kind: evidence
+  summary: "数组自定义字符串键属性修复（arrMeta 旁表）——消除最后一项已知 silent 错值；654/673（97.2%），残余全 loud/窄面"
   affects: [aot-wasm-tagged-backend]
