@@ -414,6 +414,10 @@ class Emitter {
         const out = [];
         const seen = new Set();
         const walk = (n) => {
+            if (n.kind === ts.SyntaxKind.SuperKeyword) {   // super 引用需要 receiver（home object 的 this）→ 箭头视作捕获 "this"
+                if (!local.has("this") && lambdaIsArrow && !seen.has("this")) { seen.add("this"); out.push("this"); }
+                ts.forEachChild(n, walk); return;
+            }
             if (ts.isThis(n)) {   // 箭头函数继承 this → 视作捕获 "this"
                 // 合成的访问器/方法闭包把 self 作为名为 "this" 的**形参** → 不作捕获
                 if (!local.has("this") && (lambdaIsArrow && !seen.has("this"))) { seen.add("this"); out.push("this"); }
@@ -644,6 +648,15 @@ class Emitter {
     // 属性读 base.a（接收者已求值于 local `base`）：宿主对象(0x7FFD) → object_get；
     // POJO(0x7FF9|off≥8)/类实例(0x7FFE|off) → 内存 load 且**越界（无此字段）→ undefined**；
     // 其余（数组/字符串/数字上的普通属性）→ undefined。
+    // 当前函数的 this（i64）。方法体：local 0 = this；lambda（箭头继承）→ 捕获的 this 或 synthThis 形参槽。
+    _emitThisReceiver() {
+        const M = this.m;
+        if (this.capMap && this.capMap.has("this")) { M.localGet(this.capMap.get("this")); M.i32Const(this._strId("this")); M.call("qz.env_get"); return; }
+        const idx = this._local("this");
+        if (idx !== undefined) { M.localGet(idx); return; }
+        M.localGet(0);
+    }
+
     _emitPropReadFromLocal(base, name) {
         const M = this.m;
         if (name === "stack") { M.localGet(base); M.call("qz.err_stack"); return; }   // Error 族 .stack → 宿主合成
@@ -1296,6 +1309,18 @@ class Emitter {
         const params = astParams.map(p => p.name.text);
         // 捕获名先分析并记录（emitLambdaBody 内 identifier 读写用 capMap 路由）
         const caps = this._capturesOf(lam);
+        // 所属类（箭头内的 super = 继承外层方法的 super 绑定）：按 pos/end 包含判定，不依赖 parent 指针。
+        // 合成箭头（对象字面量方法，synthThis）不参与：其 super 指向字面量的 home object，不是外层类。
+        let supCtx = null;
+        if (!thisSlot) {
+            for (const cn0 of this._classList) {
+                const c0 = this.classes.get(cn0);
+                if (!c0) continue;
+                const nodes0 = [c0.ctor].concat((c0.methods || []).map(m => m.node)).concat(((c0.staticMethods || []).map(m => m.node)));
+                if (nodes0.some(n0 => n0 && n0.pos <= lam.pos && lam.end <= n0.end)) { supCtx = cn0; break; }
+            }
+        }
+        lam._qzSupCtx = supCtx;
         this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(lam._qzRest || (astParams.length && astParams[astParams.length - 1].dotDotDotToken)), synthThis: thisSlot });
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
         this._pendingLambdas.push({ lam, fname, params, caps, astParams });
@@ -1355,6 +1380,8 @@ class Emitter {
         const savedMap = this.varMap, savedCap = this.capMap, savedBlk = this.blkLocal;
         const savedMode = this.mode, savedDepth = this.depth, savedStatic = this._staticVars;
         const savedEnvRef = this.envRef;
+        const savedCCO3 = this._curClassObj;   // 箭头内 super 需外层类上下文
+        this._curClassObj = (lam._qzSupCtx && this.classes.get(lam._qzSupCtx)) || null;
         const savedFnVars2 = this._fnVars; this._fnVars = new Set();
         this.mode = "tagged";
         this._fnVoid = false;                                  // lambda 恒返回 i64
@@ -1424,6 +1451,7 @@ class Emitter {
         this._fnVars = savedFnVars2;
         if (!(last && ts.isReturnStatement(last))) this._emitUndefined();   // 无显式 return → undefined（JS 语义；不是 unreachable）
         M.endBody();
+        this._curClassObj = savedCCO3;
         this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
         this.envLocal = undefined; this.envRef = savedEnvRef;
         this.mode = savedMode; this.depth = savedDepth; this._staticVars = savedStatic;
@@ -4004,8 +4032,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             acc = (cl.methods || []).find(m => m.accessor === "get" && m.name === e.name.text) || null;
             if (!acc) owner = cl.parent;
         }
-        if (acc) { this.m.localGet(0); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
-        this.m.localGet(0); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
+        if (acc) { this._emitThisReceiver(); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
+        this._emitThisReceiver(); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
         return;
     }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
@@ -4095,8 +4123,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             acc = (cl.methods || []).find(m => m.accessor === "get" && m.name === e.name.text) || null;
             if (!acc) owner = cl.parent;
         }
-        if (acc) { this.m.localGet(0); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
-        this.m.localGet(0); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
+        if (acc) { this._emitThisReceiver(); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
+        this._emitThisReceiver(); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
         return;
     }
     if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression)
@@ -4120,7 +4148,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.m.call(staticMethName(c, method));
             return;
         }
-        this.m.localGet(0);                                  // self = this
+        this._emitThisReceiver();                            // self = this（闭包内 this 走捕获/形参槽，local0 是 blk）
         for (let i = 0; i < 4; i++) {
             if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
         }

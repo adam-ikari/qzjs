@@ -4,6 +4,16 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 箭头函数内的 super（2026-10-17）
+- 症状：`class B extends A { arrow() { const f = () => "a" + super.m(); return f(); } }` → 编译期 loud「super.m() 在父类链上未定义」（lambda 发射期无类上下文）。
+- 三处修复（corpus13 19→20/20 全绿）：
+  1. `emitLambda` 记录 lambda 的**所属类**（按 pos/end 包含判定 method/ctor 节点，不依赖 parent 指针；合成箭头 `_qzSynthThis` 除外——对象字面量方法的 super 指向其 home object）；
+  2. `_emitLambdaBody` 用该上下文设置 `_curClassObj`（并在恢复处还原），使 lambda 体内 super 可解析；
+  3. `_capturesOf` 把 **`super` 关键字**视同 `this`：箭头引用 super 时捕获 `this`（`_probeCaptured` 随之让外层方法把 `this` 写入 env，`_mEnter` 已有 `env_set("this", local 0)` 路径）。
+- 新增 `_emitThisReceiver()`：super 的 receiver 取值统一走「捕获 this / this 形参槽 / local 0」，修 lambda 内 `localGet(0)`（i32 blk）当 this 的 wasm 校验失败（`call[0] expected i64, found i32`）。
+- 验证：`b.m()`=`BA`、`b.arrow()`=`aA`、`b.arrowG()`=`GA`。
+- 结果：**736/750（98.1%）**；32 批 + ctest 32/32 零回归。
+
 ### 多参数（>4 形参）调用完整性（2026-10-17）
 - 症状：对象字面量方法 `o.m(a,b,c,d)` 第 4+ 实参**静默变 undefined**（`[a,b,c,d].join()` → `a,b,c,`）；类方法 `.bind` 后带 5 参调用抛 `Cannot convert undefined to a BigInt`。
 - 四处修复（corpus12 14→15/16）：
