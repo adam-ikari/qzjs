@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### `Object.create(Array.prototype)` 的 `length`（2026-10-17）
+- 症状：`const arr = Object.create(Array.prototype); arr[0]=1; arr[1]=2; arr.length=2;` → `arr.length` 恒 0、`arr.join(",")` 恒空串（静默错值）。
+- 两处修复（corpus27 18→19/21）：
+  1. 发射器 `_emitStoreLength` 的「非 wasm 数组」分支把值写进 **POJO 字段槽**（对宿主对象 = 写 wasm 内存垃圾）→ 增加 `HOST_HI(0x7FFD)` 子分支走 `qz.set_index(recv, "length", v)`（宿主对象属性写）。
+  2. 宿主 `arr_set_len` 增加宿主对象回落：`0x7FFD` 句柄 → 直接写 JS 属性 `o.length`（此前按 wasm 数组头解析内存 → 返回 0）。
+- 验证：`arr.length`=2、`arr.join(",")`=`1,2`、`Array.isArray(arr)`=false。
+- 结果：**738/750（98.4%）**；32 批 + ctest 32/32 零回归。
+
 ### function 作类族（`Animal.prototype.x = …` / `new (Dog as any)()`）（2026-10-17）
 - 症状：`new (Dog as any)("Rex")` → 编译期 loud「new 未知类: Dog」（顶层函数不是类）；`d instanceof (Animal as any)` → loud「instanceof 右操作数须为用户类」。
 - 六处修复（corpus22 18→19/19 全绿）：

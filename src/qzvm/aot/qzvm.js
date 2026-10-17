@@ -2070,8 +2070,10 @@ function makeQzvm(strings, opts) {
       return tagHandle(f);
     },
     arr_set_len: (recv, n) => {
-      const off = Number(BigInt.asUintN(64, recv) & MASK32);
       const want = Math.max(0, Math.trunc(toJS(n)));
+      { const u0 = BigInt.asUintN(64, recv);                      // 宿主对象（Object.create(Array.prototype) 等）：按 JS 属性写 length（此前按 wasm 数组解析内存 → 静默 0）
+        if ((u0 >> 48n) === HOST_HI) { const o0 = handles[Number(u0 & MASK32)]; if (o0 != null && typeof o0 === "object") o0.length = want; return box(want); } }
+      const off = Number(BigInt.asUintN(64, recv) & MASK32);
       const dv = new DataView(mem.buffer);
       let dataOff = dv.getInt32(off + 8, true);
       let cap = dv.getInt32(off + 4, true);

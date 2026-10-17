@@ -4742,8 +4742,13 @@ Emitter.prototype._emitStoreLength = function (left) {
     M.ifBlock("void");
     M.localGet(this.scratchA); M.localGet(this.scratch); M.call("qz.arr_set_len"); M.drop();   // 数组：宿主处理
     M.else_();
+    M.localGet(this.scratchA); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
+    M.ifBlock("void");
+    M.localGet(this.scratchA); this._emitStrLitHandle("length"); M.localGet(this.scratch); M.call("qz.set_index");   // 宿主对象（Object.create(Array.prototype)）：属性写 length（此前按 POJO 字段写 → 静默丢）
+    M.else_();
     M.localGet(this.scratchA); M.i32WrapI64();
-    M.localGet(this.scratch); M.i64Store(3, this._fieldIndex("length"));             // 非数组：字段
+    M.localGet(this.scratch); M.i64Store(3, this._fieldIndex("length"));             // POJO/实例：字段
+    M.end();
     M.end();
     M.localGet(this.scratch);                       // 赋值表达式返回所赋之值
 };
