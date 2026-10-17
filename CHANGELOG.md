@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十九批差分审计（2026-10-17）
+- 新增 `audit_corpus29.js`（20 例：类值/原型链深化、闭包捕获 this、高阶函数与互递归、sort 稳定性、浮点累加、Object.prototype.toString 与 Symbol.toStringTag、String.raw、Array.from 与迭代器、原型 getter/setter 继承、delete 语义、JSON toJSON、递归深度、trampoline/柯里化、对象字面量 super、类表达式名、私有静态 + static 块、原型方法提取、模板字符串进阶、位运算边界、端到端真实程序）。
+- **修复（静默错值）**：类自定义 `toString`/`toLocaleString`/`valueOf` 此前被 `method_call` 的 Object.prototype 默认快捷分支遮蔽（类方法从不执行，返回 `[object Object]`）→ 先沿类原型链查自有方法，命中则直接派发 wasm 方法。
+- 结果：**670/693（96.7%）**；corpus29 12/20。ctest 32/32。
+- 新增 8 项残余（1 例修复后仍存 8 项）：
+  - **真 bug（2 项）**：自递归/互递归**箭头 const**（`const f = (n) => n ? f(n-1) : 0`）走 interp 路径报 `closure_call 未知 funcidx 0`（`function` 声明版本正常）；提取的原型方法 `.call/.apply`（`const g = m.get; g.call(m)`）报「无方法 call」。
+  - **loud（4 项）**：类计算属性名访问器（`get [Symbol.toStringTag]()`）；对象字面量内 `super`；类表达式工厂（`const A = makeClass(); new A()`）；标签模板 `strings.raw`。
+  - **窄面（2 项）**：内建类作值（`Object.getPrototypeOf(A) === Function.prototype`）。
+
 ### Reflect.construct + 类 static {} 块内 this（2026-10-17）
 - **`Reflect.construct(用户类, args)`**：宿主 builtin 特殊化——识别类对象（`__qzClsId` 标记）→ `buildInstance` 分配 wasm 实例（`[0]=__cls`、`[4]=size`、字段槽填 undefined）+ 调 `__m_<C>$ctor`；`classMeta` 补 `ctor`/`size` 字段（size 与 `_instSize` 一致）。**初版漏写 `[4]=size` 与字段槽清空 → 字段读 undefined，已修**。
 - **类 `static { }` 初始化块内 `this` ≡ 定义类**（此前 loud「this 仅在类方法/构造器内可用」）：`_emitStaticsGuardBody` 期间设定类上下文（`_curClassObj` + `_inStaticMethod`）→ `this.x = v` 走 `qz.static_set`、`this.x` 读走静态路径、`this` 作值 → `qz.class_value`（类对象）。

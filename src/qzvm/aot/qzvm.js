@@ -1610,7 +1610,19 @@ function makeQzvm(strings, opts) {
             }
             return boxBool(extras.has(off0 + "|" + key));
           }
-          if (name === "toString" || name === "toLocaleString" || name === "valueOf") return ret("[object Object]");
+          if (name === "toString" || name === "toLocaleString" || name === "valueOf") {
+            // 类/原型链上若自定义了同名方法 → 不套用 Object.prototype 默认值（否则静默遮蔽类方法）
+            let cid0 = h0 === INST_HI && mem ? new DataView(mem.buffer).getInt32(off0, true) : -1;
+            let cc0 = cid0 >= 0 && classMeta ? classMeta[cid0] : null;
+            let hasOwnM = false;
+            while (cc0) { if (own(cc0.methods, name)) { hasOwnM = true; break; } cc0 = cc0.parent != null ? classMeta[cc0.parent] : null; }
+            if (!hasOwnM) return ret("[object Object]");
+            let cc1 = cid0 >= 0 ? classMeta[cid0] : null, mOwner = null;      // 类自定义同名方法 → 直接派发 wasm 方法
+            while (cc1) { if (own(cc1.methods, name)) { mOwner = cc1; break; } cc1 = cc1.parent != null ? classMeta[cc1.parent] : null; }
+            const mm0 = mOwner && mOwner.methods[name];
+            if (mm0 && exportsRef[mm0.name]) return exportsRef[mm0.name](recv, a0, a1, a2, a3);
+            return ret("[object Object]");
+          }
         }
       }
       // 纯数值接收者（高16位非任何句柄 tag）→ Number.prototype 方法
