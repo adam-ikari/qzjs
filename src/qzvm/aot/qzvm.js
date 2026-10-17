@@ -513,7 +513,7 @@ function makeQzvm(strings, opts) {
       const nV = meta.rest ? meta.n - 1 : meta.n;
       args = [blk];
       for (let i = 0; i < nV; i++) args.push(i < vals.length ? vals[i] : TAG);
-      if (meta.rest) args.push(arrWriteback(vals.slice(nV - 1).map(toJS)));
+      if (meta.rest) args.push(arrWriteback(vals.slice(nV).map(toJS)));   // 固定参（含 receiver）占 0..nV-1 → rest 从 nV 起（此前 nV-1 把 receiver 并入 rest 数组）
     } else if (meta.n > 4) {
       // a3 仅当为 wasm 数组(0x7FFB)时才是「溢出实参数组」；标量 a3 就是实参 3（此前一律当数组 → toJS(4).length undefined → 实参 3/4 静默变 undefined）
       const a3IsArr = a3 !== undefined && a3 !== TAG && (BigInt.asUintN(64, a3) >> 48n) === 0x7ffbn;
@@ -1061,6 +1061,12 @@ function makeQzvm(strings, opts) {
         }
       }
       const u = BigInt.asUintN(64, obj);
+      if ((u >> 48n) === HOST_HI) {   // 宿主对象（如 B.prototype）：按 JS instanceof 判定（原型链含 A.prototype）
+        const o0 = handles[Number(u & MASK32)];
+        const cP = classObjImpl(clsId);
+        if (o0 != null && cP && typeof cP === "function") { try { return boxBool(o0 instanceof cP); } catch (_) {} }
+        return boxBool(false);
+      }
       if ((u >> 48n) !== INST_HI) return boxBool(false);
       const off = Number(u & MASK32);
       if (!mem || off + 4 > mem.buffer.byteLength) return boxBool(false);

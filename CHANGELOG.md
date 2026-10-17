@@ -4,6 +4,11 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 批 35 残余修复（2026-10-17）
+- **synthThis 无溢出分支的 rest 切片基准错误**（上一批引入的回归）：`vals` = `[receiver, 实参 0..2]`，固定参（含 receiver）占 0..nV-1 → rest 应为 `vals.slice(nV)`，此前写成 `slice(nV - 1)` → **receiver 混入 rest 数组**（`o.j("a","b")` 的 `xs` = `[obj,"a","b"]`）。corpus35 13→14/17。
+- **`instanceof` 右值为宿主对象**（如 `B.prototype`）：`instanceof_op` 此前对非 `0x7FFE` 句柄一律 false → 增加 `HOST_HI` 分支，按 JS `instanceof`（对 `classObjImpl(clsId)` 构造器）判定。
+- 结果：**792/803（98.6%）**（35 批）；ctest 32/32 零回归。
+
 ### 第三十五批语料（2026-10-17）
 - 新增 `audit_corpus35.js`（17 例）：原型访问器（defineProperty on prototype）、静态继承 + `super` 静态、解构形参（默认值/rest/嵌套）、`catch` 解构、自定义迭代器类、`JSON.toJSON`、Date 确定性操作、排序边界值、类实例属性描述符、`delete`/`in`/`typeof` 组合、类实例删字段、do-while 闭包、互递归、Map/Set 转换、标签模板 raw、getter/setter 副作用、展开调用。**首跑 12/17**。
 - 修复：私有字段名（`#C#name`）此前出现在 `Object.getOwnPropertyNames`（JS 私有槽不可见）→ 过滤；`method_call` 的 POJO 闭包字段 rest 分支的 `nFix` 未扣 synthThis 的 receiver 槽 → 修正基准。
