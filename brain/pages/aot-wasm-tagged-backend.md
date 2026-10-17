@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T08:38:06"
+updated: "2026-10-17T08:46:53"
 ---
 
 <!-- compiled_truth -->
@@ -501,4 +501,9 @@ updated: "2026-10-17T08:38:06"
 - time: 2026-10-17T08:38:06
   kind: evidence
   summary: "含方法/访问器的对象字面量支持展开与计算键：730/750（97.3%），corpus32 19/19"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T08:46:53
+  kind: evidence
+  summary: "内建全局作值 + 原始值 .constructor 修复（零回归）"
   affects: [aot-wasm-tagged-backend]
