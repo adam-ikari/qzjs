@@ -359,3 +359,23 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 - 因此重落地时必须保证**同一条件**：只有「`_emitClassValue` 确实存了 env（其 `names` 过滤后非空）」的类，`_mEnter` 才允许用 `static_get` 取 env；否则应回退到 `env_new(-1)` 或保持不映射（loud）。
 - 建议实现：在 `collectClasses` 阶段就把「可捕获名」定死（用与 `_emitClassValue` 完全相同的谓词，但把 `_isCapturable` 换成「非内建/非类名/非模块全局/非 fnNames」这一保守近似），并把结果同时用于两处 —— 避免两处各自过滤导致条件不一致。
 - 另：`render()` 内含嵌套箭头 `(t) => …`，`_probeCaptured` 非空时的混合场景应保持**保守**（不启用类 env），以免与既有 env 机制冲突。
+
+## 【重要】模块级闭包调用在 start 段崩溃（先于类捕获特性存在的缺陷，2026-10-17 发现）
+
+**最小复现**（与本轮特性无关，今天仍然如此）：
+```
+const f = (x: any) => x + 1;
+const y = f(2);                 // 模块级：闭包调用发生在 __module_init
+export function g(): any { return y; }
+```
+→ `WebAssembly.instantiate` 报 `Cannot read properties of null (reading 'buffer')`（全方法包装定位到 **`qz.closure_call`**：它要读闭包头 `new DataView(mem.buffer)…`，而 start 段执行时宿主 `mem` 尚未 `bindMem`）。
+
+**根因**：`emitter.js:2785` `if (modStmts.length && anyTagged) m.setStart("__module_init")` —— 模块初始化被放进 **start 段**，而宿主的内存/导出/类元在 `instantiate` **之后**才绑定。
+
+**影响**：任何在模块级执行「闭包/值调用」的程序（极常见：`const a = f(1)`、`const x = makeThing()`、mixin 工厂调用等）都会在实例化阶段崩；此前只有被编译期 loud 挡住的场景才没暴露（例如 `withVersion("1.0")(Root)` 曾因「未定义捕获变量」loud，类捕获落地后编译通过，才露出这个运行期缺陷）。
+
+**修法（建议，二选一）**：
+1. **不在 start 段跑**：去掉 `setStart`，把 `__module_init` 作为普通导出，由宿主在所有 bind 之后调用一次（例如新增 `qz.bindReady()`/放在 `bindClasses` 之后，或 harness 显式调用）。
+2. **懒初始化**：加一个 wasm 全局 `__moddone`（须加在 `__bump`(0)/`__err`(1) **之后**），在每个导出函数 prologue 里 `if (!__moddone) { __module_init(); __moddone=1; }` —— 首次调用时必然已 bind 完毕。
+
+两条路线都能同时修好「模块级闭包调用」与「模块级 mixin（类 env 在 start 段构建）」；后者是本轮类捕获特性的唯一已知限制。
