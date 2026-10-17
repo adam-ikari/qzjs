@@ -246,4 +246,20 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 尝试：QZ 表加 `instanceof_dyn(x, clsObj)` + 宿主 `instanceById(obj, clsId)`（抽出 `instanceof_op` 的原型链/@@hasInstance 逻辑，二者共用）+ 发射器在 `instanceof` 右操作数非用户类名但可解析为局部/捕获/模块全局/属性访问时改走动态判定。
 效果：`WebAssembly.instantiate` 报 `Import #6 qz new_dynamic: function import require…`（**导入签名/调用点不匹配**）；且 `const C = class{…}; new C() instanceof C` 由 loud 变为**静默 false**（比 loud 更差）。
 结论：**已回退**。重做要点：(1) 先单独加 host 方法 + 只做发射器改动，逐步 instantiate 验证导入签名（勿一次并入 `new_dynamic` 上下文）；(2) `boxBool(false)` 兜底（`__qzClsId` 缺失时）会把 loud 降级为静默 false → 兜底应 **throw loud**；(3) 需实测 `new C()`（动态 new）产出的实例 clsId 与类对象 `__qzClsId` 是否同一（`dyn_inst` 实测 `c instanceof C` = false，`c instanceof Object` = true）。
+### 动态 extends（mixin）实现方案（2026-10-17 勘察，待实现）
+
+现状：`class X extends <运行时表达式>`（mixin：`const Tagged = (B) => class extends B {…}`）→ 发射器把 extends 的**表达式/形参名**当类名 → `call 未定义: __m_<Name>$ctor`（loud）。
+
+关键位置（已定位）：
+- 类收集 `collectClasses`：`parentName = parent.expression.text`（1430 行）→ 对 `Counted(Tagged(Base))`（CallExpression）与形参 `Base2`（非已知类）均失效。
+- ctor 的 super 调用：`_emitSuperCallForward`（4858）/ 显式 super（4850）→ 静态 `M.call(ctorName(c.parent))`。
+- 类值构造：`emitTaggedExpr` 的 ClassExpression 分支（`qz.class_value(id)`）+ 标识符路径（声明式类）。
+
+实现方案（4 处，约 70–100 行）：
+1. **发射时刻判定**（勿在收集期判定，避免前向引用误判）：`parentKnown = c.parent && (this.classes.has(c.parent) || BUILTIN_GLOBALS.has(c.parent))`；不已知 → 走动态路径，并保存 `c.dynParentNode = parent.expression`。
+2. **ctor super → 宿主**：动态父时改发 `qz.super_ctor(clsId, self, a0..a3)`（QZ: `["i32","i64","i64","i64","i64","i64"] → []`）。
+3. **类值 → class_value_dyn**：动态父类的类值构造改发 `qz.class_value_dyn(clsId, <求值父表达式>)`；声明式类在其 **statics guard** 内发一次（幂等：宿主缓存）。
+4. **宿主**：新增 `classRuntimeParent: Map<clsId, baseCid>`；`class_value_dyn` 记录 + 以 baseCtor 建原型链；`super_ctor` 按 baseCid 调 `classMeta[baseCid].ctor`；**方法派发与 instanceof 的链遍历**同时走 `classRuntimeParent`（现仅走 `classMeta[c].parent`）。
+
+验证目标：`mixin-class-factory` / `curried-class-factory`（各 1 例）；回归面 = 全语料 + ctest（class 机制用例多，须逐批核对）。
 
