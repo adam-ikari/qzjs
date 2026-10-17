@@ -324,3 +324,23 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 结果：踩到两个实现细节——(1) 锚点 `M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);` 在 **`_mEnter` 与 `_emitLambdaBody` 各出现一次**（替换命中 2 处 → lambda 体内 `cname` 未定义 → `cname is not defined`）；(2) 类捕获名仍未进 `capMap`（分支条件/位置不对），两例仍 loud。
 **下次正确做法**：先在 `_mEnter` 内用**唯一锚点**（如 `this.envLocal = capNames.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;` 这一行）插入 env 分支；再紧随其后按「`capNames.length === 0 && c.captured.length > 0`」把类捕获名写入 `capMap`；`_emitLambdaBody` 完全不动。
 
+
+---
+
+## 类表达式方法捕获——第四轮尝试（2026-10-17，已回退；机制已打通）
+
+**关键 bug（找到）**：`qz.env_def` 的**首参是 handles 索引（i32）**，此前传 env 句柄（i64）→ V8 报
+`call[0] expected type i32, found local.get of type i64`。改为 `localGet(envT.v); i32WrapI64();` 后，
+四类场景**全部正确**：`withVersion("1.0")` → `r,1.0`；`withV(7)` → `7`；方法内用 `Math` 且捕获 `n` → `5`；双捕获 → `3`。
+
+**可工作组合（下次直接复用）**：
+1. `collectClasses` 存 `c.captured`（`_capturesOf(methodNode)`，过滤内建/类名/模块全局/`fnNames`）。
+2. `_emitClassValue` 创建点：`env_new(-1)` → 逐名 `env_def(envIdx, strId(name), 值)` → `static_set(strId(cname), strId("@@qzEnv"), env)`（**零新 import**，绕开编码器卡点）。
+3. `_mEnter`：在**唯一锚点**（`const capNames = this._probeCaptured(...)` 之后）并入类捕获名；当「无嵌套 lambda 捕获」时 `envLocal = static_get(cname, "@@qzEnv")`（`i32WrapI64`），`capMap` 随之映射；`_emitLambdaBody` 不动。
+
+**未收敛的两处边角**（回退原因）：
+- `mixed-realistic-program`（声明式类 `TaskList`，`captured` 含类名 `Task`/`TaskList`）被回归 → 用「仅 `__clsExpr_*` 参与捕获」收窄后回归消失。
+- 但随后 `curried-class-factory` 变 `Cannot read properties of null (reading 'buffer')`：**start 段（`__module_init`）mem 未绑定**，而模块级 `class Final extends withVersion("1.0")(Root)` 的 env 构建会 `env_def` 写**字符串**值（触发 `strWriteback` 需 mem）。
+- 再加 `!this._inModInit` 守卫后，**函数级**捕获又返回 `undefined` → 说明 `__clsExpr_` / `_inModInit` 两处全局收窄与「函数级创建点」的实际情形不一致。
+
+**下次路径**：只保留上述「可工作组合」三件，**不要**做 `__clsExpr_`/`_inModInit` 全局收窄；单独插桩 `mixed-realistic-program`（打印该类 `captured` 与 `_mEnter` 侧 `capNames`）定位其真实成因；模块级 mixin 的 start 段问题单独处理（延后类 env 构建到 mem 绑定之后，或 start 段只存非字符串捕获）。
