@@ -1614,6 +1614,7 @@ function makeQzvm(strings, opts) {
           const out2 = [];
           for (const [n, idx] of fieldEntries) {
             if (idx >= size2) continue;
+            if (typeof n === "string" && n.charCodeAt(0) === 35) continue;   // 私有字段（#C#name）：不出现在 getOwnPropertyNames（JS 私有槽）
             if (BigInt.asUintN(64, dv2.getBigInt64(off0 + idx, true)) !== TAG) out2.push(n);
           }
           for (const [k] of extras) { const bar = k.indexOf("|"); if (Number(k.slice(0, bar)) === off0) out2.push(k.slice(bar + 1)); }
@@ -1914,7 +1915,7 @@ function makeQzvm(strings, opts) {
             const ex = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
             const flat = [a0, a1, a2, a3].concat(ex.slice(1).map(bitsOf));   // 统一为 tagged（ex 元素是 JS 值）
             if (m.rest) {
-              const nFix = (m.n || 1) - 1;
+              const nFix = m.synthThis ? Math.max(0, (m.n || 2) - 2) : ((m.n || 1) - 1);   // synthThis（对象字面量方法）：m.n 含 receiver 槽 → 固定实参 = n-2
               const tail = flat.slice(nFix).filter(givenSlot);   // tagged
               const head = flat.slice(0, nFix);
               const out2 = [recv].concat(head, [arrWriteback(tail.map(toJS))]);   // rest 数组落在其形参槽；arrWriteback 收 JS 值

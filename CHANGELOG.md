@@ -4,6 +4,16 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十五批语料（2026-10-17）
+- 新增 `audit_corpus35.js`（17 例）：原型访问器（defineProperty on prototype）、静态继承 + `super` 静态、解构形参（默认值/rest/嵌套）、`catch` 解构、自定义迭代器类、`JSON.toJSON`、Date 确定性操作、排序边界值、类实例属性描述符、`delete`/`in`/`typeof` 组合、类实例删字段、do-while 闭包、互递归、Map/Set 转换、标签模板 raw、getter/setter 副作用、展开调用。**首跑 12/17**。
+- 修复：私有字段名（`#C#name`）此前出现在 `Object.getOwnPropertyNames`（JS 私有槽不可见）→ 过滤；`method_call` 的 POJO 闭包字段 rest 分支的 `nFix` 未扣 synthThis 的 receiver 槽 → 修正基准。
+- 新暴露 4 项残余（已定位）：
+  1. `Object.defineProperty(proto, k, {get/set})` 于 POJO 原型 + `Object.create(proto)` 的访问器读（`o.computed` → NaN）；
+  2. 静态方法内 `this` 恒为**定义类**（`B.describe()` 里 `super.describe()` 的 `this.tag` 应为 B）→ 需静态方法接收者运行时化；`B.prototype instanceof A` = false（原型对象的 instanceof）；
+  3. do-while 体内 `const` 未被闭包**每迭代**绑定（三个闭包同值）；
+  4. 对象字面量方法（synthThis + rest）调用时 receiver 进入 rest 数组（`o.j("a","b")` → `xs=[obj,"a","b"]`）。
+- 结果：**791/803（98.5%）**（35 批）；ctest 32/32 零回归。
+
 ### 函数 `toString` 剥离 TS 类型注解（2026-10-17）
 - 症状：`String(fn)` 返回含类型标注的 **TS 源文本**（`(x: any) => x instanceof Function`），而 oracle 是 tsc **转译后的 JS**（`(x) => x instanceof Function`）→ 窄面 diff。
 - 修：新增 `stripTsTypes(node, sf)` —— 遍历 AST 收集「参数/函数返回/属性/变量声明的类型节点」与「`as`/`<T>`/`satisfies` 断言」，在源码文本上按位置**降序删除**（类型节点的 `pos` 不含前导冒号 → 一并剥掉冒号与空白）。`lamMeta.src` 改用该函数。
