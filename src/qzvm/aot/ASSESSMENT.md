@@ -3,10 +3,7 @@
 
 ### 批 36 三项残余的机理（2026-10-17 记录，待修）
 
-1. **`try { return X } finally { throw Y }` → finally 执行两次**
-   - 观测：`log` = `t,f1,f1,c`（finally 跑两次）。
-   - 机理（已读通）：`return` 触发 `_emitPendingFinally(true, false)` 跑一次 finally（f1 #1），finally 内抛错置 `__err` 并 `br` 到**该 try 的 `$err` 块**（throw 的发射目标仍在动态 try 范围内）→ 落回 `emitTry` 的**正常路径** finally（`emitter.js:3510-3512`，未加防重入切片）→ f1 #2 → 其后的 `_emitErrCheck(false)` 再向外传播。
-   - 候选修法：`_emitPendingFinally` 发射 finally 体时把 `_tryStack` 同步切到 `slice(0, i)`（使体内 throw 归向外层 try）；或给正常路径 finally 加运行时一次性守卫。**风险高（try/finally 是核心路径），需成对验证**。
+1. **已修复（见 CHANGELOG「`finally` 重复执行」）**：`_emitPendingFinally` 发射时同步切 `_tryStack`。
 2. **已修复（见 CHANGELOG「对象展开与运行时访问器」）**：`usesDynAcc` 程序下展开段一律走 `obj_merge`（此前槽级拷贝静默丢访问器键）。
 3. **已修复（见 CHANGELOG「嵌套闭包内的私有名限定」）**：`_emitLambdaBody` 现同时设置 `_curClass`（源自 `lam._qzSupCtx`）。
 

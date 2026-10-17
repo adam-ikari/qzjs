@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### `finally` 重复执行（2026-10-17）
+- 症状：`try { return X } finally { throw Y }` → `finally` **执行两次**（日志 `t,f1,f1,c`）。
+- 真因：`return` 触发 `_emitPendingFinally` 跑一次 finally；finally 内抛错置 `__err` 并经 `br` 跳到**该 try 的 `$err` 块**（throw 发射时的动态 try 范围仍含本 try）→ 落回 `emitTry` **正常路径** finally → 第二次。
+- 修：`_emitPendingFinally` 发射 finally 体时把 `_tryStack` 同步切到 `slice(0, entry.tryDepth)`（本 try 已退出 → 体内 throw 归向外层 try），发射后还原。
+- 验证：`t,f1,c` ✓；`try{return}` + 无 throw 的 finally 行为不变；corpus36 16→17/17（该批三项残余全部修复）。
+- 结果：**814/820（99.3%）**（36 批）；ctest 32/32 零回归。
+
 ### 嵌套闭包内的私有名限定（2026-10-17）
 - 症状：`class Factory { #base = 100; get builder() { return (x) => this.#base + x; } }` → `fac.builder(1)` = NaN（应为 101）。
 - 真因：私有名（`this.#x`）按「当前类名」限定，而 `_curClass` 只在类方法体内设置；访问器**返回的闭包**在 `_emitLambdaBody` 中发射时 `_curClass` 为空 → 私有名限定失效。

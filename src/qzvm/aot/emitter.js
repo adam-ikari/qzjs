@@ -3526,7 +3526,10 @@ Emitter.prototype._emitPendingFinally = function (tagged, forThrow) {
         const e = st[i];
         if (forThrow && ((e.tryDepth === undefined ? -1 : e.tryDepth) < curDepth)) continue;   // 目标及其外层：不在此跑
         this._finallyStack = st.slice(0, i);        // 防重入：finally 体内的 return/throw 不再重复跑本层
-        if (tagged) this.emitTaggedBlock(e.node); else this.emitBlock(e.node);
+        { const savedTry = this._tryStack;          // 本 try 已退出：体内 throw 应归向外层 try（否则 br 回本 try 的 $err → 落回正常路径 finally → 重复执行）
+          this._tryStack = (this._tryStack || []).slice(0, e.tryDepth === undefined ? 0 : e.tryDepth);
+          try { if (tagged) this.emitTaggedBlock(e.node); else this.emitBlock(e.node); }
+          finally { this._tryStack = savedTry; } }
     }
     this._finallyStack = st;
 };
