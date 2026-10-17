@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### rest 闭包形参（箭头 const）+ `fn(...restArr)`（2026-10-17）
+- **惯例（实测确立）**：rest 闭包的调用方传 `[固定参…, rest 数组, 余参…]`（`function g(first, ...rest)` 实测 a0=固定参、a1=rest 数组）。
+- **根因**：`closureCall` 的简单分支（≤4 实参）用 `slice(0, 1+meta.n)` 只传固定参 → `const c = (...a) => a.length` 得 `undefined`（形参拿到单值而非数组）；`fn(...a)`（a 为 rest 形参）报 `toJS(...) is not iterable`。
+- **修复**：新增 `else if (meta.rest)` 分支，按「`a[nFix]`（nFix = meta.n-1）是否为 wasm 数组(0x7FFB)」精确判定是否**已打包**：已打包 → `[blk, 固定参…, rest 数组]` 透传；未打包（箭头 const 被直接调用）→ 固定参 + 剩余打包 `arrWriteback`。
+- **前两轮失败原因**（记录留档）：用 `meta.n === 1` + 全部槽为空判定（过窄，含固定参的场景漏判）→ 回归；用 `a0` 是数组判定（未对齐 nFix 位置）→ 回归。正确判据是**按 nFix 定位槽位**。
+- 验证：`const c=(...a)=>a.length` = 3（原 undefined）；`(x,...a)=>x+":"+a.join("-")` = `1:2-3|9:`；`fn(...restArr)` = 7；`function c(...a)` 不变。
+- 结果：**706/731（96.6%）**；corpus29 14→15/20、corpus30 14→15/20。ctest 32/32。
+- 已知窄面（新）：rest-only 闭包被单个**数组实参**调用（`c([1,2])` → 得 `2:number`，JS 为 `1:object`）——与「已打包」不可区分；另 `sum(...arr)`（模块级 const 箭头 + 数组变量展开）仍 loud「未定义函数: sum」。
+
 ### 对象字面量计算属性名插入序（静默错值修复，2026-10-17）
 - **根因**：属性循环中计算键**先**逐个登记序（`qz.field_order`），而静态键的批量登记（`field_order_lit`，编译期常量）在循环**之后**执行 → 计算键被挤到键序最前。
 - **修复**：`hasComputedKey` 时改为**逐属性按源码序**登记（静态键在自身槽位写完后 `field_order`；计算键沿用原路径），并跳过批量 `field_order_lit`（避免重复）。

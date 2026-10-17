@@ -113,7 +113,7 @@
 
 审计法：同一 TS 源 → (a) tsc 剥类型在 node 跑真 JS 作 oracle；(b) AOT 编译 wasm 跑；逐例独立编译比对。
 语料：`audit_corpus.js`(47) / `audit_corpus2.js`(40) / `audit_corpus3.js`(39) / `audit_corpus4.js`(38) / `audit_corpus5.js`(28) / `audit_corpus6.js`(29) / `audit_corpus7.js`(27) / `audit_corpus8.js`(24) / `audit_corpus9.js`(25) / `audit_corpus10.js`(24) / `audit_corpus11.js`(24) / `audit_corpus12.js`(16) / `audit_corpus13.js`(20) / `audit_corpus14.js`(17) / `audit_corpus15.js`(20) / `audit_corpus16.js`(19) / `audit_corpus17.js`(18) / `audit_corpus18.js`(19) / `audit_corpus19.js`(19) / `audit_corpus20.js`(19)。
-结果：**704/731 一致（96.3%）**；残余 21 项（按语料案例计；for-of 急切快照已消除；Symbol.hasInstance 已修；新增：类名作值×2 + static block（loud）、数组自定义字符串键属性 + 对象字面量方法闭包不共享 env（2 项 silent 待修））：11 项 loud + **1 项新发现静默差异**（`for...of` 急切快照 vs JS 惰性迭代，见「残余 loud 清单」注释）。（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
+结果：**706/731 一致（96.6%）**；残余 21 项（按语料案例计；for-of 急切快照已消除；Symbol.hasInstance 已修；新增：类名作值×2 + static block（loud）、数组自定义字符串键属性 + 对象字面量方法闭包不共享 env（2 项 silent 待修））：11 项 loud + **1 项新发现静默差异**（`for...of` 急切快照 vs JS 惰性迭代，见「残余 loud 清单」注释）。（编译期/运行期显式报错，明细见「残余 loud 清单」）——**零静默错值**；另注 宿主↔wasm 闭包递归约 300 层（`node --stack-size` 可提高）；`test_aot.js` 233 checks ALL PASS；`ctest`（含 test262）32/32 全绿。
 
 **残余 loud 清单（键序修复后，按类别 7 项 / 按语料案例 8 例，全部 loud）**
 
@@ -231,7 +231,9 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 - `_emitArrayPush` 就地增长（更新 header 的 len/cap/dataOff，不改句柄）；`_emitLambdaBody` 先建 capMap 再发射体。
 
 下一步：定位对象字面量方法体的发射路径（是否 `_emitLambdaNew` + 延迟 lambda pass，或在外围内联），使方法体内标识符解析与闭包 env 一致。
-### 已尝试并回退：rest 闭包 ≤4 实参的打包（2026-10-17）
+### 已修复：rest 闭包 ≤4 实参的打包（2026-10-17，第三轮成功）
+
+判据 = 「`a[nFix]`（nFix = meta.n-1）是 wasm 数组(0x7FFB)」→ 已打包透传；否则打包。前两轮（`meta.n===1`+全槽空判定、`a0` 判定）均因未对齐 nFix 位置而回归。
 
 尝试：在 `closureCall` 的简单分支（`else`，≤4 实参）加 `else if (meta.rest)` —— 按 `nFix = meta.n - 1` 拆固定参 + `arrWriteback(tail)` 打包剩余。
 效果：修好 `const c = (...a) => a.length`（`undefined` → `3`）与 `fn(...restArr)`（`toJS(...) is not iterable` → 正确值），但**引入 5 例回归**（corpus3/5/10/11/27：`spread-call-mixed` `many-args-abi` `rest-spread-objects` 等——`(a, ...rest)` 调用后 `rest.length` 少 1）。

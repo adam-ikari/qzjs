@@ -476,6 +476,25 @@ function makeQzvm(strings, opts) {
       args = [blk, a0, a1, a2];
       if (meta.rest) args.push(arrWriteback(ex.slice(meta.n - 4)));
       else for (let i = 0; i < meta.n - 3; i++) args.push(i < ex.length ? bitsOf(ex[i]) : TAG);
+    } else if (meta.rest) {
+      // 惯例（实测）：调用方传 [固定参…, rest 数组, 余参…]。判定「已打包」= a[nFix] 是 wasm 数组(0x7FFB)。
+      // 未打包（如箭头 const 被直接调用）→ 固定参 + 剩余打包成数组。
+      const nFix0 = meta.n - 1;
+      const slots0 = [a0, a1, a2, a3];
+      const noneMore0 = (x) => x === undefined || x === TAG;
+      const isArrH = (x) => !noneMore0(x) && (BigInt.asUintN(64, x) >> 48n) === 0x7ffbn;
+      const packed = nFix0 >= 0 && nFix0 < 4 && isArrH(slots0[nFix0]);
+      if (packed) {
+        args = [blk];
+        for (let i = 0; i < Math.min(nFix0, 4); i++) args.push(slots0[i] === undefined ? TAG : slots0[i]);
+        args.push(slots0[nFix0]);
+      } else {
+        args = [blk];
+        for (let i = 0; i < Math.min(nFix0, 4); i++) args.push(slots0[i] === undefined ? TAG : slots0[i]);
+        const tail0 = [];
+        for (let i = nFix0; i < 4; i++) if (!noneMore0(slots0[i])) tail0.push(toJS(slots0[i]));
+        args.push(arrWriteback(tail0));
+      }
     } else {
       args = [blk, a0, a1, a2, a3].slice(0, 1 + meta.n);
     }
