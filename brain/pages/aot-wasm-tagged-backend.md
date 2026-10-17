@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T06:48:10"
+updated: "2026-10-17T06:58:13"
 ---
 
 <!-- compiled_truth -->
@@ -476,4 +476,9 @@ updated: "2026-10-17T06:48:10"
 - time: 2026-10-17T06:48:10
   kind: evidence
   summary: "动态 instanceof 零回归落地：dynR 排除已知类名是关键（模块级类亦登记 moduleGlobals）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T06:58:13
+  kind: evidence
+  summary: "mixin 类字段默认值修复：动态父类 ctor 的 super 转发条件缺失——709/731（97.0%），corpus30 18/20"
   affects: [aot-wasm-tagged-backend]
