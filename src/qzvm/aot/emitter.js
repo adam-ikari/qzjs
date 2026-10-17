@@ -3675,17 +3675,26 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isObjectLiteralExpression(e)
         && e.properties.some(p => ts.isMethodDeclaration(p) || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p))) {
-        if (e.properties.some(p => ts.isSpreadAssignment(p))) throw new Error("[tagged] 含方法/访问器的对象字面量暂不支持展开");
+        // 含方法/访问器的对象字面量也支持展开：按源码序用 qz.obj_merge 就地并入（宿主对象目标）
         // 宿主对象(0x7FFD)：方法 → 闭包包装值；访问器 → defineProperty(get/set 回调 wasm 闭包)。
         const M = this.m, t = this._expEnter();
         M.call("qz.obj_new"); M.localSet(t.v);
         const doneA = new Set();
         for (const p of e.properties) {
             const nm = p.name && p.name.text;
-            if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+            if (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)) {   // 计算键：运行期键 → qz.set_index
+                M.localGet(t.v);
+                this.emitTaggedExpr(p.name.expression);
+                this.emitTaggedExpr(p.initializer);
+                M.call("qz.set_index");
+            } else if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
                 M.localGet(t.v); M.i32Const(this._strId(nm));
                 this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);
                 M.call("qz.object_set");
+            } else if (ts.isSpreadAssignment(p)) {
+                M.localGet(t.v);
+                this.emitTaggedExpr(p.expression);
+                M.call("qz.obj_merge");
             } else if (ts.isMethodDeclaration(p)) {
                 if (nm !== undefined) {                                   // 字符串名
                     M.localGet(t.v); M.i32Const(this._strId(nm));

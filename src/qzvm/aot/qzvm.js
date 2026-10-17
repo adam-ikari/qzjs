@@ -1317,6 +1317,8 @@ function makeQzvm(strings, opts) {
     obj_merge: (target, src) => {
       const o = toJS(src);
       if (o == null) return;
+      { const hd = BigInt.asUintN(64, target) >> 48n, od = Number(BigInt.asUintN(64, target) & MASK32);   // 宿主对象目标：就地合并
+        if (hd === HOST_HI) { const t0 = handles[od]; if (t0 && typeof t0 === "object") { for (const k of Object.keys(o)) t0[k] = o[k]; } return; } }
       syncExtras();
       const u = BigInt.asUintN(64, target), off = Number(u & MASK32);
       const dv = mem ? new DataView(mem.buffer) : null;

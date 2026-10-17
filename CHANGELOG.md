@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 含方法/访问器的对象字面量 + 展开 + 计算键（2026-10-17）
+- **展开**：此前该分支直接 loud「含方法/访问器的对象字面量暂不支持展开」→ 现按源码序用 `qz.obj_merge` 就地并入；宿主 `obj_merge` 新增**宿主对象目标**分支（`Object.assign` 语义，值已是 JS 值**勿再 `toJS`**——这正是上一次尝试 `Cannot convert 2 to a BigInt` 的原因）。
+- **计算键**：该分支此前只认 `p.name.text` → `[key]` 落成 `"undefined"`；现计算键改走 `qz.set_index(target, 求值键, 值)`。
+- 验证：`{ m(){return 1}, ...{a:2,b:3}, g:4 }` = `1,234,m/a/b/g`；`{ ...base, get d(){return 9}, y:2 }` = `12,{"x":1,"d":9,"y":2}`；`{ ...{a:1}, m(){return 2} }` = 3；corpus32 `object-literal-patterns` 全通。
+- 结果：**730/750（97.3%）**；corpus32 18→19/19；32 批 + ctest 32/32 零回归。
+
 ### 闭包内类名被误当自由变量捕获（silent 错值修复，2026-10-17）
 - **根因**：`_capturesOf` 的自由变量扫描把**类名**（如 `Circle`）当作闭包的自由变量 → 闭包内 `s.constructor === Circle` 的 `Circle` 走 `env_get` → env 中并无该名 → 得 TAG(undefined) → 比较恒 **false**（而同层函数体内正常）。
 - 探针证据：`qz.seq` 收到 `0x7FFD|2`（类句柄）与 `0x7FF9|0`（TAG）→ 左侧对、右侧是 undefined；`typeof s.constructor` 为 `function`、`s instanceof Circle` 为 `true`，仅 `===` 错。
