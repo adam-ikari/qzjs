@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T07:42:29"
+updated: "2026-10-17T08:06:17"
 ---
 
 <!-- compiled_truth -->
@@ -486,4 +486,9 @@ updated: "2026-10-17T07:42:29"
 - time: 2026-10-17T07:42:29
   kind: evidence
   summary: "类表达式方法捕获外围变量落地（第六轮）：env_def 索引类型 + 嵌套形参误捕获是关键；零回归"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T08:06:17
+  kind: evidence
+  summary: "模块初始化移出 start 段：修复所有模块级闭包调用崩溃（711/731，97.3%）"
   affects: [aot-wasm-tagged-backend]
