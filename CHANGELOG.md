@@ -4,6 +4,18 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第二十五批差分审计（2026-10-17）
+- 新增 `audit_corpus25.js`（20 例：Math 扩展（imul/clz32/fround/sign/trunc/exp/log 系列）、数字判型（isInteger/isNaN/isSafeInteger）、正则 lastIndex 显式设置与捕获组、split 捕获组、展开字符串与 Set、整数键对象键序、稀疏数组方法、concat 与展开混用、switch let 作用域、for-comma 与嵌套三元、Object.is vs ===、parseInt/parseFloat/Number 异常输入、getter 返回函数被调用、throw 非错误值、嵌套对象 getter 链、Array.from 字符串/类数组、字符串索引与 charAt、提取方法经 .call/.apply/.map、布尔/数值装箱方法、for-in vs for-of 对象）。
+- **修复 6 项（含 2 项静默错值）**：
+  - **Number.prototype 方法**（toString/toFixed/valueOf/…）此前「无方法 toString」→ 顶层 method_call 新增数值分支。
+  - **Boolean.prototype toString/valueOf**：布尔句柄经 bitsToNum 得 NaN → 新增 BOOL_HI 前置分支。
+  - **提取的类方法经 .call/.apply/.map(thisArg)**：包装器 args.map(bitsOf) 遇 undefined 抛 Cannot convert BigInt → 过滤 undefined/null + TAG 补位。
+  - **closureCall 宿主函数分支**此前丢弃 receiver：[1].map(obj.m, obj) 中 this 为 undefined → hf.apply(toJS(recv), args)（静默错值修复）。
+  - **for...in 此前仅自有键**（Object.keys）→ JS 含继承可枚举键；改走 Object.keysIn（宿主原生 for-in 收集）。静默错值修复。
+  - **类 getter 作被调目标 x.p()**：静态快路径直接调 getter（返回其返回值未再调用）→ 静默错值；getter/setter 走动态路径 + 新增 _hasAccessor(get) 分支：prop_get + _emitValueCall(..., recv=rx)。
+- **_emitValueCall 新增 recvExpr 形参**（getter 返回值/方法值调用时把 receiver 传给闭包）。
+- 结果：**598/610（98.0%）**；ctest 32/32。残余 12 例（11 loud + 1 窄面静默 for-of 急切快照，待惰性迭代改造）。
+
 ### 第二十四批差分审计（2026-10-16）
 - 新增 `audit_corpus24.js`（21 例：Math 特殊值（无参 min/max、字符串/布尔参与）、数组方法链、**泛化数组方法**（Array.prototype.join/map/push/slice.call 于 array-like）、位运算边界、typeof 矩阵、解构进阶、in 运算符边界、展开实参 + rest、switch default 非尾、void/一元边界、类私有跨方法、matchAll/替换回调、对象键序与数组索引、JSON 嵌套转义、reduce 无初值、默认参数闭包、数组解构返回、字符串 Unicode 比较、方法链 fluent、对象展开字面量序、复合循环）。
 - **修复：`typeof <类表达式>` → "function"**（此前 loud「不支持的表达式: ClassExpression」）。

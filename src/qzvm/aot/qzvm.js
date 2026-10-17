@@ -44,6 +44,7 @@ const BUILTIN_FNS = {
   "isNaN": isNaN, "isFinite": isFinite,
   "JSON.stringify": JSON.stringify, "JSON.parse": JSON.parse,
   "Object.keys": Object.keys, "Object.values": Object.values, "Object.entries": Object.entries,
+  "Object.keysIn": (o) => { const out = []; if (o != null) for (const k in o) out.push(k); return out; },   // for-in 键（含继承可枚举）
   "Object.freeze": Object.freeze, "Object.seal": Object.seal, "Object.isFrozen": Object.isFrozen, "Object.isSealed": Object.isSealed,
   "Object.preventExtensions": Object.preventExtensions, "Object.isExtensible": Object.isExtensible,
   "Object.getOwnPropertyNames": Object.getOwnPropertyNames, "Object.getPrototypeOf": Object.getPrototypeOf,
@@ -432,7 +433,8 @@ function makeQzvm(strings, opts) {
     if ((BigInt.asUintN(64, handle) >> 48n) === HOST_HI) {         // 宿主函数句柄（顶层函数作值/回调）→ 直接调用
       const hf = handles[idxOf(handle)];
       if (typeof hf !== "function") throw new Error("closure_call: 非函数值");
-      return ret(hf(...[a0, a1, a2, a3].filter(givenSlot).map(toJS)));   // 只传真传了的实参
+      const selfArg = (recv === undefined || recv === TAG) ? undefined : toJS(recv);   // thisArg（map/filter 第 2 实参、.call 的 receiver）→ JS this
+      return ret(hf.apply(selfArg, [a0, a1, a2, a3].filter(givenSlot).map(toJS)));   // 只传真传了的实参
     }
     const off = Number(BigInt.asUintN(64, handle) & 0xffff_ffffn);
     const funcidx = new DataView(mem.buffer).getUint32(off, true);   // 免 4 对齐（bump 偏移可非 4 倍数）
@@ -523,7 +525,7 @@ function makeQzvm(strings, opts) {
     const extra = (first) => [a0, a1, a2, a3].slice(first).filter(givenSlot).map(toJS);
     const name = strings[mid];
     const arr = () => arrRead(recv);
-    const cbv = (h, v, i, acc) => toJS(closureCall(h, bitsOf(v), box(i), acc === undefined ? recv : acc));
+    const cbv = (h, v, i, acc) => toJS(closureCall(h, bitsOf(v), box(i), acc === undefined ? recv : acc, TAG, undefined, givenSlot(a1) ? a1 : undefined));   // thisArg（map/filter…第 2 实参）→ 闭包 receiver（合成方法 lambda 的 this）
     let r;
     switch (name) {
       case "indexOf":     r = givenSlot(a1) ? arr().indexOf(toJS(a0), toJS(a1)) : arr().indexOf(toJS(a0)); break;   // 未传 fromIndex 必须**省略实参**（传 undefined 语义不同）
@@ -856,7 +858,11 @@ function makeQzvm(strings, opts) {
             const m2 = own(c2.methods, name);
             if (m2) {
               const recv2 = recv;
-              return tagHandle(function (...args) { return toJS(exportsRef[m2.name](recv2, ...args.map(bitsOf), TAG, TAG, TAG)); });
+              return tagHandle(function (...args) {   // 提取的类方法：过滤未传实参（apply/call 会带入 undefined）→ TAG 补足
+                const a2 = args.filter(x => x !== undefined && x !== null).map(bitsOf);
+                while (a2.length < 4) a2.push(TAG);
+                return toJS(exportsRef[m2.name](recv2, ...a2.slice(0, 4), TAG));
+              });
             }
             c2 = c2.parent != null ? classMeta[c2.parent] : null;
           }
@@ -1387,6 +1393,10 @@ function makeQzvm(strings, opts) {
     // 通用方法调用：字符串 → doStrMethod；数组(0x7FFB) → doArrMethod；类实例（内存 [0]=__cls id）
     // → 沿继承链查 classMeta[clsId].methods[name] 调 wasm 导出方法（self=recv, a0..a3）。
     method_call: (recv, mid, a0, a1, a2, a3, ovf) => {
+      if (BigInt.asUintN(64, recv) >> 48n === BOOL_HI) {   // 布尔装箱：toString/valueOf（数字分支按 f64 位解析会得 NaN）
+        const bv = (BigInt(recv) & 1n) === 1n;
+        if (strings[mid] === "toString" || strings[mid] === "valueOf") return ret(bv.toString());
+      }
       try {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1, a2, a3);
       if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3);
@@ -1460,6 +1470,11 @@ function makeQzvm(strings, opts) {
       }
       // 纯数值接收者（高16位非任何句柄 tag）→ Number.prototype 方法
       {
+        const vnum = bitsToNum(recv);
+        if (name === "toString") return ret(vnum.toString(toJS(a0) !== undefined ? toJS(a0) : 10));
+        if (name === "toFixed") return ret(vnum.toFixed(Number(toJS(a0))));
+        if (name === "valueOf") return ret(vnum);
+        if (name === "toLocaleString" || name === "toExponential" || name === "toPrecision") return ret(vnum[name](toJS(a0) !== undefined ? Number(toJS(a0)) : undefined));
         const hi = BigInt.asUintN(64, recv) >> 48n;
         if (hi !== TAG_HI && hi !== STR_HI && hi !== BOOL_HI
             && hi !== HOST_HI && hi !== INST_HI && hi !== 0x7ffbn) {

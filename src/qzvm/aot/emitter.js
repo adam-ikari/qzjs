@@ -734,7 +734,7 @@ class Emitter {
         const n = expr.name.text;
         return /^(iterator|asyncIterator|toPrimitive|toStringTag|hasInstance|isConcatSpreadable|species|match|replace|search|split|matchAll)$/.test(n) ? "@@" + n : null;
     };
-    _emitValueCall(calleeExpr, args) {
+    _emitValueCall(calleeExpr, args, recvExpr) {
         const M = this.m, t = this._expEnter();
         this.emitTaggedExpr(calleeExpr); M.localSet(t.v);
         M.localGet(t.v);
@@ -748,7 +748,7 @@ class Emitter {
             litV.pos = args[0].pos; litV.end = args[args.length - 1].end;
             this.emitTaggedExpr(litV);
         } else this._emitUndefined();
-        this._emitUndefined();                        // recv（普通调用 = undefined）
+        if (recvExpr) this.emitTaggedExpr(recvExpr); else this._emitUndefined();   // recv（普通调用 = undefined；字段/访问器取值调用 = receiver）
         M.call("qz.call_value");
         this._emitErrCheck();
         this._expLeave();
@@ -3108,7 +3108,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         // for (k in o) → for (k of Object.keys(o))（复用 for-of 机制；键为字符串）
         const withPos = (n, p) => { n.pos = p.pos; n.end = p.end; return n; };
         const obj = withPos(ts.factory.createIdentifier("Object"), s.expression);
-        const keysProp = withPos(ts.factory.createPropertyAccessExpression(obj, "keys"), s.expression);
+        const keysProp = withPos(ts.factory.createPropertyAccessExpression(obj, "keysIn"), s.expression);   // keysIn：自有+继承可枚举键（JS for-in 语义）
         const keysCall = withPos(ts.factory.createCallExpression(keysProp, undefined, [s.expression]), s.expression);
         const forOf = withPos(ts.factory.createForOfStatement(undefined, s.initializer, keysCall, s.statement), s);
         this.emitTaggedStmt(forOf);
@@ -4801,11 +4801,19 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         const meta = owner && this._classMethodMeta(owner, method);
         // 仅直调有返回值、非 setter 的普通方法；void/setter 语义与动态路径不同（动态返回 i64），退回。
         const voidRet = meta && !!meta.node.type && meta.node.type.kind === ts.SyntaxKind.VoidKeyword;
-        if (owner && meta && meta.accessor !== "set" && !voidRet) {
+        if (owner && meta && !meta.accessor && !voidRet) {   // getter/setter 走动态路径（getter 需先取值再调用）
             // 纯值栈：self + 4 参按形参序压栈（实参可为嵌套调用，天然按深度隔离，无需暂存槽）。
             this.emitTaggedExpr(rx);                                // self
             this._emitMethodArgs(meta.node.parameters, args);
             M.call(methName(owner, method));
+            return;
+        }
+    }
+    {   // 类 getter 作被调目标：x.p() ≡ (取值 x.p)()（如 get m(){ return () => … }）
+        if (this._hasAccessor(method, "get")) {   // 全局 getter 名集合（rx 静态可判时更精确，见 _classOfExpr）
+            const pacc = ts.factory.createPropertyAccessExpression(rx, ts.factory.createIdentifier(method));
+            pacc.pos = rx.pos; pacc.end = rx.end;
+            this._emitValueCall(pacc, args, rx);
             return;
         }
     }
