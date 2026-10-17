@@ -231,4 +231,10 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 - `_emitArrayPush` 就地增长（更新 header 的 len/cap/dataOff，不改句柄）；`_emitLambdaBody` 先建 capMap 再发射体。
 
 下一步：定位对象字面量方法体的发射路径（是否 `_emitLambdaNew` + 延迟 lambda pass，或在外围内联），使方法体内标识符解析与闭包 env 一致。
+### 已尝试并回退：rest 闭包 ≤4 实参的打包（2026-10-17）
+
+尝试：在 `closureCall` 的简单分支（`else`，≤4 实参）加 `else if (meta.rest)` —— 按 `nFix = meta.n - 1` 拆固定参 + `arrWriteback(tail)` 打包剩余。
+效果：修好 `const c = (...a) => a.length`（`undefined` → `3`）与 `fn(...restArr)`（`toJS(...) is not iterable` → 正确值），但**引入 5 例回归**（corpus3/5/10/11/27：`spread-call-mixed` `many-args-abi` `rest-spread-objects` 等——`(a, ...rest)` 调用后 `rest.length` 少 1）。
+根因线索：`hasEx` 分支同样用 `nFix = meta.n - 1` 且工作正常 → 两分支对 `meta.n` 的假设不一致（`lamMeta.n` 对 `(a, ...rest)` 的实际值需实测；可能含 `$ovf`/`blk` 计数差异）。
+结论：**已回退**（净收益为负）。下一步用探针打印 `lamMeta.n`/`rest` 实测值再决定拆包位置。
 
