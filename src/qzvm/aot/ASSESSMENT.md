@@ -287,4 +287,11 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 其余 3 例（corpus11/15 已绿、corpus14/22 仍报 `instanceof: 右操作数不是类或内建类`）表明还有**第二类**类表达式值来源未物化（局部/别名场景）。
 
 结论：此项需**分两步**做——(1) 先把类对象物化从 start 段移出（惰性或延后），(2) 再启用动态 `instanceof`（判定 + 内建回退的补丁已在 `/tmp/qzaux/patch_dyninst3.js`、`patch_dyninst4.js` 成形，单测全对：`const T=Array; [] instanceof T`、`{} instanceof Object`、`new Final() instanceof Root/Final/A(Root)`、`const T=P; p instanceof T`）。**已修复（2026-10-17）**：动态 instanceof 落地（`dynR` 需排除**已知类名**——模块级类亦登记为 moduleGlobals，先前四例回归即此因；宿主 `instanceById` + 内建按名回退 + loud 兜底）。mixin 语料用例的剩余阻塞另有其二：mixin 类**字段默认值**未应用（`x.inc()` → NaN）、类表达式方法**捕获外围变量**（`未定义捕获变量: v`）。
+### mixin 类字段默认值未生效（2026-10-17 插桩，待修）
+
+复现：`const Counted = (B) => class extends B { count: any = 0; inc() { return ++this.count; } }; class Root {} class Final extends Counted(Root) {}` → `new Final().inc()` 得 `NaN`（`count` 读作 undefined）。
+插桩结果（编译期）：`SUPER_FORWARD(__clsExpr_1) dyn=true` + `FIELD_DEFAULTS(__clsExpr_1) fields=["count"]` → **字段默认值确实被发射**，且走的是动态 super 分支（`qz.super_ctor` 之后紧跟 `_emitFieldDefaults`）。
+因此问题在**运行期**：默认值写入的槽与读取端不一致，或 `super_ctor` 调用的父构造器在其之后再次清空字段槽。下一步：在 `_emitFieldDefaults` 后打印 self 与字段偏移，并在宿主 `super_ctor` 前后 dump 该实例的字段槽值（定位是「写错槽」还是「被父构造器覆盖」）。
+
+另一相关阻塞：类表达式**方法捕获外围变量**（`const withVersion = (v) => (Base) => class extends Base { version() { return v; } }` → loud「未定义捕获变量: v」）——类方法未接外围 env，需为类表达式的类方法建立捕获通道（工程量较大）。
 
