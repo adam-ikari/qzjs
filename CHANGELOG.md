@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 嵌套闭包内的私有名限定（2026-10-17）
+- 症状：`class Factory { #base = 100; get builder() { return (x) => this.#base + x; } }` → `fac.builder(1)` = NaN（应为 101）。
+- 真因：私有名（`this.#x`）按「当前类名」限定，而 `_curClass` 只在类方法体内设置；访问器**返回的闭包**在 `_emitLambdaBody` 中发射时 `_curClass` 为空 → 私有名限定失效。
+- 修：`_emitLambdaBody` 复用已有的 `lam._qzSupCtx`（所属类，上一轮箭头 `super` 修复引入）同时设置 `_curClass`（并保存/还原）。
+- 验证：`fac.builder(1)`=101、`fac.builder(2)`=102；corpus36 15→16/17。
+- 结果：**813/820（99.1%）**（36 批）；ctest 32/32 零回归。
+
 ### 对象展开与运行时访问器（2026-10-17）
 - 症状：`const s: any = {}; Object.defineProperty(s, "lazy", { get(){…}, enumerable: true }); const c: any = { ...s };` → `c.lazy` = undefined、`Object.keys(c)` = ""（**键值全部静默丢失**）。
 - 真因：对象字面量的展开分支对 POJO/实例源走**内存槽级浅拷贝**（`0x7FF9`/`0x7FFE` 分支），而访问器键只存在于宿主 `dynAcc` 表（不在内存槽）→ 无槽可拷 → 静默丢键。

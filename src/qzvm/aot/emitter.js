@@ -1437,10 +1437,11 @@ class Emitter {
         const savedMap = this.varMap, savedCap = this.capMap, savedBlk = this.blkLocal;
         const savedMode = this.mode, savedDepth = this.depth, savedStatic = this._staticVars;
         const savedEnvRef = this.envRef;
-        const savedCCO3 = this._curClassObj;   // 箭头内 super 需外层类上下文
+        const savedCCO3 = this._curClassObj, savedCC3 = this._curClass;   // 箭头内 super/私有名需外层类上下文
         const savedLitM = this._inLitMethod;
         this._inLitMethod = !!lam._qzLitMethod;
         this._curClassObj = (lam._qzSupCtx && this.classes.get(lam._qzSupCtx)) || null;
+        this._curClass = lam._qzSupCtx || null;   // 私有名限定（this.#x）在嵌套闭包内也需所属类名
         const savedFnVars2 = this._fnVars; this._fnVars = new Set();
         this.mode = "tagged";
         this._fnVoid = false;                                  // lambda 恒返回 i64
@@ -1511,6 +1512,7 @@ class Emitter {
         if (!(last && ts.isReturnStatement(last))) this._emitUndefined();   // 无显式 return → undefined（JS 语义；不是 unreachable）
         M.endBody();
         this._curClassObj = savedCCO3;
+        this._curClass = savedCC3;
         this._inLitMethod = savedLitM;
         this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
         this.envLocal = undefined; this.envRef = savedEnvRef;
