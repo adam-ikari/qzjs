@@ -268,4 +268,14 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 - **单层 mixin**（`const T = Tagged(Base); new T()`）：越过了 `call 未定义 __m_*$ctor`，改为卡在 `instanceof T`（动态 instanceof，已回退）→ 说明 ctor 转发 + 运行时父链 + 单级方法继承均已通。
 - **链式 mixin**（`class Final extends B2(A(Root)) {}` 后 `x.r()`）：报 `method_call: 类 3 无方法 r` → **运行时父链未逐级记录**。链上每一级类值的创建（`B2(A(Root))` 与 `A(Root)` 的求值）都必须在其自身构造前完成 `class_value_dyn` 记录。
 - 下一步：用 `classRuntimeParent` 插桩定位缺失层级（疑点：guard 内链接的发射时机 vs `_dynParentExpr` 的「已知类」判定对链上中间层是否成立），再决定是否需在类表达式**求值点**（而非 statics guard）建立链接。
+### 动态 instanceof 的**前置缺口**：局部类表达式 const 的值不是宿主类对象（2026-10-17 三轮尝试后定位）
+
+三轮尝试（判定=可解析标识符 → 加 moduleGlobals → 加内建名回退）均在 corpus11/14/15/22 回归，回归信息完全一致：`instanceof: 右操作数不是类或内建类`。
+精确复现（导出回归 DIFF）：
+- corpus11 `class-expression`、corpus14 `array-methods-on-instances`、corpus15 `class-expr-heritage`、corpus22 `class-inherit-override-super`：均含**局部** `const C = class {...}` 后 `x instanceof C`。
+- 早期探针曾显示 `typeof C === "function"`，但 `qz.class_value` **未被调用**（无日志）→ 该值是别的宿主函数（非构造器对象）→ 无 `__qzClsId` → 动态判定必然 loud / 静态判定必然 loud。
+
+**结论：先修前置缺口**——绑定声明路径对 ClassExpression 初值应发射 `_emitClassValue(c)`（存宿主类对象句柄），而非跳过/存放包装器。位置线索：`_emitBindingDecl` 顶层 `ts.isClassExpression(d.initializer)` 分支现为「声明处跳过初值求值 → 存 undefined」（约 296–300 行），局部绑定另有一处同类处理。修完后再启用动态 `instanceof`（判定 + 内建回退已在 /tmp/qzaux/patch_dyninst3.js、patch_dyninst4.js 中成形且单测全对）。
+
+（其余动态 instanceof 单测均正确：`const T=Array; [] instanceof T`、`{} instanceof Object`、`new Final() instanceof Root/Final/A(Root)`、`const T=P; p instanceof T`。）
 
