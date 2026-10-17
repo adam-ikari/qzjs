@@ -1621,7 +1621,7 @@ class Emitter {
         // super 语句处 _emitSuperCall 负责调用父 ctor 后回写本类默认值。基类：此处直接写。
         if (!c.parent) this._emitFieldDefaults(c);
         if (ctor) { this._emitFnDeclClosures(ctor.body); this.emitTaggedBlock(ctor.body); }
-        else if (c.parent) this._emitSuperCallForward(c);   // 合成 ctor：constructor(...a){ super(...a) }
+        else if (c.parent || this._dynParentExpr(c)) this._emitSuperCallForward(c);   // 合成 ctor：constructor(...a){ super(...a) }（动态父同样须转发，否则父类字段默认值不执行）
         this._curClassObj = null;
         M.endBody();
         this._mExit();

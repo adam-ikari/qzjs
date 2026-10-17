@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### mixin 类字段默认值（2026-10-17）
+- **根因**：动态父类（`class Final extends Counted(Root) {}`）在编译期 `c.parent = null` → 合成 ctor 的 super 转发条件 `else if (c.parent)` **不成立** → **父类 ctor 从不执行** → mixin 类（`class extends B { count = 0; … }`）的字段默认值未应用（`++this.count` → NaN）。
+- **修复**：条件放宽为 `else if (c.parent || this._dynParentExpr(c))`（动态父同样须转发 super）。
+- 验证：`new Final()` 后 `x.count, x.inc(), x.inc()` = `0,1,2`（原 `undefined,NaN,NaN`）；三层 mixin（`Counted(Tagged(Base))`）= `base,tagged,1,2,2`（与 JS 一致）。
+- 结果：**709/731（97.0%）**；corpus30 17→18/20。31 批 + ctest 32/32 零回归。
+
 ### 动态 instanceof（运行时类值 / 内建值）（2026-10-17，第三轮后成功）
 - **判定**：`instanceof` 右值为**非已知类名**且为属性访问/调用式/可解析标识符（局部/捕获/模块全局）时 → `qz.instanceof_dyn(左, 右)`；**关键修正**：`dynR` 须排除**已知类名**（模块级类亦登记为 moduleGlobals，先前误判为动态 → corpus11/14/15/22 四例回归）。
 - **宿主**：`instanceById(obj, clsId)`（抽出 `instanceof_op` 的 @@hasInstance 优先 + 原型链，含**运行时父链** `classRuntimeParent`）；`instanceof_dyn` = 用户类值（`__qzClsId`）→ 运行时链判定；内建函数值 → 按名回退（Array/Object/Function/String/Number/Boolean/Map/Set/WeakMap/WeakSet/Promise/RegExp/Date/Error 族）；两者皆非 → loud（不静默 false）。

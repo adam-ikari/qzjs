@@ -287,7 +287,9 @@ export function f(): any { let a: any = []; const o: any = { push: (x: any) => a
 其余 3 例（corpus11/15 已绿、corpus14/22 仍报 `instanceof: 右操作数不是类或内建类`）表明还有**第二类**类表达式值来源未物化（局部/别名场景）。
 
 结论：此项需**分两步**做——(1) 先把类对象物化从 start 段移出（惰性或延后），(2) 再启用动态 `instanceof`（判定 + 内建回退的补丁已在 `/tmp/qzaux/patch_dyninst3.js`、`patch_dyninst4.js` 成形，单测全对：`const T=Array; [] instanceof T`、`{} instanceof Object`、`new Final() instanceof Root/Final/A(Root)`、`const T=P; p instanceof T`）。**已修复（2026-10-17）**：动态 instanceof 落地（`dynR` 需排除**已知类名**——模块级类亦登记为 moduleGlobals，先前四例回归即此因；宿主 `instanceById` + 内建按名回退 + loud 兜底）。mixin 语料用例的剩余阻塞另有其二：mixin 类**字段默认值**未应用（`x.inc()` → NaN）、类表达式方法**捕获外围变量**（`未定义捕获变量: v`）。
-### mixin 类字段默认值未生效（2026-10-17 插桩，待修）
+### 已修：mixin 类字段默认值未生效（2026-10-17）
+
+根因：动态父类 `c.parent = null` → 合成 ctor 的 super 转发条件不成立 → 父类 ctor 从不执行（字段默认值在其中）→ `++this.count` 得 NaN。修复：`else if (c.parent || this._dynParentExpr(c))`。验证：`0,1,2` / 三层 mixin `base,tagged,1,2,2`。
 
 复现：`const Counted = (B) => class extends B { count: any = 0; inc() { return ++this.count; } }; class Root {} class Final extends Counted(Root) {}` → `new Final().inc()` 得 `NaN`（`count` 读作 undefined）。
 插桩结果（编译期）：`SUPER_FORWARD(__clsExpr_1) dyn=true` + `FIELD_DEFAULTS(__clsExpr_1) fields=["count"]` → **字段默认值确实被发射**，且走的是动态 super 分支（`qz.super_ctor` 之后紧跟 `_emitFieldDefaults`）。
