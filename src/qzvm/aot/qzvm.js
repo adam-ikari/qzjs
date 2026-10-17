@@ -229,15 +229,21 @@ function makeQzvm(strings, opts) {
         let v;
         if (e2) v = toJS(dv.getBigInt64(off + e2[1], true));
         else { syncExtras(); const x2 = extras.get(off + "|" + name); v = x2 === undefined ? undefined : toJS(x2); }   // 运行期新增键（extras）
-        if (v !== undefined && !nonEnum.has(off + "|" + name)) { o[name] = v; setNow.add(name); }
+        if (v !== undefined) {
+          if (nonEnum.has(off + "|" + name)) { Object.defineProperty(o, name, { value: v, writable: true, enumerable: false, configurable: true }); }   // 非枚举自有属性（defineProperty enumerable:false）
+          else { o[name] = v; }
+          setNow.add(name);
+        }
       }
     }
     for (const [name, idx] of fieldEntries) {
       if (idx >= size || seen.has(name)) continue;
       if (typeof name === "string" && name.charCodeAt(0) === 35) continue;        // 私有字段（#类名#名）：非自有可枚举属性（JS 私有槽）
-      if (nonEnum.has(off + "|" + name)) continue;   // defineProperty enumerable:false
       const v = toJS(dv.getBigInt64(off + idx, true));
-      if (v !== undefined) { o[name] = v; setNow.add(name); }
+      if (v === undefined) continue;
+      if (nonEnum.has(off + "|" + name)) { Object.defineProperty(o, name, { value: v, writable: true, enumerable: false, configurable: true }); }   // 非枚举自有属性
+      else { o[name] = v; }
+      setNow.add(name);
     }
     for (const [k, v] of extras) {                        // 运行期新增字段
       const bar = k.indexOf("|");
@@ -1031,6 +1037,12 @@ function makeQzvm(strings, opts) {
       }
       throw new Error("instanceof: 右操作数不是类或内建类");
     },
+    brand_check: (obj, clsId) => {   // 私有名 in o：非对象 → TypeError（与 JS 同文案）；对象 → 是否该类实例
+      const u = BigInt.asUintN(64, obj), hi = u >> 48n;
+      const isObj = (hi === TAG_HI && (u & MASK32) >= 8n) || hi === INST_HI || hi === HOST_HI || hi === 0x7ffbn || hi === CLO_HI;
+      if (!isObj) { throwValue(new TypeError("Cannot use 'in' operator on non-object")); return TAG; }
+      return instanceById(obj, clsId);
+    },
     instanceof_op: (obj, clsId) => {
       // Symbol.hasInstance 优先（JS [[HasInstance]] 语义）：沿类继承链查 static @@hasInstance → 调 wasm 静态方法
       {
@@ -1501,6 +1513,10 @@ function makeQzvm(strings, opts) {
       }
       // 展开实参 + 内建函数：Math.max(...a) 等
       if (name === "builtin_spread") {
+        if (strings[a0] === "Object.assign") {   // >4 源（直接路径仅 4 个实参槽）：合并语义
+          const srcs = (toJS(a1) || []).map(x => toJS(x));
+          return ret(Object.assign({}, ...srcs));
+        }
         const fn2 = BUILTIN_FNS[strings[a0]] || (BUILTIN_CTORS.has(strings[a0]) ? globalThis[strings[a0]] : undefined);
         if (typeof fn2 !== "function") throw new Error("builtin_spread: 非函数 " + strings[a0]);
         return ret(fn2.apply(null, toJS(a1)));
@@ -1597,7 +1613,9 @@ function makeQzvm(strings, opts) {
             if (BigInt.asUintN(64, dv2.getBigInt64(off0 + idx, true)) !== TAG) out2.push(n);
           }
           for (const [k] of extras) { const bar = k.indexOf("|"); if (Number(k.slice(0, bar)) === off0) out2.push(k.slice(bar + 1)); }
-          return ret(out2);
+          { const isIx = (k2) => /^(0|[1-9]\d*)$/.test(k2) && Number(k2) < 4294967295;   // JS 键序：整数键在前（升序），其余保持插入序
+            const nums2 = out2.filter(isIx).sort((x2, y2) => Number(x2) - Number(y2));
+            return ret(nums2.concat(out2.filter(k2 => !isIx(k2)))); }
         }
       }
       // Reflect.set / Reflect.deleteProperty：目标为 POJO/实例 → 就地改（物化副本无效）
@@ -2080,6 +2098,9 @@ function makeQzvm(strings, opts) {
     },
     builtin_spread: (id, arr) => {
       const name = strings[id];
+      if (name === "Object.assign") {   // >4 源（直接路径仅 4 实参槽）：合并语义（POJO 目标就地合并由直接路径覆盖）
+        return ret(Object.assign({}, ...(toJS(arr) || [])));   // toJS(arr) 已是 JS 值数组
+      }
       const e2 = BUILTIN_FNS[name];
       let f = Array.isArray(e2) ? e2[0] : (e2 || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined));
       if (f === undefined && typeof globalThis[name] === "function") f = globalThis[name];

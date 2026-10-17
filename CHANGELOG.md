@@ -4,6 +4,16 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 第三十三批语料 + 4 项新修（2026-10-17）
+- 新增 `audit_corpus33.js`（18 例）：Object/Array 组合方法、defineProperty、sort 比较器、String 方法、JSON replacer、标签循环、try/finally、switch、解构、Map/Set、数值与位运算、Math、freeze/seal、私有字段、Symbol、可选链/逻辑赋值、Array.from、闭包循环变量、正则组。首跑 14/18 → **17/18**。
+- 新修 4 项：
+  1. **物化非枚举自有属性**：`Object.defineProperty(o,k,{enumerable:false})` 的属性此前在物化时被**完全跳过**（只记 nonEnum）→ `hasOwnProperty`/`getOwnPropertyDescriptor` 读不到。改为 `Object.defineProperty(o,k,{value,enumerable:false,configurable:true})`（`Object.keys` 仍不含）。
+  2. **JS 键序**：`Object.getOwnPropertyNames`/键枚举须「整数键在前（升序），其余插入序」。
+  3. **内建调用 >4 实参**：`Object.assign({}, a, b, c, d, e)` 直接路径只有 4 个实参槽 → 第 5+ 源静默丢失。发射器改为「内建全局/成员 + >4 实参」走展开路径（宿主 `builtin_spread` 全量透传；`Object.assign` 分支合并语义）。
+  4. **私有名 `in`（品牌检查）**：`#x in o` 此前 loud「不支持的表达式: PrivateIdentifier」。新增宿主 `qz.brand_check(obj, clsId)`：非对象 → `TypeError("Cannot use 'in' operator on non-object")`（与 JS 同文案）；对象 → 是否该类实例。
+  5. **静态/实例方法直调路径补 `_emitErrCheck`**：被调内 throw（跨函数 `__err`）此前被**静默吞掉**（如 `#x in null` 抛错后调用方继续执行）。
+- 结果：**757/768（98.6%）**（33 批）；32 批 + ctest 32/32 零回归。
+
 ### 类名作值（类方法内 return M）+ 静态方法包装器参数补齐（2026-10-17）
 - 症状 A：`class M { static inc() { return M; } }` → `M.inc()` 返回 **undefined**（静默错值）；进而 `M.inc().inc()` 报「method_call: 无方法 inc」。
   真因：`collectClasses` 逐个 `classes.set` 期间，**尚未登记的类名**（含本类自身、后续声明的类）被 `_capturesOf` 误判为自由变量 → 进类 env 捕获表 → 方法体内标识符走 `env_get` 得 TAG。

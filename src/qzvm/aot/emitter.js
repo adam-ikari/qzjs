@@ -119,6 +119,7 @@ const QZ = {
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   class_value: { params: ["i32"], results: ["i64"] },
   builtin_value: { params: ["i32"], results: ["i64"] },
+  brand_check: { params: ["i64", "i32"], results: ["i64"] },   // 私有名 in o（品牌检查）：非对象 → TypeError（JS 语义）
   super_method: { params: ["i64", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 对象字面量 super.m()：按 receiver 原型链解析               // 内建全局作值（String/Number/Array/… → 宿主句柄，缓存保证 ===）                  // 类名作值：clsId → 宿主构造器对象句柄
   new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
   class_value_dyn: { params: ["i32", "i64"], results: ["i64"] },             // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
@@ -4179,7 +4180,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     // 调用实参含展开 f(...a, x)：wasm 静态元数无法承载 → 实参先构造成数组，宿主按名/闭包动态派发
-    if (ts.isCallExpression(e) && e.arguments.some(a => ts.isSpreadElement(a))) {
+    // 内建全局/成员调用 >4 实参（Object.assign(a,b,c,d,e)）同样走此路径：宿主 builtin_spread 全量透传（直接路径只有 4 个实参槽）
+    if (ts.isCallExpression(e) && (e.arguments.some(a => ts.isSpreadElement(a))
+        || (e.arguments.length > 4 && ((ts.isIdentifier(e.expression) && BUILTIN_GLOBALS.has(e.expression.text))
+            || (ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression) && BUILTIN_GLOBALS.has(e.expression.expression.text)))))) {
         this._emitSpreadCall(e);
         return;
     }
@@ -5098,6 +5102,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         this._emitUndefined();
         this._emitMethodArgs(((this.classes.get(owner).staticMethods || []).find(s => s.name === method) || {}).node ? (this.classes.get(owner).staticMethods || []).find(s => s.name === method).node.parameters : null, args);
         M.call(staticMethName(owner, method));
+        this._emitErrCheck();   // 被调内 throw（跨函数 __err）→ 调用点转异常路径（此前静默吞掉）
         return;
     }
     const cls = this._staticRecvClass(rx);
@@ -5111,6 +5116,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
             this.emitTaggedExpr(rx);                                // self
             this._emitMethodArgs(meta.node.parameters, args);
             M.call(methName(owner, method));
+            this._emitErrCheck();   // 同上：直调路径的跨函数 throw
             return;
         }
     }
@@ -5183,6 +5189,12 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         return;
     }
     if (op === ts.SyntaxKind.InKeyword) {
+        if (ts.isPrivateIdentifier(e.left)) {   // 私有名 in o → 品牌检查：非对象 → TypeError；否则 o 是否为声明该私有名的类的实例
+            if (!this._curClassObj) throw new Error("[tagged] #名字 in o 仅在类体内可用");
+            this.emitTaggedExpr(e.right); this.m.i32Const(this._curClassObj.id); this.m.call("qz.brand_check");
+            this._emitErrCheck();
+            return;
+        }
         // k in o → qz.in_op（宿主语义；POJO/实例由 toJS 物化）
         this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this.m.call("qz.in_op"); return;
     }
