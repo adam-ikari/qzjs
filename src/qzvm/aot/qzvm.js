@@ -780,6 +780,18 @@ function makeQzvm(strings, opts) {
     // instanceof：obj 须为类实例句柄（专用 tag 0x7FFE|off，[off]=clsId）；沿「实例类 → 父链」查目标 clsId。
     // 非实例（数字/字符串/bool/null/数组/POJO/宿主对象）→ false。需 bindClasses 提供 classMeta。
     instanceof_op: (obj, clsId) => {
+      // Symbol.hasInstance 优先（JS [[HasInstance]] 语义）：沿类继承链查 static @@hasInstance → 调 wasm 静态方法
+      {
+        let cc = classMeta && classMeta[clsId];
+        while (cc) {
+          const sm = cc.staticMethods && cc.staticMethods["@@hasInstance"];
+          if (sm && exportsRef) {
+            const fn = exportsRef[sm.name];
+            if (typeof fn === "function") return boxBool(!!toJS(fn(TAG, obj, TAG, TAG, TAG)));   // self=TAG(占位)；a0=x=obj(tagged i64)
+          }
+          cc = cc.parent != null ? classMeta[cc.parent] : null;
+        }
+      }
       const u = BigInt.asUintN(64, obj);
       if ((u >> 48n) !== INST_HI) return boxBool(false);
       const off = Number(u & MASK32);

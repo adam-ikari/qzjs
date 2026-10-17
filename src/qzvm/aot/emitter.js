@@ -2745,16 +2745,20 @@ function compileTS(input, outWasm, opts = {}) {
     // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
     const classMeta = em._classList.map(cname => {
         const c = em.classes.get(cname);
-        const methods = {}, getters = {}, setters = {};
+        const methods = {}, getters = {}, setters = {}, staticMethods = {};
         for (const mth of c.methods) {
             if (mth.accessor === "set") setters[mth.name] = { name: methName(cname, mth.name + "$set"), n: mth.node.parameters.length };
             else if (mth.accessor === "get") getters[mth.name] = { name: methName(cname, mth.name), n: 0 };
             else methods[mth.name] = { name: methName(cname, mth.name), n: mth.node.parameters.length,
                                        rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken) };
         }
+        for (const smth of (c.staticMethods || [])) {
+            if (smth.accessor) continue;   // 静态 getter/setter 走独立路径
+            staticMethods[smth.name] = { name: staticMethName(cname, smth.name), n: smth.node.parameters.length };
+        }
         const p = c.parent ? em.classes.get(c.parent) : null;
 
-        return { id: c.id, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters };
+        return { id: c.id, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters, staticMethods };
     });
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs };
 }

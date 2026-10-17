@@ -4,6 +4,14 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### Symbol.hasInstance 修复（2026-10-17）
+- **修复：`x instanceof C` 当 C 有 `static [Symbol.hasInstance]` 此前仅查原型链 → 静默错值**（`4 instanceof Even` 返 false 而非 true）。
+  - emitter `classMeta` 新增 `staticMethods` 字段（与 `methods` 同构：`{name: 导出名, n: 参数量}`，仅普通方法，不含 accessor）。
+  - 宿主 `instanceof_op` 在原型链检查**前**沿继承链查 `staticMethods["@@hasInstance"]` → 调 wasm 静态方法 `__sm_<C>$@@hasInstance(TAG, obj, TAG, TAG, TAG)` → tagged bool。
+  - JS `[[HasInstance]]` 语义：`@@hasInstance` 优先于 `OrdinaryHasInstance`（原型链查）。
+- 差分审计数字不变（636/652，97.5%）——`instanceof-custom-hasinstance` 案仍按 fn-toString 窄面计为 diff（instanceof 行为已正确，仅函数入数组 join 的 toString 取物化包装器源）。ctest 32/32。
+- **消除全部已知静默错值**（for-of 急切快照 + Symbol.hasInstance 均已修；残余 16 例全部 loud 或已知窄面）。
+
 ### 第二十七批差分审计（2026-10-17）
 - 新增 `audit_corpus27.js`（21 例：类 super 方法/静态继承/getter-setter 副作用/计算属性 Symbol/私有字段、JSON 边界值（undefined/NaN/Infinity/函数）、RegExp 标志与捕获、运算符边角（**=/复合赋值/链式比较/0.1+0.2）、Error 子类 cause、解构默认值与 rest、spread 混用调用、Object.create 原型链、getter 链、try-finally-return 交互、Symbol.hasInstance instanceof、数组方法链、模板字符串强制转换、闭包捕获变异、in 运算符类型、Number 方法边界、Object.keys/entries/values 往返）。
 - 结果：**636/652（97.5%）**；ctest 32/32。
