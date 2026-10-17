@@ -393,7 +393,11 @@ export function g(): any { return y; }
 
 顺序要点：早声明必须发生在**导出函数序言发射之前**（`fns` 声明循环之后即可），且 `__module_init` 自身序言要跳过（`_inModInit` 守卫）。
 
-### silent：闭包内 `obj.constructor === C` 恒为 false（2026-10-17 定位，待修）
+### ✅ 已修（2026-10-17）：闭包内 `obj.constructor === C` 恒为 false
+
+根因：`_capturesOf` 把**类名**当自由变量捕获 → 闭包内 `Circle` 经 `env_get` 得 TAG(undefined)。修：捕获扫描排除类名 + 标识符值的类解析兜底（`_className(text) || classes.has(text)`）。验证：闭包内比较 false→true，corpus32 `RRR`→`CRQ`。
+
+（以下为定位记录）### silent：闭包内 `obj.constructor === C` 恒为 false（2026-10-17 定位）
 
 探针（同一模块内对照，Classes：`class Shape {} class Circle extends Shape {}`）：
 | 写法 | 结果 |

@@ -419,6 +419,7 @@ class Emitter {
                 if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
                 const name = n.text;
                 if (!local.has(name) && !seen.has(name) && !this.fnNames.has(name)
+                    && !(this.classes.has(this._className(name) || name))   // 类名不是自由变量（闭包内须走类对象路径）
                     && !(this.moduleGlobals && this.moduleGlobals.has(name))   // 模块级全局：闭包内改为调用时读全局（否则按创建时值捕获 → 自递归箭头 const 拿到 undefined）
                     && !/^(undefined|null|NaN|Infinity)$/.test(name)) { seen.add(name); out.push(name); }
                 return;
@@ -3578,7 +3579,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (e.text === "NaN") { this.m.i64ConstBits(...f64Bits(NaN)); return; }
         if (e.text === "Infinity") { this.m.i64ConstBits(...f64Bits(Infinity)); return; }
         {   // 类名作值 → 宿主构造器对象句柄（prototype 链/静态方法）；new C(...) 仍走专用路径
-            const cnV = this._className(e.text);
+            const cnV = this._className(e.text) || (this.classes.has(e.text) ? e.text : undefined);   // 闭包内 _className 可能失配 → 兜底按原名查类
             const cV = cnV && this.classes.get(cnV);
             if (cV) { this._emitClassValue(cV); return; }
         }

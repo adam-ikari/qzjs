@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 闭包内类名被误当自由变量捕获（silent 错值修复，2026-10-17）
+- **根因**：`_capturesOf` 的自由变量扫描把**类名**（如 `Circle`）当作闭包的自由变量 → 闭包内 `s.constructor === Circle` 的 `Circle` 走 `env_get` → env 中并无该名 → 得 TAG(undefined) → 比较恒 **false**（而同层函数体内正常）。
+- 探针证据：`qz.seq` 收到 `0x7FFD|2`（类句柄）与 `0x7FF9|0`（TAG）→ 左侧对、右侧是 undefined；`typeof s.constructor` 为 `function`、`s instanceof Circle` 为 `true`，仅 `===` 错。
+- **修复**：`_capturesOf` 的标识符过滤补一条「类名不算自由变量」（`this.classes.has(this._className(name) || name)`）；另外把标识符值的类解析兜底为 `_className(text) || (classes.has(text) ? text : undefined)`（闭包内 `_className` 可能失配）。
+- 验证：闭包内 `(s) => s.constructor === Circle` 由 false → **true**；`[new Circle()].map(...)` 同步修好；corpus32 `class-hierarchy-shapes` 由 `RRR` → `CRQ`。
+- 结果：**729/750（97.2%）**；corpus32 17→18/19；32 批 + ctest 32/32 零回归。
+
 ### 第三十二批差分审计（2026-10-17）
 - 新增 `audit_corpus32.js`（19 例：模块级初始化模式（闭包调用/IIFE/计数器——start-段修复后新解锁的面）、模块级状态机、迭代协议（Map/Set/Array 的 keys/values/entries + for-of）、字符串格式化算法、数值算法（素数/阶乘/gcd/斐波那契/Collatz/数位和）、类层次（面积/instanceof/constructor 比较）、错误恢复（tryParse/withRetry/嵌套 try）、闭包循环捕获（var/let/for-of/while）、对象字面量全形态、数组迭代进阶、switch 控制流、JSON 往返、Map/Set 重度使用、高阶管线、字符串解析、bigint/symbol 探针、深层嵌套数据、混合程序 v2、数值精度运算）。
 - 结果：**728/750（97.1%）**；corpus32 17/19。ctest 32/32。
