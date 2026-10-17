@@ -117,7 +117,8 @@ const QZ = {
   builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // nameId, n, a0..a3, ovf（实参 3..）
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
-  class_value: { params: ["i32"], results: ["i64"] },                  // 类名作值：clsId → 宿主构造器对象句柄
+  class_value: { params: ["i32"], results: ["i64"] },
+  builtin_value: { params: ["i32"], results: ["i64"] },               // 内建全局作值（String/Number/Array/… → 宿主句柄，缓存保证 ===）                  // 类名作值：clsId → 宿主构造器对象句柄
   new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
   class_value_dyn: { params: ["i32", "i64"], results: ["i64"] },             // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
   super_ctor: { params: ["i32", "i64", "i64", "i64", "i64", "i64"], results: [] },   // 动态父构造转发：clsId + self + a0..a3
@@ -3582,6 +3583,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const cnV = this._className(e.text) || (this.classes.has(e.text) ? e.text : undefined);   // 闭包内 _className 可能失配 → 兜底按原名查类
             const cV = cnV && this.classes.get(cnV);
             if (cV) { this._emitClassValue(cV); return; }
+        }
+        if (BUILTIN_GLOBALS.has(e.text)) {          // 内建全局作值（String/Number/Array/…）
+            this.m.i32Const(this._strId(e.text)); this.m.call("qz.builtin_value"); return;
         }
         this._emitCapturedRead(e.text); return;
     }

@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 内建全局作值 + 原始值 `.constructor`（2026-10-17）
+- **内建全局作值**：标识符路径新增分支——`BUILTIN_GLOBALS` 名字作值 → `qz.builtin_value(strId)`（宿主句柄**缓存**，保证 `String === String`）；此前落到 `_emitCapturedRead` 的 loud「未定义捕获变量」。
+- **原始值 `.constructor`**：宿主 `prop_get` 对字符串/数字/布尔的 `constructor` → 返回对应内建句柄（`"x".constructor === String` 现为 true）。
+- 验证：`"x".constructor === String`、`5 .constructor === Number`、`true.constructor === Boolean` 均 true；`typeof String/Array` = function、`T === Array` true、`a instanceof T` true。
+- 结果：**730/750（97.3%）**（语料计数未变——相关窄面用例另有其它断言）；32 批 + ctest 32/32 零回归。
+
 ### 含方法/访问器的对象字面量 + 展开 + 计算键（2026-10-17）
 - **展开**：此前该分支直接 loud「含方法/访问器的对象字面量暂不支持展开」→ 现按源码序用 `qz.obj_merge` 就地并入；宿主 `obj_merge` 新增**宿主对象目标**分支（`Object.assign` 语义，值已是 JS 值**勿再 `toJS`**——这正是上一次尝试 `Cannot convert 2 to a BigInt` 的原因）。
 - **计算键**：该分支此前只认 `p.name.text` → `[key]` 落成 `"undefined"`；现计算键改走 `qz.set_index(target, 求值键, 值)`。

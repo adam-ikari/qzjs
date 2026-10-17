@@ -553,6 +553,15 @@ function makeQzvm(strings, opts) {
     return boxBool(false);
   };
   const classHandles = new Map();          // clsId → 宿主句柄（缓存 → === 同一）
+  const builtinValCache = new Map();       // 内建名 → 句柄缓存（=== 稳定）
+  const qzBuiltinValue = (n0) => {         // 取内建全局的宿主句柄（缓存）
+    let h0 = builtinValCache.get(n0);
+    if (h0 !== undefined) return h0;
+    const v0 = globalThis[n0];
+    if (v0 === undefined) return TAG;
+    h0 = tagHandle(v0); builtinValCache.set(n0, h0);
+    return h0;
+  };
   const classRuntimeParent = new Map();    // clsId → 运行时父 clsId（动态 extends / mixin）
   const chainNext = (cc) => {              // 类链下一跳：优先运行时父（mixin），否则静态 parent
     if (!cc) return null;
@@ -944,6 +953,15 @@ function makeQzvm(strings, opts) {
       if (typeof fn === "function") fn(self, a0, a1, a2, a3);
       return;
     },
+    builtin_value: (id) => {                        // 内建全局作值：句柄缓存（保证 === 同一）
+      const n = strings[id];
+      let h2 = builtinValCache.get(n);
+      if (h2 !== undefined) return h2;
+      const v = globalThis[n];
+      if (v === undefined) return TAG;
+      h2 = tagHandle(v); builtinValCache.set(n, h2);
+      return h2;
+    },
     class_value: (clsId) => classValueImpl(clsId),
     instanceof_dyn: (x, rhs) => {                // 动态右值 instanceof：用户类值 → 运行时父链；内建函数值 → 按名回退；否则 loud
       const c = handles[idxOf(rhs)];
@@ -1092,6 +1110,9 @@ function makeQzvm(strings, opts) {
           }
         }
         return TAG;
+      }
+      if (name === "constructor" && (hi === STR_HI || hi === BOOL_HI || (hi !== TAG_HI && hi !== HOST_HI && hi !== CLO_HI && hi !== INST_HI && hi !== 0x7ffbn))) {
+        return qzBuiltinValue(hi === STR_HI ? "String" : hi === BOOL_HI ? "Boolean" : "Number");   // 原始值 .constructor
       }
       if (hi === INST_HI && name === "constructor") {        // 实例 .constructor → 类对象（JS 语义）
         const cid = mem ? new DataView(mem.buffer).getInt32(off, true) : -1;
