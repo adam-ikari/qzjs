@@ -118,7 +118,8 @@ const QZ = {
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   class_value: { params: ["i32"], results: ["i64"] },
-  builtin_value: { params: ["i32"], results: ["i64"] },               // 内建全局作值（String/Number/Array/… → 宿主句柄，缓存保证 ===）                  // 类名作值：clsId → 宿主构造器对象句柄
+  builtin_value: { params: ["i32"], results: ["i64"] },
+  super_method: { params: ["i64", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 对象字面量 super.m()：按 receiver 原型链解析               // 内建全局作值（String/Number/Array/… → 宿主句柄，缓存保证 ===）                  // 类名作值：clsId → 宿主构造器对象句柄
   new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
   class_value_dyn: { params: ["i32", "i64"], results: ["i64"] },             // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
   super_ctor: { params: ["i32", "i64", "i64", "i64", "i64", "i64"], results: [] },   // 动态父构造转发：clsId + self + a0..a3
@@ -1136,6 +1137,7 @@ class Emitter {
         }
         else if (ts.isGetAccessorDeclaration(member)) f = this._synthArrow(["this"], member.body);
         else f = this._synthArrow(["this", member.parameters[0] ? member.parameters[0].name.text : "v"], member.body);
+        f._qzLitMethod = true;   // 对象字面量方法：super 指向字面量的 home object（运行时按 receiver 原型链解析）
         this._synthLambdas.set(member, f);
         return f;
     }
@@ -1383,6 +1385,8 @@ class Emitter {
         const savedMode = this.mode, savedDepth = this.depth, savedStatic = this._staticVars;
         const savedEnvRef = this.envRef;
         const savedCCO3 = this._curClassObj;   // 箭头内 super 需外层类上下文
+        const savedLitM = this._inLitMethod;
+        this._inLitMethod = !!lam._qzLitMethod;
         this._curClassObj = (lam._qzSupCtx && this.classes.get(lam._qzSupCtx)) || null;
         const savedFnVars2 = this._fnVars; this._fnVars = new Set();
         this.mode = "tagged";
@@ -1454,6 +1458,7 @@ class Emitter {
         if (!(last && ts.isReturnStatement(last))) this._emitUndefined();   // 无显式 return → undefined（JS 语义；不是 unreachable）
         M.endBody();
         this._curClassObj = savedCCO3;
+        this._inLitMethod = savedLitM;
         this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
         this.envLocal = undefined; this.envRef = savedEnvRef;
         this.mode = savedMode; this.depth = savedDepth; this._staticVars = savedStatic;
@@ -4134,6 +4139,18 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         && ts.isSuperKeyword(e.expression.expression)) {
         const owner = this._curClassObj && this._curClassObj.parent;
         const method = e.expression.name.text;
+        if (!this._curClassObj && this._inLitMethod) {          // 对象字面量方法内的 super.m(args)：运行时解析（宿主走 receiver 的原型链，this = receiver）
+            const M4 = this.m;
+            this._emitThisReceiver();
+            M4.i32Const(this._strId(method));
+            for (let i = 0; i < 4; i++) {
+                if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+            }
+            this._emitUndefined();   // ovf：>4 实参暂不打包（对象字面量 super 调用的窄面）
+            M4.call("qz.super_method");
+            this._emitErrCheck();
+            return;
+        }
         let c = owner, isStaticM = false;
         while (c) {                                          // 父链上查实例方法，其次静态方法（static super.m()）
             const cl = this.classes.get(c);

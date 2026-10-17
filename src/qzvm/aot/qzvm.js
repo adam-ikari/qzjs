@@ -1990,6 +1990,29 @@ function makeQzvm(strings, opts) {
       if (!m) throw new Error("regex: 无法解析字面量 " + src);
       return tagHandle(new RegExp(m[1], m[2]));
     },
+    // 对象字面量 super.m(args)：this → 物化 → 原型链上取 m → 以 this = receiver 调用
+    super_method: (recv, mid, a0, a1, a2, a3, ovf) => {
+      const name = strings[mid];
+      const o = toJS(recv);
+      const proto = (o != null && (typeof o === "object" || typeof o === "function")) ? Object.getPrototypeOf(o) : null;
+      if (proto == null) throwValue(new TypeError("super." + name + " 的原型为空"));
+      const as4 = [a0, a1, a2, a3].map(toJS);
+      const ex = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []).slice(1);
+      const ovfA = ex.length ? arrWriteback(ex) : undefined;
+      { const ph = bitsOf(proto), uh = BigInt.asUintN(64, ph), hiP = uh >> 48n, offP = Number(uh & MASK32);
+        if (hiP === TAG_HI && offP >= 8 && mem) {                    // POJO 原型：方法存于字段槽（闭包值）
+          const fi = fieldEntries.find(([n]) => n === name);
+          if (fi) {
+            const v = new DataView(mem.buffer).getBigInt64(offP + fi[1], true), uv = BigInt.asUintN(64, v);
+            if ((uv >> 48n) === CLO_HI) return ret(closureCall(v, ret(as4[0]), ret(as4[1]), ret(as4[2]), ret(as4[3]), ovfA, recv));
+            if ((uv >> 48n) === HOST_HI) { const f2 = handles[Number(uv & MASK32)]; if (typeof f2 === "function") { const all0 = as4.concat(ex); while (all0.length && all0[all0.length-1] === undefined) all0.pop(); return ret(f2.apply(o, all0)); } }
+          }
+        } }
+      const f3 = proto[name];
+      if (typeof f3 !== "function") throwValue(new TypeError("super." + name + " 不是函数"));
+      const all = as4.concat(ex); while (all.length && all[all.length - 1] === undefined) all.pop();
+      return ret(f3.apply(o, all));
+    },
     builtin_member: (id) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);

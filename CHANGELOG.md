@@ -4,6 +4,15 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### 对象字面量方法内的 `super`（2026-10-17）
+- 症状：`const d = { __proto__: base, greet() { return "d+" + super.greet(); } }` → 编译期 loud「super.greet() 在父类链上未定义」（对象字面量方法没有类上下文）。
+- 三处修复（corpus29 18→19/20）：
+  1. `_memberLambda` 给对象字面量方法的合成箭头标记 `_qzLitMethod`；`_emitLambdaBody` 据此设 `_inLitMethod`（保存/还原）；
+  2. `super.m(args)` 发射：`_curClassObj` 为空且处于对象字面量方法内时 → 走宿主 `qz.super_method(recv, mid, a0..a3, ovf)`（receiver 由 `_emitThisReceiver()` 取）；
+  3. 宿主 `super_method`：`this` 物化 → `Object.getPrototypeOf(o)`（`__proto__` 字面量在物化时已设真原型）→ 原型上取 `m`（POJO 原型的**字段槽闭包值**直调 `closureCall`，宿主原型走 `fn.apply`）→ **this = receiver**。
+- 验证：`derived.greet()`=`derived+base`；`derived.kind`（继承 getter）=`B`；`"greet" in derived`=true；`Object.getPrototypeOf(derived) === base`=true。
+- 结果：**739/750（98.5%）**；32 批 + ctest 32/32 零回归。
+
 ### `Object.create(Array.prototype)` 的 `length`（2026-10-17）
 - 症状：`const arr = Object.create(Array.prototype); arr[0]=1; arr[1]=2; arr.length=2;` → `arr.length` 恒 0、`arr.join(",")` 恒空串（静默错值）。
 - 两处修复（corpus27 18→19/21）：
