@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T02:27:16"
+updated: "2026-10-17T02:40:43"
 ---
 
 <!-- compiled_truth -->
@@ -366,4 +366,9 @@ updated: "2026-10-17T02:27:16"
 - time: 2026-10-17T02:27:16
   kind: evidence
   summary: "for-of 惰性迭代：消除最后一项已知静默错值（急切快照）"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-17T02:40:43
+  kind: evidence
+  summary: "第二十六批：619/631（98.1%）；修复 String 方法第 2 实参与 Object.defineProperties 就地注册"
   affects: [aot-wasm-tagged-backend]
