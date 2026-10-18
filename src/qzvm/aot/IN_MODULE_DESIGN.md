@@ -1,6 +1,6 @@
 # in-module 档设计
 
-**状态**：设计定稿，M1–M5 已实现（guest 自包含）；M6 未实现——拆 M6a（去 JS 化）+ M6b（qzjs 运行时合并，无 ABI 机制核心；前提 emitter 通用化不绑定 qzjs）。详见 `NO_ABI_DESIGN.md`
+**状态**：设计定稿，M1–M5 已实现（guest 自包含）；M6 未实现——拆 M6a（去 JS 化）+ M6b（qzvm 模块合并，无 ABI 机制核心；前提 emitter 通用化不绑定 qzjs/qzvm）。详见 `NO_ABI_DESIGN.md`
 **范围**：把 **qzvm**（引擎 + `qz.*` 原语 + realm 生命周期 + DAP 调试器 + 扩展注册机制 + 引擎 patches；**不含** Web API 扩展内容、polyfill、pal 接线、libuv）编成 wasm32 模块（`libqzvm.wasm`）的 qzjs 构建形态。`QZ_PROFILE=in-module` 下**不含 wasm 引擎绑定**（`ext_wamr/ext_wasm3` 不进 guest）。
 **方法**：第一性原理推导 guest 真需要什么 + 奥卡姆剃刀取最小产 —— **不追求最小改动**
 **ABI 承诺**：qzjs 只承诺公开 JS API 稳定；wasm 模块内部与 qzvm 交互无 ABI 承诺（内联绑定，见 `NO_ABI_DESIGN.md`）。
@@ -247,7 +247,7 @@ VM:  qz_ctx_create()                guest: qz_ctx_create()
 - 输出 `libqzvm.wasm`（导出 `qz_create`/`qz_eval`/`qz_tick`/`qz_destroy` + `memory`/`malloc`/`free` + M5 结果读出 `qz_result_ptr`/`qz_result_len`），**非** `libqzjs.so`。`guest_entry.c` 用 `__attribute__((export_name))` 把 `qz_guest_*` C 符号映射到设计导出名（避免与宿主侧 `qz_create`/`qz_destroy` 同名）。文件名经 `SUFFIX .wasm` / `PREFIX lib`（M5 定）。
 - 宏 `QZ_VM_GUEST` 由该 target 下发（`target_compile_definitions`），驱动 5.1 的条件编译。`QZ_WITH_*` 全 0 → `qz_default_exts` 全 NULL 槽，不引未编入的扩展符号。
 - 工具链 `cmake/wasm32.cmake`：clang `-target wasm32-wasi --sysroot`（Debian wasi-libc 或 wasi-sdk），`-nodefaultlibs -lc -lm`（绕 Debian 缺 libgcc），reactor（`-mexec-model=reactor`，无 main）。
-- **合并形态裁决（M4 定 / M6b 落地）**：M4 产出**独立 guest `.wasm`**（`libqzvm.wasm`）。emitter 是**通用 TS→wasm 工具**（产物只声明标准 wasm import，不绑定 qzjs，§10.6 line 428）；与 `libqzvm.wasm` 的合并是 **qzjs 运行时侧**行为（M6b：合并成单模块后，emitter 产物的标准 import 变模块内调用——字节码引擎↔wasm 原生代码内联绑定，无 marshalling）。关键不是链接工具（wasm-merge/wasm-ld），是运行时组合 + emitter 通用化。M5 guest 跑通真 JS 后前提满足；M6b 未实现。详见 `NO_ABI_DESIGN.md`。
+- **合并形态裁决（M4 定 / M6b 落地）**：M4 产出**独立 guest `.wasm`**（`libqzvm.wasm`）。emitter 是**通用 TS→wasm 工具**（产物只声明标准 wasm import，不绑定 qzjs/qzvm，§10.6 line 428）；与 `libqzvm.wasm`（qzvm）的合并是 **qzvm 引擎层模块构建**行为（M6b：合并成单模块后，emitter 产物的标准 import 变模块内调用——字节码引擎↔wasm 原生代码内联绑定，无 marshalling）。关键不是链接工具（wasm-merge/wasm-ld），是模块合并 + emitter 通用化。M5 guest 跑通真 JS 后前提满足；M6b 未实现。详见 `NO_ABI_DESIGN.md`。
 
 ```mermaid
 flowchart TB
@@ -276,9 +276,9 @@ flowchart TB
 | M4 ✅ | wasm32 工具链 + guest target | `cmake/wasm32.cmake` + `qzvm-guest` target（`src/qzvm/CMakeLists.txt` if QZ_IN_MODULE）+ `src/qzvm/guest_entry.c`（导出面 + qz_host.drain import） | `libqzvm.wasm` 链接成功，导出 `qz_create`/`qz_eval`/`qz_tick`/`qz_destroy` + `memory`/`malloc`/`free`；import 段含 `qz_host.drain`；native 全回归绿（32/32 ctest）；`-DQZ_VM_GUEST -fsyntax-only` 内核源+guest_entry 零 error。**运行验证**（node WASI preview1 + `qz_host.drain` shim）：`qz_create`→rt、`qz_eval("1+2*3…")`→0、`qz_tick`→0 且 drain 被调、`qz_eval("throw…")`→-1、`qz_destroy` ok——guest 真跑 QuickJS |
 | M5 ✅ | guest 跑通（真 JS + 异步） | §10.3 import 面（M5 仅 `fs_read`/`drain`）+ §10.4 回流：`guest_entry.c` 加 op 表（resolve/reject 持 JSValue）+ `fsRead(path)` 原语（Promise）+ `qz_tick` 去自旋（drain 一批 → dispatch → return）+ 结果读出 `qz_result_ptr/len`；导出名 `libqzvm.wasm`（SUFFIX .wasm / PREFIX lib） | **仓内 harness 真跑**（`test/test_inmodule_guest_e2e.sh` + `test/inmodule-e2e/host.mjs`，CI job `in-module`）：`fsRead(data.txt)` → 结果 `"OK len=33 head=hello from host file"`；reject 路径 `fsRead(NOPE.txt)` → `"ERR ENOENT"`；两个并发 op 按 `op_id` 派发（顺序无关）。证明 guest 持 resolve(JSValue)、host 无 JSContext 经队列拉回（§10.4 选型「import 拉」成立）。限制（M6 消除）：单 rt、op 表 static、单事件 ≤512B、仅 1 个原语 |
 | M6a | qzjs native 侧去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 qzvm-guest；tcp_io/control/worker 去 JSValue；qzjs native 侧不再**直接**调 QuickJS API | qzjs native 侧零 `JS_NewRuntime`（引擎归 qzvm guest）；AOT/standard 档不受影响 |
-| M6b | qzjs 运行时合并+内联绑定（无 ABI 机制核心） | emitter 是**通用 TS→wasm 工具**（产物只声明标准 wasm import，不绑定 qzjs，§10.6 line 428）；qzjs 运行时侧合并 emitter 产物 + `libqzvm.wasm` 成单模块，标准 import 变模块内调用（字节码引擎↔wasm 原生代码内联绑定，无 marshalling） | emitter 产物零 qzjs 专有绑定（通用，任何 wasm 引擎可跑）；合并后模块内调用税 ~ns 级（对标 pal 面 45–66ns，非跨界 3.55µs）。见 `NO_ABI_DESIGN.md` |
+| M6b | qzvm 模块合并+内联绑定（无 ABI 机制核心） | emitter 是**通用 TS→wasm 工具**（产物只声明标准 wasm import，不绑定 qzjs/qzvm，§10.6 line 428）；qzvm 模块合并 emitter 产物 + `libqzvm.wasm` 成单模块，标准 import 变模块内调用（字节码引擎↔wasm 原生代码内联绑定，无 marshalling） | emitter 产物零 qzjs 专有绑定（通用，任何 wasm 引擎可跑）；合并后模块内调用税 ~ns 级（对标 pal 面 45–66ns，非跨界 3.55µs）。见 `NO_ABI_DESIGN.md` |
 
-**M1–M3 全部在 native 上验证**（切分是纯重构，宿主行为不变）→ 风险最低、最先做。M4–M5 引入 wasm 工具链 + 跨界 ABI 不确定性。**M6a/M6b 是 in-module 真正落地**（前 5 步可先跑通 guest 自包含 + 单原语）：M6a 去完 host 侧 JS_ 调用，M6b qzjs 运行时合并 emitter 产物 + `libqzvm.wasm` 成单模块（内联绑定字节码引擎↔wasm 原生代码）；emitter 保持**通用 TS→wasm 工具，不绑定 qzjs**（§10.6 line 428）。
+**M1–M3 全部在 native 上验证**（切分是纯重构，宿主行为不变）→ 风险最低、最先做。M4–M5 引入 wasm 工具链 + 跨界 ABI 不确定性。**M6a/M6b 是 in-module 真正落地**（前 5 步可先跑通 guest 自包含 + 单原语）：M6a 去完 host 侧 JS_ 调用，M6b qzvm 模块合并 emitter 产物 + `libqzvm.wasm` 成单模块（内联绑定字节码引擎↔wasm 原生代码）；emitter 保持**通用 TS→wasm 工具，不绑定 qzjs/qzvm**（§10.6 line 428）。
 
 **相比初版**：删除了「stub uv 头」（负债）；把「native 回归」作为每一步的护栏（而非一次 configure）；最小可验证提前到 M1；**新增 M6**——初版没意识到 pal 面跨界问题（§10）。
 
@@ -307,7 +307,7 @@ cmake --build build-inmod --target qzvm-guest
 | 扩展内容取舍 | 全 OFF 最小，但 guest 的标准面（如 console/URL）依赖 polyfill 非 C 扩展 | M5 定 polyfill 注入的最小集 |
 | 跨界 ABI 已验、深化未验 | §10 骨架（同步/写回/异步）由原型验证（`inmod-abi-proto/`）；**guest 侧 JSValue 生命周期 / 内存增长 / AOT 变体 / 多 op 并发**未验 | M5 扩原型：真实 resolve 持 JSValue、memory.grow、wamrc 路径 |
 | host 去 JS 化面大（M6a） | `bridge.c` 463 / `tcp_io.c` 229 / `control.c` 72 处 JS_ 调用需处置 | M6a 独立，前 5 步不依赖；先判定"移 guest vs 去 JS 化"再动 |
-| 运行时合并+emitter 通用化未明（M6b） | 两点未决：(1)emitter **通用 TS→wasm 工具**——产物只声明标准 wasm import，不假设 qzjs 专有特性（§10.6 line 428 通用编译目标，qzjs 只是符号提供者之一）；(2)qzjs 运行时侧合并 emitter 产物 + `libqzvm.wasm` 成单模块，标准 import 变模块内调用（字节码引擎↔wasm 原生代码内联绑定）的机制 + 表示统一（emitter tagged/bump vs QuickJS JSValue，line 366 暗示 QuickJS 侧复用 0x7FFA） | M6b 是无 ABI 机制核心，零实测（"AOT 变体未验"）；M6a 去完 JS 后才可干净做；先做 1 操作合并原型验机制。见 `NO_ABI_DESIGN.md` |
+| qzvm 模块合并+emitter 通用化未明（M6b） | 两点未决：(1)emitter **通用 TS→wasm 工具**——产物只声明标准 wasm import，不假设 qzjs/qzvm 专有特性（§10.6 line 428 通用编译目标，qzjs 只是符号提供者之一）；(2)qzvm 模块合并 emitter 产物 + `libqzvm.wasm` 成单模块，标准 import 变模块内调用（字节码引擎↔wasm 原生代码内联绑定）的机制 + 表示统一（emitter tagged/bump vs QuickJS JSValue，line 366 暗示 QuickJS 侧复用 0x7FFA） | M6b 是无 ABI 机制核心，零实测（"AOT 变体未验"）；M6a 去完 JS 后才可干净做；先做 1 操作合并原型验机制。见 `NO_ABI_DESIGN.md` |
 | import 面与 AOT `qz.*` 命名冲突 | 两套 import（`qz.*` 值原语 vs `qz_host.*` 宿主能力） | 不同 import module 名隔离（§10.6） |
 
 ## 10. 跨界 ABI（★本轮核心：pal 面如何跨 wasm）
@@ -411,7 +411,7 @@ guest: qz_tick()  ← 宿主每轮 libuv iteration 后调
 
 ### 10.5 对 qzjs native 侧源的影响
 
-in-module 下 **qzjs native 侧不再直接调 QuickJS API**（`qzjs.c:489` 的 `JS_NewRuntime` 是 qzvm guest 的活；引擎**仍属 qzjs 运行时**，只是位于 `libqzvm.wasm` 内）。故 qzjs native 侧需去 JS 化的源：
+in-module 下 **qzjs native 侧不再直接调 QuickJS API**（`qzjs.c:489` 的 `JS_NewRuntime` 是 qzvm guest 的活；引擎属 **qzvm**（qzjs 运行时的引擎子模块），位于 `libqzvm.wasm` 内）。故 qzjs native 侧需去 JS 化的源：
 
 | 源 | JS_ 用量 | 处置 |
 | --- | --- | --- |

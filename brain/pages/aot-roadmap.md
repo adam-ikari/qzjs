@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-18T10:40:38"
+updated: "2026-10-18T13:42:35"
 ---
 
 <!-- compiled_truth -->
@@ -153,3 +153,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "emitter 通用化重点修正(用户纠正'通用ts编译wasm工具是重点,不要绑定qzjs运行时'): 撤销 NO_ABI_DESIGN.md + IN_MODULE_DESIGN.md 中'M6b=emitter 内联绑定 QuickJS'错误框架(那会绑定 qzjs 运行时)。修正为: emitter 是通用 TS→wasm 工具, 产物只声明标准 wasm import(零 import 或 JS 函数服务号), 不假设 qzjs 专有特性(§10.6 line 428 qzjs 只是符号提供者之一); in-module 的内联绑定是 qzjs 运行时侧行为(合并 emitter 产物+libqzvm.wasm 成单模块, 标准 import 变模块内调用, 字节码引擎↔wasm 原生代码)。修正 8 处: IN_MODULE_DESIGN 状态行/§6 合并裁决/§7 M6b 行+总结/§9 M6b 风险; NO_ABI_DESIGN §2.1/偏差1/偏差2/偏差3/偏差6/§5。M6b 重新定义=qzjs 运行时合并(emitter 通用化为前提)。emitter 通用化是无 ABI 前提+产品重点, 不是 emitter 侧内联绑定工程。"
   source: "用户纠正'通用ts编译wasm工具是重点,不绑定qzjs运行时'; §10.6 line 428(qzjs 符号提供者之一)"
   affects: [aot-roadmap, IN_MODULE_DESIGN]
+
+- time: 2026-10-18T13:42:35
+  kind: reversal
+  summary: "术语归属二次反转(用户澄清 qzvm vs qzjs): 撤销前 reversal 'in-module 内联绑定是 qzjs 运行时侧行为'的错误归属。修正为: qzvm=JS引擎(libqzvm.wasm, 含 QuickJS 字节码引擎+qz.* 原语+realm 生命周期); qzjs=完整运行时(qzvm+宿主+pal+libuv+公开 JS API), qzjs ⊃ qzvm。in-module 合并(emitter 产物+libqzvm.wasm 成单模块, 标准 import 变模块内调用, 字节码引擎↔wasm 原生代码内联绑定)是 qzvm 引擎层模块构建行为, 非 qzjs 运行时侧行为; 内联绑定对象=qzvm。M6b 重定义=qzvm 模块合并(emitter 通用化为前提)。emitter 保持通用不绑定 qzjs/qzvm。对外边界仍用 qzjs 运行时(import 由宿主提供, 正确)。新建 aot-glossary 术语库页。修正 14 处: IN_MODULE_DESIGN 状态行/§6 合并裁决/§7 M6b 行+总结/§9 M6b 风险/§10.5 引擎归属; NO_ABI_DESIGN §2 标题/§2.1 归属+列表+18 qz.* 行/偏差1 标题+M6 目标+关系+修正/偏差2 两点+修正/偏差3 消亡+修正/偏差6 重复行删除。"
+  source: "用户澄清: qzvm=JS引擎, qzjs=完整运行时, 内联绑定归 qzvm 引擎层非 qzjs 运行时侧"
+  affects: [aot-roadmap, aot-glossary, IN_MODULE_DESIGN, NO_ABI_DESIGN]

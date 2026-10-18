@@ -1,11 +1,12 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-18T10:40:38.198Z._
+_Auto-generated. Last updated 2026-10-18T13:42:35.994Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-bigint-tagged-backend](pages/aot-bigint-tagged-backend.md) — category: decision | tags: [aot, wasm, bigint, qzvm, emitter] | # AOT BigInt tagged 后端（批 39，2026-10-18）
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | status: archived | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
 - [aot-generic-compiler-target](pages/aot-generic-compiler-target.md) — category: decision | tags: [decision, aot, wasm, architecture, generic] | ## 结论
+- [aot-glossary](pages/aot-glossary.md) — category: reference | # AOT 术语库
 - [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
 - [aot-roadmap](pages/aot-roadmap.md) — category: reference | tags: [aot, roadmap, emitter, reference] | # AOT 主线路线（emitter.js 唯一主线）
 - [aot-wasm-tagged-backend](pages/aot-wasm-tagged-backend.md) — category: decision | tags: [aot, wasm, emitter, qzvm, perf] | # AOT tagged 后端（emitter.js → wasm）
