@@ -236,11 +236,11 @@ export function setupURL() {
     }
 
     _parse(url, baseUrl) {
-      if (typeof url !== 'string') {
-        throw new TypeError('URL must be a string');
-      }
-
-      url = url.trim();
+      /* WebIDL:构造器/`href=` 的参数先转 USVString 再解析。浏览器里
+       * `new URL(window.location)` 走 location.toString() → href;数字、
+       * 带 toString 的对象同理。此前对非字符串直接抛 "URL must be a string",
+       * docs.python.org 的 sphinx_highlight.js 因此整段中断(实测 warn)。 */
+      url = String(url).trim();
 
       // Regex for URL parsing
       // protocol://[user:pass@]host[:port]/path[?query][#hash]
