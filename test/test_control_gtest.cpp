@@ -518,3 +518,132 @@ TEST(control_, timeout) {
     EXPECT_NE(std::string::npos, out.find("\"code\":\"TIMEOUT\"")) << out;
     host_destroy(h);
 }
+
+/* ---- op:"context"：宿主可寻址的 per-document realm ----
+ *
+ * 背景见 brain document-global-environment：浏览器语义是「一个文档 = 一个
+ * 全新全局环境」。qzjs 既有模型是「宿主只见主 context」，子 context 只能由
+ * JS 侧 qzContext.spawn 建、建完 active 切回主，宿主无法持续把 eval 指向它。
+ * op:"context" 补的就是这个入口。 */
+
+// 从回执里取 id（够用即可：回执是 `{"ctl":true,...,"id":N}`）。
+static int receipt_id(const std::string &r) {
+    size_t p = r.find("\"id\":");
+    if (p == std::string::npos) return -1;
+    return atoi(r.c_str() + p + 5);
+}
+
+static std::string ctx_eval_cmd(const char *correl, int ctx_id, const char *script) {
+    return std::string("{\"op\":\"eval\",\"correl\":\"") + correl +
+           "\",\"ctx_id\":" + std::to_string(ctx_id) + ",\"script\":" +
+           JSON_string(script) + "}";
+}
+
+TEST(control_, context_new_is_addressable_and_isolated) {
+    HostCtx *h = host_create_ctl();
+    ASSERT_NE(nullptr, h);
+    std::string out;
+
+    ASSERT_EQ(0, host_control(h, R"({"op":"context","correl":"cn1","action":"new"})"));
+    ASSERT_TRUE(host_wait_ctl(h, "cn1", &out)) << out;
+    ASSERT_NE(std::string::npos, out.find("\"ok\":true")) << out;
+    int id = receipt_id(out);
+    ASSERT_GE(id, 1) << out;   // 主 context 占 0
+
+    /* new **不改变 active**：宿主仍「只见主」，不带 ctx_id 的命令继续落主。 */
+    ASSERT_EQ(0, host_control(h, R"({"op":"context","correl":"ca1","action":"active"})"));
+    ASSERT_TRUE(host_wait_ctl(h, "ca1", &out)) << out;
+    EXPECT_EQ(0, receipt_id(out)) << out;
+
+    /* 子 realm 的全局不泄漏到主。 */
+    ASSERT_EQ(0, host_control(h, ctx_eval_cmd("ce1", id,
+        "globalThis.__only_child = 7; 1")));
+    ASSERT_TRUE(host_wait_ctl(h, "ce1", &out)) << out;
+    ASSERT_NE(std::string::npos, out.find("\"ok\":true")) << out;
+
+    ASSERT_TRUE(host_value(h, "typeof globalThis.__only_child", &out));
+    EXPECT_EQ("undefined", out) << out;
+
+    /* 带 ctx_id 才看得见子 realm 自己的全局。 */
+    ASSERT_EQ(0, host_control(h, ctx_eval_cmd("ce2", id,
+        "String(globalThis.__only_child)")));
+    ASSERT_TRUE(host_wait_ctl(h, "ce2", &out)) << out;
+    EXPECT_NE(std::string::npos, out.find("\"result\":\"7\"")) << out;
+
+    /* destroy 后该 id 不再可寻址；主 context 始终可用。 */
+    std::string dcmd = "{\"op\":\"context\",\"correl\":\"cd1\",\"action\":\"destroy\",\"id\":" +
+                       std::to_string(id) + "}";
+    ASSERT_EQ(0, host_control(h, dcmd));
+    ASSERT_TRUE(host_wait_ctl(h, "cd1", &out)) << out;
+    EXPECT_NE(std::string::npos, out.find("\"ok\":true")) << out;
+
+    ASSERT_EQ(0, host_control(h, ctx_eval_cmd("ce3", id, "1")));
+    ASSERT_TRUE(host_wait_ctl(h, "ce3", &out)) << out;
+    EXPECT_NE(std::string::npos, out.find("\"code\":\"NOT_FOUND\"")) << out;
+
+    ASSERT_TRUE(host_value(h, "1+1", &out));
+    EXPECT_EQ("2", out) << out;
+    host_destroy(h);
+}
+
+/* per_context_bytecode：宿主的 initial_bytecode 是否也在**非主** context 里
+ * 跑一遍。两条测试互为对照 —— 只跑一条「有」证明不了开关有区分力。 */
+static HostCtx *host_create_ctl_bc(const uint8_t *bc, size_t bc_len,
+                                   int per_context) {
+    auto *h = new HostCtx();
+    qz_config_t cfg;
+    qz_config_init(&cfg);
+    cfg.initial_script = kTestBootstrap;
+    cfg.control_plane = QZ_CONTROL_IN_PROC;
+    cfg.initial_bytecode = bc;
+    cfg.initial_bytecode_len = bc_len;
+    cfg.per_context_bytecode = per_context;
+    h->rt = qz_create(&cfg);
+    if (!h->rt) { delete h; return nullptr; }
+    return h;
+}
+
+static std::string child_marker(HostCtx *h, const char *correl) {
+    std::string out;
+    if (host_control(h, R"({"op":"context","correl":"pn1","action":"new"})") != 0)
+        return "<ctl-failed>";
+    if (!host_wait_ctl(h, "pn1", &out)) return "<no-receipt>";
+    int id = receipt_id(out);
+    if (id < 0) return "<no-id>";
+    if (host_control(h, ctx_eval_cmd(correl, id,
+            "String(globalThis.__doc_boot)")) != 0)
+        return "<ctl-failed>";
+    if (!host_wait_ctl(h, correl, &out)) return "<no-receipt>";
+    size_t p = out.find("\"result\":");
+    if (p == std::string::npos) return "<no-result>";
+    return out.substr(p);
+}
+
+TEST(control_, per_context_bytecode_runs_in_new_context) {
+    const char *src = "globalThis.__doc_boot = 'yes';";
+    uint8_t *bc = nullptr; size_t bc_len = 0; char *err = nullptr;
+    ASSERT_EQ(0, qz_compile(src, strlen(src), "<doc-boot>", &bc, &bc_len, &err))
+        << (err ? err : "");
+    ASSERT_NE(nullptr, bc);
+
+    HostCtx *h = host_create_ctl_bc(bc, bc_len, 1);
+    ASSERT_NE(nullptr, h);
+    EXPECT_NE(std::string::npos, child_marker(h, "pe1").find("\"result\":\"yes\""));
+    host_destroy(h);
+    free(bc);
+}
+
+TEST(control_, per_context_bytecode_off_by_default) {
+    const char *src = "globalThis.__doc_boot = 'yes';";
+    uint8_t *bc = nullptr; size_t bc_len = 0; char *err = nullptr;
+    ASSERT_EQ(0, qz_compile(src, strlen(src), "<doc-boot>", &bc, &bc_len, &err))
+        << (err ? err : "");
+    ASSERT_NE(nullptr, bc);
+
+    HostCtx *h = host_create_ctl_bc(bc, bc_len, 0);
+    ASSERT_NE(nullptr, h);
+    EXPECT_NE(std::string::npos,
+              child_marker(h, "po1").find("\"result\":\"undefined\""));
+    host_destroy(h);
+    free(bc);
+}

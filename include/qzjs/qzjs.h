@@ -72,6 +72,17 @@ typedef struct qz_config_s {
     int strict_mode;                 /* 0 = off（默认）| 1 = on */
     const char *sandbox_root;
     const char *const *env_allowlist;
+    /* 非主 context 是否也要跑宿主的 initial_bytecode。
+     *   0（默认）= 现状：只有主 context 跑宿主字节码（thread.c / rt_main.c 的
+     *     启动路径），`op:"context" new` / `qzContext.spawn` 建出来的子 context
+     *     仅注入 qzjs 自带 polyfill。
+     *   1 = 每个**非主** context 在建好（polyfill + ext init 完成）后，再求值一遍
+     *     rt->config.initial_bytecode —— 宿主借此让它建立的「每个文档一个全新
+     *     全局环境」都带上自己的引导程序（例如浏览器 polyfill）。子 context 的
+     *     字节码求值失败 = 建 context 失败（不静默留一个没有引导程序、只能报
+     *     一堆 "xxx is not defined" 的空 realm）。主 context（slot 0）仍由启动
+     *     路径求值，这里跳过以免同一段字节码被求值两次。 */
+    int per_context_bytecode;        /* 0 = 主 context only（默认）| 1 = 每个 context */
 } qz_config_t;
 
 /* 初始化 qz_config_t 的 ABI 门控字段（struct_size / abi_version）与其余字段的
