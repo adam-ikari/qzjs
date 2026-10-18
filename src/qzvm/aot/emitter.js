@@ -3255,7 +3255,15 @@ Emitter.prototype._emitConcat = function (inPlace) {
       M.ifBlock("i64");
         M.localGet(this.scratchB); M.localGet(this.scratchA); M.call("qz.string_concat");
       M.else_();
-        M.localGet(this.scratchB); M.localGet(this.scratchA); M.call("qz.add");
+        // 双纯数 → f64Add 内联（零跨界）；否则宿主 qz.add（ToPrimitive：bool/null/handle 拼接语义）
+        this._emitIsPureNum(this.scratchA); this._emitIsPureNum(this.scratchB); M.i32And();
+        M.ifBlock("i64");
+          M.localGet(this.scratchB); M.f64ReinterpretI64();
+          M.localGet(this.scratchA); M.f64ReinterpretI64();
+          M.f64Add(); M.i64ReinterpretF64();
+        M.else_();
+          M.localGet(this.scratchB); M.localGet(this.scratchA); M.call("qz.add");
+        M.end();
       M.end();
     M.end();
     this._concatInPlace = saved;

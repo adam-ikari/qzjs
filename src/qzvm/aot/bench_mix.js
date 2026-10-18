@@ -22,7 +22,7 @@ const { execSync, spawnSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..", "..", "..");
 const OUT = path.join(ROOT, "build", "aot");
-const QZJS = process.env.QZJS || path.join(ROOT, "build", "dbg", "qzjs");
+const QZJS = path.resolve(process.env.QZJS || path.join(ROOT, "build", "dbg", "qzjs"));
 
 // 每负载：[glue 前缀, 导出名, 参数, interp 回退名单]
 // interp：这些函数不编 wasm，退到宿主解释器跑（`--interp`）。字符串密集型即此类——
