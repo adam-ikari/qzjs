@@ -92,7 +92,7 @@ f64 在 wasm 里恒为 IEEE-754 double（与宿主字长无关）。成本全在
 | 宽度语义假设 | 字段步长 `NF*8`、句柄 `高16位0x7FF9\|offset`、bump `NF*8`、QZ import 全 i64 | emitter.js `_fieldIndex`/object literal；QZ 表 |
 | qzvm.js | BigInt i64 编解码（`f64↔i64` reinterpret）；32/64 位宿主同一实现 | qzvm.js |
 | **`build.js` 目标** | **缺陷**：`:97` 无 `--target`/`--target-abi` → 默认宿主 CPU 架构，产物不可跨架构分发 | build.js:91,97 |
-| wasm2c→C99→.so | 可行：wasm2c（已装 `/usr/bin/wasm2c`）生成 `uint32_t` 地址 + C `double`，32 位 C 编译器可编；但继承 f64 软浮点代价 | README.md:55（历史路线） |
+| wasm2c→C99→.so | ~~可行~~ **已否决删除**（2026-10-18）：wasm2c so 派生实验已删，so 形态失效；32 位分发走 wamrc AOT + `--target/--target-abi` | release-artifact-topology（reversal）|
 | ext_wamr.c | **I32/I64/F32/F64 参数与返回转换全支持，无阻塞** | :860–877 参数、:908–939 返回（已阅） |
 
 **唯一需要修的 32 位缺口在构建脚本**：加显式 `--target=<arch> --target-abi=<abi>` 并透传给 wamrc；表示层本身可移植。
@@ -133,4 +133,4 @@ wamrc 可用 ABI：`gnu eabi eabihf gnueabihf msvc ilp32 ilp32f ilp32d lp64 lp64
 | `div(7,2)` | 3.5 | 浮点除法 |
 | `mod(10,3)` / `neg(5)` / `wsum(1000)` | 1 / -5 / 499500 | 取模/取负/循环 |
 
-未测：armv7 / riscv32 真机或 QEMU（仅确认 wamrc 支持该 target/ABI、交叉编译产出成功）；wasm2c 32 位 C 构建。
+未测：armv7 / riscv32 真机或 QEMU（仅确认 wamrc 支持该 target/ABI、交叉编译产出成功）。（wasm2c 32 位 C 构建已否决删除，见 release-artifact-topology reversal。）
