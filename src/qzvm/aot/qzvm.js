@@ -1188,7 +1188,7 @@ function makeQzvm(strings, opts) {
       }
       if (hi === HOST_HI) {
         const o = handles[off], hv = o == null ? undefined : o[name];
-        return Array.isArray(hv) ? tagHandle(hv) : ret(hv);   // 宿主数组：保持宿主句柄（就地写，见 object_get 注释）
+        return Array.isArray(hv) ? tagHandle(hv) : typeof hv === "bigint" ? hv : ret(hv);   // BigInt = 已打包句柄（如描述符里的 get/set 闭包句柄）→ 直通（保持 CLO_HI → typeof "function"）
       }
       if (hi === CLO_HI) {                                   // 闭包值：函数自身属性
         const dv3 = mem ? new DataView(mem.buffer) : null;
@@ -1560,6 +1560,18 @@ function makeQzvm(strings, opts) {
           const props = toJS(a1) || {};
           for (const key of Object.keys(props)) {
             const desc = props[key] || {};
+            if (desc.get || desc.set) {   // 访问器描述符：注册 dynAcc（与 defineProperty 同路径）
+              syncDynAcc();
+              { if (typeof key === "string") { let l = orderMap.get(offD); if (!l) { l = []; orderMap.set(offD, l); } if (l.indexOf(key) < 0) l.push(key); } }
+              const gv = desc.get, sv = desc.set;
+              const gH = (gv && typeof gv === "function" && gv.__qzClo !== undefined) ? gv.__qzClo : (gv === undefined ? undefined : bitsOf(gv));
+              const sH = (sv && typeof sv === "function" && sv.__qzClo !== undefined) ? sv.__qzClo : (sv === undefined ? undefined : bitsOf(sv));
+              dynAcc.set(offD + "|" + key, { g: gH, s: sH });
+              syncPropFlags(); propFlags.set(offD + "|" + key, { w: true, c: desc.configurable !== false });
+              if (desc.enumerable === false) { syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); nonEnum.set(offD + "|" + key, true); }
+              continue;
+            }
+            if (typeof key === "string") { let l = orderMap.get(offD); if (!l) { l = []; orderMap.set(offD, l); } if (l.indexOf(key) < 0) l.push(key); }   // 插入序（物化/keys 顺序一致；此前值描述符不更新 orderMap → 物化键序错）
             const val = bitsOf(desc.value);
             const e2 = fieldEntries.find(([nn]) => nn === key);
             if (e2 && mem && new DataView(mem.buffer).getInt32(offD + 4, true) >= e2[1] + 8) new DataView(mem.buffer).setBigInt64(offD + e2[1], val, true);
@@ -1616,6 +1628,46 @@ function makeQzvm(strings, opts) {
           syncPropFlags(); syncNonEnum(bumpRef ? Number(bumpRef.value) : -1);
           const fl = propFlags.get(off0 + "|" + key) || {};
           return tagHandle({ value: val, writable: fl.w !== false, enumerable: !nonEnum.has(off0 + "|" + key), configurable: fl.c !== false });
+        }
+      }
+      // Object.getOwnPropertyDescriptors(o)：POJO/实例 → 逐键组装描述符（含 writable/enumerable/configurable + 访问器 get/set）
+      if (name === "Object.getOwnPropertyDescriptors" && a0 !== undefined) {
+        const h0 = BigInt.asUintN(64, a0) >> 48n, off0 = Number(BigInt.asUintN(64, a0) & MASK32);
+        if ((h0 === TAG_HI && off0 >= 8) || h0 === INST_HI) {
+          syncExtras(); syncNonEnum(bumpRef ? Number(bumpRef.value) : -1); syncDynAcc(); syncPropFlags();
+          const dv2 = mem ? new DataView(mem.buffer) : null;
+          const size2 = dv2 ? dv2.getInt32(off0 + 4, true) : 0;
+          const keys = [];
+          for (const [n, idx] of fieldEntries) {
+            if (idx >= size2) continue;
+            if (typeof n === "string" && n.charCodeAt(0) === 35) continue;
+            if (BigInt.asUintN(64, dv2.getBigInt64(off0 + idx, true)) !== TAG) keys.push(String(n));
+          }
+          for (const [k] of extras) { const bar = k.indexOf("|"); if (Number(k.slice(0, bar)) === off0 && keys.indexOf(k.slice(bar + 1)) < 0) keys.push(k.slice(bar + 1)); }
+          for (const k of dynAcc.keys()) { const bar = k.indexOf("|"); if (Number(k.slice(0, bar)) === off0 && keys.indexOf(k.slice(bar + 1)) < 0) keys.push(k.slice(bar + 1)); }
+          { const isIx = (k2) => /^(0|[1-9]\d*)$/.test(k2) && Number(k2) < 4294967295;
+            keys.sort((a, b) => { const na = isIx(a) ? Number(a) : -1, nb = isIx(b) ? Number(b) : -1;
+              if (na >= 0 && nb >= 0) return na - nb; if (na >= 0) return -1; if (nb >= 0) return 1; return 0; }); }
+          const out = {};
+          for (const key of keys) {
+            const fl = propFlags.get(off0 + "|" + key) || {};
+            const acc2 = dynAcc.get(off0 + "|" + key);
+            if (acc2) {
+              out[key] = { get: acc2.g, set: acc2.s,
+                enumerable: !nonEnum.has(off0 + "|" + key), configurable: fl.c !== false };
+            } else {
+              let has = false, val = undefined;
+              const e2 = fieldEntries.find(([n]) => n === key);
+              if (e2 && dv2 && dv2.getInt32(off0 + 4, true) >= e2[1] + 8) {
+                const raw = BigInt.asUintN(64, dv2.getBigInt64(off0 + e2[1], true));
+                if (raw !== TAG) { has = true; val = toJS(raw); }
+              }
+              if (!has) { const x2 = extras.get(off0 + "|" + key); if (x2 !== undefined) { has = true; val = toJS(x2); } }
+              if (!has) continue;
+              out[key] = { value: val, writable: fl.w !== false, enumerable: !nonEnum.has(off0 + "|" + key), configurable: fl.c !== false };
+            }
+          }
+          return tagHandle(out);
         }
       }
       // Object.getOwnPropertyNames(o)：预登记字段（已赋值）+ extras（含非枚举）

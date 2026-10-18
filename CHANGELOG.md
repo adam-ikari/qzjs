@@ -5,6 +5,12 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+
+### 描述符往返完整修复（2026-10-18）
+- **getOwnPropertyDescriptors**：POJO/实例逐键组装描述符（含 writable/enumerable/configurable + 访问器 get/set）；此前走原生+物化 → 丢 writable/enumerable/访问器。
+- **defineProperties**：访问器描述符注册 dynAcc（与 defineProperty 同路径）；值描述符更新 orderMap（插入序）→ 往返键序正确。
+- **prop_get HOST 分支**：BigInt 属性值（描述符里的 get/set 闭包句柄）直通（保持 CLO_HI → typeof "function"）；此前 tagHandle 包成 HOST → typeof "object"。
+- 结果：批 37 16/17 → 17/17 全绿；**833/837（99.5%）**；ctest 32/32 零回归。
 ### `iter_close` 根因修复（2026-10-18）
 - **根因**：emitter 的 for-of 把 `iter_close` 调用放在 `loop.end` 与 `brk block.end` 之间。但 wasm 语义 `br 到 block = 跳到 end 之后`，`brIf(1)`（done）与 break 均跳到 brk block 的 end 之后 → 跳过了 block 内的 `iter_close` 调用 → 永不执行。
 - **修复**：把 `M.call(qz.iter_close)` 移到 brk block 的 `end()` 之后（block 外）。`brIf(1)` 跳到 brk.end 后即落在 iter_close；break 同理。
