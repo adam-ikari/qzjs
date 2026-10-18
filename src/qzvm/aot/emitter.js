@@ -4536,7 +4536,18 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (e.operator === ts.SyntaxKind.ExclamationToken) {
             this.m.call("qz.truthy"); this.m.i32Eqz(); this.emitBoxBool();
         } else if (e.operator === ts.SyntaxKind.TildeToken) {
+            // 双路径：BigInt → binop op 11（~x，精确位反）；其余 qz.bnot（ToInt32 语义）
+            const M3 = this.m, t3 = this._expEnter();
+            M3.localSet(this.scratchB);
+            this._emitIsBig(this.scratchB);
+            M3.ifBlock("i64");
+            M3.i32Const(11); M3.localGet(this.scratchB); M3.localGet(this.scratchB);
+            M3.call("qz.bigint_binop");                       // b = dummy（op 11 忽略）
+            M3.else_();
+            M3.localGet(this.scratchB);
             this.m.call("qz.bnot");          // ~a = ~(ToInt32(ToNumber(a)))，宿主解引用（含字符串/句柄）
+            M3.end();
+            this._expLeave();
         } else if (e.operator === ts.SyntaxKind.PlusToken) {
             this.m.call("qz.to_num");        // +a = ToNumber(a)
         } else if (e.operator === ts.SyntaxKind.MinusToken) {
@@ -4648,6 +4659,11 @@ Emitter.prototype._emitIsHandle = function (scratch) {
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();   // 闭包值（函数）
     M.i32Or();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();   // 宿主对象(JSON.parse 结果/函数等)
+    M.i32Or();
+    // BigInt（0x7FF8|低32≠0）：可交宿主（toJS 还原真 BigInt → 原生 JS 语义；BIG×number 混合 = JS TypeError）
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff8n); M.i64Eq();
+    M.localGet(scratch); M.i64Const(0xffff_ffffn); M.i64And(); M.i64Eqz(); M.i32Eqz();
+    M.i32And();
     M.i32Or();
 };
 // BigInt 句柄判定（0x7FF8|低32=handles 槽，槽位从 2 起）：_emitBinOp 双 BIG 前置路由用。
@@ -5532,17 +5548,37 @@ Emitter.prototype._emitBinOp = function (op) {
             [K.EqualsEqualsEqualsToken]: 5, [K.ExclamationEqualsEqualsToken]: 6,
             [K.EqualsEqualsToken]: 5, [K.ExclamationEqualsToken]: 6,
             [K.LessThanToken]: 7, [K.LessThanEqualsToken]: 8, [K.GreaterThanToken]: 9, [K.GreaterThanEqualsToken]: 10,
+            [K.AmpersandToken]: 12, [K.BarToken]: 13, [K.CaretToken]: 14,
+            [K.LessThanLessThanToken]: 15, [K.GreaterThanGreaterThanToken]: 16, [K.AsteriskAsteriskToken]: 17,
         };
     }
     const bigId = Emitter.prototype.BIGOP[op];
     if (bigId !== undefined) {
+        if (op === ts.SyntaxKind.PlusToken) {
+            // + 三路：双 BIG → binop(0)；涉及 BIG → 宿主 qz.add（JS 语义："x"+10n 拼接 / 10n+1 TypeError）；纯字符串/数字 → 原 _emitConcat
+            M.localSet(this.scratchB); M.localSet(this.scratchA);
+            this._emitIsBig(this.scratchA); this._emitIsBig(this.scratchB); M.i32Or();
+            M.ifBlock("i64");
+            this._emitIsBig(this.scratchA); this._emitIsBig(this.scratchB); M.i32And();
+            M.ifBlock("i64");
+            M.i32Const(bigId); M.localGet(this.scratchA); M.localGet(this.scratchB);
+            M.call("qz.bigint_binop");
+            M.else_();
+            M.localGet(this.scratchA); M.localGet(this.scratchB); M.call("qz.add");
+            M.end();
+            M.else_();
+            M.localGet(this.scratchA); M.localGet(this.scratchB);
+            this._emitBinOpPlain(op);
+            M.end();
+            return;
+        }
         M.localSet(this.scratchB); M.localSet(this.scratchA);
         this._emitIsBig(this.scratchA); this._emitIsBig(this.scratchB); M.i32And();
         M.ifBlock("i64");
         M.i32Const(bigId); M.localGet(this.scratchA); M.localGet(this.scratchB);
         M.call("qz.bigint_binop");
         M.else_();
-        M.localGet(this.scratchA); M.localGet(this.scratchB);   // 非双 BIG → 原 guard 路径
+        M.localGet(this.scratchA); M.localGet(this.scratchB);   // 非双 BIG → 原 guard 路径（BIG 混合经 _emitIsHandle → 宿主 JS 语义）
         this._emitBinOpPlain(op);
         M.end();
         return;

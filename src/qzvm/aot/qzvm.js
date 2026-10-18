@@ -941,6 +941,10 @@ function makeQzvm(strings, opts) {
         case 5: return boxBool(x === y); case 6: return boxBool(x !== y);
         case 7: return boxBool(x < y); case 8: return boxBool(x <= y);
         case 9: return boxBool(x > y); case 10: return boxBool(x >= y);
+        case 11: return mk(~x);                                   // ~a（b = dummy）
+        case 12: return mk(x & y); case 13: return mk(x | y); case 14: return mk(x ^ y);
+        case 15: return mk(x << y); case 16: return mk(x >> y);
+        case 17: return mk(x ** y);                               // BigInt 幂（无 ± 溢出截断）
       }
       throw new Error("bigint_binop: 未知 op " + op);
     },
@@ -988,7 +992,7 @@ function makeQzvm(strings, opts) {
     div:  (a, b) => box(toJS(a) / toJS(b)),
     rem:  (a, b) => box(toJS(a) % toJS(b)),
     // **：Math.pow 语义（含 NaN^0=1、0^0=1 等特例）；tagged 操作数经 toJS 解引用
-    pow:  (a, b) => box(Math.pow(toJS(a), toJS(b))),
+    pow:  (a, b) => (isBigH(a) || isBigH(b)) ? ret(toJS(a) ** toJS(b)) : box(Math.pow(toJS(a), toJS(b))),   // 2n**10n = bigint（精确）；数字走 Math.pow
     math_pow: (a, b) => Math.pow(a, b),
     math_rem: (a, b) => a % b,
     // nullish = 0x7FF9|0（undefined）或 0x7FF9|1（null）——按 tag 判定，不经 toJS（无需字段表/物化）。
@@ -1814,12 +1818,13 @@ function makeQzvm(strings, opts) {
         return TAG;
       }
     },
-    band: (a, b) => box((toJS(a) | 0) & (toJS(b) | 0)),
-    bor:  (a, b) => box((toJS(a) | 0) | (toJS(b) | 0)),
-    bxor: (a, b) => box((toJS(a) | 0) ^ (toJS(b) | 0)),
-    shl:  (a, b) => box((toJS(a) | 0) << ((toJS(b) | 0) & 31)),
-    shr:  (a, b) => box((toJS(a) | 0) >> ((toJS(b) | 0) & 31)),
-    ushr: (a, b) => box((toJS(a) | 0) >>> ((toJS(b) | 0) & 31)),
+    // 位运算：BIG（BigInt）→ 精确 JS 位语义（无截断；混合 BigInt×number 由原生 op 抛 TypeError）；数字走 ToInt32/f64。
+    band: (a, b) => (isBigH(a) || isBigH(b)) ? ret(toJS(a) & toJS(b)) : box((toJS(a) | 0) & (toJS(b) | 0)),
+    bor:  (a, b) => (isBigH(a) || isBigH(b)) ? ret(toJS(a) | toJS(b)) : box((toJS(a) | 0) | (toJS(b) | 0)),
+    bxor: (a, b) => (isBigH(a) || isBigH(b)) ? ret(toJS(a) ^ toJS(b)) : box((toJS(a) | 0) ^ (toJS(b) | 0)),
+    shl:  (a, b) => (isBigH(a) || isBigH(b)) ? ret(toJS(a) << toJS(b)) : box((toJS(a) | 0) << ((toJS(b) | 0) & 31)),
+    shr:  (a, b) => (isBigH(a) || isBigH(b)) ? ret(toJS(a) >> toJS(b)) : box((toJS(a) | 0) >> ((toJS(b) | 0) & 31)),
+    ushr: (a, b) => (isBigH(a) || isBigH(b)) ? ret(toJS(a) >>> toJS(b)) : box((toJS(a) | 0) >>> ((toJS(b) | 0) & 31)),
     lt:   (a, b) => bool(toJS(a) < toJS(b)),
     gt:   (a, b) => bool(toJS(a) > toJS(b)),
     le:   (a, b) => bool(toJS(a) <= toJS(b)),
@@ -1831,8 +1836,8 @@ function makeQzvm(strings, opts) {
     // 宽松相等 == / 不等 !=：JS 强制转换（ToPrimitive/ToNumber；1=="1"=true、null==undefined=true）
     eq:   (a, b) => { const ua = BigInt.asUintN(64, a), ub = BigInt.asUintN(64, b); const oa = isObjHandle(ua), ob = isObjHandle(ub); return bool(oa && ob ? ua === ub : toJS(a) == toJS(b)); },   // 两个对象 → 身份；其余走 JS 宽松相等（含对象↔原始值强转）
     ne:   (a, b) => bool(toJS(a) != toJS(b)),
-    bnot: (a) => box(~(toJS(a) | 0)),
-    to_num: (a) => box(+toJS(a)),
+    bnot: (a) => isBigH(a) ? ret(~toJS(a)) : box(~(toJS(a) | 0)),
+    to_num: (a) => isBigH(a) ? throwValue(new TypeError("Cannot convert a BigInt value to a number")) : box(+toJS(a)),   // +10n → TypeError（JS）；BigInt 不可拆箱为 number
     neg: (a) => box(-toJS(a)),                          // 一元 -：ToNumber（对象 valueOf）
     // 真值判定：不经 toJS——类实例/POJO 句柄（0x7FF9|内存偏移）不在 JS handles 表中，
     // 经 toJS 会取到 undefined 而误判 falsy。按 tag 直接判：idx=0=undefined→假；其余查 handles[idx]（null→假、对象→真）。
