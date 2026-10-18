@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-17T17:05:44"
+updated: "2026-10-18T02:27:08"
 ---
 
 <!-- compiled_truth -->
@@ -612,3 +612,8 @@ updated: "2026-10-17T17:05:44"
   kind: evidence
   summary: "批37 语料 + TypeError 修复：830/837（99.2%）"
   affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-18T02:27:08
+  kind: note
+  summary: "BIG_HI=0x7FF8 新 tag 落地（批 39）：BigInt 句柄路由优先于通用 qz.*（不入 _emitIsHandle）；0x7FF8|0=canonical NaN → BIG 槽位从 2 起，见 aot-bigint-tagged-backend"
+  affects: [aot-bigint-tagged-backend]

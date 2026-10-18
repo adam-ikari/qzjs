@@ -7,6 +7,16 @@ All notable changes to qzjs.
 
 
 
+### 第三十九批语料 + BigInt tagged 后端（2026-10-18）
+- **BigInt 进 tagged 后端**：新 tag `BIG_HI = 0x7FF8`（`0x7FF8|低32=handles 槽`，`handles[槽]=JS BigInt`）。
+  - 字面量：`10n/0xffn/1_000n`（去 `_` 与 `n` 后缀）→ `qz.bigint_lit(sid)`。
+  - 双目：`+ - * / % === !== == != < <= > >=` 双 BIG 运行时前置路由 → `qz.bigint_binop(opId, a, b)`（== 与 === 对两 BigInt 同义，共用 opId）；非双 BIG 落原 guard（==/!= 宽松、BIG×number 混合为已知限制）。
+  - 一元负号：双路径 — BIG → `bigint_binop(1, 0n, x)`；其余 `qz.neg`/f64Neg。
+  - `typeof`：`0x7FF8|低32≠0 → "bigint"`；`method_call`：`toString([radix])`/`valueOf`；`prop_get`/`toJS`：BIG → `handles[槽]`（真实 BigInt）；托管 `ret`：裸 BigInt 回程 → BIG 句柄。
+  - **canonical NaN 边界**（批 38 回归教训）：`0x7FF8|0` = `box(NaN)` 的确碰位型 → `handles` 固定首槽 `[undefined,null]`、BIG 槽位从 2 起（payload≠0），`_emitIsBig`/`isBigH`/`typeof` 三处一律带 `低32≠0` 判定——否则 `parseInt("99",8)=NaN` 之类值过 `toJS` 被读成 `handles[0]=undefined`（wasm 得空串）。
+- 新增 `audit_corpus39.js`（7 例）：binops、负数截断（-7n/2n=-3n）、比较链（strict+宽松）、typeof、toString（radix/拼接）、超大数全精度、除零两侧同抛 RangeError。**7/7 全绿**。
+- 已知限制（不在本批）：BIG×number 混合算术（JS 应 TypeError，现走 f64 快路径得垃圾）、`BigInt(x)` 构造器（builtin 未入 BUILTIN_FNS）、`<<`/`&` 等位运算、一元 `+`/`~`。
+- 结果：**857/862（99.4%）**（39 批；残余 5=generator/async/class-expression-names/fromentries/prototype-chain 均为既有已知）；test_aot.js ALL PASS。
 ### 第三十八批语料 + at 无参修复（2026-10-18）
 - 新增 `audit_corpus38.js`（18 例）：Array flat/flatMap/copyWithin/at、String matchAll/at/split(limit)、Object.fromEntries 迭代器源、sort 稳定性/比较函数返回非数、Map/Set 迭代器协议、Reflect、Symbol.toPrimitive、logical assignment、ternary 链、闭包循环、错误 cause 链、prototype 链。**首跑 15/18 → 16/18**。
 - 修复 1 项：`Array.prototype.at`/`String.prototype.at` 无参（`at()`）→ `Math.trunc(undefined)` = NaN → `a2[NaN]` = undefined；改为 `undefined → 0`（JS `ToIntegerOrInfinity(undefined)` = 0 → `arr[0]`）。
