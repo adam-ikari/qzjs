@@ -25,13 +25,14 @@
 | **对外能力边界（无 OS）** | wasm ↔ （无） | TS 源码 import 的内容若内联（无外部 OS API 需求）→ 产物**零 import、自包含** | 零 import |
 | **对外能力边界（依赖 qzjs JS API）** | wasm ↔ qzjs JS 运行时 | **标准 WebAssembly import**：导入 JS 函数服务号，遵守 wasm 标准 | 标准 import |
 
-### 2.1 模块内部：内联绑定
+### 2.1 模块内部：内联绑定（qzjs 运行时侧）
 
-合并成单一 wasm 产物后，emitter 产物（wasm 原生代码）与字节码引擎（QuickJS 解释器）同处一模块。两者交互是**模块内部调用**——不是 wasm import/export（那会跨模块边界），是编译期/链路期直接绑定的函数调用。
+emitter 是**通用 TS→wasm 工具**，产物只声明标准 wasm import，**不绑定 qzjs 运行时**（§10.6 line 428：qzjs 只是符号提供者之一）。in-module 形态下，**qzjs 运行时**把 emitter 产物 + `libqzvm.wasm`（含字节码引擎 QuickJS）合并成单一 wasm 模块——合并后 emitter 产物的标准 import 变**模块内部调用**（字节码引擎↔wasm 原生代码内联绑定），不是 wasm import/export（无跨模块边界）。
 
-- 无 import/export 契约面 → 无 marshalling 税（无 i64↔BigInt、无 JS 中间层、无 import 编解码）。
-- 无 ABI 承诺 → 绑定方式、内部表示可随时改。
-- **18 个 `qz.*` import 是跨界形态（宿主 JS shim）的产物**；内联绑定形态（M6）下 emitter 不发 `qz.*` import，直接内联绑定字节码引擎的内部操作。`qz.*` 契约面在 M6 后**消亡为模块内绑定**。
+- emitter 侧：通用，只发标准 import（零 import 或 JS 函数服务号），**绝不内联绑定 qzjs 专有特性**。
+- qzjs 运行时侧：合并成单模块后，import 变模块内函数调用 → 无 marshalling 税（无 i64↔BigInt、无 JS 中间层、无 import 编解码）。
+- 无 ABI 承诺 → 运行时侧绑定方式、内部表示可随时改。
+- **18 个 `qz.*` import 是跨界形态（宿主 JS shim）的产物**；in-module 合并形态（M6b）下，qzjs 运行时合并使 `qz.*` 标准变模块内调用，`qz.*` 契约面在合并后**消亡为模块内绑定**。emitter 产物本身仍通用（带标准 import 声明，未合并时任何 wasm 引擎可跑）。
 
 ### 2.2 对外：零 import 或标准 import
 
@@ -54,31 +55,31 @@
 
 对照 `IN_MODULE_DESIGN.md` 的 M1–M6 实现计划，与无 ABI 设计存在以下偏差：
 
-### 偏差 1（关键）：M6 目标错位——「去 JS 化」vs「内联绑定」
+### 偏差 1（关键）：M6 目标错位——「去 JS 化」vs「运行时合并」
 
 `IN_MODULE_DESIGN.md` 的 M6 定义为**宿主去 JS 化**（line 306：`bridge.c` 463 / `tcp_io.c` 229 / `control.c` 72 处 `JS_` 调用需处置，「先判定'移 guest vs 去 JS 化'再动」）。
 
-无 ABI 设计的 M6 核心目标是 **emitter 产物内联绑定字节码引擎**。
+无 ABI 设计的 M6 核心目标是 **qzjs 运行时合并**（emitter 产物 + `libqzvm.wasm` 合并成单模块，标准 import 变模块内调用）；前提是 **emitter 通用化**（不绑定 qzjs）。
 
-两者关系：去 JS 化是**手段/前提**（把 JSValue 操作全移入 guest 后，emitter 产物才能干净内联绑定 guest 内的 QuickJS）；内联绑定是**目的**。但 IN_MODULE_DESIGN **只写了手段（去 JS 化），没写目的（内联绑定）**——M6 落地后若只完成去 JS 化而未做 emitter 内联绑定，in-module 仍未真正实现无 ABI 机制。
+两者关系：去 JS 化是**手段/前提**（把 JSValue 操作全移入 guest 后，运行时合并才能让 emitter 产物的标准 import 干净变模块内调用）；运行时合并是**目的**。但 IN_MODULE_DESIGN **只写了手段（去 JS 化），没写目的（运行时合并）+ 前提（emitter 通用化）**——M6 落地后若只完成去 JS 化而未做运行时合并，in-module 仍未真正实现无 ABI 机制。
 
-**修正建议**：M6 拆为 M6a（去 JS 化：host 侧 JS_ 调用移 guest）+ M6b（emitter 内联绑定：emitter 编译模式从「发 qz.* import」切到「内联绑定 QuickJS 内部操作」）。M6b 才是无 ABI 机制核心。
+**修正建议**：M6 拆为 M6a（去 JS 化：host 侧 JS_ 调用移 guest）+ M6b（qzjs 运行时合并：emitter 产物 + `libqzvm.wasm` 合并，标准 import 变模块内调用；前提 emitter 通用化不绑定 qzjs）。M6b 才是无 ABI 机制核心。
 
 ### 偏差 2：§6 把 M4 合并当工具链问题
 
 `IN_MODULE_DESIGN.md` §6 line 248 把合并描述为「wasm-merge / wasm-ld 链接」延后到 M5 后。这把 in-module 落地的关键当成**链接工具**问题。
 
-无 ABI 设计下，关键是 **emitter 编译期内联（M6b：不发 qz.* import，直接绑定 QuickJS）**——这是 emitter 侧编译模式变更，不是链接工具。合并工具链（wasm-merge 缺）是次要的：只要 emitter 内联绑定（产物对 QuickJS 的引用是模块内函数调用，无 import），链接就是常规模块合并。
+无 ABI 设计下，关键是两点：**(1) emitter 通用化**（产物只声明标准 wasm import，不绑定 qzjs，§10.6 line 428）+ **(2) qzjs 运行时侧合并**（emitter 产物 + `libqzvm.wasm` 合并成单模块，标准 import 变模块内调用）。关键不是链接工具，是运行时组合 + emitter 通用化。合并工具链（wasm-merge 缺）是次要的。
 
-**修正建议**：§6 合并的论述应改为「emitter 内联绑定模式（M6b）+ 常规模块合并」，弱化 wasm-merge 工具的定位。
+**修正建议**：§6 合并论述改为「emitter 通用化 + qzjs 运行时侧合并」，弱化 wasm-merge 工具定位。
 
 ### 偏差 3：§10.6 line 426 保留 `qz.*` 契约面表述
 
 `IN_MODULE_DESIGN.md` §10.6 line 426：「`qz.*` = AOT 值原语（guest 内 AOT 代码用）」。这暗示合并后 `qz.*` 仍存在（模块内调用）。
 
-无 ABI 设计下，内联绑定形态（M6b）emitter **不发 `qz.*` import**，直接内联绑定 QuickJS——`qz.*` 契约面在 M6b 后**消亡**。两表述有张力：line 426 让人以为 `qz.*` 是稳定的内部契约面，但无 ABI 说它**可消亡**（无承诺）。
+无 ABI 设计下，`qz.*` 是**跨界形态产物**（emitter 通用产物声明标准 import，宿主 JS shim 提供）。in-module 合并形态（M6b）下，qzjs 运行时合并使 `qz.*` 标准变模块内调用，`qz.*` 契约面在合并后**消亡**。emitter 产物本身仍带标准 import 声明（通用，未合并时任何引擎可跑）。两表述有张力：line 426 让人以为 `qz.*` 是稳定的内部契约面，但无 ABI 说它**可消亡**（无承诺）。
 
-**修正建议**：§10.6 澄清 `qz.*` 是**跨界形态产物**（宿主 JS shim 提供），M6b 内联绑定后消亡为模块内 QuickJS 绑定；line 428 的「内联则零 import」才是无 ABI 的对外边界陈述。
+**修正建议**：§10.6 澄清 `qz.*` 是跨界形态产物，M6b 运行时合并后消亡为模块内 QuickJS 绑定；line 428 的「内联则零 import」是无 ABI 的对外边界陈述。
 
 ### 偏差 4：缺承诺边界陈述
 
@@ -94,16 +95,17 @@
 
 ### 偏差 6：核心设计未验的落差
 
-§9 line 305 诚实标注「AOT 变体未验」= M6b（emitter 内联绑定）未做。但无 ABI 是 in-module 的**核心设计**——核心设计未验，意味着 in-module 当前只完成了 guest 自包含（M1–M5），无 ABI 机制（内联绑定）是纸面设计。
+§9 line 305 诚实标注「AOT 变体未验」= M6b（运行时合并）未做。但无 ABI 是 in-module 的**核心设计**——核心设计未验，意味着 in-module 当前只完成了 guest 自包含（M1–M5），无 ABI 机制（emitter 通用化 + 运行时合并）是纸面设计。
 
-**修正建议**：状态行（line 3）应反映「M1–M5 已实现（guest 自包含）；M6（内联绑定，无 ABI 机制核心）未实现」——当前「M6 进行中」过于乐观（去 JS 化都没做完，内联绑定更未开始）。
+**修正建议**：状态行（line 3）应反映「M1–M5 已实现（guest 自包含）；M6（运行时合并，无 ABI 机制核心）未实现」——当前「M6 进行中」过于乐观（去 JS 化都没做完，运行时合并更未开始）。
 
 ## 5. 待决（M6 落地前）
 
-1. **emitter 内联绑定机制**（M6b 核心）：emitter 编译模式如何从「发 qz.* import」切到「内联绑定 QuickJS 内部操作」——编译期如何引用 QuickJS 内部符号、绑定发生在编译期还是链接期。
-2. **表示统一方向**：emitter tagged/bump（0x7FF9 POJO / 0x7FFA str / bump arena）vs QuickJS JSValue。内联绑定下表示统一是绑定实现的一部分（非接口适配层）。`IN_MODULE_DESIGN.md` line 366 暗示 QuickJS 侧复用 0x7FFA——需裁决谁适配谁。
-3. **M6a/M6b 拆分**：去 JS 化（host JS_ 移 guest）与内联绑定（emitter 编译模式）是两个独立工程，需分别排期。
-4. **最小验证**：选 1 个 emitter 操作（如对象属性读）做内联绑定原型，验「模块内无 marshalling 税」成立（对标 pal 面 45–66ns 量级，而非跨界 3.55µs）。
+1. **emitter 通用化**（重点）：emitter 是通用 TS→wasm 工具，产物只声明标准 wasm import（零 import 或 JS 函数服务号），**不假设 qzjs 专有特性**（§10.6 line 428 通用编译目标）。这是无 ABI 的前提——emitter 不绑定 qzjs 运行时。
+2. **qzjs 运行时合并机制**（M6b 核心）：qzjs 运行时如何合并 emitter 产物 + `libqzvm.wasm` 成单模块，使标准 import 变模块内调用（内联绑定字节码引擎↔wasm 原生代码）——合并发生在编译期还是加载期、链接机制。
+3. **表示统一方向**：emitter tagged/bump（0x7FF9 POJO / 0x7FFA str / bump arena）vs QuickJS JSValue。运行时合并后表示统一是合并实现的一部分（非接口适配层）。`IN_MODULE_DESIGN.md` line 366 暗示 QuickJS 侧复用 0x7FFA——需裁决谁适配谁。
+4. **M6a/M6b 拆分**：去 JS 化（host JS_ 移 guest）与运行时合并（emitter 产物 + `libqzvm.wasm` 合并）是两个独立工程，需分别排期。
+5. **最小验证**：选 1 个 emitter 操作（如对象属性读）做运行时合并原型，验「模块内无 marshalling 税」成立（对标 pal 面 45–66ns 量级，而非跨界 3.55µs）。
 
 ## 6. 参考
 

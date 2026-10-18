@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-18T10:29:20"
+updated: "2026-10-18T10:40:38"
 ---
 
 <!-- compiled_truth -->
@@ -147,3 +147,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "无 ABI 设计文档落地(src/qzvm/aot/NO_ABI_DESIGN.md): 承诺边界=qzjs 只承诺公开 JS API 稳定; 三层交互模型——模块内部内联调用绑定(emitter 产物↔QuickJS 字节码引擎, 合并单模块直接互调, 无 qz.* import 契约面/无 marshalling); 对外零 import(无 OS 调用自包含)或标准 wasm import(依赖 qzjs JS API 时 import JS 函数服务号, 遵守 WebAssembly 标准)。18 qz.* import 是跨界形态(宿主 JS shim)产物, M6 内联绑定不走它。偏差评估 6 条: (1)关键 M6 目标错位——IN_MODULE_DESIGN M6=去 JS 化(host JS_ 调用), 无 ABI M6 核心=emitter 内联绑定, 去JS化是手段/前提非目的, 建议拆 M6a(去JS化)+M6b(emitter 内联绑定); (2)§6 把 M4 合并当工具链问题(wasm-merge), 无 ABI 关键是 emitter 编译期内联非链接工具; (3)§10.6 line426 保留 qz.* 契约面表述与内联绑定零 import 张力; (4)缺承诺边界陈述; (5)缺标准合规陈述(标准 wasm import 服务号); (6)§9 line305 AOT 变体未验=M6b 未做, 状态行'M6 进行中'过于乐观。"
   source: "NO_ABI_DESIGN.md(新建); 用户澄清'无 ABI=公开 JS API 稳定+内联绑定+标准 wasm import'; IN_MODULE_DESIGN line234/278/306/422/428"
   affects: [aot-roadmap, IN_MODULE_DESIGN, release-artifact-topology]
+
+- time: 2026-10-18T10:40:38
+  kind: reversal
+  summary: "emitter 通用化重点修正(用户纠正'通用ts编译wasm工具是重点,不要绑定qzjs运行时'): 撤销 NO_ABI_DESIGN.md + IN_MODULE_DESIGN.md 中'M6b=emitter 内联绑定 QuickJS'错误框架(那会绑定 qzjs 运行时)。修正为: emitter 是通用 TS→wasm 工具, 产物只声明标准 wasm import(零 import 或 JS 函数服务号), 不假设 qzjs 专有特性(§10.6 line 428 qzjs 只是符号提供者之一); in-module 的内联绑定是 qzjs 运行时侧行为(合并 emitter 产物+libqzvm.wasm 成单模块, 标准 import 变模块内调用, 字节码引擎↔wasm 原生代码)。修正 8 处: IN_MODULE_DESIGN 状态行/§6 合并裁决/§7 M6b 行+总结/§9 M6b 风险; NO_ABI_DESIGN §2.1/偏差1/偏差2/偏差3/偏差6/§5。M6b 重新定义=qzjs 运行时合并(emitter 通用化为前提)。emitter 通用化是无 ABI 前提+产品重点, 不是 emitter 侧内联绑定工程。"
+  source: "用户纠正'通用ts编译wasm工具是重点,不绑定qzjs运行时'; §10.6 line 428(qzjs 符号提供者之一)"
+  affects: [aot-roadmap, IN_MODULE_DESIGN]
