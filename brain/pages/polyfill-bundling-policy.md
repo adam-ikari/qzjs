@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [polyfill, bundling, memory]
 created: "2026-09-10T01:38:27"
-updated: "2026-09-13T10:52:49"
+updated: "2026-10-18T02:48:24"
 ---
 
 <!-- compiled_truth -->
@@ -56,4 +56,10 @@ updated: "2026-09-13T10:52:49"
 - time: 2026-09-13T10:52:49
   kind: note
   summary: "polyfill 模式产物分家（fix(build)）：build.js 与 CMakeLists 把生成 C 文件按 QZ_POLYFILL_MODE 拆分——rodata 仍写 tracked 基线 src/polyfill_default.c，compressed/external/host 各写 untracked src/polyfill_<mode>.c（CMake _polyfill_gen_c 同映射）。修掉「三模式共写同一 tracked 文件、互覆产物」缺陷；external 的 SHA-256 锚定符号 qz_polyfill_external_sha256 随 polyfill_external.c 落盘；运行时行为与 SHA-256 校验语义不变。验证：rodata/compressed/external 三模式各自 configure+build 通过、ctest offline 21/21、external 篡改 .polyfill 被拒绝、tracked 基线 hash 不变"
+  affects: [polyfill-bundling-policy]
+
+- time: 2026-10-18T02:48:24
+  kind: decision
+  summary: "子目录构建的 polyfill 源依赖必须用 CMAKE_CURRENT_SOURCE_DIR,不是 CMAKE_SOURCE_DIR。qzjs 被宿主 add_subdirectory 时后者指向宿主树:qzjs 自己的 polyfill 改动不触发重建(旧字节码静默进产物),宿主改 polyfill 反而触发 qzjs 重建。tinybrowser 集成实测(改 url.js 后仍报旧错误);改正后 URL 修复才进产物。"
+  source: "2026-10-18 tinybrowser 集成"
   affects: [polyfill-bundling-policy]
