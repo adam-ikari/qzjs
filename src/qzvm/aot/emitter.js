@@ -4813,7 +4813,6 @@ Emitter.prototype._emitStoreProp = function (left) {
     const privName = ts.isPrivateIdentifier(left.name) && this._curClass ? "#" + this._curClass + "#" + left.name.text : null;
     if (privName) {                               // 私有字段写：类名限定名（普通字段槽）
         M.localSet(t.w);
-        M.localGet(t.w);                          // 占位顺序修正（值已存）
         this.emitTaggedExpr(left.expression); M.localSet(t.v);
         M.localGet(t.v); M.i32WrapI64(); M.localGet(t.w); M.i64Store(3, this._fieldIndex(privName));
         M.localGet(t.w);
