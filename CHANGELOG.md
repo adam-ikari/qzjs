@@ -7,6 +7,15 @@ All notable changes to qzjs.
 
 
 
+### 第四十批语料 + BigInt 门面收尾（2026-10-18）
+- **BIG 入 `_emitIsHandle`**：混合值不再落 f64 快路径，改走宿主 `toJS` 还原原生 JS 语义——混合 BigInt×number 的算术/关系运算精确抛 `TypeError`（`10n+1`、`10<=10n`），`==` 走定义算法（`10n==10`/`10n=="10"`/`0n==false` → true；`10n===10` → false）。
+- **位运算 BigInt 语义**：`& | ^ << >>`、`~`、`**` 宿主 BIG 分支走原生 JS 位运算（无截断：`1n<<40n=1099511627776`、`9n**2n=81`）；数字路径不变（ToInt32 截断语义）。`>>>` BigInt → TypeError（JS 无定义）。
+- **一元门面**：`~BIG` 前置路由 `bigint_binop(11)`；`+BIG` → `qz.to_num` 抛 `TypeError`（BigInt 不可拆箱为 number）；`-BIG` 已在批 39。
+- **幂**：`AsteriskAsteriskToken` 双 BIG 路由 `bigint_binop(17)`；`bigint_binop` 扩 op 11~17（~、&、|、^、<<、>>、**）。
+- **`+` 三路**：双 BIG → binop(0)；涉及 BIG → 宿主 `qz.add`（JS 语义：`"x"+10n`/`10n+"x"`/`""+10n` 拼接、`.join(",")`/模板内插 ToString）；其余原 `_emitConcat`。
+- **现成即通**：`BigInt("31")`/`BigInt(9)`/`BigInt(10n)`/`String(10n)` 经 builtin 派发 globalThis 回退 + `.map(toJS)` 天然工作，零改动。
+- 新增 `audit_corpus40.js`（8 例）：ctor、混合 TypeError 通道、宽松 ==、字符串拼接、位运算族、`>>>` 抛错、复合赋值链（`+=/*=/<<=/&=/`**=）、原始值等值。**首跑 8/8 全绿**。
+- 结果：**865/870（99.5%）**（40 批；余 5 均既有已知）；ctest 32/32 零回归；test_aot ALL PASS。
 ### 第三十九批语料 + BigInt tagged 后端（2026-10-18）
 - **BigInt 进 tagged 后端**：新 tag `BIG_HI = 0x7FF8`（`0x7FF8|低32=handles 槽`，`handles[槽]=JS BigInt`）。
   - 字面量：`10n/0xffn/1_000n`（去 `_` 与 `n` 后缀）→ `qz.bigint_lit(sid)`。

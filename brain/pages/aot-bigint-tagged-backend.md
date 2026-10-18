@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, bigint, qzvm, emitter]
 created: "2026-10-18T02:26:43"
-updated: "2026-10-18T02:27:13"
+updated: "2026-10-18T02:41:17"
 ---
 
 <!-- compiled_truth -->
@@ -50,3 +50,9 @@ updated: "2026-10-18T02:27:13"
   kind: decision
   summary: "BigInt tagged 后端落地（批 39）：BIG_HI=0x7FF8 三处低32≠0 判定排 canonical NaN；双 BIG 前置路由 qz.bigint_binop；857/862"
   affects: [aot-bigint-tagged-backend, aot-wasm-tagged-backend]
+
+- time: 2026-10-18T02:41:17
+  kind: decision
+  summary: "门面收尾（批 40）：BIG 入 _emitIsHandle → 混合走宿主原生 JS 语义（TypeError/宽松==精确）；位运算/~/pow BIG 分支去截断；bigint_binop op 11~17；+ 三路拼接；BigInt() ctor 零改动即通；865/870"
+  source: batch-40
+  affects: [aot-bigint-tagged-backend]
