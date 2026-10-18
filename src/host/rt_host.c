@@ -308,6 +308,14 @@ int qz_host_start(qz_t *rt)
         argv[n++] = (char *)"--debug";
         argv[n++] = debug_arg;
     }
+    /* per_context_bytecode：op:"context" new 在**主RT 进程**里执行，而宿主
+     * 经 qz_config_t 设的值只在宿主进程的 rt->config 上。不传的话，ISOLATED
+     * （默认进程模型）下这个开关静默变成 0 —— 每文档 context 拿不到宿主的
+     * initial_bytecode，桥函数全缺，新 realm 里只剩一片 "xxx is not defined"。
+     * 裸 flag 即可：0（缺省）不传。 */
+    if (rt->config.per_context_bytecode) {
+        argv[n++] = (char *)"--per-context-bytecode";
+    }
     /* CTL-2：控制面档位 + 端点路径传给主RT（runtime 在主RT 进程；宿主进程
      * 只有通道桩，不监听端点）。argv 仅在 spawn 期间需要（同步 fork+exec）。 */
     if (rt->config.control_plane == QZ_CONTROL_IN_PROC ||

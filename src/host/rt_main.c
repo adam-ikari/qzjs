@@ -506,6 +506,7 @@ int rt_main_entry(int argc, char **argv)
     int worker_backend = -1;    /* --worker-backend；-1 = 编译缺省 */
     int control_plane = -1;     /* --control-plane；-1 = 缺省（OFF） */
     int debug_arg = 0;          /* --debug；父进程经 argv 传递（见 rt_host.c） */
+    int per_context_bytecode = 0;  /* --per-context-bytecode；父进程经 argv 传递 */
     const char *control_pipe = NULL;   /* --control-pipe 路径（NULL = 缺省） */
     const char *path_arg = NULL;       /* §8.2 path 链 "k1,k2,..."（父经 argv 传） */
 
@@ -544,6 +545,8 @@ int rt_main_entry(int argc, char **argv)
             path_arg = argv[++i];
         } else if (strcmp(argv[i], "--debug") == 0 && i + 1 < argc) {
             debug_arg = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--per-context-bytecode") == 0) {
+            per_context_bytecode = 1;
         } else if (strcmp(argv[i], "--control-plane") == 0 && i + 1 < argc) {
             const char *cp = argv[++i];
             if (strcmp(cp, "off") == 0) control_plane = QZ_CONTROL_OFF;
@@ -731,6 +734,10 @@ int rt_main_entry(int argc, char **argv)
      * 在 ISOLATED（默认）下静默失效——runtime 只在主RT 进程，而 qz_runtime_init
      * 的自动 attach 判定读的正是这个字段。父进程现经 --debug 传入。 */
     rt->config.debug = debug_arg;
+    /* 宿主经 qz_config_t.per_context_bytecode 设的开关。op:"context" new 在
+     * 主RT 进程执行，不传的话 ISOLATED（默认）下子进程恒为 0 —— 每文档
+     * context 拿不到宿主 initial_bytecode，且无任何报错。 */
+    rt->config.per_context_bytecode = per_context_bytecode;
     rt->config.control_plane = 0;
     /* strict 模式：父进程（qzjs --strict-sandbox）经环境变量传递——子进程 exec
      * 后继承 environ，无需改 argv 协议。深拷贝语义同 qz_create（rt 拥有）。 */

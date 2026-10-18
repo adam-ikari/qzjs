@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [audit, cross-process, ipc, methodology]
 created: "2026-10-06T10:04:34"
-updated: "2026-10-06T10:04:50"
+updated: "2026-10-18T02:20:43"
 ---
 
 <!-- compiled_truth -->
@@ -80,4 +80,10 @@ IPC 控制帧只有 READY/IDLE/SHUTDOWN/CLOSING/PING/PONG/PFAIL，**IDLE 仅存�
   kind: decision
   summary: "跨进程配置传递审计：可复用的四条扫描判据 + 2026-10 全库扫描结论（含否定项）"
   source: "2026-10 以 #9~#16 沉淀的失效模式扫全库"
+  affects: [cross-process-config-audit]
+
+- time: 2026-10-18T02:20:43
+  kind: decision
+  summary: "新增 per_context_bytecode 被门抓到未接线;已按既有模式接线(--per-context-bytecode argv,rt_host.c 组装 + rt_main.c 还原),门 14 字段/9 已接线/5 白名单全绿"
+  source: "2026-10-18 PR #30"
   affects: [cross-process-config-audit]
