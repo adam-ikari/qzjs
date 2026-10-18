@@ -750,7 +750,7 @@ function makeQzvm(strings, opts) {
                              const rc2 = (acc, v, i) => toJS(closureCall(a0, bitsOf(acc), bitsOf(v), box(i)));
                              r = toJS(a1) !== undefined ? a2.reduceRight((acc, v, i) => rc2(acc, v, i), toJS(a1))
                                                          : a2.reduceRight((acc, v, i) => rc2(acc, v, i)); break; }
-      case "at":           { const a2 = arr(); const i = Math.trunc(toJS(a0)); r = a2[i < 0 ? a2.length + i : i]; break; }
+      case "at":           { const a2 = arr(); const idx0 = toJS(a0); const i = Math.trunc(idx0 === undefined ? 0 : Number(idx0)); r = a2[i < 0 ? a2.length + i : i]; break; }
       case "toReversed":   r = arr().slice().reverse(); break;
       case "toSpliced":   { const src = arr(); const st2 = toJS(a0);                     // 原数组不变（返回新数组）
                             const items = [a2, a3].slice(0, 2).filter(givenSlot).map(toJS);
@@ -812,7 +812,7 @@ function makeQzvm(strings, opts) {
                              const lim = givenSlot(a1) ? toJS(a1) : undefined;
                              r = s.split(sep instanceof RegExp ? sep : String(sep), lim); break; }
       case "concat":       r = s.concat(...extra().map(String)); break;
-      case "at":           { const i = Math.trunc(arg(a0)); r = s[i < 0 ? s.length + i : i]; break; }
+      case "at":           { const idx1 = arg(a0); const i = Math.trunc(idx1 === undefined ? 0 : Number(idx1)); r = s[i < 0 ? s.length + i : i]; break; }
       case "localeCompare": r = s.localeCompare(String(arg(a0))); break;
       case "normalize":    r = arg(a0) === undefined ? s.normalize() : s.normalize(String(arg(a0))); break;
       case "codePointAt":  r = s.codePointAt(arg(a0)); break;

@@ -6,6 +6,12 @@ All notable changes to qzjs.
 - 
 
 
+
+### 第三十八批语料 + at 无参修复（2026-10-18）
+- 新增 `audit_corpus38.js`（18 例）：Array flat/flatMap/copyWithin/at、String matchAll/at/split(limit)、Object.fromEntries 迭代器源、sort 稳定性/比较函数返回非数、Map/Set 迭代器协议、Reflect、Symbol.toPrimitive、logical assignment、ternary 链、闭包循环、错误 cause 链、prototype 链。**首跑 15/18 → 16/18**。
+- 修复 1 项：`Array.prototype.at`/`String.prototype.at` 无参（`at()`）→ `Math.trunc(undefined)` = NaN → `a2[NaN]` = undefined；改为 `undefined → 0`（JS `ToIntegerOrInfinity(undefined)` = 0 → `arr[0]`）。
+- 新暴露 2 项残余：① `YieldExpression` 不支持（generator，c7 大特性）；② `ctor.prototype.m = fn`（函数对象 prototype 链，普通函数表达式应有 `.prototype`）。
+- 结果：**849/855（99.3%）**（38 批）；ctest 32/32 零回归。
 ### 描述符往返完整修复（2026-10-18）
 - **getOwnPropertyDescriptors**：POJO/实例逐键组装描述符（含 writable/enumerable/configurable + 访问器 get/set）；此前走原生+物化 → 丢 writable/enumerable/访问器。
 - **defineProperties**：访问器描述符注册 dynAcc（与 defineProperty 同路径）；值描述符更新 orderMap（插入序）→ 往返键序正确。
