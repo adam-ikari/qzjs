@@ -149,6 +149,8 @@ const QZ = {
   iter_pull: { params: ["i64"], results: ["i64"] },               // for-of: 推进一次；返回 1=done / 0=continue（BigInt）
   iter_val: { params: ["i64"], results: ["i64"] },                // for-of: 取当前迭代值（已 pull）
   iter_close: { params: ["i64"], results: [] },                   // for-of: 提前终止调用（break/return）→ iterator.return?.()
+  bigint_lit: { params: ["i32"], results: ["i64"] },              // BigInt 字面量（字符串 id）→ BIG_HI 句柄
+  bigint_binop: { params: ["i32", "i64", "i64"], results: ["i64"] },   // BigInt 二元运算（op, a, b）；op: 0+ 1- 2* 3/ 4% 5=== 6!== 7< 8<= 9> 10>=
   fn_value: { params: ["i32", "i32", "i32"], results: ["i64"] },   // 顶层函数作值：包装为宿主函数句柄（arity = 形参数，缺省补 TAG）
   builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
   spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
@@ -3602,6 +3604,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this.m.i64ConstBits(...f64Bits(Number(e.text)));   // 数值 = 原始 f64 位型
         return;
     }
+    if (ts.isBigIntLiteral(e)) {                       // BigInt 字面量（10n/0x10n/1_000n → 去 _ 与 n 后缀）→ HOST 句柄（BIG_HI|槽）
+        this.m.i32Const(this._strId(e.text.replace(/_/g, "").replace(/n$/i, "")));
+        this.m.call("qz.bigint_lit");
+        return;
+    }
     if (ts.isStringLiteral(e)) { this._emitStrLitHandle(e.text); return; }
     if (ts.isNoSubstitutionTemplateLiteral(e)) { this._emitStrLitHandle(e.text); return; }
     if (e.kind === ts.SyntaxKind.TrueKeyword) { this.m.i64ConstBits(1, 0x7ffc0000); return; }   // tagged bool 0x7FFC|1（非 f64 1.0：bool 与 number 须区分）
@@ -3823,6 +3830,13 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         M.ifBlock("i64");
         this._emitStrLitHandle("string");
         M.else_();
+        // 0x7FF8|低32≠0 → "bigint"（0x7FF8|0 = canonical NaN → 落后面 "number"）
+        M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff8n); M.i64Eq();
+        M.localGet(this.scratch); M.i64Const(0xffff_ffffn); M.i64And(); M.i64Eqz(); M.i32Eqz();
+        M.i32And();
+        M.ifBlock("i64");
+        this._emitStrLitHandle("bigint");
+        M.else_();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
         M.localGet(this.scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
         M.i32Or();
@@ -3846,7 +3860,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._emitStrLitHandle("boolean");
         M.else_();
         this._emitStrLitHandle("number");
-        M.end(); M.end(); M.end();   // 关 ifBool / ifObj / ifStr
+        M.end();
+        M.end(); M.end(); M.end();   // 关 ifBool / ifObj / ifStr / ifBig
         M.end();                     // 关 ifClo
         M.end();                     // 关 ifHost 外层
         M.end();                     // 关 block(i64)
@@ -4525,7 +4540,19 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         } else if (e.operator === ts.SyntaxKind.PlusToken) {
             this.m.call("qz.to_num");        // +a = ToNumber(a)
         } else if (e.operator === ts.SyntaxKind.MinusToken) {
+            // 双路径：BigInt(0x7FF8) → 0n - x（binop 1，除零安全）；句柄/纯数 → 原 guard（qz.neg / f64Neg）
+            const M3 = this.m, t3 = this._expEnter();
+            M3.localSet(this.scratchB);
+            this._emitIsBig(this.scratchB);
+            M3.ifBlock("i64");
+            M3.i32Const(this._strId("0")); M3.call("qz.bigint_lit"); M3.localSet(t3.w);   // zeroH
+            M3.i32Const(1); M3.localGet(t3.w); M3.localGet(this.scratchB);
+            M3.call("qz.bigint_binop");
+            M3.else_();
+            M3.localGet(this.scratchB);
             this._emitUnaryNum("qz.neg", this.m.f64Neg);   // JS：-a = -ToNumber(a)（对象走 valueOf，此前裸取反 → 静默 NaN）
+            M3.end();
+            this._expLeave();
         }
         return;
     }
@@ -4607,6 +4634,8 @@ Emitter.prototype._emitIsHandle = function (scratch) {
     const M = this.m;
     // 非「纯 f64 数值」判定 = 句柄(0x7FF9) | 字符串(0x7FFA) | 布尔(0x7FFC) | 类实例(0x7FFE)。
     // 均须回退宿主（f64ReinterpretI64 对它们是 NaN 位型 → 原生 f64 运算全错）。
+    // 注：BigInt（0x7FF8）**不入此表**——双 BIG 先由 _emitBinOp 前置走 qz.bigint_binop；
+    // 混合 BIG×number 进 f64 快路径得垃圾（JS 应抛 TypeError，批 39 已知限制）。
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
     M.i32Or();
@@ -4620,6 +4649,15 @@ Emitter.prototype._emitIsHandle = function (scratch) {
     M.i32Or();
     M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();   // 宿主对象(JSON.parse 结果/函数等)
     M.i32Or();
+};
+// BigInt 句柄判定（0x7FF8|低32=handles 槽，槽位从 2 起）：_emitBinOp 双 BIG 前置路由用。
+// 排除 0x7FF8|0 —— 那是 canonical NaN（box(NaN) 恰产此位型；BIG 槽恒 payload≠0，故用低32非零判定）。
+Emitter.prototype._emitIsBig = function (scratch) {
+    const M = this.m;
+    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff8n); M.i64Eq();
+    M.localGet(scratch); M.i64Const(0xffff_ffffn); M.i64And(); M.i64Eqz();
+    M.i32Eqz();
+    M.i32And();
 };
 // 纯数字判定 = 非句柄(0x7FF9)/字符串(0x7FFA)/数组(0x7FFB)/布尔(0x7FFC)/实例(0x7FFE)。
 // 用于 _emitConcat 区分「数值」与「须走宿主 ToPrimitive/ToNumber 的值」。
@@ -5481,8 +5519,38 @@ Emitter.prototype.emitNullish = function (left, right) {
     this.emitTaggedExpr(right);                      // 真短路：仅此路径求值 right
     M.end();
 };
-// 操作数已在栈上 [a, b]；按 op 发射运算
+// 操作数已在栈上 [a, b]；按 op 发射运算。
+// 双 BigInt（0x7FF8 句柄）前置路由 → qz.bigint_binop(opId, a, b)（宿主 handles 查值运算）；
+// 否则按原数字/句柄 guard 发射。==/!= 对两 BigInt 与 ===/!== 同义（JS），共用 opId 5/6。
+Emitter.prototype.BIGOP = null;   // 惰性建表（ts 运行时依赖）
 Emitter.prototype._emitBinOp = function (op) {
+    const M = this.m;
+    if (!Emitter.prototype.BIGOP) {
+        const K = ts.SyntaxKind;
+        Emitter.prototype.BIGOP = {
+            [K.PlusToken]: 0, [K.MinusToken]: 1, [K.AsteriskToken]: 2, [K.SlashToken]: 3, [K.PercentToken]: 4,
+            [K.EqualsEqualsEqualsToken]: 5, [K.ExclamationEqualsEqualsToken]: 6,
+            [K.EqualsEqualsToken]: 5, [K.ExclamationEqualsToken]: 6,
+            [K.LessThanToken]: 7, [K.LessThanEqualsToken]: 8, [K.GreaterThanToken]: 9, [K.GreaterThanEqualsToken]: 10,
+        };
+    }
+    const bigId = Emitter.prototype.BIGOP[op];
+    if (bigId !== undefined) {
+        M.localSet(this.scratchB); M.localSet(this.scratchA);
+        this._emitIsBig(this.scratchA); this._emitIsBig(this.scratchB); M.i32And();
+        M.ifBlock("i64");
+        M.i32Const(bigId); M.localGet(this.scratchA); M.localGet(this.scratchB);
+        M.call("qz.bigint_binop");
+        M.else_();
+        M.localGet(this.scratchA); M.localGet(this.scratchB);   // 非双 BIG → 原 guard 路径
+        this._emitBinOpPlain(op);
+        M.end();
+        return;
+    }
+    this._emitBinOpPlain(op);
+};
+// 原生运算发射（双 BIG 路由剥离后的原始路径；操作数 [a, b] 在栈上）。
+Emitter.prototype._emitBinOpPlain = function (op) {
     const G = (qz, f64op, cmp) => () => this.emitGuardedOp(qz, f64op, cmp);
     const GUARD = {
         [ts.SyntaxKind.PlusToken]: () => this._emitConcat(),   // 任一操作数 0x7FFA → wasm 内拼接，否则数值（inPlace 由调用点设置）

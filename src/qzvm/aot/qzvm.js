@@ -23,6 +23,7 @@ const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低
 const INST_HI = 0x7ffen;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 const HOST_TAG = 0x7ffd_0000_0000_0000n;  // 宿主对象句柄标记（0x7FFD|低32=handles 索引）
 const CLO_HI = 0x7fffn;                   // 闭包值（函数）句柄高 16 位（0x7FFF|低32=cell offset）
+const BIG_HI = 0x7ff8n;                    // BigInt 句柄高 16 位（0x7FF8|低32=handles 槽，handles[槽]=JS BigInt）
 const HOLE = 0x7ff9000000000002n;         // 数组「洞」（稀疏）：读作 undefined，数组方法跳过，JSON → null
 const HOST_HI = 0x7ffdn;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 // 内建全局分派：名 → JS 函数（参数个数由调用点传入的 n 决定，见 builtin）。
@@ -315,8 +316,10 @@ function makeQzvm(strings, opts) {
   };
   const isInstH = (b) => (BigInt(b) >> 48n) === INST_HI;
   const isHostH = (b) => (BigInt(b) >> 48n) === HOST_HI;
+  // 0x7FF8|0 = canonical NaN（box(NaN)）→ 须排除（BIG 槽位从 2 起，恒 payload≠0）；否则 NaN 元素 toJS 得 undefined（批 38 回归教训）
+  const isBigH = (b) => { const u = BigInt.asUintN(64, b); return (u >> 48n) === BIG_HI && u !== (BIG_HI << 48n); };
   // 类实例 → 稳定占位对象（同 offset 同对象，保证 === 自身）；宿主无法访问其实例内存。
-  const toJS = (b) => (typeof b === "bigint" && BigInt.asUintN(64, b) === HOLE) ? undefined : (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b), false) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b), true) : {}) : bitsToNum(b));
+  const toJS = (b) => (typeof b === "bigint" && BigInt.asUintN(64, b) === HOLE) ? undefined : (isCloH(b) ? cloWrap(b) : isStrH(b) ? strRead(b) : isArrH(b) ? arrRead(b) : isBigH(b) ? handles[idxOf(b)] : isH(b) ? (idxOf(b) < 8 ? handles[idxOf(b)] : (mem && fieldEntries.length ? materialize(idxOf(b), false) : handles[idxOf(b)])) : isHostH(b) ? handles[idxOf(b)] : isBoolH(b) ? Number(BigInt(b) & 1n) === 1 : isInstH(b) ? (mem && fieldEntries.length ? materialize(idxOf(b), true) : {}) : bitsToNum(b));
   // undefined/null → 0x7FF9|0 / |1（wasm 字面量 sentinel）；其余 JS 值 → 宿主对象句柄 0x7FFD|idx
   const hostOf = new WeakMap();   // JS 对象/函数 → 已有句柄（同一 JS 值恒等同一句柄 → === 语义正确）
   const symOf = new Map();        // Symbol → 句柄（symbol 非对象，WeakMap 不收；well-known 符号为单例，泄漏可忽略）
@@ -548,6 +551,8 @@ function makeQzvm(strings, opts) {
   // JS 值 → tagged 位型（宿主回退返回用）：number→box、bool→boxBool、string→0x7FFA、
   // array→0x7FFB、null/undefined→固定槽、其它→0x7FF9 句柄。
   const ret = (r) => typeof r === "number" ? box(r) : typeof r === "boolean" ? boxBool(r)
+                   : typeof r === "bigint" ? ((BigInt.asUintN(64, r) >> 48n) === BIG_HI ? r   // 已是 tagged BIG 句柄 → 直通
+                     : (BIG_HI << 48n) | BigInt(handles.push(r) - 1))                        // 裸 BigInt → BIG 句柄（宿主运算回程保 typeof "bigint"）
                    : typeof r === "string" ? strWriteback(r) : r === undefined || r === null ? tagHandle(r)
                    : r === Array.prototype ? tagHandle(r)   // Array.isArray(Array.prototype) === true → 不能当普通数组写回（否则原型变成 wasm 数组句柄，Object.getPrototypeOf([]) !== Array.prototype）
                    : Array.isArray(r) ? (arrOf.has(r) ? arrOf.get(r)                        // wasm 数组回程 → 原句柄（别名语义）
@@ -926,6 +931,19 @@ function makeQzvm(strings, opts) {
     },
     iter_val: (h) => ret(handles[idxOf(h)].val),
     iter_close: (h) => { if ((BigInt.asUintN(64, h) >> 48n) !== HOST_HI) return; const st = handles[idxOf(h)]; if (st && st.it && typeof st.it.return === "function") try { st.it.return(); } catch (_) {} },   // 非 HOST（wasm 数组/字符串等）→ no-op
+    bigint_lit: (sid) => { handles.push(BigInt(strings[sid])); return (BIG_HI << 48n) | BigInt(handles.length - 1); },
+    bigint_binop: (op, a, b) => {
+      const x = handles[idxOf(a)], y = handles[idxOf(b)];
+      const mk = (v) => { handles.push(v); return (BIG_HI << 48n) | BigInt(handles.length - 1); };
+      switch (op) {
+        case 0: return mk(x + y); case 1: return mk(x - y); case 2: return mk(x * y);
+        case 3: return mk(x / y); case 4: return mk(x % y);
+        case 5: return boxBool(x === y); case 6: return boxBool(x !== y);
+        case 7: return boxBool(x < y); case 8: return boxBool(x <= y);
+        case 9: return boxBool(x > y); case 10: return boxBool(x >= y);
+      }
+      throw new Error("bigint_binop: 未知 op " + op);
+    },
     iter_array: (v) => {                          // 非数组可迭代（Map/Set/迭代器等）→ wasm 数组（元素经 toJS/bitsOf）
       const x = toJS(v);
       if (x == null) throw new Error("for-of: 该值不可迭代");
@@ -1846,6 +1864,13 @@ function makeQzvm(strings, opts) {
       if (isStrH(recv)) return doStrMethod(recv, mid, a0, a1, a2, a3);
       if (isArrH(recv)) return doArrMethod(recv, mid, a0, a1, a2, a3, (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []).slice(1));
       const name = strings[mid];
+      if (isBigH(recv)) {                                    // BigInt：toString([radix]) / valueOf；其余 → TypeError（JS）
+        const bv = handles[idxOf(recv)];
+        if (name === "toString") { const rx = toJS(a0); return ret(bv.toString(rx === undefined ? undefined : Number(rx))); }
+        if (name === "valueOf") return recv;
+        throwValue(new TypeError("BigInt." + name + " is not a function"));
+        return TAG;
+      }
       if ((BigInt.asUintN(64, recv) >> 48n) === CLO_HI && (name === "toString" || name === "valueOf")) {
         const dv4 = mem ? new DataView(mem.buffer) : null;
         const off4 = Number(BigInt.asUintN(64, recv) & MASK32);
