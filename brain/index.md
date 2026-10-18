@@ -1,12 +1,13 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-18T02:41:17.314Z._
+_Auto-generated. Last updated 2026-10-18T10:12:46.385Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-bigint-tagged-backend](pages/aot-bigint-tagged-backend.md) — category: decision | tags: [aot, wasm, bigint, qzvm, emitter] | # AOT BigInt tagged 后端（批 39，2026-10-18）
-- [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
+- [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | status: archived | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
 - [aot-generic-compiler-target](pages/aot-generic-compiler-target.md) — category: decision | tags: [decision, aot, wasm, architecture, generic] | ## 结论
 - [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
+- [aot-roadmap](pages/aot-roadmap.md) — category: reference | tags: [aot, roadmap, emitter, reference] | # AOT 主线路线（emitter.js 唯一主线）
 - [aot-wasm-tagged-backend](pages/aot-wasm-tagged-backend.md) — category: decision | tags: [aot, wasm, emitter, qzvm, perf] | # AOT tagged 后端（emitter.js → wasm）
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）
 - [branch-management](pages/branch-management.md) — category: decision | tags: [git, workflow, branch, protection] | ## 分支命名（7 前缀）
@@ -53,7 +54,7 @@ _Auto-generated. Last updated 2026-10-18T02:41:17.314Z._
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
 - [qzvm-qzjs-layering](pages/qzvm-qzjs-layering.md) — category: decision | tags: [decision, architecture, qzvm, in-module, boundary] | ## 结论
-- [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑（2026-10-07/08 用户拍板）
+- [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论
 - [rename-argparser-regression](pages/rename-argparser-regression.md) — category: decision | tags: [test, regression, rename] | ## 结论
 - [runtime-perf-baseline](pages/runtime-perf-baseline.md) — category: reference | tags: [perf, worker, runtime, baseline] | > **测试策略（2026-09-09 用户拍板）：性能基准一律在 CI 环境（GitHub Actions ubuntu-latest）执行，不使用本机。

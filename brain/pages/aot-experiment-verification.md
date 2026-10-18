@@ -2,10 +2,10 @@
 id: aot-experiment-verification
 title: "AOT 实验验证：TS→wasm→C99→so 链路成立 + fib 性能 8.97x"
 category: decision
-status: active
+status: archived
 tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment]
 created: "2026-10-07T16:11:15"
-updated: "2026-10-13T08:37:26"
+updated: "2026-10-18T06:02:26"
 ---
 
 <!-- compiled_truth -->
@@ -450,4 +450,10 @@ string 拼接不支持，console.log 用多参数替代。
   kind: decision
   summary: "标注 frontmatter title 数字漂移：title「fib 8.97x」是 fib_only 原型首次测量值，ts2c 落地后同负载实测 25.22x。CLI 无改 title 命令，故在正文记录，以正文为准。"
   source: "页内 fib 表实测值对照"
+  affects: [aot-experiment-verification]
+
+- time: 2026-10-18T06:02:26
+  kind: reversal
+  summary: "ts2c.py 早期实验（TS→C99→so 链路）工作树已删（refactor 2e43702e）；2026-10-18 用户裁决不走 AS/ts2c/wasm2c 早期路线，emitter.js 为唯一 AOT 主线（见 release-artifact-topology reversal）。本页实验数据作历史参考归档。"
+  source: brain archive-page
   affects: [aot-experiment-verification]

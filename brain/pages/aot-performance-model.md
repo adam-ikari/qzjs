@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, aot, performance, f64, wasm, numeric]
 created: "2026-10-13T06:22:46"
-updated: "2026-10-15T07:12:13"
+updated: "2026-10-18T09:03:34"
 ---
 
 <!-- compiled_truth -->
@@ -28,32 +28,36 @@ updated: "2026-10-15T07:12:13"
 
 in-module 档关掉 wasm 引擎（`_prof_wamr`/`_prof_wasm3` OFF）⇒ **模块内 qzvm 源集 = context.c + vm_core.c + ext_lifecycle.c**，不含 wasm 引擎、不含 debugger、不含宿主 I/O。QuickJS-ng 是其底层引擎（外部依赖），二者不等同。
 
-- **性能天花板架构性、已实测（2026-10-15 复测）**：纯数值 ~27x 解释器（numWork(3000)：AOT 367ms vs 解释器 10.1s，见下表）/ 快 V8 ~2.0x；对象循环 ~9x 解释器 / 慢 V8 ~8x；字符串**在 wasm 里零收益**（≈解释器），慢 V8 ~3.9x。
+- **性能天花板架构性**：纯数值 ~27x 解释器（numWork(3000)：AOT 367ms vs 解释器 10.1s）/ 快 V8 ~2.0x；对象循环 ~9x 解释器 / 慢 V8 ~8x；字符串**在 wasm 里零收益**（≈解释器），慢 V8 ~3.9x。
 - **「整体实现」收益 = 覆盖率，非峰值**（qzvm.js 现 20–33 符号）。
-- **最大性能杠杆 = `qz.*` 跨界税 4.9µs → 45–66ns（~100x）**：把 `qz.*` import 从 JS 函数改为 WAMR raw native（`ext_wamr.c:1071` `wasm_runtime_register_natives_raw`）。
 - **数值表示裁决：维持 f64 NaN-box；num 快路径已是裸 f64**。原生整数 i32/i64 实测仅快 12–18%，被三约束否决。
 
-## 实测锚点（本机 2026-10-15 复测，`README.md` 性能画像）
+## 实测锚点（本机实测，`README.md` 性能画像 + 2026-10-18 复测修正）
 
 | 负载 | AOT(qzjs) | 解释器(qzjs) | V8(node) | vs 解释器 | vs V8 |
 |---|---|---|---|---|---|
 | numWork(3000) 纯数值递归 | 367ms | 10.1s | 748ms | 快 ~27x | 快 ~2.0x |
-| objWork(30000) 对象循环 | 0.8ms | 7.0ms | 0.10ms | 快 ~9x | 慢 ~8x |
+| objWork(30000) 对象循环 | **2.88ms（fix 后，见下）** | 7.0ms | 0.10ms | 快 ~2.4x | 慢 ~29x |
 | strWork(200000) 字符串拼接 | 26.3ms | 26.6ms | 6.7ms | **~1.0x（无收益）** | 慢 ~3.9x |
 
-- **str 的裁决（2026-10-15，推翻旧锚点「慢 ~6x」）**：字符串负载在 wasm 里既非收益也无系统性劣势，
-  **≈解释器持平**。独立 A/B 交替实测（best-of-10 × 6 轮，strWork(200000)）：AOT wasm 中位 **28.18ms**
-  vs interp 回退 **26.50ms** —— 每轮 `s = s + i` 跨一次 `qz.string_concat` 边界，跨界税吃掉全部
-  AOT 收益。**故 str 放弃 wasm 化**，走 `--interp` 退解释器（`compileTS(opts.interp)`，调用者
-  经传递闭包一并退，glue 内联 transpile 出的 JS；判据不做自动推断，显式列名）。
+**⚠️ objWork 表行修正（2026-10-18）**：旧表记 `objWork AOT=0.8ms 快 ~9x`。该 0.8ms/1ms 锚点来自 `28835e96`（2026-10-11）引入的 `_emitConcat` num+num→`f64Add` 内联支（零跨界）。**`7af9e98c`（2026-10-16 08:45，"+ 拼接 ToPrimitive"）删了该 f64Add 内联支、num+num 改走宿主 `qz.add`**（提交信息称"双纯数走原生"但 diff 实删 f64Add，信息不准）⇒ objWork 回归至 **186–213ms**（60000 次 `qz.add` 跨界 × 3.55µs/次）。**2026-10-18 修复**：`_emitConcat`（emitter.js:3257-3266）「两非串」else 支加双纯数运行时 guard——纯数+纯数→`f64Add` 内联（零跨界），否则→`qz.add`（保留 ToPrimitive 正确性）⇒ objWork=**2.88ms**、跨界 60006→6、check=8999999990000 正确，14 个 ToPrimitive 边界 + test_aot.js ALL PASS。
 
-## 跨界税：唯一的大杠杆
+- **str 的裁决（2026-10-15）**：字符串负载在 wasm 里既非收益也无系统性劣势，**≈解释器持平**。独立 A/B 交替实测（strWork(200000)）：AOT wasm 中位 28.18ms vs interp 回退 26.50ms —— 每轮 `s = s + i` 跨一次 `qz.string_concat` 边界，跨界税吃掉全部 AOT 收益。**故 str 放弃 wasm 化**，走 `--interp` 退解释器（`compileTS(opts.interp)`）。
 
-- 现状 `qz.*` import = **JS 函数**（glue 里 `qz.add`/`qz.str_len`…）→ **~4.9µs/次**（`ASSESSMENT.md:391`）。
-- 改走 `ext_wamr.c:1071` **raw native 注册**（wasm import → native C 函数，WAMR 直跳 C 无 JS glue/无 importObject 闭包/无 BigInt 装箱）→ **~45ns/次（空）/ ~66ns/次（32B 负载）**（`inmod-abi-proto` C 段实测）。
-- 效果：**循环内跨界不再必成悬崖**。命门 = guard 化率——objWork 曾因 60001 次跨界从 1ms 劣化到 292ms（`ASSESSMENT.md:26`）。
+## 跨界税：唯一的大杠杆（2026-10-18 复测修正）
 
-## 数值表示：f64 vs 原生整数（本轮新决策）
+**关键修正：raw native ≠ qz.* 的 C 实现，只压派发；且 glue 路径未走 raw native。**
+
+- **现状（glue / `WebAssembly.instantiate` 路径）**：`qz.*` import = glue 里 `makeQzvm()` 返回的 JS 函数。实测 `qz.add` **~3.55µs/次**（objWork 213ms ÷ 60000 跨界）—— 走 WAMR 标准 import callback（慢路径），**不**走 raw native。
+- **raw native（`ext_wamr.c:893-907` + `wasm_runtime_register_natives_raw`）= 派发蹦床**：wasm→C 蹦床→查 importObject 的 JS 函数→BigInt 解 tag→调 JS。**JS shim 工作仍在**（~195ns/次）。
+- **C 宿主实测（`inmod-abi-proto/host_bench3`，纯派发无 JS 工作）**：noop **43.01ns/次**、32B 负载 60.73ns/次、纯 wasm 循环 5.23ns/次、C 直调 0.28ns/次。该 43–66ns 是 raw native **派发税下界**，但仅在 C 宿主直跑时达成；**glue 路径不触发它**（仍 3.55µs）。
+- **objWork 跨界分解（实测，计数器隔离）**：objWork(30000) 实际运行时跨界 = `qz.add`×60000（2/轮 × 30000），**零** prop_get/object_get/string_concat/str_dup 运行时跨界。即：
+  - POJO 对象字面量 `{id,sq,tag}` = bump 内联 alloc（emitter.js:3917+，零跨界）✓
+  - POJO 属性读 `r.id`/`r.sq` = 内联 i32Load（`_emitPropReadFromLocal` 0x7FF9 支，emitter.js:752-761，零跨界）✓ —— **旧脑页/早期推断"POJO 属性读走 prop_get 跨界"是错的**。
+  - 唯一跨界 = `total + r.id + r.sq` 的 `+`：tagged 模式经 `_emitBinOp`→`_emitConcat`，旧代码 num+num 无内联支→`qz.add`（宿主）。fix 后双纯数 guard→`f64Add` 内联（零跨界）。
+- **效果**：循环内跨界不再必成悬崖——但前提是 guard 化率（num+num 内联）+ 走 raw native 路径（glue 当前不走，需 in-module/M4 或原生 Module 构造路径才触发）。
+
+## 数值表示：f64 vs 原生整数
 
 ### 前提纠正
 
@@ -89,9 +93,9 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
 
 - **单模块统一形态**：in-module 档（`QZ_PROFILE=in-module`，`CMakeLists.txt:41-45`）= 把 qzvm 编到 wasm32 与该模块的静态 wasm **共存于同一 wasm 模块**。故 in-module 与 AOT **不是两条并行路线**——是同一模块的静态/动态两面。（校正本页 2026-10-13 早先"两条并行路线"的错误记录。）
 - **为何单模块可成立**：in-module profile 关掉 qzjs 自己的 wasm 引擎（`_prof_wamr OFF` / `_prof_wasm3 OFF`），模块内不套第二层 wasm 引擎 ⇒ **无 wasm 嵌套**。
-- **两条 import 面互斥可选**：`qz.*`（qzjs 兑现）与 WASI（wasm 运行时兑现）。qzjs 内置 WAMR 的 `WAMR_BUILD_LIBC_WASI 0`（`CMakeLists.txt:582`）、wasm3 `BUILD_WASI=none` ⇒ **qzjs 当前不解 WASI**；WASI 目标模块供其它 wasm 运行时。工具链可发多 target（`build.js:128` `--target` 是 CPU 架构交叉编译，与 lowering target 不同轴）。
-- **`qz.*` 归属**：`02:36` 记为「工具链自带 JS shim」（`build.js:36/82/91`），`02:42` 记为「引擎↔宿主阻抗匹配绑定」。二者统一：shim 实现该绑定，跑在任意 JS 引擎（Node/浏览器/qzjs）；qzjs 只是其中一个兑现者。
-- **待决点（M4）**：单模块如何合并——`IN_MODULE_DESIGN.md §6` 只说产独立 guest 产物（qzvm 编出的 .wasm），未写与 AOT 静态 wasm 的合并步骤。wasm-merge/wasm-ld 链接成单模块（契合"零 marshalling"）vs 并列加载？
+- **两条 import 面互斥可选**：`qz.*`（qzjs 兑现）与 WASI（wasm 运行时兑现）。qzjs 内置 WAMR 的 `WAMR_BUILD_LIBC_WASI 0`、wasm3 `BUILD_WASI=none` ⇒ **qzjs 当前不解 WASI**；WASI 目标模块供其它 wasm 运行时。
+- **`qz.*` 归属**：工具链自带 JS shim（`build.js:36/82/91`）。shim 实现该绑定，跑在任意 JS 引擎（Node/浏览器/qzjs）；qzjs 只是其中一个兑现者。
+- **待决点（M4）**：单模块如何合并——`IN_MODULE_DESIGN.md §6`。`build-inmod/src/qzvm/libqzvm.wasm`（in-module guest）已编出，但静态 wasm + qzvm 合并到同模块的步骤未实现，跑不了 objWork in-module 形态。
 
 
 ## Timeline
@@ -161,3 +165,21 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
   affects: [aot-performance-model]
+
+- time: 2026-10-18T05:42:04
+  kind: decision
+  summary: "2026-10-18 复测修正：objWork 0.8ms 锚点来自 28835e96 的 _emitConcat num+num→f64Add 内联；7af9e98c(10-16) 删该支致回归 186-213ms；fix 双纯数 guard 恢复 2.88ms。raw native 43-66ns 仅 C 宿主 bench3 路径，glue 路径 qz.add=3.55µs 不走 raw native。POJO 属性读实为内联(0 跨界)，旧'POJO 走 prop_get'说法错。"
+  source: "实测: bench_mix 计数器隔离 objWork 跨界 + inmod bench3 C 宿主 + test_aot.js ALL PASS + 14 ToPrimitive 边界 ALL OK"
+  affects: [aot-performance-model]
+
+- time: 2026-10-18T05:42:43
+  kind: evidence
+  summary: "objWork 跨界税实测裁决 + 回归定位 + fix。计数器隔离 objWork(30000): 60006 跨界全 qz.add(2/轮×30000), 零 prop_get/object_get/string_concat 运行时跨界→POJO 字面量 bump 内联 alloc + POJO 属性读内联 i32Load(均零跨界)确认; 旧'POJO 走 prop_get 跨界'推断错。qz.add=3.55µs/次(glue/WASM.instantiate 走 WAMR import callback 慢路径, 非 raw native)。回归: 28835e96(10-11) 引入 _emitConcat num+num→f64Add 内联(=旧 0.8ms/1ms 锚点来源); 7af9e98c(10-16 08:45 '+ 拼接 ToPrimitive')删该 f64Add 改 qz.add(信息称双纯数走原生但 diff 实删, 不准)→objWork 回归 186-213ms。fix(2026-10-18): _emitConcat(emitter.js:3257-3266)两非串 else 加双纯数运行时 guard→纯数+纯数 f64Add 内联零跨界, 否则 qz.add 保 ToPrimitive。结果 objWork=2.88ms(213ms→74x), 跨界 60006→6, check=8999999990000 正确, 14 ToPrimitive 边界 ALL OK, test_aot.js ALL PASS。inmod bench3 C 宿主: noop 43.01ns/32B 60.73ns/纯循环 5.23ns(raw native 派发税下界, 仅 C 宿主达成, glue 不触发)。"
+  source: "bench_mix.js 计数器实测 + inmod-abi-proto/host_bench3 + git log -L _emitConcat + test_aot.js + ToPrimitive 烟测"
+  affects: [emitter.js, aot-performance-model]
+
+- time: 2026-10-18T09:03:34
+  kind: evidence
+  summary: "noop AOT 跨界微基准修正: qzjs ext_wamr noop=133.8ns/次, V8=17.7ns/次。证明 raw-native 蹦床已生效(非'glue 不走 raw native')。qz.add 3.55µs = 蹦床 133.8ns + JS shim 工作 ~3.4µs(BigInt 解 tag+add)。旧'glue 路径不走 raw native, 派发税 3.55µs'推断修正: 派发已最小(133.8ns), 瓶颈是 JS shim 工作非派发。"
+  source: "noop_imp.wat(wat2wasm)+wamrc AOT+qzjs/V8 对照"
+  affects: [aot-performance-model, aot-roadmap]
