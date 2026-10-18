@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-18T10:12:46"
+updated: "2026-10-18T10:29:20"
 ---
 
 <!-- compiled_truth -->
@@ -129,3 +129,21 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "2026-10-18 修正：P2 M4 合并无 ABI 层(设计核心 line 234/366, 单一 wasm 内部调用无 ABI 承诺, 对象表示统一无 JSValue)。撤销前推断'ABI 适配工程'。真阻塞=工具链(wasm-merge 缺)+函数绑定(libqzvm 不 export 18 qz.*)。价值=qz.add 3.55µs→wasm 内函数~ns。P1✅P5✅不变。"
   source: "IN_MODULE_DESIGN line 234/366; 用户纠正'无 abi 核心设计'"
   affects: [aot-roadmap]
+
+- time: 2026-10-18T10:20:07
+  kind: note
+  summary: "无 ABI 设计可行性评估(2026-10-18): '无 ABI'=无跨 wasm 边界 marshalling 税(无 i64↔BigInt/无 JS 中间层/无 import-export 编解码),非'无接口/无工程'。三层面论证: (1)kernel 接口(§5.3 line234 无 ABI 承诺)✅M5 已验; (2)pal 面(§10.1-2 uv_io_* 穿边界 ptr+len 无 JSValue)✅inmod-abi-proto 已验 45-66ns; (3)AOT qz.* 面(§10.6 line428 通用契约面非私有 ABI)⚠️设计成立但实现缺口大。核心缺口: libqzvm.wasm 无 18 个 qz.* C 符号(实测 wasm2wat 确认), 需新写 wrapper; 对象表示双轨(emitter bump arena tagged handle vs QuickJS JSValue 堆), line366'0x7FFA 复用'是统一前提但未落地(改 QuickJS 字符串层大工程); AOT 面缺三层重排论证(pal 面有 §10.2, AOT 面仅 §10.6 一句); §9 line305'AOT 变体未验'诚实标注。结论: 设计原则成立, AOT 面实现缺口+论证缺口大; 建议补 AOT 三层重排论证+最小验证(1-2 qz.* wrapper 合并跑)+裁决表示统一程度。"
+  source: "IN_MODULE_DESIGN §5.3/§10.1-2/§10.6 line234/366/428; wasm2wat libqzvm 无 qz.* 符号(1043 func 含 QuickJS); mix.wasm 18 qz.* import"
+  affects: [aot-roadmap, IN_MODULE_DESIGN, aot-performance-model]
+
+- time: 2026-10-18T10:23:55
+  kind: reversal
+  summary: "无 ABI 认知二次修正(用户深化): '无 ABI'=qzjs 只承诺公开 JS API 稳定, wasm 模块内与 qzvm 交互是内联调用绑定字节码引擎(QuickJS)和 wasm 原生代码(emitter 产物)。撤销前评估'18 qz.* wrapper 是核心缺口'框架——18 qz.* import 是跨界形态(宿主 JS shim)产物, M6 内联绑定形态不走它(不发 qz.* import, 直接内联绑定 QuickJS 内部操作)。IN_MODULE_DESIGN line428 佐证: 'TS import 内容若内联, 产物 wasm 零 import 自包含'; line4/278/422: M6=in-module 真正落地(内联绑定), M1-M5 先 guest 自包含。真缺口(M6 未实现): (1)emitter 侧内联绑定机制(如何生成对 QuickJS 内部操作的内联调用, 非 qz.* import 桥); (2)合并链接工具链(wasm-merge 缺); (3)表示统一决策(emitter tagged/bump vs QuickJS JSValue, line366 暗示 QuickJS 侧复用 0x7FFA, 内联绑定下表示统一是绑定实现细节非接口适配层); (4)零实测(§9 line305 AOT 变体未验=M6 未做)。承诺边界设计原则成立, M6 是未实现的纸面设计。"
+  source: "用户深化'无 ABI=公开 JS API 稳定+内联绑定'; IN_MODULE_DESIGN line428(内联则零import)/line4,278,422(M6=in-module 落地)"
+  affects: [aot-roadmap, IN_MODULE_DESIGN]
+
+- time: 2026-10-18T10:29:20
+  kind: decision
+  summary: "无 ABI 设计文档落地(src/qzvm/aot/NO_ABI_DESIGN.md): 承诺边界=qzjs 只承诺公开 JS API 稳定; 三层交互模型——模块内部内联调用绑定(emitter 产物↔QuickJS 字节码引擎, 合并单模块直接互调, 无 qz.* import 契约面/无 marshalling); 对外零 import(无 OS 调用自包含)或标准 wasm import(依赖 qzjs JS API 时 import JS 函数服务号, 遵守 WebAssembly 标准)。18 qz.* import 是跨界形态(宿主 JS shim)产物, M6 内联绑定不走它。偏差评估 6 条: (1)关键 M6 目标错位——IN_MODULE_DESIGN M6=去 JS 化(host JS_ 调用), 无 ABI M6 核心=emitter 内联绑定, 去JS化是手段/前提非目的, 建议拆 M6a(去JS化)+M6b(emitter 内联绑定); (2)§6 把 M4 合并当工具链问题(wasm-merge), 无 ABI 关键是 emitter 编译期内联非链接工具; (3)§10.6 line426 保留 qz.* 契约面表述与内联绑定零 import 张力; (4)缺承诺边界陈述; (5)缺标准合规陈述(标准 wasm import 服务号); (6)§9 line305 AOT 变体未验=M6b 未做, 状态行'M6 进行中'过于乐观。"
+  source: "NO_ABI_DESIGN.md(新建); 用户澄清'无 ABI=公开 JS API 稳定+内联绑定+标准 wasm import'; IN_MODULE_DESIGN line234/278/306/422/428"
+  affects: [aot-roadmap, IN_MODULE_DESIGN, release-artifact-topology]
