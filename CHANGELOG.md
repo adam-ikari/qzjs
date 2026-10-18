@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+
+### `iter_close` 根因修复（2026-10-18）
+- **根因**：emitter 的 for-of 把 `iter_close` 调用放在 `loop.end` 与 `brk block.end` 之间。但 wasm 语义 `br 到 block = 跳到 end 之后`，`brIf(1)`（done）与 break 均跳到 brk block 的 end 之后 → 跳过了 block 内的 `iter_close` 调用 → 永不执行。
+- **修复**：把 `M.call(qz.iter_close)` 移到 brk block 的 `end()` 之后（block 外）。`brIf(1)` 跳到 brk.end 后即落在 iter_close；break 同理。
+- **宿主侧**：`iter_close` 对非 HOST 句柄（wasm 数组/字符串等）做 no-op（现在所有 for-of 均调 iter_close，含数组模式）。
+- 结果：批 37 14/17 → 15/17；**831/837（99.3%）**；ctest 32/32 零回归。
 ### 第三十七批语料 + TypeError 修复（2026-10-17）
 - 新增 `audit_corpus37.js`（17 例）：Unicode 字符串、Math 扩展、数组空洞、`Object.create(null)`、描述符往返、迭代器提前退出、错误 cause/stack、标签块、switch 块级作用域、Map NaN 键、位运算截断、IIFE 记忆化、trampoline、字符串替换边缘、嵌套解构默认值、静态私有字段、可选深链。**首跑 13/17 → 14/17**。
 - 修复 1 项：宿主对象 `method_call` 在 `obj[name]` 非函数时**内部 loud 不可捕获** → 改为 `throwValue(new TypeError(...))`（JS 语义，可被 catch 捕获）。

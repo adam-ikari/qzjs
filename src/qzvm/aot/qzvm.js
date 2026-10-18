@@ -925,7 +925,7 @@ function makeQzvm(strings, opts) {
       return st.done ? 1n : 0n;   // i64 flag（宿主返回 i64 必须 BigInt）
     },
     iter_val: (h) => ret(handles[idxOf(h)].val),
-    iter_close: (h) => { const st = handles[idxOf(h)]; if (st && typeof st.it.return === "function") try { st.it.return(); } catch (_) {} return; },
+    iter_close: (h) => { if ((BigInt.asUintN(64, h) >> 48n) !== HOST_HI) return; const st = handles[idxOf(h)]; if (st && st.it && typeof st.it.return === "function") try { st.it.return(); } catch (_) {} },   // 非 HOST（wasm 数组/字符串等）→ no-op
     iter_array: (v) => {                          // 非数组可迭代（Map/Set/迭代器等）→ wasm 数组（元素经 toJS/bitsOf）
       const x = toJS(v);
       if (x == null) throw new Error("for-of: 该值不可迭代");

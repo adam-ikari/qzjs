@@ -3426,13 +3426,9 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.depth--; M.end();                                  // end cont
         M.br(0);                                                // 下一轮（→ loop 头 → 条件）
         this.depth--; M.end();                                  // end loop
-        // 正常完成 / break：宿主迭代器 → iter_close（JS 迭代协议）；数组模式（0x7FFB）无操作
-        M.localGet(arrL); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
-        M.ifBlock("void");
-        M.else_();
+        this.depth--; M.end();                                  // end brk（iter_close 移到 block 外：wasm br 到 block = 跳到 end 后，故 brIf(1) 落到此处）
+        // 正常完成 / break → iter_close（brk block 外：brIf(1) done 与 break 均跳到 brk.end 后 → 落到此处）
         M.localGet(arrL); M.call("qz.iter_close");
-        M.end();
-        this.depth--; M.end();                                  // end brk
         this.forOfCount--;
         return;
     }
