@@ -1399,11 +1399,16 @@ class Emitter {
         /* 表槽提前分配：闭包值在**调用方**函数体发射时就要写入槽号，而蹦床
          * 是在被调 lambda 的函数体发射末尾才生成——顺序上更晚。故此处先占号，
          * 蹦床生成时复用同一槽。 */
-        this._trampSlots = this._trampSlots || new Map();
-        const tb = this._inModuleLink ? INMOD_TABLE_CAP : 1;
-        const tn0 = fname + "$t";
-        let slot0 = this._trampSlots.get(tn0);
-        if (slot0 === undefined) { slot0 = tb + this._trampSlots.size; this._trampSlots.set(tn0, slot0); }
+        /* 蹦床表槽仅为 in-module 档分配：共享 funcref 表由 libqzvm 导出。
+         * 独立档（JS 宿主）没有表，闭包值按原路径写 funcidx（见 _emitLambdaNew
+         * 的 tableSlot===undefined 回退）。*/
+        let slot0;
+        if (this._inModuleLink) {
+            this._trampSlots = this._trampSlots || new Map();
+            const tn0 = fname + "$t";
+            slot0 = this._trampSlots.get(tn0);
+            if (slot0 === undefined) { slot0 = INMOD_TABLE_CAP + this._trampSlots.size; this._trampSlots.set(tn0, slot0); }
+        }
         this._lamById.set(lam, { id, fname, caps, n: params.length, tableSlot: slot0,
                                  rest: !!(lam._qzRest || (astParams.length && astParams[astParams.length - 1].dotDotDotToken)), synthThis: thisSlot });
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
@@ -3023,9 +3028,13 @@ function compileTS(input, outWasm, opts = {}) {
     /* 类方法蹦床：与闭包蹦床同模式（统一 5 参 (i64 self, i64×4)），供 C 侧类原语
      * 按 clsId+方法名 查表分派。每条 classMeta 项记录方法名→槽。 */
     em._clsTrampSlots = new Map();   // 导出名 → 表槽
+    /* 类方法蹦床只为 in-module 档生成：需要共享 funcref 表（表由 libqzvm 导入）。
+     * 独立档（test_aot 的 JS 宿主）没有表，生成蹦床会 elem 越界。 */
     const clsMetaBuild = em._classList.map(cname => {
         const c = em.classes.get(cname);
         const mthToSlot = (mthName) => {
+            /* 蹦床 + 表槽仅 in-module 档：独立档由 JS 宿主按 classMeta.methods.name 直调导出。*/
+            if (!em._inModuleLink) return undefined;
             if (!em._clsTrampSlots.has(mthName)) {
                 const tn = mthName + "$t";
                 m.declareFunc(tn, ["i64", "i64", "i64", "i64", "i64"], ["i64"]);
@@ -3052,9 +3061,9 @@ function compileTS(input, outWasm, opts = {}) {
             const en = methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name);
             const slot = mthToSlot(en);
             const nameStrId = em._strId(mth.name);
-            if (mth.accessor === "set") setters[mth.name] = { slot, nameStrId, n: mth.node.parameters.length };
-            else if (mth.accessor === "get") getters[mth.name] = { slot, nameStrId, n: 0 };
-            else methods[mth.name] = { slot, nameStrId, n: mth.node.parameters.length,
+            if (mth.accessor === "set") setters[mth.name] = { slot, nameStrId, name: en, n: mth.node.parameters.length };
+            else if (mth.accessor === "get") getters[mth.name] = { slot, nameStrId, name: en, n: 0 };
+            else methods[mth.name] = { slot, nameStrId, name: en, n: mth.node.parameters.length,
                                        rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken) };
         }
         for (const smth of (c.staticMethods || [])) {
@@ -3062,10 +3071,10 @@ function compileTS(input, outWasm, opts = {}) {
             const en = staticMethName(cname, smth.name);
             const slot = mthToSlot(en);
             const nameStrId = em._strId(smth.name);
-            staticMethods[smth.name] = { slot, nameStrId, n: smth.node.parameters.length };
+            staticMethods[smth.name] = { slot, nameStrId, name: en, n: smth.node.parameters.length };
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
-        const ctorSlot = mthToSlot(ctorName(cname));
+        const ctorSlot = em._inModuleLink ? mthToSlot(ctorName(cname)) : undefined;
         return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null,
                  methods, getters, setters, staticMethods, ctorSlot,
                  ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };
