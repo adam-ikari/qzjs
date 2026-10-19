@@ -80,11 +80,12 @@ if(QZ_IN_MODULE)
         OUTPUT_NAME qzvm
         SUFFIX ".wasm"
         PREFIX "lib")
-    # M6b: memory 提到 640 页（40 MiB）——emitter 产物 import qz.memory 需
-    # 字面量段 STR_BASE=16MiB + bump arena；内存由本模块定义，emitter import 复用。
+    # M6b: memory 1024 页（64 MiB）——emitter 产物 import qz.memory 复用。
+    # 布局（in-module）：libqzvm [0,12MiB) / emitter bump [12MiB,20MiB) / 字面量 [20MiB,64MiB)。
+    # libqzvm wasi-libc 堆自 __heap_base 向上增长，实测 5 万对象后 7.19MiB，12MiB 界留余量。
     target_link_options(qzvm-guest PRIVATE
         -mexec-model=reactor
-        -Wl,--initial-memory=41943040
+        -Wl,--initial-memory=67108864
         -Wl,--export=malloc -Wl,--export=free)
     # M6b PoC: reactor 模式默认 export memory（libqzvm.wasm exports "memory"），
     # emitter 产物 import "qz" "memory" 共享 linear memory（已验 multi-module 链接）。

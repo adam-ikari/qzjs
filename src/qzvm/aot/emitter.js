@@ -2252,6 +2252,13 @@ const SCRATCH = 16;                              // numstr 临时区（48 字节
 const STR_BASE = 16 << 20;                       // 字面量 data 段基址（16 MiB）：bump 堆 arena 上限，越过即 trap
                                                  // （字符串拼接不再原地追加 → 内存需求约翻倍，故 arena 加倍）
 const STR_BUMP = 128;                            // bump 堆起始（跳过 scratch）
+/* in-module 合并形态布局（与 libqzvm 共享 memory）。
+ * 依据：libqzvm wasi-libc 堆自 __heap_base(≈698KB) 向上增长，实测 5 万对象后堆顶
+ * 7.19MiB；取 12MiB 为界留余量。emitter arena 全在其上，字面量段再上抬 8MiB。*/
+const INMOD_HOST_LIMIT = 12 << 20;               // libqzvm 段上界（12 MiB）：emitter bump 起点
+const INMOD_STR_BUMP   = INMOD_HOST_LIMIT;       // in-module bump 堆起始
+const INMOD_STR_BASE   = 20 << 20;               // in-module 字面量段基址（20 MiB）
+const INMOD_PAGES      = 1024;                   // 64 MiB（字面量段 [20MiB, 64MiB)）
 
 // 字符串 helper 函数（每模块一份，emitter call 调用）
 
@@ -2268,12 +2275,12 @@ function emitBumpAlloc(m, emitTotal) {
 function emitBumpSet(m, emitNewVal) {
     emitNewVal(); m.call("qzs_ckmem"); m.globalSet(0);
 }
-function emitStringHelpers(m) {
+function emitStringHelpers(m, strBase) {
     // qzs_ckmem(newBump:i32) -> i32：bump 越界守卫。arena = [SCRATCH, STR_BASE)，越过基址
     // 即 trap（unreachable），杜绝静默覆盖字面量段（STR_BASE 起）或 OOB 崩溃。
     m.declareFunc("qzs_ckmem", ["i32"], ["i32"]);
     m.startBody("qzs_ckmem", [], []);
-    m.localGet(0); m.i32Const(STR_BASE); m.i32GtU();
+    m.localGet(0); m.i32Const(strBase); m.i32GtU();
     m.ifBlock("void"); m.unreachable(); m.end();
     m.localGet(0);
     m.endBody();
@@ -2872,16 +2879,22 @@ function compileTS(input, outWasm, opts = {}) {
             if (contract) registerQz(m, contract);
         }
         if (anyTagged) {
+            em._scratch = (opts.inModuleLink ? INMOD_HOST_LIMIT : SCRATCH);
+            /* in-module 合并形态：emitter 产物与 libqzvm 共享同一 linear memory。
+             * libqzvm 的 wasi-libc 堆从 __heap_base 起向上增长（实测 5 万对象后堆顶
+             * 7.19MiB）；若 emitter 仍用 [128,16MiB) 作 bump arena 会与之重叠。
+             * → in-module 下整体后移：libqzvm 段 [0, INMOD_HOST_LIMIT) 预留，
+             *   bump arena [INMOD_HOST_LIMIT, INMOD_STR_BASE)，字面量段起于 INMOD_STR_BASE。
+             * 独立模式保留原布局：bump [128,16MiB) + 字面量 [16MiB,40MiB)。*/
+            em._strBase = opts.inModuleLink ? INMOD_STR_BASE : STR_BASE;
+            em._strBump = opts.inModuleLink ? (INMOD_STR_BUMP + 64) : STR_BUMP;   // +64：让出 scratch 区
             if (opts.inModuleLink) {
-                // M6b: multi-module 合并形态——emitter 产物 import libqzvm memory
-                // （共享 linear memory, NaN-box 句柄跨模块有效）。布局协调
-                // （STR_BUMP 偏移避 libqzvm heap）+ libqzvm memory 增大是完整落地工程。
-                m.importMemory("qz", "memory", 640, 640);
+                m.importMemory("qz", "memory", INMOD_PAGES, INMOD_PAGES);
                 m.exportMemory(0);   // re-export 链接到的 memory（导入 memory 索引恒 0），供宿主驱动读结果
             } else {
-                m.addMemory(640);                            // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
+                m.addMemory(640);    // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
             }
-            m.addGlobal("i32", STR_BUMP);                    // global0 = bump 堆（字符串/对象）
+            m.addGlobal("i32", em._strBump);                 // global0 = bump 堆（字符串/对象）
             m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
             em.moduleGlobals = new Map();                    // 模块级变量名 → wasm 全局索引（i64 tagged，索引 2 起）
             em._modInitNames = new Set(modVars.map(v => v.name.text));
@@ -2897,7 +2910,7 @@ function compileTS(input, outWasm, opts = {}) {
             m.startBody("qzs_getargs", []);
             m.globalGet(em._argGlobal);
             m.endBody();
-            emitStringHelpers(m);
+            emitStringHelpers(m, em._strBase || STR_BASE);
         }
         for (const st of fns) {
             if (interpSet.has(st.name.text)) continue;   // interp 函数不进 wasm
@@ -2945,7 +2958,7 @@ function compileTS(input, outWasm, opts = {}) {
             // 使一次调用的 arena 占用与调用时长解耦（否则长循环累加耗尽 arena）。
             m.declareFunc("__bump_reset", [], []);
             m.startBody("__bump_reset", [], []);
-            m.i32Const(STR_BUMP); m.globalSet(0);
+            m.i32Const(em._strBump || STR_BUMP); m.globalSet(0);
             m.endBody();
             m.exportFn("__bump_reset", "__bump_reset");
         }
@@ -3141,7 +3154,7 @@ Emitter.prototype._emitIsStr = function () {
 Emitter.prototype._litOffset = function (text) {
     let off = this._litOff.get(text);
     if (off !== undefined) return off;
-    off = (this._litCursor === undefined) ? STR_BASE : this._litCursor;
+    off = (this._litCursor === undefined) ? (this._strBase || STR_BASE) : this._litCursor;
     const bytes = Buffer.from(text, "utf8");
     const head = Buffer.alloc(4); head.writeInt32LE(bytes.length, 0);
     this.m.addData(off, Buffer.concat([head, bytes]));
@@ -3244,10 +3257,10 @@ Emitter.prototype._emitConcat = function (inPlace) {
           M.f64Const(9007199254740992); M.f64Lt();
           M.i32And();
           M.ifBlock("i64");
-            M.i32Const(SCRATCH); M.localGet(this.scratchA); M.f64ReinterpretI64(); M.i64TruncF64S(); M.call("qzs_numstr");
+            M.i32Const(this._scratch || SCRATCH); M.localGet(this.scratchA); M.f64ReinterpretI64(); M.i64TruncF64S(); M.call("qzs_numstr");
             M.drop();
-            M.i32Const(SCRATCH); M.i32Load(2, 0); M.localSet(this.sT[0]);
-            M.i32Const(SCRATCH + 4); M.localSet(this.sT[2]);
+            M.i32Const(this._scratch || SCRATCH); M.i32Load(2, 0); M.localSet(this.sT[0]);
+            M.i32Const((this._scratch || SCRATCH) + 4); M.localSet(this.sT[2]);
             M.localGet(this.scratchB); if (!this._concatInPlace) M.call("qz.str_dup"); M.i32WrapI64();   // 左操作数可能被别名引用 → 先私有副本（此前缺失 → 静默改到他处）
             M.localGet(this.sT[2]); M.localGet(this.sT[0]); M.call("qzs_append");
             this._strTag();
