@@ -1,3 +1,4 @@
+#include <math.h>
 /*
  * qzvm guest entry — in-module wasm32 reactor（IN_MODULE_DESIGN.md §6/§7 M4→M5）。
  *
@@ -427,6 +428,136 @@ int64_t qz_guest_str_len(int64_t a)
     JSValue vr = JS_NewFloat64(ctx, (double)len);
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* ── M6b PoC: sub/mul/div/rem 算术原语（批量，qz_tojs/ret 模式）────────── */
+__attribute__((export_name("sub")))
+int64_t qz_guest_sub(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, fa - fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("mul")))
+int64_t qz_guest_mul(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, fa * fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("div")))
+int64_t qz_guest_div(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, fa / fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("rem")))
+int64_t qz_guest_rem(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, fmod(fa, fb));
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* ── M6b PoC: le/ge/seq/sne 比较原语（批量，布尔 tag）────────── */
+__attribute__((export_name("le")))
+int64_t qz_guest_le(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewBool(ctx, fa <= fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("ge")))
+int64_t qz_guest_ge(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewBool(ctx, fa >= fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("seq")))
+int64_t qz_guest_seq(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewBool(ctx, fa == fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("sne")))
+int64_t qz_guest_sne(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewBool(ctx, fa != fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
     return r;
 }
 
