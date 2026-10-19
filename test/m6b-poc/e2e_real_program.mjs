@@ -1,5 +1,7 @@
 // M6b e2e：真实 emitter 产物（含循环/递归/数组/字符串/for-of/push）经 libqzvm 端到端实跑。
-// 覆盖 sum/pick（f64 ABI）、greet（tagged i64 + 字符串）、fib（递归）、arrSum（数组+push+for-of）。
+// 覆盖 sum/pick（f64 ABI）、greet（tagged i64 + 字符串）、fib（递归）、arrSum（数组字面量+for-of）。
+// 注：arrSum 的 a.push 由 emitter 内联为内存数组写，不经 method_call；
+//     method_call 的覆盖见 e2e_builtin.mjs。
 import { readFileSync, existsSync } from 'node:fs';
 import { WASI } from 'node:wasi';
 
@@ -57,7 +59,7 @@ chk('pick(3,9)', P.pick(3, 9), 9);
 chk('pick(9,3)', P.pick(9, 3), 9);
 chk('fib(10)', P.fib(10), 55);                     // 递归
 chk('greet("x")', readStr(P.greet(writeStr('x'))), 'hi x');   // tagged + 字符串拼接
-chk('arrSum(3)', unbox(P.arrSum(box(3))), 6);      // 数组 push + for-of
+chk('arrSum(3)', unbox(P.arrSum(box(3))), 6);      // 数组字面量 + for-of
 chk('arrSum(4)', unbox(P.arrSum(box(4))), 12);
 
 L.qz_destroy(rt);

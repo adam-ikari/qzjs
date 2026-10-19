@@ -2084,3 +2084,212 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
     JS_FreeValue(ctx, fn); JS_FreeValue(ctx, r);
     return out;
 }
+
+/* ── M6b: 内建全局分派（builtin 系列 + instanceof 内建） ─────────────
+ * 名字 → globalThis 上的值。点号名（Math.floor / Symbol.for / JSON.stringify）
+ * 沿 globalThis 逐段解析；构造函数名直接取 globalThis。*/
+
+/* 内建常量表：非全局对象的常量值（与 qzvm.js BUILTIN_CONSTS 对齐）。*/
+static const struct { const char *name; const char *lit; } QZ_CONSTS[] = {
+    { "NaN", "NaN" }, { "Infinity", "Infinity" }, { "undefined", "undefined" },
+    { "Number.MAX_SAFE_INTEGER", "9007199254740991" },
+    { "Number.MIN_SAFE_INTEGER", "-9007199254740991" },
+    { "Number.MAX_VALUE", "1.7976931348623157e308" },
+    { "Number.MIN_VALUE", "5e-324" },
+    { "Number.EPSILON", "2.220446049250313e-16" },
+    { "Number.POSITIVE_INFINITY", "Infinity" },
+    { "Number.NEGATIVE_INFINITY", "-Infinity" },
+    { "Number.NaN", "NaN" },
+    { "Math.PI", "3.141592653589793" },
+    { "Math.E", "2.718281828459045" },
+    { "Math.LN2", "0.6931471805599453" },
+    { "Math.LN10", "2.302585092994046" },
+    { "Math.LOG2E", "1.4426950408889634" },
+    { "Math.LOG10E", "0.4342944819032518" },
+    { "Math.SQRT2", "1.4142135623730951" },
+    { "Math.SQRT1_2", "0.7071067811865476" },
+};
+
+/* 固定元数的内建函数：调用点按此裁剪实参（其余按调用点给的 n）。*/
+static const struct { const char *name; int arity; } QZ_ARITY[] = {
+    { "Math.log2", 1 }, { "Math.log10", 1 }, { "Math.atan2", 2 },
+    { "Date.now", 0 }, { "Date.parse", 1 },
+};
+
+static JSValue qz_global_path(JSContext *ctx, const char *name)
+{
+    JSValue cur = JS_GetGlobalObject(ctx);
+    const char *p = name;
+    while (*p) {
+        const char *dot = strchr(p, '.');
+        size_t len = dot ? (size_t)(dot - p) : strlen(p);
+        char seg[128];
+        if (len >= sizeof(seg)) { JS_FreeValue(ctx, cur); return JS_UNDEFINED; }
+        memcpy(seg, p, len); seg[len] = '\0';
+        JSValue nxt = JS_GetPropertyStr(ctx, cur, seg);
+        JS_FreeValue(ctx, cur);
+        if (JS_IsUndefined(nxt) || JS_IsException(nxt)) return nxt;
+        cur = nxt;
+        if (!dot) break;
+        p = dot + 1;
+    }
+    return cur;
+}
+
+static int qz_arity_of(const char *name)
+{
+    for (size_t i = 0; i < sizeof(QZ_ARITY) / sizeof(QZ_ARITY[0]); i++)
+        if (strcmp(QZ_ARITY[i].name, name) == 0) return QZ_ARITY[i].arity;
+    return -1;
+}
+
+static JSValue qz_const_lookup(JSContext *ctx, const char *name, int *found)
+{
+    for (size_t i = 0; i < sizeof(QZ_CONSTS) / sizeof(QZ_CONSTS[0]); i++) {
+        if (strcmp(QZ_CONSTS[i].name, name) != 0) continue;
+        *found = 1;
+        return JS_Eval(ctx, QZ_CONSTS[i].lit, strlen(QZ_CONSTS[i].lit), "<const>", JS_EVAL_TYPE_GLOBAL);
+    }
+    *found = 0;
+    return JS_UNDEFINED;
+}
+
+/* 名字 → 内建值（含符号/原型对象等）。未知名返回 JS_UNDEFINED。*/
+static JSValue qz_builtin_lookup(JSContext *ctx, const char *name)
+{
+    int found = 0;
+    JSValue v = qz_const_lookup(ctx, name, &found);
+    if (found) return v;
+    v = qz_global_path(ctx, name);
+    return v;
+}
+
+__attribute__((export_name("builtin_value")))
+int64_t qz_guest_builtin_value(int32_t id)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t len = 0;
+    const char *name = qz_str_by_id(id, &len);
+    if (!name || len >= 128) return 0;
+    char nm[128];
+    memcpy(nm, name, len); nm[len] = '\0';
+    JSValue v = qz_builtin_lookup(ctx, nm);
+    if (JS_IsUndefined(v) || JS_IsException(v)) { JS_FreeValue(ctx, v); return 0; }
+    int64_t out = qz_ret(ctx, v);
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
+__attribute__((export_name("builtin_fn")))
+int64_t qz_guest_builtin_fn(int32_t id)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t len = 0;
+    const char *name = qz_str_by_id(id, &len);
+    if (!name || len >= 128) return 0;
+    char nm[128];
+    memcpy(nm, name, len); nm[len] = '\0';
+    JSValue v = qz_builtin_lookup(ctx, nm);
+    if (!JS_IsFunction(ctx, v)) { JS_FreeValue(ctx, v); return 0; }
+    int64_t out = qz_ret(ctx, v);
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
+__attribute__((export_name("builtin_member")))
+int64_t qz_guest_builtin_member(int32_t id)
+{
+    return qz_guest_builtin_value(id);   /* 成员当作值读：同一查找路径 */
+}
+
+__attribute__((export_name("builtin")))
+int64_t qz_guest_builtin(int32_t id, int32_t n, int64_t a0, int64_t a1,
+                         int64_t a2, int64_t a3, int64_t ovf)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t len = 0;
+    const char *name = qz_str_by_id(id, &len);
+    if (!name || len >= 128) return 0;
+    char nm[128];
+    memcpy(nm, name, len); nm[len] = '\0';
+
+    JSValue fn = qz_builtin_lookup(ctx, nm);
+    if (JS_IsException(fn)) { JS_FreeValue(ctx, fn); return 0; }
+    /* 非函数（常量 / 原型对象）：直接作为调用结果 */
+    if (!JS_IsFunction(ctx, fn)) {
+        int64_t out = qz_ret(ctx, fn);
+        JS_FreeValue(ctx, fn);
+        return out;
+    }
+
+    JSValue argv[16];
+    int argc = qz_collect_args(ctx, argv, 16,
+                               qz_tojs(ctx, a0), qz_tojs(ctx, a1),
+                               qz_tojs(ctx, a2), qz_tojs(ctx, a3),
+                               qz_tojs(ctx, ovf));
+    int arity = qz_arity_of(nm);
+    if (arity >= 0 && arity < argc) argc = arity;
+    if (n >= 0 && n < argc) argc = n;
+
+    JSValue res = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
+    for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
+    JS_FreeValue(ctx, fn);
+    if (JS_IsException(res)) { JS_FreeValue(ctx, res); return 0; }
+    int64_t out = qz_ret(ctx, res);
+    JS_FreeValue(ctx, res);
+    return out;
+}
+
+/* x instanceof 内建类：按名字走 JS instanceof（宿主值）/ 按原型链前缀判定 */
+__attribute__((export_name("instanceof_builtin")))
+int32_t qz_guest_instanceof_builtin(int64_t x, int32_t id)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t len = 0;
+    const char *name = qz_str_by_id(id, &len);
+    if (!name || len >= 128) return 0;
+    char nm[128];
+    memcpy(nm, name, len); nm[len] = '\0';
+
+    JSValue v = qz_builtin_lookup(ctx, nm);
+    if (JS_IsException(v) || !JS_IsFunction(ctx, v)) { JS_FreeValue(ctx, v); return 0; }
+
+    JSValue val = qz_tojs(ctx, x);
+    JSValue glob = JS_GetGlobalObject(ctx);
+    JSValue instf = JS_GetPropertyStr(ctx, glob, "Symbol");
+    JS_FreeValue(ctx, glob);
+    JSValue ctor = JS_UNDEFINED;
+    if (!JS_IsException(instf) && !JS_IsUndefined(instf))
+        ctor = JS_GetPropertyStr(ctx, instf, "hasInstance");
+    JS_FreeValue(ctx, instf);
+    int result = 0;
+    if (JS_IsFunction(ctx, ctor)) {
+        JSValue arg = v, r = JS_Call(ctx, ctor, arg, 1, &val);
+        if (!JS_IsException(r)) {
+            result = JS_ToBool(ctx, r) > 0;
+            JS_FreeValue(ctx, r);
+        }
+    }
+    JS_FreeValue(ctx, ctor);
+    JS_FreeValue(ctx, v);
+    return result;
+}
+
+/* 实例 instanceof 用户类：实例头 [off:i32] = clsId。类元数据（父链）本层不可达
+ * （emitter 未向产物传 classMeta），故只做自反/直接相等判定。*/
+__attribute__((export_name("instanceof_op")))
+int64_t qz_guest_instanceof_op(int64_t obj, int32_t clsId)
+{
+    uint64_t u = (uint64_t)obj;
+    if ((u >> 48) != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48) | 0;
+    int32_t cid = *(int32_t *)(uintptr_t)(uint32_t)(u & 0xFFFFFFFFu);
+    return (int64_t)((uint64_t)0x7FFC << 48) | (cid == clsId ? 1 : 0);
+}
