@@ -1,7 +1,7 @@
 ;; M6b 量税 bench: 循环 N 次调 qz_add, 量 multi-module 调用税
 (module
   (import "qz" "memory" (memory 1))
-  (import "qz" "qz_add" (func $qz_add (param i64 i64) (result i64)))
+  (import "qz" "add" (func $qz_add (param i64 i64) (result i64)))
   (func (export "bench") (param $n i64) (result i64)
     (local $i i64) (local $acc i64)
     i64.const 3

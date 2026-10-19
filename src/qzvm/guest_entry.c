@@ -274,7 +274,7 @@ int qz_guest_result_len(void)
  * 前提: emitter 产物 import "qz" "memory" 共享 libqzvm linear memory。
  * NaN-box 句柄（0x7FF9/0x7FFA/0x7FFB）后续: 当前只处理数值(f64 位型),
  * 句柄解 tag + handle table 是 M6b 完整落地工程。 */
-__attribute__((export_name("qz_add")))
+__attribute__((export_name("add")))
 int64_t qz_guest_add(int64_t a, int64_t b)
 {
     if (!g_current_rt) return a + b;  /* fallback: 未经 qz_eval 流 */
@@ -296,6 +296,14 @@ int64_t qz_guest_add(int64_t a, int64_t b)
     memcpy(&r, &fr, sizeof(double));
     return r;
 }
+
+/* ── M6b: handle table（0x7FF9 句柄，复杂原语基础）────────── */
+/* qz_tojs(0x7FF9|idx) → g_handles[idx]（JS_DupValue）。
+ * qz_ret(对象/闭包等非数值/字符串/布尔) → 注册 handle → 0x7FF9|idx。
+ * PoC 简化: static array + 不释放（泄漏接受）；refcount + 生命周期管理完整落地工程。 */
+#define QZ_MAX_HANDLES 65536
+static JSValue g_handles[QZ_MAX_HANDLES];
+static int g_handle_count = 0;
 
 /* ── M6b: toJS/ret C 最小版（112 原语基础——统一 NaN-box 编解码）────────── */
 /* toJS(b): i64 NaN-box → JSValue。数值(f64 位型) → JS_NewFloat64;
@@ -321,6 +329,10 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
         return JS_NewStringLen(ctx, mem + 4, len);
     }
     if (tag == 0x7FFC) return JS_NewBool(ctx, (int)(b & 1));  /* 布尔句柄 */
+    if (tag == 0x7FF9) {  /* handle table 句柄（对象/闭包等） */
+        uint32_t idx = (uint32_t)(b & 0xFFFFFFFF);
+        if (idx < (uint32_t)g_handle_count) return JS_DupValue(ctx, g_handles[idx]);
+    }
     return JS_UNDEFINED;  /* 其他 tag 后续 */
 }
 
@@ -347,7 +359,12 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
         return ((int64_t)0x7FFA << 48) | off;
     }
     if (tag == JS_TAG_BOOL) return ((int64_t)0x7FFC << 48) | (JS_VALUE_GET_BOOL(r) ? 1 : 0);
-    return 0;  /* undefined/null 等后续 */
+    /* 对象/闭包/数组等 → handle table 注册（0x7FF9 | idx） */
+    int idx = g_handle_count++;
+    if (idx >= QZ_MAX_HANDLES) return 0;
+    g_handles[idx] = JS_DupValue(ctx, r);
+    return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
+    /* undefined/null 等后续（0 tag） */
 }
 
 /* ── M6b PoC: string_concat C（JS 字符串拼接，handle table 原语）────────── */
@@ -651,6 +668,41 @@ int64_t qz_guest_truthy(int64_t a)
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
     return r;
+}
+
+/* ── M6b PoC: object_get/object_set（复杂原语，handle table + JS API）────── */
+__attribute__((export_name("object_get")))
+int64_t qz_guest_object_get(int64_t obj, int64_t key)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue o = qz_tojs(ctx, obj);
+    JSValue k = qz_tojs(ctx, key);
+    size_t klen = 0;
+    const char *kstr = JS_ToCStringLen(ctx, &klen, k);
+    JSValue vr = kstr ? JS_GetPropertyStr(ctx, o, kstr) : JS_UNDEFINED;
+    JS_FreeCString(ctx, kstr);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("object_set")))
+int64_t qz_guest_object_set(int64_t obj, int64_t key, int64_t val)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue o = qz_tojs(ctx, obj);
+    JSValue k = qz_tojs(ctx, key);
+    JSValue v = qz_tojs(ctx, val);
+    size_t klen = 0;
+    const char *kstr = JS_ToCStringLen(ctx, &klen, k);
+    int rc = kstr ? JS_SetPropertyStr(ctx, o, kstr, v) : -1;
+    JS_FreeCString(ctx, kstr);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k); JS_FreeValue(ctx, v);
+    return (int64_t)rc;
 }
 
 /* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
