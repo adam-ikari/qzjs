@@ -69,7 +69,7 @@ const info = compileTS(tsPath, wasmPath, { inModuleLink: true });
 setStrTab(info.strings || []);   // 产物 strId → 名字
 
 const prod = new WebAssembly.Module(readFileSync(wasmPath));
-const qz = { memory: mem };
+const qz = { memory: mem, __indirect_function_table: L.__indirect_function_table };
 const missing = [];
 for (const im of WebAssembly.Module.imports(prod)) {
   if (im.module !== 'qz' || im.kind !== 'function') continue;

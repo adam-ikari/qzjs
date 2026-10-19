@@ -1396,7 +1396,16 @@ class Emitter {
             }
         }
         lam._qzSupCtx = supCtx;
-        this._lamById.set(lam, { id, fname, caps, n: params.length, rest: !!(lam._qzRest || (astParams.length && astParams[astParams.length - 1].dotDotDotToken)), synthThis: thisSlot });
+        /* 表槽提前分配：闭包值在**调用方**函数体发射时就要写入槽号，而蹦床
+         * 是在被调 lambda 的函数体发射末尾才生成——顺序上更晚。故此处先占号，
+         * 蹦床生成时复用同一槽。 */
+        this._trampSlots = this._trampSlots || new Map();
+        const tb = this._inModuleLink ? INMOD_TABLE_CAP : 1;
+        const tn0 = fname + "$t";
+        let slot0 = this._trampSlots.get(tn0);
+        if (slot0 === undefined) { slot0 = tb + this._trampSlots.size; this._trampSlots.set(tn0, slot0); }
+        this._lamById.set(lam, { id, fname, caps, n: params.length, tableSlot: slot0,
+                                 rest: !!(lam._qzRest || (astParams.length && astParams[astParams.length - 1].dotDotDotToken)), synthThis: thisSlot });
         this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
         this._pendingLambdas.push({ lam, fname, params, caps, astParams });
         return { fname, caps };
@@ -1539,6 +1548,30 @@ class Emitter {
         this.varMap = savedMap; this.capMap = savedCap; this.blkLocal = savedBlk;
         this.envLocal = undefined; this.envRef = savedEnvRef;
         this.mode = savedMode; this.depth = savedDepth; this._staticVars = savedStatic;
+        const tramp = this._emitLambdaTrampoline(fname, params.length);
+        const m0 = this._lamById.get(lam);
+        if (m0) { m0.tableSlot = tramp.slot; m0.trampFunc = tramp.func; }
+        /* meta.tableSlot 已就绪 → 后续 _emitLambdaNew 写闭包值时可用。 */
+    }
+    /* 闭包体蹦床：统一签名 (env:i32, a0..a4:i64) → i64，供 C 侧 call_indirect 按
+     * 一个固定函数类型分派（闭包体自身签名随形参个数变化，无法直接进表）。
+     * 超出形参个数的槽补 undefined 句柄，与直调路径语义一致。 */
+    _emitLambdaTrampoline(fname, nParams) {
+        const M = this.m, tn = fname + "$t";
+        M.declareFunc(tn, ["i32", "i64", "i64", "i64", "i64"], ["i64"]);
+        M.startBody(tn, []);
+        /* 蹦床接收 5 个实参槽（i32 env + 4×i64），闭包体只声明它自己的形参个数 →
+         * 按 nParams 精确转发，多出的槽直接丢弃（wasm 调用参数必须严格匹配）。 */
+        M.localGet(0);
+        for (let i = 0; i < Math.min(nParams, 4); i++) M.localGet(1 + i);
+        M.call(fname);
+        M.return_();
+        M.endBody();
+        const f = this.m._funcIdx[tn];
+        /* 表槽分配：0 起留给「无此表项」哨兵，实际槽从 1 开始；product 侧表由
+         * libqzvm 导出共享（见 wasm-encoder.addTableImport）。 */
+        this._trampSlots = this._trampSlots || new Map();
+        return { slot: this._trampSlots.get(tn), func: f };
     }
     // ---------- 语句 ----------
     // ---------- 类（method lifting）----------
@@ -2257,6 +2290,8 @@ const STR_BUMP = 128;                            // bump 堆起始（跳过 scra
  * 7.19MiB；取 12MiB 为界留余量。emitter arena 全在其上，字面量段再上抬 8MiB。*/
 const INMOD_HOST_LIMIT = 12 << 20;               // libqzvm 段上界（12 MiB）：emitter bump 起点
 const INMOD_STR_BUMP   = INMOD_HOST_LIMIT;       // in-module bump 堆起始
+const INMOD_TABLE_CAP = 514;      // libqzvm 导出表容量（cmake 链接生成，见 --export-table）
+const INMOD_TABLE_RESERVE = 4096; // 产物蹦床可用槽数（闭包 + 类方法）
 const INMOD_STR_BASE   = 20 << 20;               // in-module 字面量段基址（20 MiB）
 const INMOD_PAGES      = 1024;                   // 64 MiB（字面量段 [20MiB, 64MiB)）
 
@@ -2879,6 +2914,7 @@ function compileTS(input, outWasm, opts = {}) {
             if (contract) registerQz(m, contract);
         }
         if (anyTagged) {
+            em._inModuleLink = !!opts.inModuleLink;
             em._scratch = (opts.inModuleLink ? INMOD_HOST_LIMIT : SCRATCH);
             /* in-module 合并形态：emitter 产物与 libqzvm 共享同一 linear memory。
              * libqzvm 的 wasi-libc 堆从 __heap_base 起向上增长（实测 5 万对象后堆顶
@@ -2891,6 +2927,11 @@ function compileTS(input, outWasm, opts = {}) {
             if (opts.inModuleLink) {
                 m.importMemory("qz", "memory", INMOD_PAGES, INMOD_PAGES);
                 m.exportMemory(0);   // re-export 链接到的 memory（导入 memory 索引恒 0），供宿主驱动读结果
+                /* funcref 表：与 libqzvm 共享（其表容量 TABLE_CAP 项）。产物从
+                 * TABLE_CAP 起追加自己的蹦床，C 侧 closure_call 按槽号 call_indirect。 */
+                /* 表容量必须一次声明够（import 段先于 code 段编码，蹦床数此时未知）：
+                 * TABLE_CAP（libqzvm 自身表项）+ 余量给产物闭包/类方法。 */
+                m.addTableImport(INMOD_TABLE_CAP, "__indirect_function_table", "qz");
             } else {
                 m.addMemory(640);    // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
             }
@@ -2978,6 +3019,17 @@ function compileTS(input, outWasm, opts = {}) {
     // 第二趟：按采集到的子集注册契约面，真发产物。
     const m = new Module({ debug: !!opts.debug, debugLine: !!opts.debug || !!opts.debugLine, srcFile: input });
     const em = emitAll(m, contract);
+    /* 蹦床进表：把每个闭包蹦床装到其分配槽，供 C 侧 call_indirect 分派。必须在
+     * build() 前完成（elem 段在 build 时编码）。 */
+    if (em._trampSlots) {
+        for (const [tn, slot] of em._trampSlots) {
+            const fi = m._funcIdx[tn];
+            if (fi !== undefined) m.addElem(slot, fi);
+        }
+        if (em._trampSlots.size) {
+            m.emitTableInit(em._trampSlots.size, INMOD_TABLE_CAP);
+        }
+    }
     fs.writeFileSync(outWasm, m.build());
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
     const funcMeta = fns.map(f => ({
@@ -3010,7 +3062,7 @@ function compileTS(input, outWasm, opts = {}) {
         return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters, staticMethods,
                  ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };   // 与 _instSize 一致（__cls + 字段）
     });
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs };
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs, trampSlots: em._trampSlots || new Map() };
 }
 
 
@@ -5104,7 +5156,8 @@ Emitter.prototype._emitLambdaNew = function (lam, selfName) {
     // 闭包值 = [funcidx:i32][envIdx:i32][arity:i32][nameStrId:i32]（envIdx=0 表示无捕获）；捕获值不再拷贝（共享环境）。
     emitBumpAlloc(M, () => M.i32Const(16));           // → off(i32)（越界 trap）
     M.localSet(this.cloOff);
-    M.localGet(this.cloOff); M.i32Const(fidx); M.i32Store(2, 0);
+    /* [off] = 蹦床表槽（C 侧 closure_call 经 call_indirect 分派）；无蹦床时退回 funcidx */
+    M.localGet(this.cloOff); M.i32Const(meta.tableSlot !== undefined ? meta.tableSlot : fidx); M.i32Store(2, 0);
     M.localGet(this.cloOff); (this.envRef !== undefined ? M.localGet(this.envRef) : M.i32Const(0)); M.i32Store(2, 4);
     M.localGet(this.cloOff); M.i32Const(lam.parameters ? lam.parameters.length : 0); M.i32Store(2, 8);
     M.localGet(this.cloOff); M.i32Const(lam.name && ts.isIdentifier(lam.name) ? this._strId(lam.name.text) : -1); M.i32Store(2, 12);

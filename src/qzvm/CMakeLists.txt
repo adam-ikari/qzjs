@@ -86,7 +86,14 @@ if(QZ_IN_MODULE)
     target_link_options(qzvm-guest PRIVATE
         -mexec-model=reactor
         -Wl,--initial-memory=67108864
-        -Wl,--export=malloc -Wl,--export=free)
+        -Wl,--export=malloc -Wl,--export=free
+        # M6b: 导出 funcref 表供 emitter 产物 import 共享（跨模块 call_indirect
+        # 回调闭包体/类方法）。表内本模块函数由 wasm-ld 自动填 elem 段；
+        # 产物的函数由产物自己的 elem 段追加到同一张表。
+        -Wl,--export-table
+        # 表去 max：产物 import 时按 min 声明并自行扩容到所需大小（闭包蹦床数
+        # 编译期未知），否则产物必须精确匹配 libqzvm 的表尺寸才能链接。
+        -Wl,--growable-table)
     # M6b PoC: reactor 模式默认 export memory（libqzvm.wasm exports "memory"），
     # emitter 产物 import "qz" "memory" 共享 linear memory（已验 multi-module 链接）。
     # 无需 --export-memory（wasm-ld-14 无此 flag，--export=memory 报 symbol not found）。

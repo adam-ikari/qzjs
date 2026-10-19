@@ -64,7 +64,7 @@ const OP = {
 };
 
 class Module {
-    constructor(opts) { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this.startIdx = null; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null;
+    constructor(opts) { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this.startIdx = null; this.table = null; this.tableElems = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null;
         this.debug = !!(opts && opts.debug);   // 生成 name 段（函数名）→ wat/wasm 可读，DAP 友好
         this._fnNames = [];                    // funcidx(全局) → 名（导入在前，本地函数在后）
         this.debugLine = !!(opts && opts.debugLine); // 生成 DWARF 调试段（.debug_info/line/abbrev/str）
@@ -200,6 +200,42 @@ class Module {
     // 内存（字符串/数组共享内存用）
     addMemory(pages) { this.memory = pages; }
     addData(offset, bytes) { this.data.push({ offset, bytes: Uint8Array.from(bytes) }); }   // 数据段（字符串字面量 UTF-8）
+    /* funcref 表：跨模块共享（import 名 __indirect_function_table），供 C 侧原语
+     * 经 call_indirect 回调产物内的闭包体/类方法。函数指针在 C 里就是 i32 索引，
+     * 故原语只需拿到表槽号即可分派。
+     *   addTableImport(min)  → 表来自宿主（libqzvm 导出）
+     *   addTableLocal(min)   → 本模块自建表
+     *   addElem(slot, funcIdx) → 把函数装入表槽（elem 段） */
+    addTableImport(min, name, module) { this.table = { imported: true, min, name: name || "__indirect_function_table", module: module || "qz" }; }
+    addTableLocal(min) { this.table = { imported: false, min }; }
+    /* 被动 elem 段：不参与实例化时的表初始化（此时表还没扩容），由启动函数
+     * 在 table.grow 之后 table.init 装入。 */
+    addElem(slot, funcIdx) { this.tableElems.push({ slot, funcIdx }); }
+    addTableGrow(n) { this.tableGrow = n; }
+    /* 生成启动函数完成表扩容 + 被动段装入。ply：产物侧起始槽（=宿主表容量）。
+     *   table.grow(dst, ref.null func) → 抬高到 ply + n
+     *   table.init(elem idx, dst, src, len) 逐段装入
+     * 必须在所有 addElem 之后、build 之前调用。 */
+    emitTableInit(growBy, baseSlot) {
+        if (!this.tableElems.length) return;
+        const fnName = "__qz_table_init";
+        this.declareFunc(fnName, [], []);
+        this.startBody(fnName, []);
+        // table.grow：栈序 (ref, n) → 返回旧尺寸
+        this._emit(0xd0, 0x70);                 // ref.null func
+        this._emit(0x41, ...sleb(growBy));      // i32.const growBy
+        this._emit(0xfc, ...uleb(15), ...uleb(0));   // table.grow table=0（0xFC 15）
+        this._emit(OP.drop);
+        const sorted = [...this.tableElems].sort((a, b) => a.slot - b.slot);
+        sorted.forEach((e, i) => {
+            this._emit(0x41, ...sleb(e.slot));  // dst
+            this._emit(0x41, 0x00);             // src=0（每段只有 1 项）
+            this._emit(0x41, 0x01);             // len=1
+            this._emit(0xfc, ...uleb(12), ...uleb(i), ...uleb(0));   // table.init elem=i, table=0（0xFC 12）
+        });
+        this.endBody();
+        this.setStart(fnName);
+    }
     i32Store(align, offset) { this._emit(OP.i32_store, ...uleb(align), ...uleb(offset)); }
     i32Store8(align, offset) { this._emit(OP.i32_store8, ...uleb(align), ...uleb(offset)); }
     i32Load(align, offset) { this._emit(OP.i32_load, ...uleb(align), ...uleb(offset)); }
@@ -232,14 +268,28 @@ class Module {
             ]));
             out.push(1, ...uleb(body.length), ...body);
         }
-        // import 段
-        if (this.imports.length) {
-            const body = vec(this.imports.map(imp => {
+        // import 段（含可能存在的 imported funcref 表）
+        if (this.imports.length || (this.table && this.table.imported)) {
+            const items = this.imports.map(imp => {
                 const head = [...uleb(imp.module.length), ...[...Buffer.from(imp.module)],
                               ...uleb(imp.field.length), ...[...Buffer.from(imp.field)]];
                 if (imp.memory) return [...head, 0x02, 0x00, ...uleb(imp.memory.min)];  // memory import: 非 shared、min-only（WAMR 拒 shared+max）
                 return [...head, 0x00, ...uleb(imp.type)];   // func import, type idx
-            }));
+            });
+            /* imported funcref 表必须排在 import 段内：0x01 = table，tabletype =
+             * reftype(0x70 funcref) + limits(flag=0x01 有 max, min, max)。与 libqzvm
+             * 导出的表同型（min=max=514），跨模块共享同一张表。 */
+            if (this.table && this.table.imported) {
+                const mn = this.table.min;
+                const mod = Buffer.from(this.table.module || "qz");
+                const fld = Buffer.from(this.table.name || "__indirect_function_table");
+                /* limits flag=0x00（仅 min）：宿主表无 max（libqzvm --growable-table）。
+                 * min 必须 ≤ 宿主现有表长（否则链接失败），故用宿主容量；
+                 * 产物所需的额外槽在启动函数里 table.grow 扩容后 table.init 装入。 */
+                items.push([...uleb(mod.length), ...mod, ...uleb(fld.length), ...fld,
+                            0x01, 0x70, 0x00, ...uleb(mn)]);
+            }
+            const body = vec(items);
             out.push(2, ...uleb(body.length), ...body);
         }
         // function 段
@@ -253,6 +303,12 @@ class Module {
             // 非 shared（shared 需 import，WAMR 不接受本地定义）
             const body = [0x01, 0x00, ...uleb(this.memory)];   // count=1 + limits{flags=0x00(min only), min} —— WAMR classic AOT 不支持 max
             out.push(5, ...uleb(body.length), ...body);
+        }
+        // table 段（id 4）：仅本地表（import 表已在 import 段内）
+        if (this.table && !this.table.imported) {
+            const mn = this.table.min;
+            const body = vec([[0x70, 0x00, ...uleb(mn)]]);   // funcref + limits(min only)
+            out.push(4, ...uleb(body.length), ...body);
         }
         // global 段：mutable（bump i32 / __err i64）；init 按类型选 const opcode（0x41=i32 0x42=i64）
         if (this.globals && this.globals.length) {
@@ -272,6 +328,19 @@ class Module {
         if (this.startIdx !== null && this.startIdx !== undefined) {
             const b = uleb(this.startIdx);
             out.push(8, ...uleb(b.length), ...b);
+        }
+        /* elem 段（id 9）：**被动**段（flags=1）。产物的表槽在宿主表容量之外，
+         * 实例化时表还没扩容 → 不能在实例化期装入；改为启动函数里 grow 之后
+         * table.init。段内按槽号升序排，启动函数用同一顺序 init。 */
+        if (this.tableElems.length) {
+            const sorted = [...this.tableElems].sort((a, b) => a.slot - b.slot);
+            const items = sorted.map(e => [
+                0x01,                            // flags=1：passive + elemkind，vec(funcidx)
+                0x00,                            // elemkind: funcref
+                ...uleb(1), ...uleb(e.funcIdx)
+            ]);
+            const body = vec(items);
+            out.push(9, ...uleb(body.length), ...body);
         }
         let dwarfPayload = null;   // { entries:[{c, low, size}], payloadLen }
         if (this.codes.length) {

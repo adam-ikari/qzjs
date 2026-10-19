@@ -28,7 +28,7 @@ const mem = vm.memory;
 const view = new DataView(mem.buffer);
 
 // emitter 产物：import "qz" {memory, add, string_concat, str_dup, ...} 全链接 libqzvm 导出
-const qz = { memory: vm.memory };
+const qz = { memory: vm.memory, __indirect_function_table: vm.__indirect_function_table };
 for (const k of Object.keys(vm)) if (typeof vm[k] === 'function') qz[k] = vm[k];
 const prodBytes = readFileSync(prodPath);
 const prodInst = new WebAssembly.Instance(new WebAssembly.Module(prodBytes), { qz });

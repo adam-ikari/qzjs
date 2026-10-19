@@ -2085,6 +2085,93 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
     return out;
 }
 
+/* 撑大 funcref 表：wasm-ld 按「被取地址的函数数 + 1」定表大小，无法直接指定
+ * 容量。产物要把自己的蹦床装进同一张表的 [QZ_TABLE_CAP, +N) 槽，故此处保留
+ * 一段函数指针占位数组，让表至少覆盖 QZ_TABLE_CAP + QZ_TABLE_RESERVE 项。
+ * 占位项从不被调用（全 NULL），仅用于定表尺寸。*/
+#define QZ_TABLE_CAP     514
+#define QZ_TABLE_RESERVE 4096
+__attribute__((used)) static void *qz_table_pad[QZ_TABLE_CAP + QZ_TABLE_RESERVE];
+
+/* 闭包调用：闭包值 [off]=蹦床表槽 [off+4]=envIdx [off+8]=arity [off+12]=nameStrId。
+ *
+ * 分派的是一张**共享 funcref 表**（产物 import qz.__indirect_function_table，
+ * 由本模块 --export-table --growable-table 导出）。表项是产物里的蹦床，签名固定
+ * (i32 env, i64 a0..a3) → i64，故这里只需一种函数指针类型。
+ * 蹦床内部按自己的形参个数精确转发，并自行处理 synthThis/rest 的槽位重排——
+ * 这些语义在 emit 期就已确定，C 侧不需要知道。*/
+typedef int64_t (*qz_lam_fn)(int32_t env, int64_t, int64_t, int64_t, int64_t);
+
+/* 表槽号 → 函数指针：clang 把它编成 call_indirect。槽号来自产物蹦床分配
+ * （emitter: INMOD_TABLE_CAP + i），与本模块导出的同一张 funcref 表对齐。*/
+static int64_t qz_lam_dispatch(int32_t slot, int32_t env, int64_t a0, int64_t a1,
+                               int64_t a2, int64_t a3)
+{
+    qz_lam_fn f = (qz_lam_fn)(uintptr_t)(uint32_t)slot;
+    return f(env, a0, a1, a2, a3);
+}
+
+/* closure_call(handle, a0..a3, recv) → i64
+ * handle 是闭包值句柄（0x7FFF|off）；宿主函数句柄（0x7FF9|idx）走 JS 调用。*/
+__attribute__((export_name("closure_call")))
+int64_t qz_guest_closure_call(int64_t handle, int64_t a0, int64_t a1, int64_t a2,
+                              int64_t a3, int64_t recv)
+{
+    if (!g_current_rt) return 0;
+    uint64_t u = (uint64_t)handle;
+    uint16_t tag = (uint16_t)(u >> 48);
+
+    if (tag == 0x7FF9) {          /* 宿主函数句柄 → 取 JS 函数直接调 */
+        JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+        if (!ctx) return 0;
+        JSValue fn = qz_tojs(ctx, handle);
+        if (!JS_IsFunction(ctx, fn)) { JS_FreeValue(ctx, fn); return 0; }
+        JSValue argv[4];
+        int argc = qz_collect_args(ctx, argv, 4, qz_tojs(ctx, a0), qz_tojs(ctx, a1),
+                                   qz_tojs(ctx, a2), qz_tojs(ctx, a3), JS_UNDEFINED);
+        JSValue self = qz_tojs(ctx, recv);
+        int64_t out = 0;
+        JSValue res = JS_Call(ctx, fn, self, argc, argv);
+        for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
+        if (!JS_IsException(res)) { out = qz_ret(ctx, res); JS_FreeValue(ctx, res); }
+        else JS_FreeValue(ctx, res);
+        JS_FreeValue(ctx, self); JS_FreeValue(ctx, fn);
+        return out;
+    }
+    if (tag != 0x7FFF && tag != 0x7FFB) return 0;   /* 非闭包值 */
+
+    uint32_t off = (uint32_t)(u & 0xFFFFFFFFu);
+    extern uint32_t qz_bump_base_addr(void);
+    /* 闭包值可能与切换前 arena 布局一致；直接读当前线性内存。*/
+    const unsigned char *p = (const unsigned char *)(uintptr_t)0;
+    (void)p;
+    int32_t slot, env;
+    memcpy(&slot, (const void *)(uintptr_t)off, 4);
+    memcpy(&env, (const void *)(uintptr_t)(off + 4), 4);
+    return qz_lam_dispatch(slot, env, a0, a1, a2, a3);
+}
+
+/* closure_call_spread(handle, arr) → i64：实参数组摊平后调用（≤4 参）。*/
+__attribute__((export_name("closure_call_spread")))
+int64_t qz_guest_closure_call_spread(int64_t handle, int64_t arr)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue a = qz_tojs(ctx, arr);
+    if (!JS_IsArray(a)) { JS_FreeValue(ctx, a); return 0; }
+    JSValue v0 = JS_GetPropertyUint32(ctx, a, 0);
+    JSValue v1 = JS_GetPropertyUint32(ctx, a, 1);
+    JSValue v2 = JS_GetPropertyUint32(ctx, a, 2);
+    JSValue v3 = JS_GetPropertyUint32(ctx, a, 3);
+    int64_t r = qz_guest_closure_call(handle, qz_ret(ctx, v0), qz_ret(ctx, v1),
+                                      qz_ret(ctx, v2), qz_ret(ctx, v3), 0);
+    JS_FreeValue(ctx, v0); JS_FreeValue(ctx, v1);
+    JS_FreeValue(ctx, v2); JS_FreeValue(ctx, v3);
+    JS_FreeValue(ctx, a);
+    return r;
+}
+
 /* ── M6b: 内建全局分派（builtin 系列 + instanceof 内建） ─────────────
  * 名字 → globalThis 上的值。点号名（Math.floor / Symbol.for / JSON.stringify）
  * 沿 globalThis 逐段解析；构造函数名直接取 globalThis。*/

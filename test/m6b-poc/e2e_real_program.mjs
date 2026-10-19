@@ -29,7 +29,7 @@ const mem = L.memory;
 
 // 产物 import "qz"：memory 直接共享 libqzvm 的，其余函数转发到 libqzvm 导出
 const prod = new WebAssembly.Module(readFileSync(prodPath2));
-const qz = { memory: mem };
+const qz = { memory: mem, __indirect_function_table: L.__indirect_function_table };
 const missing = [];
 for (const im of WebAssembly.Module.imports(prod)) {
   if (im.module !== 'qz' || im.kind !== 'function') continue;
