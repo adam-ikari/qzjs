@@ -2026,3 +2026,61 @@ int64_t qz_guest_str_method(int64_t recv, int32_t mid, int64_t a0, int64_t a1)
     JS_FreeValue(ctx, fn); JS_FreeValue(ctx, r0);
     return r;
 }
+
+/* ── M6b: method_call（recv, mid, a0..a3, ovf）→ i64 ───────────────
+ * 纯宿主可达的部分：字符串 / 数组 / BigInt / 布尔 / 函数三件套 / POJO 与宿主对象
+ * 方法（走 QuickJS 属性查找）。类实例方法需回调 wasm 导出，本层不处理（返回 undefined）。*/
+
+/* 收集实参：a0..a3 中「已给」的槽 + ovf 数组（其 [0] 是实参 3，已含于 a3）。*/
+static int qz_collect_args(JSContext *ctx, JSValue *out, int cap,
+                           JSValue a0, JSValue a1, JSValue a2, JSValue a3, JSValue ovf)
+{
+    int n = 0;
+    JSValue slots[4] = { a0, a1, a2, a3 };
+    int given[4];
+    for (int i = 0; i < 4; i++) given[i] = !JS_IsUndefined(slots[i]);
+    for (int i = 0; i < 4 && n < cap; i++)
+        if (given[i]) out[n++] = slots[i];
+    if (!JS_IsUndefined(ovf) && JS_IsArray(ovf)) {
+        JSValue lv = JS_GetPropertyStr(ctx, ovf, "length");
+        double f = 0; JS_ToFloat64(ctx, &f, lv);
+        JS_FreeValue(ctx, lv);
+        uint32_t len = (uint32_t)f;
+        /* ovf[0] 是实参 3：a3 已收则从 1 开始，否则从 0 开始（emitter 约定）*/
+        for (uint32_t i = given[3] ? 1 : 0; i < len && n < cap; i++)
+            out[n++] = JS_GetPropertyUint32(ctx, ovf, i);
+    }
+    return n;
+}
+
+__attribute__((export_name("method_call")))
+int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
+                             int64_t a2, int64_t a3, int64_t ovf)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t nlen = 0;
+    const char *mname = qz_str_by_id(mid, &nlen);
+    if (!mname) return 0;
+    char nm[64];
+    if (nlen >= sizeof(nm)) return 0;
+    memcpy(nm, mname, nlen); nm[nlen] = '\0';
+
+    JSValue r = qz_tojs(ctx, recv);
+    JSValue fn = JS_GetPropertyStr(ctx, r, nm);
+    int64_t out = 0;
+    if (JS_IsFunction(ctx, fn)) {
+        JSValue argv[16];
+        int argc = qz_collect_args(ctx, argv, 16,
+                                   qz_tojs(ctx, a0), qz_tojs(ctx, a1),
+                                   qz_tojs(ctx, a2), qz_tojs(ctx, a3),
+                                   qz_tojs(ctx, ovf));
+        JSValue res = JS_Call(ctx, fn, r, argc, argv);
+        for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
+        if (!JS_IsException(res)) { out = qz_ret(ctx, res); JS_FreeValue(ctx, res); }
+        else JS_FreeValue(ctx, res);
+    }
+    JS_FreeValue(ctx, fn); JS_FreeValue(ctx, r);
+    return out;
+}
