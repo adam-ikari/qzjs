@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-19T18:05:03"
+updated: "2026-10-19T23:42:37"
 ---
 
 <!-- compiled_truth -->
@@ -210,4 +210,9 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
 - time: 2026-10-19T18:05:03
   kind: evidence
   summary: "P2 验收达成：objWork(30000) in-module 1.99ms vs AOT+glue 2.88ms（1.45x，纯 wasm 调用无 JS toJS）；三个真实负载 mix/cls/strwork + clsbench 全绿；18 个 qz.* 已同模块内 C 函数（无 BigInt/无蹦床）"
+  affects: [in-module-design]
+
+- time: 2026-10-19T23:42:37
+  kind: evidence
+  summary: "M6b 完成：113 原语 C 实现全 + 真实负载(mix/cls/strwork) in-module 跑通 + 两档一致23项 + test_aot ALL PASS。P2 验收达成：objWork(30000) 1.99ms vs glue 2.88ms(1.45x)。剩余 corpus diff 均 loud(未支持特性) 或预先存在的类表达式工厂静默缺口(两档一致，非本轮回归)。"
   affects: [in-module-design]
