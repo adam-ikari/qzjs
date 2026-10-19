@@ -30,8 +30,9 @@ run "closure"           "$DIR/m6b-poc/e2e_closure.mjs"      --libqzvm "$WASM"
 run "class"             "$DIR/m6b-poc/e2e_class.mjs"        --libqzvm "$WASM"
 run "mix-load"         "$DIR/m6b-poc/e2e_mixload.mjs"     --libqzvm "$WASM"
 run "cls-load"         "$DIR/m6b-poc/e2e_clsload.mjs"     --libqzvm "$WASM"
+run "str-load"         "$DIR/m6b-poc/e2e_strload.mjs"     --libqzvm "$WASM"
 run "statics"           "$DIR/m6b-poc/e2e_statics.mjs"     --libqzvm "$WASM"
 run "concat"            "$DIR/m6b-poc/e2e_concat.mjs"       --libqzvm "$WASM" \
                         --product "$DIR/m6b-poc/concat_inmod.wasm"
 
-echo "PASS: test_m6b_e2e (签名核对 + 10 组 e2e，含真实负载 mix.ts / cls.ts)"
+echo "PASS: test_m6b_e2e (签名核对 + 11 组 e2e，含真实负载 mix/cls/strwork)"
