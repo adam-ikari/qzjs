@@ -296,6 +296,57 @@ int64_t qz_guest_add(int64_t a, int64_t b)
     return r;
 }
 
+/* ── M6b: toJS/ret C 最小版（112 原语基础——统一 NaN-box 编解码）────────── */
+/* toJS(b): i64 NaN-box → JSValue。数值(f64 位型) → JS_NewFloat64;
+ *   字符串句柄(0x7FFA|off) → JS_NewStringLen(从共享 memory 读)。
+ * ret(r): JSValue → i64 NaN-box。数值 → f64 位型;
+ *   字符串 → malloc buffer [len][utf8] → 0x7FFA|off。
+ * 其他 tag（0x7FF9 句柄/0x7FFB 数组/0x7FFC 布尔等）+ handle table 后续。
+ * 参考 qzvm.js toJS/ret（~300 行 JS）C 移植，M6b 完整落地工程。 */
+static JSValue qz_tojs(JSContext *ctx, int64_t b)
+{
+    uint64_t bits = (uint64_t)b;
+    uint64_t tag = bits >> 48;
+    if (tag < 0x7FF8 || tag > 0x7FFF) {
+        double f;
+        memcpy(&f, &b, 8);
+        return JS_NewFloat64(ctx, f);
+    }
+    if (tag == 0x7FFA) {
+        uint32_t off = (uint32_t)(b & 0xFFFFFFFF);
+        const char *mem = (const char *)(uintptr_t)off;
+        uint32_t len;
+        memcpy(&len, mem, 4);
+        return JS_NewStringLen(ctx, mem + 4, len);
+    }
+    return JS_UNDEFINED;  /* 其他 tag 后续 */
+}
+
+static int64_t qz_ret(JSContext *ctx, JSValue r)
+{
+    int tag = JS_VALUE_GET_TAG(r);
+    if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64) {
+        double f = 0.0;
+        JS_ToFloat64(ctx, &f, r);
+        int64_t bits;
+        memcpy(&bits, &f, 8);
+        return bits;
+    }
+    if (tag == JS_TAG_STRING) {
+        size_t len;
+        const char *utf8 = JS_ToCStringLen(ctx, &len, r);
+        if (!utf8) return 0;
+        char *buf = (char *)malloc(4 + len);
+        if (!buf) { JS_FreeCString(ctx, utf8); return 0; }
+        uint32_t off = (uint32_t)(uintptr_t)buf;
+        memcpy(buf, &len, 4);
+        memcpy(buf + 4, utf8, len);
+        JS_FreeCString(ctx, utf8);
+        return ((int64_t)0x7FFA << 48) | off;
+    }
+    return 0;  /* undefined/null 等后续 */
+}
+
 /* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
 /* emitter 产物 import "qz" "str_dup" (i64)->i64 链接到此。
  * strRead: a = 0x7FFA | off（字符串句柄）。off = 共享 memory 偏移。
@@ -313,22 +364,8 @@ int64_t qz_guest_str_dup(int64_t a)
     if (!g_current_rt) return a;  /* fallback: 未经 qz_eval 流 */
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return a;
-    /* strRead: a = 0x7FFA | off */
-    uint32_t off = (uint32_t)(a & 0xFFFFFFFF);
-    const char *mem = (const char *)(uintptr_t)off;  /* wasm32 memory 偏移 */
-    uint32_t len;
-    memcpy(&len, mem, 4);
-    JSValue jsv = JS_NewStringLen(ctx, mem + 4, len);
-    /* strWriteback: JSValue → UTF-8 → malloc buffer */
-    size_t out_len;
-    const char *out_utf8 = JS_ToCStringLen(ctx, &out_len, jsv);
-    if (!out_utf8) { JS_FreeValue(ctx, jsv); return a; }
-    char *buf = (char *)malloc(4 + out_len);
-    if (!buf) { JS_FreeCString(ctx, out_utf8); JS_FreeValue(ctx, jsv); return a; }
-    uint32_t new_off = (uint32_t)(uintptr_t)buf;
-    memcpy(buf, &out_len, 4);
-    memcpy(buf + 4, out_utf8, out_len);
-    JS_FreeCString(ctx, out_utf8);
+    JSValue jsv = qz_tojs(ctx, a);        /* strRead: 0x7FFA|off → JSValue */
+    int64_t r = qz_ret(ctx, jsv);         /* strWriteback: JSValue → 0x7FFA|new_off */
     JS_FreeValue(ctx, jsv);
-    return ((int64_t)0x7FFA << 48) | new_off;
+    return r;
 }
