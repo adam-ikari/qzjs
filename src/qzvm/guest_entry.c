@@ -52,6 +52,10 @@ extern int qz_host_fs_read(const char *path, int len);
  * 完整 in-module 流程: host 调 qz_create→qz_eval→JS 调 emitter→emitter 调
  * qz.add→qz_guest_add 读 g_current_rt→qz_get_active_jsctx→ctx→JS_Add。 */
 static qz_t *g_current_rt = NULL;
+/* M6b: 宿主写入的字符串表基址（0=未设置，此时 i32 id 按偏移直读）。
+ * 由宿主经导出 __set_strtab(base:i32) 设定，见 qzvm.js。*/
+static uint32_t g_strtab_base = 0;
+uint32_t qz_strtab_base_addr(void) { return g_strtab_base; }
 
 /* ── M5 op 表（单 rt；M6 per-rt 化 + 移入 qz_t guest 块）───────────── */
 #define QZ_GUEST_MAX_OPS 64
@@ -306,7 +310,7 @@ int64_t qz_guest_add(int64_t a, int64_t b)
  * PoC 简化: static array + 不释放（泄漏接受）；refcount + 生命周期管理完整落地工程。 */
 #define QZ_MAX_HANDLES 65536
 static JSValue g_handles[QZ_MAX_HANDLES];
-static int g_handle_count = 0;
+static int g_handle_count = 2;   /* 槽 0=undefined / 1=null（emitter 固定约定），真实句柄从 2 起 */
 
 /* ── M6b: toJS/ret C 最小版（112 原语基础——统一 NaN-box 编解码）────────── */
 /* toJS(b): i64 NaN-box → JSValue。数值(f64 位型) → JS_NewFloat64;
@@ -332,8 +336,10 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
         return JS_NewStringLen(ctx, mem + 4, len);
     }
     if (tag == 0x7FFC) return JS_NewBool(ctx, (int)(b & 1));  /* 布尔句柄 */
-    if (tag == 0x7FF9) {  /* handle table 句柄（对象/闭包等） */
+    if (tag == 0x7FF9) {  /* handle table；idx 0=undefined / 1=null 固定槽（emitter 约定）*/
         uint32_t idx = (uint32_t)(b & 0xFFFFFFFF);
+        if (idx == 0) return JS_UNDEFINED;
+        if (idx == 1) return JS_NULL;
         if (idx < (uint32_t)g_handle_count) return JS_DupValue(ctx, g_handles[idx]);
     }
     if (tag == 0x7FF8) {  /* BigInt 句柄（BIG_HI|idx；idx≠0，0=canonical NaN） */
@@ -366,13 +372,15 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
         return ((int64_t)0x7FFA << 48) | off;
     }
     if (tag == JS_TAG_BOOL) return ((int64_t)0x7FFC << 48) | (JS_VALUE_GET_BOOL(r) ? 1 : 0);
+    /* 固定槽：undefined = 0x7FF9|0，null = 0x7FF9|1（emitter 约定，见 _emitUndefined/_emitNull）。*/
+    if (JS_IsUndefined(r)) return ((int64_t)0x7FF9 << 48);
+    if (JS_IsNull(r))      return ((int64_t)0x7FF9 << 48) | 1;
     int idx = g_handle_count++;
     if (idx >= QZ_MAX_HANDLES) return 0;
     g_handles[idx] = JS_DupValue(ctx, r);
     if (JS_IsBigInt(r)) return ((int64_t)0x7FF8 << 48) | (uint32_t)idx;  /* BigInt 句柄（BIG_HI） */
     /* 对象/闭包/数组等 → handle table 注册（0x7FF9 | idx） */
     return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
-    /* undefined/null 等后续（0 tag） */
 }
 
 /* ── M6b PoC: string_concat C（JS 字符串拼接，handle table 原语）────────── */
@@ -666,27 +674,64 @@ int64_t qz_guest_bxor(int64_t a, int64_t b)
 }
 
 __attribute__((export_name("truthy")))
-int64_t qz_guest_truthy(int64_t a)
+int32_t qz_guest_truthy(int64_t a)
 {
-    if (!g_current_rt) return a;
+    if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return a;
+    if (!ctx) return 0;
     JSValue va = qz_tojs(ctx, a);
-    JSValue vr = JS_NewBool(ctx, JS_ToBool(ctx, va));
-    int64_t r = qz_ret(ctx, vr);
-    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
+    int32_t r = JS_ToBool(ctx, va);
+    JS_FreeValue(ctx, va);
     return r;
+}
+
+/* ── M6b: strId 字符串表（emitter i32 字段名 id → UTF-8）────────────────
+ * emitter 的 i32 实参是模块字符串表下标（emitter.strings[]，宿主侧 JS 数组）。
+ * in-module 下无 JS 数组，故宿主在调用 __set_strs 前把整张表序列化进共享
+ * memory，guest 侧只读解析。格式（由宿主 qzvm.js 写入）：
+ *   [count:i32] 紧接 count 个 [off:i32][len:i32]（相对 STRTAB_ENTRIES），
+ *   每个 off 指向 [bytes...]（无 NUL）。
+ * 地址约定：宿主按 emit 时的 __strtab_base 全局写入；未设置时退化为直读 0
+ * （即把 id 当偏移，供手写 wasm/wat 用例）。*/
+static const char *qz_str_by_id(int32_t id, size_t *out_len)
+{
+    extern uint32_t qz_strtab_base_addr(void);
+    uint32_t base = qz_strtab_base_addr();
+    if (!base) return NULL;
+    const unsigned char *p = (const unsigned char *)(uintptr_t)base;
+    int32_t count;
+    memcpy(&count, p, 4);
+    if (id < 0 || id >= count) return NULL;
+    int32_t off, len;
+    memcpy(&off, p + 4 + id * 8, 4);
+    memcpy(&len, p + 8 + id * 8, 4);
+    if (out_len) *out_len = (size_t)len;
+    return (const char *)(uintptr_t)off;
+}
+
+/* qz_guest_str_id → JSValue：id → 共享内存 UTF-8 → 引擎字符串；无表时按偏移直读。*/
+static JSValue qz_strval(JSContext *ctx, int32_t id)
+{
+    size_t len = 0;
+    const char *s = qz_str_by_id(id, &len);
+    if (!s) {                       /* 回退：id 视为 [len:i32][utf8] 偏移（手写用例） */
+        const unsigned char *p = (const unsigned char *)(uintptr_t)(uint32_t)id;
+        uint32_t l;
+        memcpy(&l, p, 4);
+        return JS_NewStringLen(ctx, (const char *)(p + 4), l);
+    }
+    return JS_NewStringLen(ctx, s, len);
 }
 
 /* ── M6b PoC: object_get/object_set（复杂原语，handle table + JS API）────── */
 __attribute__((export_name("object_get")))
-int64_t qz_guest_object_get(int64_t obj, int64_t key)
+int64_t qz_guest_object_get(int64_t obj, int32_t keyId)
 {
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
     JSValue o = qz_tojs(ctx, obj);
-    JSValue k = qz_tojs(ctx, key);
+    JSValue k = qz_strval(ctx, keyId);
     size_t klen = 0;
     const char *kstr = JS_ToCStringLen(ctx, &klen, k);
     JSValue vr = kstr ? JS_GetPropertyStr(ctx, o, kstr) : JS_UNDEFINED;
@@ -697,20 +742,20 @@ int64_t qz_guest_object_get(int64_t obj, int64_t key)
 }
 
 __attribute__((export_name("object_set")))
-int64_t qz_guest_object_set(int64_t obj, int64_t key, int64_t val)
+void qz_guest_object_set(int64_t obj, int32_t keyId, int64_t val)
 {
-    if (!g_current_rt) return 0;
+    if (!g_current_rt) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return 0;
+    if (!ctx) return;
     JSValue o = qz_tojs(ctx, obj);
-    JSValue k = qz_tojs(ctx, key);
+    JSValue k = qz_strval(ctx, keyId);
     JSValue v = qz_tojs(ctx, val);
     size_t klen = 0;
     const char *kstr = JS_ToCStringLen(ctx, &klen, k);
-    int rc = kstr ? JS_SetPropertyStr(ctx, o, kstr, v) : -1;
-    JS_FreeCString(ctx, kstr);
-    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k); JS_FreeValue(ctx, v);
-    return (int64_t)rc;
+    /* JS_SetPropertyStr 接管 v 的所有权（成功/失败均消费）；不可再 JS_FreeValue(v)。*/
+    if (kstr) { JS_SetPropertyStr(ctx, o, kstr, v); JS_FreeCString(ctx, kstr); }
+    else      { JS_FreeValue(ctx, v); }
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
 }
 
 /* ── M6b PoC: to_string/string_new/object_new（字符串+对象原语）────────── */
@@ -730,14 +775,17 @@ int64_t qz_guest_to_string(int64_t a)
     return r;
 }
 
+/* string_new(off:i32) → 句柄：off 指向 [len:i32][utf8]（emitter 字面量布局）。*/
 __attribute__((export_name("string_new")))
-int64_t qz_guest_string_new(int64_t off, int64_t len)
+int64_t qz_guest_string_new(int32_t off)
 {
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
-    const char *mem = (const char *)(uintptr_t)off;
-    JSValue vr = JS_NewStringLen(ctx, mem, (size_t)len);
+    const unsigned char *p = (const unsigned char *)(uintptr_t)(uint32_t)off;
+    uint32_t l;
+    memcpy(&l, p, 4);
+    JSValue vr = JS_NewStringLen(ctx, (const char *)(p + 4), l);
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, vr);
     return r;
@@ -756,32 +804,61 @@ int64_t qz_guest_object_new(void)
 }
 
 /* ── M6b PoC: alloc/object_delete（memory 管理 + 对象操作）────────── */
+/* alloc(i32) → i32：bump 分配。in-module 下 emitter 产物用的是自己的 bump arena，
+ * 本导出仅供宿主/测试向共享内存申请临时区；返回 wasi-libc malloc 指针。*/
 __attribute__((export_name("alloc")))
-int64_t qz_guest_alloc(int64_t size)
+int32_t qz_guest_alloc(int32_t size)
 {
-    void *p = malloc((size_t)size);
-    return (int64_t)(uintptr_t)p;
+    void *p = malloc((size_t)(uint32_t)size);
+    return (int32_t)(uintptr_t)p;
 }
 
 __attribute__((export_name("object_delete")))
-int64_t qz_guest_object_delete(int64_t obj, int64_t key)
+void qz_guest_object_delete(int64_t obj, int32_t keyId)
 {
-    if (!g_current_rt) return 0;
+    if (!g_current_rt) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return 0;
+    if (!ctx) return;
     JSValue o = qz_tojs(ctx, obj);
-    JSValue k = qz_tojs(ctx, key);
+    JSValue k = qz_strval(ctx, keyId);
     size_t klen = 0;
     const char *kstr = JS_ToCStringLen(ctx, &klen, k);
-    int rc = -1;
     if (kstr) {
         JSAtom atom = JS_NewAtomLen(ctx, kstr, klen);
-        rc = JS_DeleteProperty(ctx, o, atom, 0);
+        JS_DeleteProperty(ctx, o, atom, 0);
         JS_FreeAtom(ctx, atom);
     }
     JS_FreeCString(ctx, kstr);
     JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
-    return (int64_t)rc;
+}
+
+/* __set_strtab(base:i32)：宿主在首次调用原语前写入字符串表基址。
+ * 表格式见 qz_str_by_id 注释（count + [off,len] 表 + 字节块）。*/
+__attribute__((export_name("__set_strtab")))
+void qz_guest_set_strtab(int32_t base)
+{
+    g_strtab_base = (uint32_t)base;
+}
+
+/* prop_get(recv:i64, keyId:i32) → i64：通用属性读（原型链/getter/装箱）。
+ * 接收者为 null/undefined → undefined，由调用点 _emitErrCheck 转 TypeError。*/
+__attribute__((export_name("prop_get")))
+int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue o = qz_tojs(ctx, recv);
+    JSValue k = qz_strval(ctx, keyId);
+    JSValue vr = JS_UNDEFINED;
+    if (!JS_IsNull(o) && !JS_IsUndefined(o)) {
+        size_t klen = 0;
+        const char *kstr = JS_ToCStringLen(ctx, &klen, k);
+        if (kstr) { vr = JS_GetPropertyStr(ctx, o, kstr); JS_FreeCString(ctx, kstr); }
+    }
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k); JS_FreeValue(ctx, vr);
+    return r;
 }
 
 /* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
