@@ -824,6 +824,9 @@ int32_t qz_guest_typeof_host(int64_t a)
 __attribute__((export_name("truthy")))
 int32_t qz_guest_truthy(int64_t a)
 {
+    /* 类实例（0x7FFE）是对象 → 恒真。必须先判：qz_tojs 不认识该 tag，
+     * 会退到 undefined → 实例被误判 falsy（`if (inst)` 走错分支）。*/
+    if ((uint16_t)((uint64_t)a >> 48) == 0x7FFE) return 1;
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
@@ -932,6 +935,37 @@ static void qz_set_prop_key(JSContext *ctx, JSValue obj, JSValue key, JSValue va
     JS_FreeCString(ctx, ks);
 }
 
+/* ── 全局字段表：字段名 → 全局槽索引 ─────────────────────────────────────
+ * emitter 的 fieldMap 是**全局**的（`_fieldIndex(name) = (idx+1)*8`），所有类的
+ * 实例共用同一套偏移。故 C 侧只需一张有序名字表即可定位任意实例的字段，
+ * 不必按类存布局。宿主经 __set_fields 注入：[count:i32][strOff:i32][len:i32]×count。*/
+static uint32_t g_fields_base = 0;
+
+__attribute__((export_name("__set_fields")))
+void qz_guest_set_fields(int32_t base)
+{
+    g_fields_base = (uint32_t)base;
+}
+
+/* 按 nameStrId 查全局字段索引；-1 = 该名不是字段。*/
+static int32_t qz_field_index(int32_t nameStrId)
+{
+    if (!g_fields_base) return -1;
+    size_t wlen = 0;
+    const char *want = qz_str_by_id(nameStrId, &wlen);
+    if (!want || wlen >= 256) return -1;
+    const unsigned char *b = (const unsigned char *)(uintptr_t)g_fields_base;
+    int32_t count;
+    memcpy(&count, b, 4);
+    for (int32_t i = 0; i < count; i++) {
+        uint32_t off, len;
+        memcpy(&off, b + 4 + i * 8, 4);
+        memcpy(&len, b + 8 + i * 8, 4);
+        if (len == wlen && memcmp((const void *)(uintptr_t)off, want, len) == 0) return i;
+    }
+    return -1;
+}
+
 /* 前向：类访问器链查找（定义于 classMeta 节）+ 类方法蹦床类型。*/
 static int32_t qz_clsmeta_accessor_chain(int32_t clsId, int32_t nameStrId, int wantSet, int32_t *found);
 typedef int64_t (*qz_cls_fn)(int64_t, int64_t, int64_t, int64_t, int64_t);
@@ -977,6 +1011,17 @@ void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
         if (found) {
             JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
             if (slot > 0) ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(obj, val, 0, 0, 0);
+            return;
+        }
+        /* 字段写：与 prop_get 对称。越界写静默丢弃（实例 size 是编译期定值）。*/
+        int32_t fi = qz_field_index(keyId);
+        if (fi >= 0) {
+            uint32_t inst = (uint32_t)((uint64_t)obj & 0xFFFFFFFFu);
+            int32_t sz = 0;
+            if (inst >= 8) memcpy(&sz, (const void *)(uintptr_t)(inst + 4), 4);
+            uint32_t foff = (uint32_t)(fi + 1) * 8;
+            if (inst >= 8 && foff + 8 <= (uint32_t)sz) memcpy((void *)(uintptr_t)(inst + foff), &val, 8);
+            JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
             return;
         }
     }
@@ -1383,6 +1428,21 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
         if (found) {
             JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
             return slot > 0 ? ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(recv, 0, 0, 0, 0) : 0;
+        }
+        /* 字段读：全局字段表给索引 → 偏移 (idx+1)*8；越界（未赋值/无此字段）→ undefined。*/
+        int32_t fi = qz_field_index(keyId);
+        if (fi >= 0) {
+            uint32_t inst = (uint32_t)((uint64_t)recv & 0xFFFFFFFFu);
+            int32_t sz = 0;
+            if (inst >= 8) memcpy(&sz, (const void *)(uintptr_t)(inst + 4), 4);
+            uint32_t foff = (uint32_t)(fi + 1) * 8;
+            if (inst >= 8 && foff + 8 <= (uint32_t)sz) {
+                int64_t v; memcpy(&v, (const void *)(uintptr_t)(inst + foff), 8);
+                JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+                return v;
+            }
+            JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+            return (int64_t)((uint64_t)0x7FF9 << 48);   /* undefined 句柄 */
         }
     }
     JSValue vr = JS_UNDEFINED;
@@ -2604,31 +2664,38 @@ __attribute__((export_name("new_dynamic")))
 int64_t qz_guest_new_dynamic(int64_t clsVal, int64_t a0, int64_t a1, int64_t a2,
                              int64_t a3)
 {
-    if (!g_current_rt) return 0;
     /* 类值是句柄 0x7FFE|clsId（class_value/class_expr_value 的产物）。*/
     uint64_t cu = (uint64_t)clsVal;
     if ((uint16_t)(cu >> 48) != 0x7FFE) return 0;
     int32_t clsId = (int32_t)(cu & 0xFFFFFFFFu);
-    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return 0;
-    /* 找 ctor 表槽 */
     uint32_t off = qz_clsmeta_item_off(clsId);
     if (!off) return 0;
-    int32_t ctorSlot; memcpy(&ctorSlot, (const unsigned char *)(uintptr_t)off + 12, 4);
-    if (ctorSlot < 0) return 0;   /* 无 ctor */
-    /* 分配实例内存（classMeta.size 字段在偏移 28 后，但变长布局里 size 没存）→
-     * 用 qz_ret 把 JS 对象当实例句柄：构造一个普通 JS 对象挂 __qz_cls 字段。*/
-    JSValue obj = JS_NewObject(ctx);
-    JSValue jcls = JS_NewInt32(ctx, clsId);
-    JS_SetPropertyStr(ctx, obj, "__qz_cls", jcls);
-    /* 调 ctor 蹦床：(env=clsId, self=obj句柄, a0..a3) */
-    int64_t selfH = qz_ret(ctx, obj);
-    qz_cls_fn f = (qz_cls_fn)(uintptr_t)(uint32_t)ctorSlot;
-    int64_t r = f(selfH, a0, a1, a2, a3);
-    (void)r;
-    JS_FreeValue(ctx, obj);
-    (void)r;
-    return selfH;   /* 构造器返回的是 self（与 JS new 语义一致） */
+    const unsigned char *p = (const unsigned char *)(uintptr_t)off;
+    int32_t instSize, ctorSlot;
+    memcpy(&instSize, p + 8, 4);
+    memcpy(&ctorSlot, p + 12, 4);
+    if (instSize < 16) instSize = 16;
+
+    /* 实例内存布局必须与 emitter 内联分配**逐字节一致**，否则字段读
+     * （内联 i64Load(off+foff)）取到错位数据：
+     *   [0]=clsId(i32)  [4]=size(i32)  [8, size) 槽全写 undefined 句柄
+     *   句柄 = 0x7FFE | offset（专用 tag，与 POJO 0x7FF9 区分）。
+     * bump arena 是产物模块的 global，C 侧不可达 → 用本模块堆；实例不回收
+     * （与 bump 语义一致）。*/
+    unsigned char *inst = (unsigned char *)calloc(1, (size_t)instSize);
+    if (!inst) return 0;
+    memcpy(inst, &clsId, 4);
+    memcpy(inst + 4, &instSize, 4);
+    for (int32_t k = 8; k + 8 <= instSize; k += 8) {
+        int64_t undef = (int64_t)((uint64_t)0x7FF9 << 48);   /* undefined 句柄 */
+        memcpy(inst + k, &undef, 8);
+    }
+    int64_t selfH = (int64_t)(((uint64_t)0x7FFE << 48) | (uint32_t)(uintptr_t)inst);
+    if (ctorSlot >= 0) {
+        qz_cls_fn f = (qz_cls_fn)(uintptr_t)(uint32_t)ctorSlot;
+        f(selfH, a0, a1, a2, a3);      /* 返回值即 self（构造器语义） */
+    }
+    return selfH;
 }
 
 /* super_method(recv, mid, a0..a3, ovf) → i64：调父类方法。*/
