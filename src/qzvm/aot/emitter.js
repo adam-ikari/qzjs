@@ -2872,7 +2872,14 @@ function compileTS(input, outWasm, opts = {}) {
             if (contract) registerQz(m, contract);
         }
         if (anyTagged) {
-            m.addMemory(640);                                // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
+            if (opts.inModuleLink) {
+                // M6b: multi-module 合并形态——emitter 产物 import libqzvm memory
+                // （共享 linear memory, NaN-box 句柄跨模块有效）。布局协调
+                // （STR_BUMP 偏移避 libqzvm heap）+ libqzvm memory 增大是完整落地工程。
+                m.importMemory("qz", "memory", 640, 640);
+            } else {
+                m.addMemory(640);                            // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
+            }
             m.addGlobal("i32", STR_BUMP);                    // global0 = bump 堆（字符串/对象）
             m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
             em.moduleGlobals = new Map();                    // 模块级变量名 → wasm 全局索引（i64 tagged，索引 2 起）
