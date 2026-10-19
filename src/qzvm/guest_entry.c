@@ -747,6 +747,35 @@ int64_t qz_guest_object_new(void)
     return r;
 }
 
+/* ── M6b PoC: alloc/object_delete（memory 管理 + 对象操作）────────── */
+__attribute__((export_name("alloc")))
+int64_t qz_guest_alloc(int64_t size)
+{
+    void *p = malloc((size_t)size);
+    return (int64_t)(uintptr_t)p;
+}
+
+__attribute__((export_name("object_delete")))
+int64_t qz_guest_object_delete(int64_t obj, int64_t key)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue o = qz_tojs(ctx, obj);
+    JSValue k = qz_tojs(ctx, key);
+    size_t klen = 0;
+    const char *kstr = JS_ToCStringLen(ctx, &klen, k);
+    int rc = -1;
+    if (kstr) {
+        JSAtom atom = JS_NewAtomLen(ctx, kstr, klen);
+        rc = JS_DeleteProperty(ctx, o, atom, 0);
+        JS_FreeAtom(ctx, atom);
+    }
+    JS_FreeCString(ctx, kstr);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
+    return (int64_t)rc;
+}
+
 /* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
 /* emitter 产物 import "qz" "str_dup" (i64)->i64 链接到此。
  * strRead: a = 0x7FFA | off（字符串句柄）。off = 共享 memory 偏移。
