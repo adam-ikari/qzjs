@@ -319,6 +319,7 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
         memcpy(&len, mem, 4);
         return JS_NewStringLen(ctx, mem + 4, len);
     }
+    if (tag == 0x7FFC) return JS_NewBool(ctx, (int)(b & 1));  /* 布尔句柄 */
     return JS_UNDEFINED;  /* 其他 tag 后续 */
 }
 
@@ -344,6 +345,7 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
         JS_FreeCString(ctx, utf8);
         return ((int64_t)0x7FFA << 48) | off;
     }
+    if (tag == JS_TAG_BOOL) return ((int64_t)0x7FFC << 48) | (JS_VALUE_GET_BOOL(r) ? 1 : 0);
     return 0;  /* undefined/null 等后续 */
 }
 
@@ -377,6 +379,54 @@ int64_t qz_guest_string_concat(int64_t a, int64_t b)
     JS_FreeCString(ctx, sb);
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* ── M6b PoC: lt/gt/str_len 批量原语（比较+长度，验布尔 tag）────────── */
+__attribute__((export_name("lt")))
+int64_t qz_guest_lt(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewBool(ctx, fa < fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("gt")))
+int64_t qz_guest_gt(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewBool(ctx, fa > fb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("str_len")))
+int64_t qz_guest_str_len(int64_t a)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue va = qz_tojs(ctx, a);
+    size_t len = 0;
+    JS_ToCStringLen(ctx, &len, va);
+    JSValue vr = JS_NewFloat64(ctx, (double)len);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
     return r;
 }
 
