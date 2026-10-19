@@ -347,6 +347,39 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
     return 0;  /* undefined/null 等后续 */
 }
 
+/* ── M6b PoC: string_concat C（JS 字符串拼接，handle table 原语）────────── */
+/* emitter 产物 import "qz" "string_concat" (i64,i64)->i64。
+ * JS_ConcatString 非公开 API → 用 JS_ToCString + C memcpy 拼接 + JS_NewStringLen。
+ * qz_tojs 解 a,b（字符串句柄 → JSValue），qz_ret 装回（JSValue → 0x7FFA|off）。
+ * g_current_rt NULL 时 fallback 返回 a。 */
+__attribute__((export_name("string_concat")))
+int64_t qz_guest_string_concat(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;  /* fallback */
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a);
+    JSValue vb = qz_tojs(ctx, b);
+    size_t la = 0, lb = 0;
+    const char *sa = JS_ToCStringLen(ctx, &la, va);
+    const char *sb = JS_ToCStringLen(ctx, &lb, vb);
+    JSValue vr = JS_UNDEFINED;
+    if (sa && sb) {
+        char *buf = (char *)malloc(la + lb);
+        if (buf) {
+            memcpy(buf, sa, la);
+            memcpy(buf + la, sb, lb);
+            vr = JS_NewStringLen(ctx, buf, la + lb);
+            free(buf);
+        }
+    }
+    JS_FreeCString(ctx, sa);
+    JS_FreeCString(ctx, sb);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
 /* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
 /* emitter 产物 import "qz" "str_dup" (i64)->i64 链接到此。
  * strRead: a = 0x7FFA | off（字符串句柄）。off = 共享 memory 偏移。
