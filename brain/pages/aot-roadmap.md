@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-19T11:56:35"
+updated: "2026-10-19T17:54:41"
 ---
 
 <!-- compiled_truth -->
@@ -254,4 +254,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "M6b ABI 收口: guest_entry 6 处签名对齐 emitter QZ 表(truthy→i32; object_set/delete→void+keyId:i32; alloc→i32; string_new(off:i32) 单参, off 指向 [len][utf8])。新增 strId 字符串表 __set_strtab(base:i32)+qz_strval(id): 宿主把 emitter.strings 序列化为 [count][off,len]×count+字节块入共享内存, 无表时回退 id 即 [len][utf8] 偏移。新增 prop_get(recv:i64,keyId:i32) 通用属性读。关键 bug 修复: (1) object_set 双重释放——JS_SetPropertyStr 接管 value 所有权后不得再 JS_FreeValue; (2) undefined/null 编解码缺失——qz_ret 原把 undefined 注册进 handle 表得 0x7FF9|0, null 无编码, 与 emitter 固定槽(0x7FF9|0=undefined / 0x7FF9|1=null)冲突, 现两侧对称编码且 handle 表从 idx 2 起。验证: test/m6b-poc/e2e_prop_get.mjs 全链路(object_new→object_set→prop_get), 命中读回 hello, 漏读返回 undefined 固定槽; test_inmodule_guest_e2e.sh 与 e2e_concat.mjs 均 PASS。剩余: emitter bump(128 起) 与 libqzvm 堆/静态数据(1024 起, 已用 105KB) 重叠需按模式分治布局; 112 原语 C 仍缺 84。"
   source: "guest_entry.c 对齐 + e2e_prop_get.mjs 验证"
+  affects: [aot-roadmap]
+
+- time: 2026-10-19T17:54:41
+  kind: note
+  summary: "已知结构性缺口（均 loud 报错，非静默）：>4 参数跨 ABI、generator/async 无 Promise 运行时、类方法/getter 捕获外层变量（类蹦床签名无 env 槽）"
   affects: [aot-roadmap]

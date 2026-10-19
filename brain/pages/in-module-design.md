@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, build, wasm, in-module, aot]
 created: "2026-10-13T03:49:29"
-updated: "2026-10-14T06:35:27"
+updated: "2026-10-19T18:05:03"
 ---
 
 <!-- compiled_truth -->
@@ -195,4 +195,19 @@ M1 qz_t/qz_ctx_t 切分 → M2 context.c 拆分（含边界接线移出）→ M3
   kind: reversal
   summary: "术语框架更正：初版把 qzjs 自身 C 层（含 libuv/WAMR）误称为'宿主'，并称 in-module 后'宿主不再链 QuickJS/没有 JSContext'。正确：宿主=qzjs 使用者（不含 libuv/引擎）；in-module 是 qzjs 内部两半分层（wasm 外 qzjs-native IO ↔ wasm 内 qzvm），qzjs 永远持有 JS 运行时（即 libqzvm.wasm 内引擎）。且 qzvm=引擎+qz.*+DAP+扩展注册机制+引擎 patches（in-module 不含 wasm 引擎绑定）；Web API 扩展内容（ext_compress/crypto/textcodec）不属 qzvm。SSOT=docs/architecture/qzvm-qzjs-layering.md"
   source: docs/architecture/qzvm-qzjs-layering.md
+  affects: [in-module-design]
+
+- time: 2026-10-19T17:38:00
+  kind: evidence
+  summary: "M6b 完成：QZ 契约面 113/113 原语全实现；共享 funcref 表解锁 call_indirect；7 条 e2e 全绿"
+  affects: [in-module-design]
+
+- time: 2026-10-19T17:51:39
+  kind: evidence
+  summary: "差分审计 40 corpus：36 完全一致；剩余 = generator/async 未实现(loud) + >4参ABI上限(loud) + 类表达式工厂(clsId 共享，静默)"
+  affects: [in-module-design]
+
+- time: 2026-10-19T18:05:03
+  kind: evidence
+  summary: "P2 验收达成：objWork(30000) in-module 1.99ms vs AOT+glue 2.88ms（1.45x，纯 wasm 调用无 JS toJS）；三个真实负载 mix/cls/strwork + clsbench 全绿；18 个 qz.* 已同模块内 C 函数（无 BigInt/无蹦床）"
   affects: [in-module-design]
