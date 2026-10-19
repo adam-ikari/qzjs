@@ -906,6 +906,335 @@ void qz_guest_object_set(int64_t obj, int32_t keyId, int64_t val)
     JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
 }
 
+/* ── M6b: 属性写/删、下标访问、长度、对象合并、键序登记 ──────────────
+ * 键有两种来源：i32 strId（编译期字符串表）与 i64 字符串句柄（运行期字符串）。
+ * 键序登记（field_order 系列）落对象自身的隐藏数组 __qz_keys：AOT 侧只要求
+ * 「按插入序枚举」，JS 自身属性枚举即有序，故它是可读的冗余名单。*/
+
+/* 取属性（缺失即 undefined，不抛异常）。*/
+static JSValue qz_get_prop_key(JSContext *ctx, JSValue obj, JSValue key)
+{
+    if (!JS_IsObject(obj) || JS_IsSymbol(key)) return JS_UNDEFINED;
+    const char *ks = JS_ToCString(ctx, key);
+    if (!ks) return JS_UNDEFINED;
+    JSValue v = JS_GetPropertyStr(ctx, obj, ks);
+    JS_FreeCString(ctx, ks);
+    return v;
+}
+
+/* 设属性（失败静默，同非严格模式赋值）。val 所有权被接管。*/
+static void qz_set_prop_key(JSContext *ctx, JSValue obj, JSValue key, JSValue val)
+{
+    if (!JS_IsObject(obj) || JS_IsSymbol(key)) { JS_FreeValue(ctx, val); return; }
+    const char *ks = JS_ToCString(ctx, key);
+    if (!ks) { JS_FreeValue(ctx, val); return; }
+    JS_SetPropertyStr(ctx, obj, ks, val);   /* 接管 val */
+    JS_FreeCString(ctx, ks);
+}
+
+__attribute__((export_name("prop_set")))
+void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue o = qz_tojs(ctx, obj);
+    JSValue k = qz_strval(ctx, keyId);
+    qz_set_prop_key(ctx, o, k, qz_tojs(ctx, val));
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
+}
+
+__attribute__((export_name("prop_delete")))
+void qz_guest_prop_delete(int64_t obj, int32_t keyId)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue o = qz_tojs(ctx, obj);
+    JSValue k = qz_strval(ctx, keyId);
+    if (JS_IsObject(o) && !JS_IsSymbol(k)) {
+        const char *ks = JS_ToCString(ctx, k);
+        if (ks) {
+            JSAtom atom = JS_NewAtom(ctx, ks);
+            if (atom != JS_ATOM_NULL) { JS_DeleteProperty(ctx, o, atom, 0); JS_FreeAtom(ctx, atom); }
+            JS_FreeCString(ctx, ks);
+        }
+    }
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
+}
+
+/* length_of(v)→i64：.length（字符串码元数 / 数组长度）。*/
+__attribute__((export_name("length_of")))
+int64_t qz_guest_length_of(int64_t v)
+{
+    if (!g_current_rt) return v;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return v;
+    JSValue o = qz_tojs(ctx, v);
+    JSValue lv = JS_GetPropertyStr(ctx, o, "length");
+    double f = 0; JS_ToFloat64(ctx, &f, lv);
+    JSValue vr = JS_NewFloat64(ctx, f);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, lv); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("get_index")))
+int64_t qz_guest_get_index(int64_t obj, int64_t key)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
+    JSValue vr = qz_get_prop_key(ctx, o, k);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("set_index")))
+void qz_guest_set_index(int64_t obj, int64_t key, int64_t val)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
+    qz_set_prop_key(ctx, o, k, qz_tojs(ctx, val));
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
+}
+
+/* delete_index(o,k)→tagged bool。arr_delete_index 同语义（JS 数组 delete 即留洞）。*/
+__attribute__((export_name("delete_index")))
+int64_t qz_guest_delete_index(int64_t obj, int64_t key)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
+    int ok = 1;
+    if (JS_IsObject(o) && !JS_IsSymbol(k)) {
+        const char *ks = JS_ToCString(ctx, k);
+        if (ks) {
+            JSAtom atom = JS_NewAtom(ctx, ks);
+            if (atom != JS_ATOM_NULL) { ok = JS_DeleteProperty(ctx, o, atom, 0) >= 0; JS_FreeAtom(ctx, atom); }
+            JS_FreeCString(ctx, ks);
+        }
+    }
+    JSValue vr = JS_NewBool(ctx, ok);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("arr_delete_index")))
+int64_t qz_guest_arr_delete_index(int64_t arr, int64_t key)
+{
+    return qz_guest_delete_index(arr, key);
+}
+
+__attribute__((export_name("elem_get_guard")))
+int64_t qz_guest_elem_get_guard(int64_t obj, int64_t key)
+{
+    return qz_guest_get_index(obj, key);
+}
+
+__attribute__((export_name("obj_new")))
+int64_t qz_guest_obj_new(void)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue o = JS_NewObject(ctx);
+    int64_t r = qz_ret(ctx, o);
+    JS_FreeValue(ctx, o);
+    return r;
+}
+
+/* obj_merge(dst, src)：{...src}——自有可枚举字符串键，后者覆盖。*/
+__attribute__((export_name("obj_merge")))
+void qz_guest_obj_merge(int64_t dst, int64_t src)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue d = qz_tojs(ctx, dst), s = qz_tojs(ctx, src);
+    JSPropertyEnum *tab = NULL;
+    uint32_t n = 0;
+    if (JS_IsObject(d) && JS_IsObject(s) &&
+        JS_GetOwnPropertyNames(ctx, &tab, &n, s, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            JSValue v = JS_GetProperty(ctx, s, tab[i].atom);
+            JS_SetProperty(ctx, d, tab[i].atom, v);   /* 接管 v */
+            JS_FreeAtom(ctx, tab[i].atom);
+        }
+        js_free(ctx, tab);
+    }
+    JS_FreeValue(ctx, d); JS_FreeValue(ctx, s);
+}
+
+/* arr_set_len(a,n)→i64：设 length（截断/扩容）。*/
+__attribute__((export_name("arr_set_len")))
+int64_t qz_guest_arr_set_len(int64_t arr, int64_t n)
+{
+    if (!g_current_rt) return arr;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return arr;
+    JSValue a = qz_tojs(ctx, arr), nv = qz_tojs(ctx, n);
+    double f = 0; JS_ToFloat64(ctx, &f, nv);
+    if (JS_IsObject(a)) JS_SetPropertyStr(ctx, a, "length", JS_NewFloat64(ctx, f));
+    JSValue vr = JS_NewFloat64(ctx, f);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, a); JS_FreeValue(ctx, nv); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* arr_set_index(a,k,v)→i64：a[k]=v（越界由数组语义扩容）。*/
+__attribute__((export_name("arr_set_index")))
+int64_t qz_guest_arr_set_index(int64_t arr, int64_t key, int64_t val)
+{
+    if (!g_current_rt) return val;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return val;
+    JSValue a = qz_tojs(ctx, arr), k = qz_tojs(ctx, key);
+    double fk = 0; JS_ToFloat64(ctx, &fk, k);
+    JS_SetPropertyUint32(ctx, a, (uint32_t)fk, qz_tojs(ctx, val));   /* 接管 v */
+    JSValue vr = JS_NewFloat64(ctx, fk);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, a); JS_FreeValue(ctx, k); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* ── 键序登记：隐藏数组 __qz_keys（非枚举，不污染 for..in）── */
+#define QZ_KEYS "__qz_keys"
+
+static void qz_note_key(JSContext *ctx, JSValue obj, const char *name, size_t len)
+{
+    if (!JS_IsObject(obj) || !name) return;
+    JSValue arr = JS_GetPropertyStr(ctx, obj, QZ_KEYS);
+    if (!JS_IsArray(arr)) {
+        JS_FreeValue(ctx, arr);
+        arr = JS_NewArray(ctx);
+        if (JS_IsException(arr)) { JS_FreeValue(ctx, arr); return; }
+        JS_DefinePropertyValueStr(ctx, obj, QZ_KEYS, JS_DupValue(ctx, arr), 0);  /* 不可枚举/不可写 */
+    }
+    JSValue lv = JS_GetPropertyStr(ctx, arr, "length");
+    double f = 0; JS_ToFloat64(ctx, &f, lv);
+    JS_FreeValue(ctx, lv);
+    JS_SetPropertyUint32(ctx, arr, (uint32_t)f, JS_NewStringLen(ctx, name, len));
+    JS_FreeValue(ctx, arr);
+}
+
+__attribute__((export_name("field_order")))
+void qz_guest_field_order(int64_t obj, int64_t keyStr)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, keyStr);
+    size_t len = 0;
+    const char *s = JS_ToCStringLen(ctx, &len, k);
+    qz_note_key(ctx, o, s, len);
+    JS_FreeCString(ctx, s);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
+}
+
+__attribute__((export_name("order_note")))
+void qz_guest_order_note(int64_t obj, int32_t strId)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue o = qz_tojs(ctx, obj);
+    size_t len = 0;
+    const char *s = qz_str_by_id(strId, &len);
+    if (s) qz_note_key(ctx, o, s, len);
+    JS_FreeValue(ctx, o);
+}
+
+/* field_order_lit(obj,strId)：批量登记，名单以 \0 分隔。*/
+__attribute__((export_name("field_order_lit")))
+void qz_guest_field_order_lit(int64_t obj, int32_t strId)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue o = qz_tojs(ctx, obj);
+    size_t len = 0;
+    const char *s = qz_str_by_id(strId, &len);
+    if (s) {
+        size_t start = 0;
+        for (size_t i = 0; i <= len; i++) {
+            if (i == len || s[i] == '\0') {
+                if (i > start) qz_note_key(ctx, o, s + start, i - start);
+                start = i + 1;
+            }
+        }
+    }
+    JS_FreeValue(ctx, o);
+}
+
+__attribute__((export_name("field_order_del")))
+void qz_guest_field_order_del(int64_t obj, int64_t keyStr)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, keyStr);
+    size_t klen = 0;
+    const char *ks = JS_ToCStringLen(ctx, &klen, k);
+    if (ks && JS_IsObject(o)) {
+        JSValue arr = JS_GetPropertyStr(ctx, o, QZ_KEYS);
+        if (JS_IsArray(arr)) {
+            JSValue lv = JS_GetPropertyStr(ctx, arr, "length");
+            double f = 0; JS_ToFloat64(ctx, &f, lv);
+            JS_FreeValue(ctx, lv);
+            uint32_t n = (uint32_t)f, w = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                JSValue e = JS_GetPropertyUint32(ctx, arr, i);
+                size_t elen = 0;
+                const char *es = JS_ToCStringLen(ctx, &elen, e);
+                int same = es && elen == klen && memcmp(es, ks, klen) == 0;
+                JS_FreeCString(ctx, es);
+                if (!same) { if (w != i) JS_SetPropertyUint32(ctx, arr, w, JS_DupValue(ctx, e)); w++; }
+                JS_FreeValue(ctx, e);
+            }
+            JS_SetPropertyStr(ctx, arr, "length", JS_NewFloat64(ctx, (double)w));
+        }
+        JS_FreeValue(ctx, arr);
+    }
+    JS_FreeCString(ctx, ks);
+    JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
+}
+
+/* spread_order(dst,src)：把 src 的键序补登记到 dst。*/
+__attribute__((export_name("spread_order")))
+void qz_guest_spread_order(int64_t dst, int64_t src)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue d = qz_tojs(ctx, dst), s = qz_tojs(ctx, src);
+    if (JS_IsObject(d) && JS_IsObject(s)) {
+        JSValue arr = JS_GetPropertyStr(ctx, s, QZ_KEYS);
+        if (JS_IsArray(arr)) {
+            JSValue lv = JS_GetPropertyStr(ctx, arr, "length");
+            double f = 0; JS_ToFloat64(ctx, &f, lv);
+            JS_FreeValue(ctx, lv);
+            uint32_t n = (uint32_t)f;
+            for (uint32_t i = 0; i < n; i++) {
+                JSValue e = JS_GetPropertyUint32(ctx, arr, i);
+                size_t elen = 0;
+                const char *es = JS_ToCStringLen(ctx, &elen, e);
+                qz_note_key(ctx, d, es, elen);
+                JS_FreeCString(ctx, es);
+                JS_FreeValue(ctx, e);
+            }
+        }
+        JS_FreeValue(ctx, arr);
+    }
+    JS_FreeValue(ctx, d); JS_FreeValue(ctx, s);
+}
+
 /* ── M6b PoC: to_string/string_new/object_new（字符串+对象原语）────────── */
 __attribute__((export_name("to_string")))
 int64_t qz_guest_to_string(int64_t a)

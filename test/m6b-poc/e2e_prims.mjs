@@ -77,5 +77,103 @@ eqv('in_op 缺键', asBool(vm.in_op(str('x'), obj)), 0);
 vm.object_set(obj, 0, box(1));          // （id 即偏移；此处仅建属性，键名无关紧要）
 eqv('in_op 非对象接收者', asBool(vm.in_op(str('x'), box(1))), 0);
 
+
+// ── 字符串表（后续 strId 键原语依赖它）──
+{
+  const names = ['a', 'z', 'a\u0000b\u0000c'];
+  const base = vm.alloc(256);
+  const dv0 = view();
+  dv0.setUint32(base, names.length, true);
+  let c = base + 128;
+  names.forEach((n, k) => {
+    const b = Buffer.from(n, 'utf8');
+    dv0.setUint32(base + 4 + k * 8, c, true);
+    dv0.setUint32(base + 8 + k * 8, b.length, true);
+    new Uint8Array(vm.memory.buffer, c, b.length).set(b);
+    c += b.length;
+  });
+  vm.__set_strtab(base);
+}
+// 解 0x7FFA|off 字符串
+const strOf = (h) => {
+  const u = BigInt.asUintN(64, h);
+  if ((u >> 48n) !== 0x7FFAn) return `tag=0x${(u >> 48n).toString(16)}`;
+  const off = Number(u & 0xFFFFFFFFn);
+  const dv = view();
+  return new TextDecoder().decode(new Uint8Array(vm.memory.buffer, off + 4, dv.getUint32(off, true)));
+};
+// undefined 判定
+const isUndef = (h) => BigInt.asUintN(64, h) === 0x7ff9000000000000n;
+
+// ── 属性写/删（strId 键）──
+const o = vm.object_new();
+vm.prop_set(o, 0, box(7));                    // o.a = 7
+eqv('prop_set 后 object_get', unbox(vm.object_get(o, 0)), 7);
+vm.prop_delete(o, 0);
+eqv('prop_delete 后', isUndef(vm.object_get(o, 0)), true);
+
+// ── 动态下标（字符串句柄键）──
+vm.set_index(o, str('k'), box(9));
+eqv('set_index/get_index', unbox(vm.get_index(o, str('k'))), 9);
+eqv('get_index 缺键', isUndef(vm.get_index(o, str('zz'))), true);
+eqv('delete_index 存在', asBool(vm.delete_index(o, str('k'))), 1);
+
+// ── length ──
+eqv('length_of("hello")', unbox(vm.length_of(str('hello'))), 5);
+
+// ── obj_new / obj_merge ──
+{
+  const d = vm.object_new(), s = vm.object_new();
+  vm.prop_set(s, 0, box(5));
+  vm.obj_merge(d, s);
+  eqv('obj_merge 复制自有属性', unbox(vm.object_get(d, 0)), 5);
+}
+
+// ── arr_set_index / arr_set_len（对象作接收者，验下标与 length 语义）──
+{
+  const a = vm.object_new();
+  vm.arr_set_index(a, box(0), box(10));
+  vm.arr_set_index(a, box(5), box(50));
+  eqv('arr_set_index 写 0', unbox(vm.get_index(a, box(0))), 10);
+  eqv('arr_set_index 越界写 5', unbox(vm.get_index(a, box(5))), 50);
+  vm.arr_set_len(a, box(2));
+  eqv('arr_set_len 截断后 length', unbox(vm.length_of(a)), 2);
+}
+
+// ── 键序登记系列 ──
+{
+  const k = vm.object_new();
+  vm.field_order(k, str('x'));
+  vm.order_note(k, 1);                        // strId 1 = "z"
+  const keys = vm.get_index(k, str('__qz_keys'));
+  eqv('field_order+order_note 键数', unbox(vm.length_of(keys)), 2);
+  eqv('  第 0 项', strOf(vm.get_index(keys, box(0))), 'x');
+  eqv('  第 1 项（order_note 取字符串表）', strOf(vm.get_index(keys, box(1))), 'z');
+  vm.field_order_del(k, str('x'));
+  eqv('field_order_del 后键数', unbox(vm.length_of(vm.get_index(k, str('__qz_keys')))), 1);
+
+  const lit = vm.object_new();
+  vm.field_order_lit(lit, 2);                 // strId 2 = "a\0b\0c" → 3 项
+  const lk = vm.get_index(lit, str('__qz_keys'));
+  eqv('field_order_lit 分割键数', unbox(vm.length_of(lk)), 3);
+  eqv('  拼接', [0, 1, 2].map((i) => strOf(vm.get_index(lk, box(i)))).join(','), 'a,b,c');
+
+  const d2 = vm.object_new(), s2 = vm.object_new();
+  vm.field_order(d2, str('d1'));
+  vm.field_order(s2, str('s1'));
+  vm.field_order(s2, str('s2'));
+  vm.spread_order(d2, s2);
+  const dk = vm.get_index(d2, str('__qz_keys'));
+  eqv('spread_order 追加键序', [0, 1, 2].map((i) => strOf(vm.get_index(dk, box(i)))).join(','), 'd1,s1,s2');
+}
+
+// 键序登记不污染正常属性枚举（隐藏数组不可枚举）
+{
+  const src = Buffer.from('var t={}; t.keep=1; 0');
+  const p = vm.alloc(src.length);
+  new Uint8Array(vm.memory.buffer, p, src.length).set(src);
+  eqv('libqzvm qz_eval 正常', vm.qz_eval(vm.qz_create(0, 0), p, src.length), 0);
+}
+
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }
-console.log('PASS: primitives semantics e2e');
+console.log('PASS: primitives + props/arrays/key-order semantics e2e');
