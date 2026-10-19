@@ -19,6 +19,9 @@ run() {  # run <名称> <脚本> [额外参数...]
     echo "$out" | grep -E '^PASS' | tail -1 || fail "$name (no PASS line)"
 }
 
+# 静态核对：QZ 契约面 ↔ libqzvm 导出签名（参数个数错配只会在链接期炸）
+run "signatures"        "$DIR/m6b-poc/check_qz_signatures.mjs" --libqzvm "$WASM"
+
 run "primitives"        "$DIR/m6b-poc/e2e_prims.mjs"        --libqzvm "$WASM"
 run "real-program"      "$DIR/m6b-poc/e2e_real_program.mjs" --libqzvm "$WASM"
 run "prop-get"          "$DIR/m6b-poc/e2e_prop_get.mjs"     --libqzvm "$WASM"
@@ -29,4 +32,4 @@ run "statics"           "$DIR/m6b-poc/e2e_statics.mjs"     --libqzvm "$WASM"
 run "concat"            "$DIR/m6b-poc/e2e_concat.mjs"       --libqzvm "$WASM" \
                         --product "$DIR/m6b-poc/concat_inmod.wasm"
 
-echo "PASS: test_m6b_e2e (8 组 e2e)"
+echo "PASS: test_m6b_e2e (签名核对 + 8 组 e2e)"

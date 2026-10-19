@@ -2468,35 +2468,18 @@ int64_t qz_guest_call_named(int32_t id, int64_t arr, int32_t isNum)
 
 /* call_named_rest(nameId, a0..a3, ovf) → i64：命名函数 + 前缀 + 溢出实参。*/
 __attribute__((export_name("call_named_rest")))
-int64_t qz_guest_call_named_rest(int32_t id, int64_t a0, int64_t a1, int64_t a2,
-                                 int64_t a3, int64_t ovf)
+int64_t qz_guest_call_named_rest(int32_t id, int64_t restArr, int32_t n)
 {
-    if (!g_current_rt) return 0;
-    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return 0;
-    size_t nlen = 0;
-    const char *nm = qz_str_by_id(id, &nlen);
-    if (!nm || nlen >= 128) return 0;
-    char name[128];
-    memcpy(name, nm, nlen); name[nlen] = '\0';
-    JSValue fn = qz_global_path(ctx, name);
-    if (!JS_IsFunction(ctx, fn)) { JS_FreeValue(ctx, fn); return 0; }
-    JSValue argv[16];
-    int argc = qz_collect_args(ctx, argv, 16, qz_tojs(ctx, a0), qz_tojs(ctx, a1),
-                               qz_tojs(ctx, a2), qz_tojs(ctx, a3), qz_tojs(ctx, ovf));
-    int64_t out = 0;
-    JSValue res = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
-    for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
-    JS_FreeValue(ctx, fn);
-    if (!JS_IsException(res)) { out = qz_ret(ctx, res); JS_FreeValue(ctx, res); }
-    else JS_FreeValue(ctx, res);
-    return out;
+    /* 展开实参 + rest 收尾：实参已由 emitter 收进数组 → 走 call_named 的数组摊平路径。*/
+    (void)n;
+    return qz_guest_call_named(id, restArr, 0);
 }
 
 /* fn_value(nameId) → i64：取命名函数作为值（用于赋值/作实参）。*/
 __attribute__((export_name("fn_value")))
-int64_t qz_guest_fn_value(int32_t id)
+int64_t qz_guest_fn_value(int32_t id, int32_t arity, int32_t pad)
 {
+    (void)arity; (void)pad;   /* 契约保留位：arity 供宿主包装时定形参数 */
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
@@ -2579,8 +2562,9 @@ int64_t qz_guest_builtin_spread(int32_t id, int64_t arr)
 
 /* arr_apply(nameId, arr) → i64：以数组实参调命名函数。*/
 __attribute__((export_name("arr_apply")))
-int64_t qz_guest_arr_apply(int32_t id, int64_t arr)
+int64_t qz_guest_arr_apply(int32_t id, int64_t arr, int64_t ovf)
 {
+    (void)ovf;   /* 契约保留位 */
     return qz_guest_call_named(id, arr, 0);
 }
 
@@ -2695,7 +2679,7 @@ int64_t qz_guest_super_method(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
 /* super_ctor(clsId, a0..a3, ovf) → i64：子类 ctor 调父类 ctor。*/
 __attribute__((export_name("super_ctor")))
 int64_t qz_guest_super_ctor(int32_t clsId, int64_t self, int64_t a0, int64_t a1,
-                            int64_t a2, int64_t a3, int64_t ovf)
+                            int64_t a2, int64_t a3)
 {
     uint32_t off = qz_clsmeta_item_off(clsId);
     if (!off) return 0;
@@ -2707,7 +2691,6 @@ int64_t qz_guest_super_ctor(int32_t clsId, int64_t self, int64_t a0, int64_t a1,
     if (ctorSlot < 0) return 0;
     qz_cls_fn f = (qz_cls_fn)(uintptr_t)(uint32_t)ctorSlot;
     return f(self, a0, a1, a2, a3);
-    (void)ovf;
 }
 
 /* class_expr_value(clsId) → i64：类表达式作值求值（每次调用一个新类）。
