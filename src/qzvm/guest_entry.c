@@ -561,6 +561,98 @@ int64_t qz_guest_sne(int64_t a, int64_t b)
     return r;
 }
 
+/* ── M6b PoC: neg/bnot/band/bor/bxor/truthy 原语（一元+位+布尔）────────── */
+__attribute__((export_name("neg")))
+int64_t qz_guest_neg(int64_t a)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a);
+    double fa = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JSValue vr = JS_NewFloat64(ctx, -fa);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("bnot")))
+int64_t qz_guest_bnot(int64_t a)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a);
+    double fa = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JSValue vr = JS_NewFloat64(ctx, (double)(~(int32_t)fa));
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("band")))
+int64_t qz_guest_band(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, (double)((int32_t)fa & (int32_t)fb));
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("bor")))
+int64_t qz_guest_bor(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, (double)((int32_t)fa | (int32_t)fb));
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("bxor")))
+int64_t qz_guest_bxor(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, (double)((int32_t)fa ^ (int32_t)fb));
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("truthy")))
+int64_t qz_guest_truthy(int64_t a)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a);
+    JSValue vr = JS_NewBool(ctx, JS_ToBool(ctx, va));
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
+    return r;
+}
+
 /* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
 /* emitter 产物 import "qz" "str_dup" (i64)->i64 链接到此。
  * strRead: a = 0x7FFA | off（字符串句柄）。off = 共享 memory 偏移。
