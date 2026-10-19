@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-19T04:28:33.659Z._
+_Auto-generated. Last updated 2026-10-19T11:14:41.912Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-bigint-tagged-backend](pages/aot-bigint-tagged-backend.md) — category: decision | tags: [aot, wasm, bigint, qzvm, emitter] | # AOT BigInt tagged 后端（批 39，2026-10-18）

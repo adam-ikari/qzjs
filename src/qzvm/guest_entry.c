@@ -100,6 +100,7 @@ uint32_t qz_guest_create(uint32_t cfg_ptr, uint32_t cfg_len)
     JS_SetPropertyStr(jctx, g, "__qz_set_result",
         JS_NewCFunction(jctx, js_set_result, "__qz_set_result", 1));
     JS_FreeValue(jctx, g);
+    g_current_rt = rt;  /* M6b: 宿主驱动原语（emitter 产物经 multi-module 调 qz.*）需活动 rt */
 
     return (uint32_t)(uintptr_t)rt;
 }
@@ -124,6 +125,7 @@ void qz_guest_destroy(uint32_t h)
     for (int i = 0; i < QZ_MAX_CONTEXTS; i++) {
         if (rt->contexts[i]) qz_ctx_destroy(rt, rt->contexts[i]);
     }
+    if (g_current_rt == rt) g_current_rt = NULL;
     if (rt->jsrt) JS_FreeRuntime(rt->jsrt);
     rt->magic = 0;
     free(rt);
@@ -142,9 +144,10 @@ int qz_guest_eval(uint32_t h, const char *src, int len)
     memcpy(buf, src, (size_t)len);
     buf[len] = '\0';
     char *err = NULL;
+    qz_t *prev = g_current_rt;
     g_current_rt = rt;  /* M6b: 供 qz_guest_add（emitter 产物经 multi-module 调）读 */
     int rc = qz_eval_internal(rt, buf, &err);
-    g_current_rt = NULL;  /* eval 退出清，避免悬空 */
+    g_current_rt = prev;  /* 恢复（qz_create 已设为 rt，宿主驱动原语仍可调；避免悬空） */
     free(buf);
     free(err);
     return rc;
@@ -333,6 +336,10 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
         uint32_t idx = (uint32_t)(b & 0xFFFFFFFF);
         if (idx < (uint32_t)g_handle_count) return JS_DupValue(ctx, g_handles[idx]);
     }
+    if (tag == 0x7FF8) {  /* BigInt 句柄（BIG_HI|idx；idx≠0，0=canonical NaN） */
+        uint32_t idx = (uint32_t)(b & 0xFFFFFFFF);
+        if (idx != 0 && idx < (uint32_t)g_handle_count) return JS_DupValue(ctx, g_handles[idx]);
+    }
     return JS_UNDEFINED;  /* 其他 tag 后续 */
 }
 
@@ -359,10 +366,11 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
         return ((int64_t)0x7FFA << 48) | off;
     }
     if (tag == JS_TAG_BOOL) return ((int64_t)0x7FFC << 48) | (JS_VALUE_GET_BOOL(r) ? 1 : 0);
-    /* 对象/闭包/数组等 → handle table 注册（0x7FF9 | idx） */
     int idx = g_handle_count++;
     if (idx >= QZ_MAX_HANDLES) return 0;
     g_handles[idx] = JS_DupValue(ctx, r);
+    if (JS_IsBigInt(r)) return ((int64_t)0x7FF8 << 48) | (uint32_t)idx;  /* BigInt 句柄（BIG_HI） */
+    /* 对象/闭包/数组等 → handle table 注册（0x7FF9 | idx） */
     return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
     /* undefined/null 等后续（0 tag） */
 }
@@ -796,5 +804,56 @@ int64_t qz_guest_str_dup(int64_t a)
     JSValue jsv = qz_tojs(ctx, a);        /* strRead: 0x7FFA|off → JSValue */
     int64_t r = qz_ret(ctx, jsv);         /* strWriteback: JSValue → 0x7FFA|new_off */
     JS_FreeValue(ctx, jsv);
+    return r;
+}
+
+/* ── M6b PoC: math_floor（i32 域，Math.floor 常用 op）────────── */
+__attribute__((export_name("math_floor")))
+int32_t qz_guest_math_floor(int32_t x)
+{
+    return x;  /* i32 域 Math.floor 恒等（emitter 用 i32 数组索引场景，x 已整数） */
+}
+
+/* ── M6b PoC: bigint_binop（0x7FF8 BigInt 句柄，op+i64×2）────────── */
+/* op: 0+ 1- 2* 3/ 4% 5=== 6!== 7< 8<= 9> 10>= 11~ 12& 13| 14^ 15<< 16>> 17** */
+__attribute__((export_name("bigint_binop")))
+int64_t qz_guest_bigint_binop(int32_t op, int64_t a, int64_t b)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue x = qz_tojs(ctx, a);
+    JSValue y = qz_tojs(ctx, b);
+    int64_t xi = 0, yi = 0;
+    JS_ToBigInt64(ctx, &xi, x);
+    JS_ToBigInt64(ctx, &yi, y);
+    int64_t zi = 0;
+    int is_cmp = 0, cmp_r = 0;
+    switch (op) {
+    case 0: zi = xi + yi; break;
+    case 1: zi = xi - yi; break;
+    case 2: zi = xi * yi; break;
+    case 3: zi = yi ? xi / yi : 0; break;
+    case 4: zi = yi ? xi % yi : 0; break;
+    case 5: is_cmp = 1; cmp_r = (xi == yi); break;
+    case 6: is_cmp = 1; cmp_r = (xi != yi); break;
+    case 7: is_cmp = 1; cmp_r = (xi <  yi); break;
+    case 8: is_cmp = 1; cmp_r = (xi <= yi); break;
+    case 9: is_cmp = 1; cmp_r = (xi >  yi); break;
+    case 10: is_cmp = 1; cmp_r = (xi >= yi); break;
+    case 11: zi = ~xi; break;
+    case 12: zi = xi & yi; break;
+    case 13: zi = xi | yi; break;
+    case 14: zi = xi ^ yi; break;
+    case 15: zi = xi << yi; break;
+    case 16: zi = xi >> yi; break;
+    case 17: { int64_t acc = 1; for (int64_t i = 0; i < yi; i++) acc *= xi; zi = acc; break; }
+    default: JS_FreeValue(ctx, x); JS_FreeValue(ctx, y); return 0;
+    }
+    JSValue vr;
+    if (is_cmp) vr = JS_NewBool(ctx, cmp_r);
+    else vr = JS_NewBigInt64(ctx, zi);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, x); JS_FreeValue(ctx, y); JS_FreeValue(ctx, vr);
     return r;
 }

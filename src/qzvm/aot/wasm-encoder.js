@@ -99,7 +99,7 @@ class Module {
         if (this.collect) { this.collected.add(key); return 0; }   // 采集模式：只记名
         if (this._importIdx[key] !== undefined) return this._importIdx[key];
         const t = this.funcType(params, results);
-        const idx = this.imports.length;
+        const idx = this._importFuncCount();
         if (this.debug) this._fnNames[this._importFuncCount()] = field;   // funcidx = push 前已登记函数导入数
         this.imports.push({ module, field, type: t });
         this._importIdx[key] = idx;
@@ -108,7 +108,7 @@ class Module {
     declareFunc(name, params, results) {          // 两阶段：先登记签名（支持前向引用）
         const t = this.funcType(params, results);
         const codeIdx = this.funcs.length;                    // codes 数组索引（本地函数序号）
-        const fidx = codeIdx + this.imports.length;           // call 指令用（函数区全局索引）
+        const fidx = codeIdx + this._importFuncCount();        // call 指令用（函数区全局索引；memory import 不占 funcidx）
         this.funcs.push(t);
         this._funcIdx[name] = fidx;
         if (this.debug) this._fnNames[fidx] = name;
@@ -123,11 +123,11 @@ class Module {
     markLine(srcLine) { if (this.debugLine && this._cur) this._cur.marks.push([this._cur.body.length, srcLine]); }
     addFunc(name, params, results, locals) {
         const t = this.funcType(params, results);
-        const fidx = this.funcs.length + this.imports.length; // funcs 索引 = imports + 本地函数序
+        const fidx = this.funcs.length + this._importFuncCount(); // funcs 索引 = 函数 import 数 + 本地函数序
         this.funcs.push(t);
         this._funcIdx[name] = fidx;
         this._codeIdx = this._codeIdx || {};
-        this._codeIdx[name] = fidx - this.imports.length;
+        this._codeIdx[name] = fidx - this._importFuncCount();
         this._cur = { name, locals: locals || [], body: [], marks: [], declLine: 1 };
         return fidx;
     }
@@ -210,7 +210,7 @@ class Module {
     // export
     setStart(fnName) { this.startIdx = this._funcIdx[fnName]; }   // start 段：实例化时自动执行（模块级初始化）
     exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName], kind: 0x00 }); }
-    exportMemory() { this.exports.push({ name: "memory", idx: this.memoryIdx(), kind: 0x02 }); }
+    exportMemory(idx) { this.exports.push({ name: "memory", idx: idx !== undefined ? idx : this.memoryIdx(), kind: 0x02 }); }   // 导入 memory 时传 0
     exportGlobal(name, gidx) { this.exports.push({ name, idx: gidx, kind: 0x03 }); }   // mutable global 导出
     globalIdx() { return 0; }   // 本地 global 索引空间：当前单 global（bump）
     memoryIdx() {   // memory 索引空间独立于 func：无 memory import 时本地 memory 索引 = 0
@@ -237,7 +237,7 @@ class Module {
             const body = vec(this.imports.map(imp => {
                 const head = [...uleb(imp.module.length), ...[...Buffer.from(imp.module)],
                               ...uleb(imp.field.length), ...[...Buffer.from(imp.field)]];
-                if (imp.memory) return [...head, 0x02, 0x03, ...uleb(imp.memory.min), ...uleb(imp.memory.max)];  // memory: shared + has max（WAMR AOT 要求 shared）
+                if (imp.memory) return [...head, 0x02, 0x00, ...uleb(imp.memory.min)];  // memory import: 非 shared、min-only（WAMR 拒 shared+max）
                 return [...head, 0x00, ...uleb(imp.type)];   // func import, type idx
             }));
             out.push(2, ...uleb(body.length), ...body);

@@ -2877,6 +2877,7 @@ function compileTS(input, outWasm, opts = {}) {
                 // （共享 linear memory, NaN-box 句柄跨模块有效）。布局协调
                 // （STR_BUMP 偏移避 libqzvm heap）+ libqzvm memory 增大是完整落地工程。
                 m.importMemory("qz", "memory", 640, 640);
+                m.exportMemory(0);   // re-export 链接到的 memory（导入 memory 索引恒 0），供宿主驱动读结果
             } else {
                 m.addMemory(640);                            // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
             }

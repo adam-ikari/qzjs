@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-19T04:28:33"
+updated: "2026-10-19T11:14:41"
 ---
 
 <!-- compiled_truth -->
@@ -177,3 +177,75 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "M6b 裁决: multi-module 可作 M6b 终态, 免编译期合并。量税实测: dummy libqzvm 31.9ns/call, 真libqzvm 53.6ns/call, 对比 JS shim 3.55µs/call = 66-111x 加速。multi-module 跨模块调用税(wasm→wasm import 间接)接近模块内调用税(ns级), 远低于 JS shim 边界税(3.55µs 含 BigInt dispatch)。裁决: multi-module(C 路径编译期合并)非必需——加载期链接税已足够低。剩余 M6b 完整落地: (1)113 原语 C 实现(包装 QuickJS internal, JS_Add 非公开 API 需 eval 或 internal js_operator); (2)emitter.js 改 import qz.memory+qz.*(addMemory→import); (3)wasi/qz_host 真接线(当前 stub); (4)表示统一(emitter NaN-box vs QuickJS JSValue, 当前 C 侧 round-trip JS_NewFloat64/JS_ToFloat64, 句柄 handle table 待移植 qzvm.js)。bench: bench_add.wat 循环 N=1e6 调 qz_add, performance.now 量时。"
   source: "M6b PoC bench_add.wat + bench_add.js: N=1e6 循环调 qz_add, dummy 31.9ns / 真 libqzvm 53.6ns"
   affects: [aot-roadmap, IN_MODULE_DESIGN, NO_ABI_DESIGN]
+
+- time: 2026-10-19T04:38:44
+  kind: evidence
+  summary: "M6b emitter.js 改造: importMemory 路径就位。emitter compileTS 加 opts.inModuleLink 条件, anyTagged 模式下 m.importMemory(qz, memory, 640, 640) 替代 m.addMemory(640)。验证: concat.ts (string 操作触发 anyTagged) 编译 → concat_inmod.wasm imports 含 qz.memory + qz.string_concat/qz.add/qz.str_dup/qz.bigint_binop。emitter 产物自动 import libqzvm memory + qz.* 函数（M6b 合并形态）。剩余: (1)STR_BUMP=128 偏移协调(emitter bump arena 避 libqzvm heap, 需 libzvm memory 增大 + 预留 emitter arena); (2)libqzvm 需 export string_concat/str_dup/bigint_binop 等 113 原语(当前只 qz_add dummy); (3)布局协调 + 113 原语 C 实现是完整落地。ModuleBuilder importMemory 方法已存在(wasm-encoder.js:91, 注释 WAMR AOT 要求内存来自宿主)。"
+  source: "emitter.js opts.inModuleLink + concat.ts 编译验证"
+  affects: [aot-roadmap, emitter.js]
+
+- time: 2026-10-19T04:48:04
+  kind: evidence
+  summary: "M6b str_dup C PoC: handle table 原语 C 实现模式验证。qz_guest_str_dup export 'str_dup' 实现 strRead(0x7FFA|off → 共享 memory[off..off+4]=len + UTF-8 → JS_NewStringLen) + strWriteback(JS_ToCStringLen → malloc buffer [len][utf8] → 返回 0x7FFA|new_off)。malloc 用 wasi-libc heap(共享 memory 区域, emitter 产物经共享 memory 可访问)。编译通过(build-inmod qzvm-guest)。PoC 简化: malloc 不 free(泄漏接受); 完整测试需 g_current_rt 有效(qz_create+qz_eval+JS 调 emitter 产物完整流程, 当前 test_add.wasm 直接调 fallback)。剩余: (1)完整 in-module 流程测试(qz_create+qz_eval+JS 调 emitter); (2)memory 布局协调(emitter STR_BUMP vs wasi-libc heap); (3)112 原语 C 实现(toJS/ret NaN-box 编解码 + handle table 移植 qzvm.js ~300 行 JS → C); (4)bump arena 管理(替代 malloc 泄漏); (5)wasi/qz_host 真接线; (6)表示统一。"
+  source: "guest_entry.c qz_guest_str_dup + build-inmod 编译验证"
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:04:57
+  kind: evidence
+  summary: "M6b wasi 真接线: multi-module 开时 WAMR_BUILD_LIBC_WASI=1, libqzvm wasi import(fd_write/clock_time_get 等)解析到 WAMR WASI 实现。验证: test_add.js 跑通 test_add(3,4)=7, 无 wasi 链接 warning(之前 failed to link clock_time_get/fd_write)。libqzvm 完整加载(wasi+qz_host stub 都解析)。剩余: qz_host 真接线(当前 stub drain返回0/fs_read返回-1); 完整 in-module 流程测试; 112 原语 C; memory 布局协调。"
+  source: "CMakeLists WAMR_BUILD_LIBC_WASI=1 (multi-module 开时)"
+  affects: [aot-roadmap, CMakeLists]
+
+- time: 2026-10-19T10:07:40
+  kind: evidence
+  summary: "M6b toJS/ret C 最小版: 112 原语基础——统一 NaN-box 编解码。qz_tojs(i64→JSValue): 数值(f64位型)→JS_NewFloat64, 字符串句柄(0x7FFA|off)→JS_NewStringLen(从共享memory读)。qz_ret(JSValue→i64): 数值→f64位型, 字符串→malloc buffer[len][utf8]→0x7FFA|off。str_dup 改用 qz_tojs+qz_ret(替代手写 strRead/strWriteback, 统一编解码)。编译通过(build-inmod)。其他 tag(0x7FF9句柄/0x7FFB数组/0x7FFC布尔等)+handle table 后续。参考 qzvm.js toJS/ret(~300行JS) C 移植, M6b 完整落地工程。"
+  source: "guest_entry.c qz_tojs/qz_ret + str_dup 改用统一编解码"
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:09:22
+  kind: evidence
+  summary: "M6b string_concat C: 第3个原语 C 实现(qz_add/str_dup/string_concat = 3/112)。JS_ConcatString 非公开 → 用 JS_ToCString+memcpy+JS_NewStringLen 拼接。qz_tojs 解 a,b(字符串句柄→JSValue), qz_ret 装回(JSValue→0x7FFA|off)。编译通过。当前 libqzvm export 3 原语 + toJS/ret C 基础(数值+字符串 tag)。剩余 109 原语 C + toJS/ret 扩展(0x7FF9句柄/0x7FFB数组/0x7FFC布尔等 + handle table) + 完整流程测试 + memory 协调 + bump 管理 + qz_host 真接线 + 表示统一。"
+  source: guest_entry.c qz_guest_string_concat
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:12:15
+  kind: evidence
+  summary: "M6b 原语批量 C 实现 6/112: qz_add/str_dup/string_concat/lt/gt/str_len。toJS/ret 加布尔 tag(0x7FFC, JS_NewBool/JS_VALUE_GET_BOOL)。lt/gt 用 C 比较(JS_ToFloat64<比较) + JS_NewBool + qz_ret。str_len 用 JS_ToCStringLen。libqzvm exports 验证(wasm-objdump): free/gt/lt/malloc/memory/qz_add/qz_create/.../str_dup/string_concat/str_len。剩余 106 原语(sub/mul/div/le/ge/seq/sne/object_*/arr_*/iter_*/call_*/builtin_*/env_*/instanceof_*) + toJS/ret 扩展(0x7FF9句柄/0x7FFB数组 + handle table) + 完整流程测试 + memory 协调 + bump 管理 + qz_host 真接线 + 表示统一。~2000 行 C 大工程。"
+  source: "guest_entry.c lt/gt/str_len + 布尔 tag"
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:14:57
+  kind: evidence
+  summary: "M6b 原语批量 C 实现 14/112: add/sub/mul/div/rem/lt/gt/le/ge/seq/sne/str_dup/string_concat/str_len。算术(sub/mul/div/rem 用 JS_ToFloat64+C运算+JS_NewFloat64+qz_ret, rem 用 fmod), 比较(le/ge/seq/sne 用 C比较+JS_NewBool+布尔 tag)。libqzvm exports 验证: 14 原语 + qz_create/eval/tick/destroy/result_*/malloc/free/memory。toJS/ret C 支持 3 tag(数值f64/字符串0x7FFA/布尔0x7FFC)。剩余 98 原语(object_*/arr_*/iter_*/call_*/builtin_*/env_*/instanceof_*/to_string/string_new/neg/band/bor/bxor/bnot/truthy/alloc 等) + toJS/ret 扩展(0x7FF9句柄/0x7FFB数组/0x7FFD宿主/0x7FFE实例/0x7FFF闭包/0x7FF8 BigInt + handle table) + 完整流程测试 + memory 协调 + bump 管理 + qz_host 真接线 + 表示统一。"
+  source: "guest_entry.c sub/mul/div/rem/le/ge/seq/sne + math.h"
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:16:48
+  kind: evidence
+  summary: "M6b 原语 C 实现 20/112: add/sub/mul/div/rem/lt/gt/le/ge/seq/sne/str_dup/string_concat/str_len/neg/bnot/band/bor/bxor/truthy。简单原语(算术+比较+位+布尔+字符串)基本完成。剩余 92 原语(复杂: object_get/object_set/object_new/object_rest/arr_apply/arr_set_index/iter_new/iter_pull/iter_val/call_named/call_value/method_call/builtin/builtin_fn/builtin_member/env_get/env_set/env_new/env_def/instanceof_op/instanceof_dyn/to_string/string_new/alloc/fn_value 等)需 handle table(0x7FF9句柄) + JS API(JS_GetProperty/JS_SetProperty/JS_Call/JS_NewObject/JS_NewArray/JS_GetGlobalObject 等) + toJS/ret 扩展(0x7FF9/0x7FFB/0x7FFD/0x7FFE/0x7FFF/0x7FF8 tag)。~1500 行 C 大工程。+ 完整流程测试 + memory 协调 + bump 管理 + qz_host 真接线 + 表示统一。"
+  source: guest_entry.c neg/bnot/band/bor/bxor/truthy
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:20:50
+  kind: evidence
+  summary: "M6b handle table + object_get/set + qz_add export name 修复: 22/112 原语。toJS/ret 加 0x7FF9 handle table(static array 65536 + JS_DupValue, 不释放泄漏接受)。object_get(JS_GetPropertyStr)/object_set(JS_SetPropertyStr) 复杂原语示范(handle table + JS API)。qz_add export_name 从 qz_add 改 add(匹配 emitter QZ 表 key), test_add.wasm import qz.add 链接成功 test_add(3,4)=7。toJS/ret 现支持 4 tag(数值f64/字符串0x7FFA/布尔0x7FFC/handle 0x7FF9)。剩余 90 原语 + toJS/ret 扩展(0x7FFB数组/0x7FFD宿主/0x7FFE实例/0x7FFF闭包/0x7FF8 BigInt + handle 生命周期) + 完整流程测试 + memory 协调 + bump 管理 + qz_host 真接线 + 表示统一。"
+  source: "guest_entry.c handle table + object_get/set + add export name"
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:22:07
+  kind: evidence
+  summary: "M6b 原语 25/112: +to_string(JS_ToCStringLen+JS_NewStringLen)/string_new(JS_NewStringLen 从 memory)/object_new(JS_NewObject)。剩余 87 原语(arr_apply/arr_set_index/arr_set_len/arr_delete_index/iter_new/iter_pull/iter_val/iter_close/iter_array/call_named/call_value/closure_call/method_call/method_spread/builtin/builtin_fn/builtin_member/builtin_value/builtin_spread/env_get/env_set/env_new/env_def/instanceof_op/instanceof_dyn/instanceof_builtin/object_rest/alloc/fn_value/object_delete/prop_get/prop_set 等) + toJS/ret 扩展(0x7FFB数组/0x7FFD宿主/0x7FFE实例/0x7FFF闭包/0x7FF8 BigInt + handle 生命周期) + 完整流程测试 + memory 协调 + bump 管理 + qz_host 真接线 + 表示统一。~1300 行 C 大工程。"
+  source: guest_entry.c to_string/string_new/object_new
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T10:57:02
+  kind: evidence
+  summary: "M6b 原语 27/112: +alloc(malloc)/object_delete(JS_DeleteProperty+JS_NewAtomLen, JS_DeletePropertyStr 不存在故用 JS_DeleteProperty)。libqzvm exports 27 原语。剩余 85 原语(arr_apply/arr_set_index/arr_set_len/arr_delete_index/iter_new/iter_pull/iter_val/iter_close/iter_array/call_named/call_value/closure_call/method_call/method_spread/builtin/builtin_fn/builtin_member/builtin_value/builtin_spread/env_get/env_set/env_new/env_def/instanceof_op/instanceof_dyn/instanceof_builtin/object_rest/fn_value/prop_get/prop_set/has_prop/get_global/set_global/typeof_*/throw_*/try_* 等) + toJS/ret 扩展 + 完整流程测试 + memory 协调 + bump 管理 + qz_host 真接线 + 表示统一。~1250 行 C。"
+  source: guest_entry.c alloc/object_delete
+  affects: [aot-roadmap, guest_entry]
+
+- time: 2026-10-19T11:14:41
+  kind: decision
+  summary: "M6b 真 e2e 跑通：emitter 产物 concat_inmod.wasm + 真 libqzvm.wasm multi-module 链接 → greet(\"x\")=\"x!\"（经 C 原语 string_concat/str_dup）。修 4 处真 bug：(1) wasm-encoder funcidx 用 imports.length 计数→memory import 混入致所有函数索引 off-by-one，改 _importFuncCount() 只数函数 import（importFn/declareFunc/addFunc）；(2) in-module memory import 编码 shared+max(0x02 0x03)→非 shared min-only(0x02 0x00)，WAMR 拒 shared；(3) libqzvm --initial-memory=41943040（640页/40MiB），emitter 产物需字面量段 STR_BASE=16MiB + bump；(4) guest_entry qz_create 设 g_current_rt、qz_destroy 清、qz_eval 保留(prev 恢复)——原仅 qz_eval 设且退出清，致宿主驱动原语调全走 fallback。验证：test_aot 205 PASS + M5 inmodule e2e PASS + 新 test/m6b-poc/e2e_concat.mjs PASS。句柄编码 tag 在高 16 位(0x7FFA<<48)。"
+  source: "本会话实测"
+  affects: [aot-roadmap]
