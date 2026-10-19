@@ -705,6 +705,48 @@ int64_t qz_guest_object_set(int64_t obj, int64_t key, int64_t val)
     return (int64_t)rc;
 }
 
+/* ── M6b PoC: to_string/string_new/object_new（字符串+对象原语）────────── */
+__attribute__((export_name("to_string")))
+int64_t qz_guest_to_string(int64_t a)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a);
+    size_t len = 0;
+    const char *s = JS_ToCStringLen(ctx, &len, va);
+    JSValue vr = s ? JS_NewStringLen(ctx, s, len) : JS_UNDEFINED;
+    JS_FreeCString(ctx, s);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("string_new")))
+int64_t qz_guest_string_new(int64_t off, int64_t len)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    const char *mem = (const char *)(uintptr_t)off;
+    JSValue vr = JS_NewStringLen(ctx, mem, (size_t)len);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("object_new")))
+int64_t qz_guest_object_new(void)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue vr = JS_NewObject(ctx);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, vr);
+    return r;
+}
+
 /* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
 /* emitter 产物 import "qz" "str_dup" (i64)->i64 链接到此。
  * strRead: a = 0x7FFA | off（字符串句柄）。off = 共享 memory 偏移。
