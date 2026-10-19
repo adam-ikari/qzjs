@@ -83,4 +83,7 @@ if(QZ_IN_MODULE)
     target_link_options(qzvm-guest PRIVATE
         -mexec-model=reactor
         -Wl,--export=malloc -Wl,--export=free)
+    # M6b PoC: reactor 模式默认 export memory（libqzvm.wasm exports "memory"），
+    # emitter 产物 import "qz" "memory" 共享 linear memory（已验 multi-module 链接）。
+    # 无需 --export-memory（wasm-ld-14 无此 flag，--export=memory 报 symbol not found）。
 endif()

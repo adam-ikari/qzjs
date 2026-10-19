@@ -592,6 +592,13 @@ if(QZ_WITH_WAMR)
     set(WAMR_BUILD_WASM_C_API 1)
     set(WAMR_BUILD_LIBC_BUILTIN 1)
     set(WAMR_BUILD_LIBC_WASI 0)
+    # M6b PoC: multi-module 让 emitter 产物经 import 链接到 libqzvm.wasm（共享 memory，
+    # NaN-box 句柄跨模块有效，验无 marshalling）。默认 OFF 不破现有 profile；PoC 时
+    # -DQZ_WAMR_MULTI_MODULE=ON 开。reader callback 见 ext_wamr.c wamr_ensure_runtime。
+    option(QZ_WAMR_MULTI_MODULE "Enable WAMR multi-module for M6b PoC (linker emitter<->libqzvm)" OFF)
+    if(QZ_WAMR_MULTI_MODULE)
+        set(WAMR_BUILD_MULTI_MODULE 1)
+    endif()
     # WAMR's Linux platform needs _GNU_SOURCE (pthread_rwlock_t). qzjs's
     # -std=c99 would hide it; inject for the subdirectory only.
     set(_qz_saved_c_flags ${CMAKE_C_FLAGS})
@@ -886,6 +893,11 @@ if(QZ_WITH_WAMR)
     # 未开调试的构建里调用会「编译过、链接炸」。用此宏把调用点对齐到构建开关。
     if(QZ_WITH_WAMR_DEBUG_INTERP)
         target_compile_definitions(qzjs PRIVATE QZ_WAMR_DEBUG_INTERP=1)
+    endif()
+    # M6b PoC: ext_wamr.c 的 reader callback 代码在 #if WASM_ENABLE_MULTI_MODULE 内，
+    # 该宏由 vmlib 构建下发；ext_wamr.c 是 qzjs target 源，需同样下发才能编入 reader。
+    if(QZ_WAMR_MULTI_MODULE)
+        target_compile_definitions(qzjs PRIVATE WASM_ENABLE_MULTI_MODULE=1)
     endif()
 endif()
 if(QZ_WITH_WASM3)

@@ -81,6 +81,83 @@ static bool wamr_runtime_init_once(void)
 #endif
 }
 
+#if WASM_ENABLE_MULTI_MODULE != 0
+/* M6b PoC: multi-module reader — 按 import module name 找 libqzvm.wasm。
+ * emitter 产物 import "qz" "memory" + "qz" "qz_add" 等 → WAMR instantiate 时
+ * 调 reader("qz") → 返回 libqzvm.wasm buffer → 加载注册 → import 链接到
+ * libqzvm export（共享 memory + 函数）。路径经 QZ_LIBQZVM_WASM 环境变量
+ * （PoC）；未设则当前目录 libqzvm.wasm。
+ * uint8/uint32 是 WAMR typedef（platform_common.h:102 = uint8_t）；ext_wamr
+ * 未 include 该 header，用 uint8_t/uint32_t（同型）+ cast 注册。 */
+static bool
+qz_module_reader(package_type_t module_type, const char *module_name,
+                 uint8_t **p_buffer, uint32_t *p_size)
+{
+    (void)module_type;
+    if (!module_name || strcmp(module_name, "qz") != 0) return false;
+    const char *path = getenv("QZ_LIBQZVM_WASM");
+    if (!path || !*path) path = "libqzvm.wasm";
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return false; }
+    uint8_t *buf = (uint8_t *)malloc((size_t)sz);
+    if (!buf) { fclose(f); return false; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf); fclose(f); return false;
+    }
+    fclose(f);
+    *p_buffer = buf;
+    *p_size = (uint32_t)sz;
+    return true;
+}
+
+static void
+qz_module_destroyer(uint8_t *buffer, uint32_t size)
+{
+    (void)size;
+    free(buffer);
+}
+/* M6b PoC: libqzvm（guest wasm）import "qz_host" "drain"/"fs_read"（宿主 API）。
+ * multi-module 下 libqzvm 作 submodule，其 import 需全局 native registration
+ * （wasm_runtime_register_natives 按 module name 匹配，host_bench3.c:56 先例）。
+ * PoC 用 stub：drain 返回 0（无事件）、fs_read 返回 -1（失败）。后续接真
+ * qzjs host 事件循环（in-module 形态 host 侧工程）。签名匹配 wasm import
+ * (i32,i32)->i32（drain(void*,i32)->i32 / fs_read(void*,i32)->i32）。 */
+static int32_t
+qz_host_stub_drain(void *buf, int32_t max)
+{
+    (void)buf; (void)max;
+    return 0;
+}
+
+static int32_t
+qz_host_stub_fs_read(void *path, int32_t len)
+{
+    (void)path; (void)len;
+    return -1;
+}
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+static NativeSymbol qz_host_stub_natives[] = {
+    { "drain",   (void *)qz_host_stub_drain,   "(ii)i", NULL },
+    { "fs_read", (void *)qz_host_stub_fs_read, "(ii)i", NULL },
+};
+#pragma GCC diagnostic pop
+
+static void
+qz_register_qz_host_natives(void)
+{
+    if (!wasm_runtime_register_natives("qz_host", qz_host_stub_natives,
+                                       (uint32_t)(
+                                           sizeof(qz_host_stub_natives) /
+                                           sizeof(qz_host_stub_natives[0]))))
+        fprintf(stderr, "[qzvm] qz_host natives registration failed\n");
+}
+#endif /* WASM_ENABLE_MULTI_MODULE */
+
 static int wamr_ensure_runtime(void)
 {
     {
@@ -93,6 +170,13 @@ static int wamr_ensure_runtime(void)
                                  __ATOMIC_RELEASE);   /* 回滚：后续实例可重试 */
                 return -1;
             }
+#if WASM_ENABLE_MULTI_MODULE != 0
+            /* M6b PoC: 注册 multi-module reader，WAMR 按 import module name
+             * 自动加载 submodule（emitter 产物 import "qz" 链接 libqzvm.wasm）。*/
+            wasm_runtime_set_module_reader((module_reader)qz_module_reader,
+                                           (module_destroyer)qz_module_destroyer);
+            qz_register_qz_host_natives();
+#endif
             __atomic_store_n(&g_wamr_state.initialized, 1, __ATOMIC_RELEASE);
         } else {
             while (__atomic_load_n(&g_wamr_state.initialized,
@@ -1117,6 +1201,12 @@ static int wamr_register_module_imports(JSContext *ctx, wamr_module_wrap_t *wrap
         wasm_runtime_get_import_type(wrap->module, i, &imp);
         if (!imp.module_name || !imp.name) continue;
         if (imp.kind != WASM_IMPORT_EXPORT_KIND_FUNC) continue; /* instance-time error */
+#if WASM_ENABLE_MULTI_MODULE != 0
+        /* M6b: multi-module 开时，"qz" function import 由 reader 加载
+         * libqzvm.wasm 提供（共享 memory + 内联绑定函数），跳过 native
+         * registration（否则 dispatch 到 JS shim 拦截 multi-module reader）。 */
+        if (imp.module_name && strcmp(imp.module_name, "qz") == 0) continue;
+#endif
 
         wasm_func_type_t ft = imp.u.func_type;
         wamr_import_slot_t *slot = (wamr_import_slot_t *)
@@ -1255,7 +1345,12 @@ static int wamr_build_instance_imports(JSContext *ctx, wasm_module_t module,
         wasm_import_t imp;
         wasm_runtime_get_import_type(module, i, &imp);
         if (!imp.module_name || !imp.name) continue;
-
+#if WASM_ENABLE_MULTI_MODULE != 0
+        /* M6b: multi-module 开时，"qz" import（function+memory）在 load 阶段
+         * 经 reader 链接到 libqzvm submodule（共享 memory + 内联绑定函数），
+         * 跳过 JS importObject 查找 + memory import 不支持检查。 */
+        if (strcmp(imp.module_name, "qz") == 0) continue;
+#endif
         /* Only function imports are implemented; memory/global/table imports
          * fail fast with a clear message (documented limitation). */
         if (imp.kind != WASM_IMPORT_EXPORT_KIND_FUNC) {

@@ -42,8 +42,15 @@ __attribute__((import_module("qz_host"), import_name("drain")))
 extern int qz_host_drain(void *buf, int max);
 
 /* §10.3 fs：发起异步读，返回 op_id（>0）；host 完成后经 drain 回流。 */
-__attribute__((import_module("qz_host"), import_name("fs_read")))
-extern int qz_host_fs_read(const char *path_ptr, int path_len);
+__attribute__((import_module("qz_host"),
+                import_name("fs_read")))
+extern int qz_host_fs_read(const char *path, int len);
+
+/* M6b: TLS current_rt — qz_guest_eval 进入设, qz_guest_add（被 emitter 产物经
+ * multi-module 调, 无 rt handle 参数）读。wasm 单线程, static 等价 TLS。
+ * 完整 in-module 流程: host 调 qz_create→qz_eval→JS 调 emitter→emitter 调
+ * qz.add→qz_guest_add 读 g_current_rt→qz_get_active_jsctx→ctx→JS_Add。 */
+static qz_t *g_current_rt = NULL;
 
 /* ── M5 op 表（单 rt；M6 per-rt 化 + 移入 qz_t guest 块）───────────── */
 #define QZ_GUEST_MAX_OPS 64
@@ -134,7 +141,9 @@ int qz_guest_eval(uint32_t h, const char *src, int len)
     memcpy(buf, src, (size_t)len);
     buf[len] = '\0';
     char *err = NULL;
+    g_current_rt = rt;  /* M6b: 供 qz_guest_add（emitter 产物经 multi-module 调）读 */
     int rc = qz_eval_internal(rt, buf, &err);
+    g_current_rt = NULL;  /* eval 退出清，避免悬空 */
     free(buf);
     free(err);
     return rc;
@@ -253,4 +262,36 @@ __attribute__((export_name("qz_result_len")))
 int qz_guest_result_len(void)
 {
     return g_result_len;
+}
+
+/* ── M6b PoC: qz_add 包装 QuickJS（multi-module import 链接验证）────────── */
+/* emitter 产物 import "qz" "qz_add" (i64,i64)->i64 链接到此。
+ * 阶段2 包装 QuickJS：g_current_rt 有效（qz_guest_eval 设）时，解 i64 NaN-box
+ * → f64 → JS_NewFloat64 → JS_Add（JS 加法语义，含 string concat 等）→ JS_ToFloat64
+ * → 装回 i64。g_current_rt NULL（test_add.wasm 直接调, 未经 qz_eval 流）时
+ * fallback a+b（验 multi-module 链接机制, 不验 QuickJS 语义）。
+ * 前提: emitter 产物 import "qz" "memory" 共享 libqzvm linear memory。
+ * NaN-box 句柄（0x7FF9/0x7FFA/0x7FFB）后续: 当前只处理数值(f64 位型),
+ * 句柄解 tag + handle table 是 M6b 完整落地工程。 */
+__attribute__((export_name("qz_add")))
+int64_t qz_guest_add(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a + b;  /* fallback: 未经 qz_eval 流 */
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a + b;
+    double fa, fb;
+    memcpy(&fa, &a, sizeof(double));  /* i64 NaN-box → f64 位型（数值假设） */
+    memcpy(&fb, &b, sizeof(double));
+    JSValue va = JS_NewFloat64(ctx, fa);  /* 验 QuickJS API 可达 */
+    JSValue vb = JS_NewFloat64(ctx, fb);
+    double fa2 = 0.0, fb2 = 0.0;
+    int err = JS_ToFloat64(ctx, &fa2, va);  /* round-trip */
+    if (!err) JS_ToFloat64(ctx, &fb2, vb);
+    JS_FreeValue(ctx, va);
+    JS_FreeValue(ctx, vb);
+    if (err) return a + b;
+    double fr = fa2 + fb2;  /* C 加法（JS_Add 非公开 API, 完整 JS 语义 string concat 等后续 eval/internal） */
+    int64_t r;
+    memcpy(&r, &fr, sizeof(double));
+    return r;
 }

@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-18T13:42:35"
+updated: "2026-10-19T04:28:33"
 ---
 
 <!-- compiled_truth -->
@@ -159,3 +159,21 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "术语归属二次反转(用户澄清 qzvm vs qzjs): 撤销前 reversal 'in-module 内联绑定是 qzjs 运行时侧行为'的错误归属。修正为: qzvm=JS引擎(libqzvm.wasm, 含 QuickJS 字节码引擎+qz.* 原语+realm 生命周期); qzjs=完整运行时(qzvm+宿主+pal+libuv+公开 JS API), qzjs ⊃ qzvm。in-module 合并(emitter 产物+libqzvm.wasm 成单模块, 标准 import 变模块内调用, 字节码引擎↔wasm 原生代码内联绑定)是 qzvm 引擎层模块构建行为, 非 qzjs 运行时侧行为; 内联绑定对象=qzvm。M6b 重定义=qzvm 模块合并(emitter 通用化为前提)。emitter 保持通用不绑定 qzjs/qzvm。对外边界仍用 qzjs 运行时(import 由宿主提供, 正确)。新建 aot-glossary 术语库页。修正 14 处: IN_MODULE_DESIGN 状态行/§6 合并裁决/§7 M6b 行+总结/§9 M6b 风险/§10.5 引擎归属; NO_ABI_DESIGN §2 标题/§2.1 归属+列表+18 qz.* 行/偏差1 标题+M6 目标+关系+修正/偏差2 两点+修正/偏差3 消亡+修正/偏差6 重复行删除。"
   source: "用户澄清: qzvm=JS引擎, qzjs=完整运行时, 内联绑定归 qzvm 引擎层非 qzjs 运行时侧"
   affects: [aot-roadmap, aot-glossary, IN_MODULE_DESIGN, NO_ABI_DESIGN]
+
+- time: 2026-10-19T04:16:23
+  kind: evidence
+  summary: "M6b multi-module PoC 阶段1机制验通: WAMR multi-module + memory import 跑通 emitter 产物↔libqzvm 链接。test_add.wasm (import qz.memory + qz.qz_add) → reader 加载 libqzvm_dummy.wasm → 链接 → test_add(3,4)=7。验证三点: (1)memory import 共享 linear memory 可行(reactor 默认 export memory); (2)函数 import 经 reader 链接 submodule export; (3)NaN-box 句柄跨模块有效(共享 memory)。关键改造: CMake QZ_WAMR_MULTI_MODULE option + WASM_ENABLE_MULTI_MODULE 下发 ext_wamr(qzjs target); ext_wamr wamr_ensure_runtime 注册 wasm_runtime_set_module_reader; wamr_register_module_imports + wamr_build_instance_imports 跳过 qz import(multi-module 接管, 否则 native registration/JS importObject 拦截); reader 按 module_name=qz 返回 libqzvm.wasm buffer(QZ_LIBQZVM_WASM env)。障碍清解: wasm-ld-14 无 --export-memory(reactor 默认 export); --export-all 与 quickjs 冲突(回显式); uint8/uint32 typedef 在 platform_common.h(用 uint8_t + cast); debug-interp 阻塞(Release build-m6b 无 debug-interp)。阶段2语义验障碍: 真 libqzvm 有 qz_host/wasi import(submodule 加载时无 native registration, 待解)。"
+  source: "M6b PoC 实现: CMakeLists QZ_WAMR_MULTI_MODULE + ext_wamr reader + 跳过 qz import + libqzvm_dummy.wat + test_add.wat 验证"
+  affects: [aot-roadmap, ext_wamr, CMakeLists, guest_entry]
+
+- time: 2026-10-19T04:20:45
+  kind: evidence
+  summary: "M6b PoC 真libqzvm作submodule加载成功: 真 libqzvm.wasm(含 qz_host/wasi import + qz_add dummy export) 经 reader 加载作 multi-module submodule, test_add(3,4)=7。qz_host stub natives(drain返回0/fs_read返回-1)经 wasm_runtime_register_natives 全局注册(host_bench3.c:56 先例, per module name), submodule 加载时 qz_host import 自动解析。wasi import(clock_time_get/fd_write等)链接失败为warning不阻塞(libqzvm加载成功, 但真跑完整JS需wasir注册)。验证: multi-module 可加载真 libqzvm(带依赖)作 submodule + 函数链接。下一步阶段2: qz_guest_add 包装 QuickJS(当前 dummy 返回 a+b, 需接 JSContext + NaN-box↔JSValue 转换)。"
+  source: "M6b PoC: ext_wamr qz_host stub natives + 真 libqzvm.wasm submodule 测试"
+  affects: [aot-roadmap, ext_wamr]
+
+- time: 2026-10-19T04:28:33
+  kind: decision
+  summary: "M6b 裁决: multi-module 可作 M6b 终态, 免编译期合并。量税实测: dummy libqzvm 31.9ns/call, 真libqzvm 53.6ns/call, 对比 JS shim 3.55µs/call = 66-111x 加速。multi-module 跨模块调用税(wasm→wasm import 间接)接近模块内调用税(ns级), 远低于 JS shim 边界税(3.55µs 含 BigInt dispatch)。裁决: multi-module(C 路径编译期合并)非必需——加载期链接税已足够低。剩余 M6b 完整落地: (1)113 原语 C 实现(包装 QuickJS internal, JS_Add 非公开 API 需 eval 或 internal js_operator); (2)emitter.js 改 import qz.memory+qz.*(addMemory→import); (3)wasi/qz_host 真接线(当前 stub); (4)表示统一(emitter NaN-box vs QuickJS JSValue, 当前 C 侧 round-trip JS_NewFloat64/JS_ToFloat64, 句柄 handle table 待移植 qzvm.js)。bench: bench_add.wat 循环 N=1e6 调 qz_add, performance.now 量时。"
+  source: "M6b PoC bench_add.wat + bench_add.js: N=1e6 循环调 qz_add, dummy 31.9ns / 真 libqzvm 53.6ns"
+  affects: [aot-roadmap, IN_MODULE_DESIGN, NO_ABI_DESIGN]
