@@ -323,6 +323,10 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
 {
     uint64_t bits = (uint64_t)b;
     uint64_t tag = bits >> 48;
+    /* canonical quiet NaN = 0x7FF8000000000000，高 16 位恰为 0x7FF8（BigInt 句柄标记）。
+     * 必须先排除，否则 NaN 会被当成句柄下标 0 → 静默读成 undefined。*/
+    if (bits == 0x7FF8000000000000ULL) return JS_NAN;
+    /* 其余非句柄位型（|tag| 不在句柄区间）按 f64 位型解释。*/
     if (tag < 0x7FF8 || tag > 0x7FFF) {
         double f;
         memcpy(&f, &b, 8);
@@ -351,7 +355,9 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
 
 static int64_t qz_ret(JSContext *ctx, JSValue r)
 {
-    int tag = JS_VALUE_GET_TAG(r);
+    /* wasm32 走 JS_NAN_BOXING：JS_VALUE_GET_TAG 对 float64 返回位型高位（如 0x3FF00000），
+     * 只有 JS_VALUE_GET_NORM_TAG 才归一为 JS_TAG_* 常量。用错会把数值误判成对象句柄。*/
+    int tag = JS_VALUE_GET_NORM_TAG(r);
     if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64) {
         double f = 0.0;
         JS_ToFloat64(ctx, &f, r);
@@ -670,6 +676,148 @@ int64_t qz_guest_bxor(int64_t a, int64_t b)
     JSValue vr = JS_NewFloat64(ctx, (double)((int32_t)fa ^ (int32_t)fb));
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* ── M6b: 位移/幂/比较/类型判定原语 ────────────────────────────────
+ * 共用「解包 → JS 运算 → 装箱」形态；与 band/bor 等既有原语一致。*/
+#define QZ_BINOP(export_name_, cexpr_)                                        \
+    __attribute__((export_name(#export_name_)))                               \
+    int64_t qz_guest_##export_name_(int64_t a, int64_t b)                     \
+    {                                                                         \
+        if (!g_current_rt) return a;                                          \
+        JSContext *ctx = qz_get_active_jsctx(g_current_rt);                   \
+        if (!ctx) return a;                                                   \
+        JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);                   \
+        double fa = 0, fb = 0;                                                \
+        JS_ToFloat64(ctx, &fa, va);                                           \
+        JS_ToFloat64(ctx, &fb, vb);                                           \
+        JSValue vr = JS_NewFloat64(ctx, (double)(cexpr_));                    \
+        int64_t r = qz_ret(ctx, vr);                                          \
+        JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);  \
+        return r;                                                             \
+    }
+
+/* JS 位移按 32 位：先 ToInt32 再移，结果转 int32（<< 结果按 uint32 位型保序）。
+ * 注意 (uint32_t)fa 对负 f64 是未定义行为，必须先 (int32_t)。*/
+QZ_BINOP(shl,  ((int32_t)((uint32_t)(int32_t)fa << ((uint32_t)(int32_t)fb & 31))))
+QZ_BINOP(shr,  ((int32_t)fa >> ((uint32_t)(int32_t)fb & 31)))
+QZ_BINOP(ushr, ((int32_t)((uint32_t)(int32_t)fa >> ((uint32_t)(int32_t)fb & 31))))
+
+__attribute__((export_name("pow")))
+int64_t qz_guest_pow(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    double fa = 0, fb = 0;
+    JS_ToFloat64(ctx, &fa, va);
+    JS_ToFloat64(ctx, &fb, vb);
+    JSValue vr = JS_NewFloat64(ctx, pow(fa, fb));   /* math.h pow：与 JS ** 语义一致 */
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* math_pow(f64,f64)→f64：编译期常量折叠与裸 f64 路径用（无需装箱）。*/
+__attribute__((export_name("math_pow")))
+double qz_guest_math_pow(double a, double b) { return pow(a, b); }
+
+__attribute__((export_name("math_rem")))
+double qz_guest_math_rem(double a, double b) { return fmod(a, b); }   /* JS % 是 fmod 语义 */
+
+/* to_num(v)→i64：ToNumber。字符串→数值，其余按 JS 语义。NaN 结果即 NaN 位型。*/
+__attribute__((export_name("to_num")))
+int64_t qz_guest_to_num(int64_t a)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a);
+    double f = 0;
+    JS_ToFloat64(ctx, &f, va);
+    JSValue vr = JS_NewFloat64(ctx, f);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* is_nullish(v)→i32：v == null（undefined 0x7FF9|0 或 null 0x7FF9|1 固定槽）。*/
+__attribute__((export_name("is_nullish")))
+int32_t qz_guest_is_nullish(int64_t a)
+{
+    uint64_t bits = (uint64_t)a;
+    return ((bits >> 48) == 0x7FF9 && (bits & 0xFFFFFFFF) <= 1) ? 1 : 0;
+}
+
+/* is_undef(v)→i32：v === undefined（固定槽 0x7FF9|0）。*/
+__attribute__((export_name("is_undef")))
+int32_t qz_guest_is_undef(int64_t a)
+{
+    return ((uint64_t)a == ((uint64_t)0x7FF9 << 48)) ? 1 : 0;
+}
+
+/* 比较类：直接落 JS_IsEqual，避免自行判型掩盖 NaN/跨类型语义。*/
+__attribute__((export_name("eq")))
+int64_t qz_guest_eq(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    JSValue vr = JS_NewBool(ctx, JS_IsEqual(ctx, va, vb));   /* == */
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+__attribute__((export_name("ne")))
+int64_t qz_guest_ne(int64_t a, int64_t b)
+{
+    if (!g_current_rt) return a;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    JSValue vr = JS_NewBool(ctx, !JS_IsEqual(ctx, va, vb));  /* != */
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* in_op(k, o)→tagged bool：k in o（含原型链）。*/
+__attribute__((export_name("in_op")))
+int64_t qz_guest_in_op(int64_t key, int64_t obj)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue k = qz_tojs(ctx, key), o = qz_tojs(ctx, obj);
+    int found = 0;
+    if (JS_IsObject(o)) {
+        const char *ks = JS_ToCString(ctx, k);      /* Symbol 键返回 NULL，此处按缺失处理 */
+        if (ks) {
+            JSAtom atom = JS_NewAtom(ctx, ks);
+            if (atom != JS_ATOM_NULL) { found = JS_HasProperty(ctx, o, atom); JS_FreeAtom(ctx, atom); }
+            JS_FreeCString(ctx, ks);
+        }
+    }
+    JSValue vr = JS_NewBool(ctx, found);
+    int64_t r = qz_ret(ctx, vr);
+    JS_FreeValue(ctx, k); JS_FreeValue(ctx, o); JS_FreeValue(ctx, vr);
+    return r;
+}
+
+/* typeof_host(v)→i32：宿主值是否为 JS 函数（typeof v === "function"）。*/
+__attribute__((export_name("typeof_host")))
+int32_t qz_guest_typeof_host(int64_t a)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue va = qz_tojs(ctx, a);
+    int32_t r = JS_IsFunction(ctx, va) ? 1 : 0;
+    JS_FreeValue(ctx, va);
     return r;
 }
 
