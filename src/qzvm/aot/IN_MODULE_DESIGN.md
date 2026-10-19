@@ -278,39 +278,29 @@ flowchart TB
 | M6a | qzjs native 侧去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 qzvm-guest；tcp_io/control/worker 去 JSValue；qzjs native 侧不再**直接**调 QuickJS API | qzjs native 侧零 `JS_NewRuntime`（引擎归 qzvm guest）；AOT/standard 档不受影响 |
 | M6b | qzvm 模块合并+内联绑定（无 ABI 机制核心） | emitter 是**通用 TS→wasm 工具**（产物只声明标准 wasm import，不绑定 qzjs/qzvm，§10.6 line 428）；qzvm 模块合并 emitter 产物 + `libqzvm.wasm` 成单模块，标准 import 变模块内调用（字节码引擎↔wasm 原生代码内联绑定，无 marshalling） | emitter 产物零 qzjs 专有绑定（通用，任何 wasm 引擎可跑）；合并后模块内调用税 ~ns 级（对标 pal 面 45–66ns，非跨界 3.55µs）。见 `NO_ABI_DESIGN.md` |
 
-### M6b 原语实现进度与结构性边界（2026-10-19）
+### M6b 原语实现进度与结构性边界（2026-10-19 更新）
 
-`src/qzvm/guest_entry.c` 已实现 **88 / 113** 个 `qz.*` 原语。已覆盖算术/比较/位运算、
-属性与下标、数组、对象合并、键序登记、闭包环境层链、迭代协议、字符串/正则/BigInt、
-`method_call`、内建全局分派（`builtin*` / `instanceof_builtin`）。
+`src/qzvm/guest_entry.c` 已实现 **全部 113 个** `qz.*` 原语（0 占位），签名核对
+114/114 与 emitter 契约面匹配。覆盖算术/比较/位运算、属性与下标、数组、对象合并、
+键序登记、闭包环境层链、迭代协议、字符串/正则/BigInt、`method_call`、内建全局分派
+（`builtin*` / `instanceof_builtin`）、类元数据族（`class_value` / `super_method` /
+`static_*` / `statics_*` / `brand_check` / `instanceof_dyn`）、通用调用族
+（`call_value` / `call_named` / `fn_value` / `*_spread` / `arr_apply`）。
 
-**剩余 25 项是架构边界，不是遗漏**：
+**原「wasm 侧回调」架构边界已被共享 funcref 表突破**：
 
-```
-closure_call closure_call_spread call_value call_named call_named_rest
-method_spread obj_accessor object_set_method object_set_method_key arr_apply
-class_value class_value_dyn super_method super_ctor new_dynamic fn_value
-static_get static_get_dyn static_set statics_ready statics_has statics_mark
-brand_check instanceof_dyn builtin_spread
-```
+- emitter 产物 import `qz.__indirect_function_table`（libqzvm `--export-table
+  --growable-table` 导出的同表），闭包体 / 类方法生成统一签名蹦床装进表槽
+  （`INMOD_TABLE_CAP + i`）。
+- C 侧把表槽号强转成函数指针 → clang 编成 `call_indirect` → 回调产物导出，无需
+  重入执行引擎。这是 25 项「回调族」原语的解锁机制。
+- 产物用 `table.grow` + 被动 elem 段 + `table.init` 在启动函数里扩容装表
+  （`emitTableInit`）。
 
-共同点：都需要 **wasm 侧回调**——闭包体是产物内独立 wasm 函数（`__lam_*`），类方法/
-静态方法/构造器同样是产物内的 wasm 导出，类元数据（父链、methods 表）由 emitter 以 JS
-对象形式交给 JS 宿主。C 侧原语运行在 wasm 内部，再调 `wasm_runtime_call_wasm_a` 会重入
-执行引擎，因此无法从 C 回调产物导出。
-
-**两条可行落地路径**（择一）：
-
-1. **emitter 加 table/elem 段**：把闭包体与类方法登记进 funcref 表，C 侧用
-   `call_indirect` 分派。`wasm-encoder.js` 已有 `call_indirect` opcode（0x11）但无 table/elem
-   段，需补。这是解锁全部剩余项的最小结构改动。
-2. **classMeta / lamMeta 传表**：仿 `__set_strtab` 增加 `__set_clsmeta(base)`，把类父链与
-   methods 表序列化进共享内存，C 侧按 clsId 查表。仍解决不了「调 wasm 闭包体」本身，
-   只能解决 `instanceof_op` 的父链判定、`statics_*` 等元数据查询类。
-
-**验证**：`test/m6b-poc/` 下 5 条 e2e（`e2e_prims` / `e2e_real_program` / `e2e_prop_get` /
-`e2e_builtin` / `e2e_concat`）+ `test/test_inmodule_guest_e2e.sh` 全绿。真实 TS 产物覆盖
-循环、递归、数组、for-of、字符串拼接、Math/parseInt/String 内建。
+**两档语义一致性**（独立档 = JS 宿主 qzvm.js；in-module = C 侧 libqzvm）：
+同一批真实负载 + 断言，两档必须同结果。硬约束：C 侧不能把闭包物化成 JS 函数
+（QuickJS 在 wasm 内回调 wasm 蹦床会 "null function or function signature
+mismatch"）→ 数组高阶方法（map/filter/reduce/…）在 C 侧自遍历、原地变异写回内存。
 
 **strId 约定**：`qz_str_by_id` 依赖宿主经 `__set_strtab(base)` 注入 `compileTS` 返回的
 `info.strings`；产物自身不带字符串表（JS 宿主按名字直接解析，不需要）。任何用到字符串
