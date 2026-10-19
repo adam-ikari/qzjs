@@ -33,6 +33,19 @@ class P { constructor(public x: number, public y: number) {} sum(): number { ret
 export function mk(a: number, b: number): number { const p = new P(a, b); return p.sum(); }
 class Q extends P { sum(): number { return super.sum() * 2; } }
 export function mk2(a: number, b: number): number { return new Q(a, b).sum(); }
+class Shape { constructor(public n: number) {} area(): number { return 0; } }
+class Sq extends Shape { constructor(n: number) { super(n); } area(): number { return this.n * this.n; } }
+export function polyTotal(): number {
+  const xs: Shape[] = [new Sq(2), new Shape(9)];
+  let s = 0;
+  for (const x of xs) s += x.area();
+  return s;
+}
+export function higherOrder(n: number): number {
+  const f = (x: number): number => x + 1;
+  const g = (h: (x: number) => number, y: number): number => h(h(y));
+  return g(f, n);
+}
 `);
 const info = compileTS(tsPath, wasmPath, { inModuleLink: true });
 
@@ -63,7 +76,9 @@ if (missing.length) { console.error('FAIL: libqzvm 缺原语 ' + missing.join(' 
 const P = new WebAssembly.Instance(prod, { qz, wasi_snapshot_preview1: wasi.wasiImport }).exports;
 chk('mk(3,4)', unbox(P.mk(box(3), box(4))), 7);
 chk('mk2(3,4) 继承+super', unbox(P.mk2(box(3), box(4))), 14);
+chk('polyTotal() 多态虚分派', unbox(P.polyTotal()), 4);      // Sq(2).area=4 + Shape(9).area=0
+chk('higherOrder(5) 闭包+类共存', unbox(P.higherOrder(box(5))), 7);
 
 L.qz_destroy(rt);
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }
-console.log('PASS: 类（继承 + super + 动态实例化）经 C 侧 classMeta 传表');
+console.log('PASS: 类（继承 + super + 多态虚分派）与闭包共存，经 C 侧 classMeta 传表');
