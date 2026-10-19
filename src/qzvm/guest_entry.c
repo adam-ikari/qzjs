@@ -295,3 +295,40 @@ int64_t qz_guest_add(int64_t a, int64_t b)
     memcpy(&r, &fr, sizeof(double));
     return r;
 }
+
+/* ── M6b PoC: str_dup 包装 QuickJS（handle table 原语 C 实现模式验证）────── */
+/* emitter 产物 import "qz" "str_dup" (i64)->i64 链接到此。
+ * strRead: a = 0x7FFA | off（字符串句柄）。off = 共享 memory 偏移。
+ *   memory[off..off+4] = len（LE i32），memory[off+4..off+4+len] = UTF-8。
+ *   → JS_NewStringLen 创建 JSValue。
+ * strWriteback: JSValue → JS_ToCStringLen → UTF-8 → malloc buffer
+ *   [len:i32][utf8] → 返回 0x7FFA | new_off。
+ * malloc 用 wasi-libc heap（共享 memory 区域），emitter 产物经共享 memory 可访问。
+ * PoC 简化: malloc buffer 不 free（字符串句柄持久，泄漏接受）；自管 bump arena +
+ * memory 布局协调（emitter STR_BUMP vs wasi-libc heap）是完整落地工程。
+ * g_current_rt NULL（未经 qz_eval 流）时 fallback 返回 a（验 multi-module 链接）。 */
+__attribute__((export_name("str_dup")))
+int64_t qz_guest_str_dup(int64_t a)
+{
+    if (!g_current_rt) return a;  /* fallback: 未经 qz_eval 流 */
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return a;
+    /* strRead: a = 0x7FFA | off */
+    uint32_t off = (uint32_t)(a & 0xFFFFFFFF);
+    const char *mem = (const char *)(uintptr_t)off;  /* wasm32 memory 偏移 */
+    uint32_t len;
+    memcpy(&len, mem, 4);
+    JSValue jsv = JS_NewStringLen(ctx, mem + 4, len);
+    /* strWriteback: JSValue → UTF-8 → malloc buffer */
+    size_t out_len;
+    const char *out_utf8 = JS_ToCStringLen(ctx, &out_len, jsv);
+    if (!out_utf8) { JS_FreeValue(ctx, jsv); return a; }
+    char *buf = (char *)malloc(4 + out_len);
+    if (!buf) { JS_FreeCString(ctx, out_utf8); JS_FreeValue(ctx, jsv); return a; }
+    uint32_t new_off = (uint32_t)(uintptr_t)buf;
+    memcpy(buf, &out_len, 4);
+    memcpy(buf + 4, out_utf8, out_len);
+    JS_FreeCString(ctx, out_utf8);
+    JS_FreeValue(ctx, jsv);
+    return ((int64_t)0x7FFA << 48) | new_off;
+}
