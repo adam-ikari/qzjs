@@ -25,7 +25,8 @@ run "prop-get"          "$DIR/m6b-poc/e2e_prop_get.mjs"     --libqzvm "$WASM"
 run "builtin"           "$DIR/m6b-poc/e2e_builtin.mjs"      --libqzvm "$WASM"
 run "closure"           "$DIR/m6b-poc/e2e_closure.mjs"      --libqzvm "$WASM"
 run "class"             "$DIR/m6b-poc/e2e_class.mjs"        --libqzvm "$WASM"
+run "statics"           "$DIR/m6b-poc/e2e_statics.mjs"     --libqzvm "$WASM"
 run "concat"            "$DIR/m6b-poc/e2e_concat.mjs"       --libqzvm "$WASM" \
                         --product "$DIR/m6b-poc/concat_inmod.wasm"
 
-echo "PASS: test_m6b_e2e (7 组 e2e)"
+echo "PASS: test_m6b_e2e (8 组 e2e)"

@@ -932,6 +932,28 @@ static void qz_set_prop_key(JSContext *ctx, JSValue obj, JSValue key, JSValue va
     JS_FreeCString(ctx, ks);
 }
 
+/* 前向：类访问器链查找（定义于 classMeta 节）+ 类方法蹦床类型。*/
+static int32_t qz_clsmeta_accessor_chain(int32_t clsId, int32_t nameStrId, int wantSet, int32_t *found);
+typedef int64_t (*qz_cls_fn)(int64_t, int64_t, int64_t, int64_t, int64_t);
+/* 前向：闭包分派（定义于 closure_call 节）。*/
+int64_t qz_guest_closure_call(int64_t handle, int64_t a0, int64_t a1, int64_t a2,
+                              int64_t a3, int64_t recv);
+
+/* ── 运行时访问器表（Object.defineProperty / 对象字面量 getter-setter）──
+ * 键 (宿主对象句柄, nameStrId)，值是 getter/setter 闭包句柄（0x7FFF|off，0=无）。
+ * prop_get/prop_set 命中则经 closure_call 分派到 wasm 蹦床——C 侧无法把 wasm
+ * 函数包成 JSFunction，故访问器必须由本层自己维护并分派。*/
+#define QZ_ACC_CAP 128
+static struct { int64_t obj; int32_t nameId; int64_t getClo, setClo; } g_accs[QZ_ACC_CAP];
+static int32_t g_acc_n = 0;
+
+static int32_t qz_acc_find(int64_t obj, int32_t nameStrId)
+{
+    for (int32_t i = 0; i < g_acc_n; i++)
+        if (g_accs[i].obj == obj && g_accs[i].nameId == nameStrId) return i;
+    return -1;
+}
+
 __attribute__((export_name("prop_set")))
 void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
 {
@@ -940,6 +962,24 @@ void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
     if (!ctx) return;
     JSValue o = qz_tojs(ctx, obj);
     JSValue k = qz_strval(ctx, keyId);
+    /* 访问器优先：命中且有 setter → 调 setter(val)，不写底层属性 */
+    { int32_t ai = qz_acc_find(obj, keyId);
+      if (ai >= 0 && g_accs[ai].setClo) {
+          qz_guest_closure_call(g_accs[ai].setClo, val, 0, 0, 0, obj);
+          JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+          return;
+      } }
+    /* 类实例 setter：classMeta.accessors → 表槽 → 蹦床(self, val) */
+    if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFE) {
+        int32_t clsId; memcpy(&clsId, (const unsigned char *)(uintptr_t)(uint32_t)(uint64_t)obj, 4);
+        int32_t found = 0;
+        int32_t slot = qz_clsmeta_accessor_chain(clsId, keyId, 1, &found);
+        if (found) {
+            JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+            if (slot > 0) ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(obj, val, 0, 0, 0);
+            return;
+        }
+    }
     qz_set_prop_key(ctx, o, k, qz_tojs(ctx, val));
     JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
 }
@@ -1290,6 +1330,7 @@ int32_t qz_guest_alloc(int32_t size)
     return (int32_t)(uintptr_t)p;
 }
 
+
 __attribute__((export_name("object_delete")))
 void qz_guest_object_delete(int64_t obj, int32_t keyId)
 {
@@ -1327,6 +1368,23 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
     if (!ctx) return 0;
     JSValue o = qz_tojs(ctx, recv);
     JSValue k = qz_strval(ctx, keyId);
+    /* 访问器优先：命中则调 getter（无 getter → undefined，与 JS 语义一致） */
+    { int32_t ai = qz_acc_find(recv, keyId);
+      if (ai >= 0) {
+          int64_t g = g_accs[ai].getClo;
+          JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+          return g ? qz_guest_closure_call(g, 0, 0, 0, 0, recv) : 0;
+      } }
+    /* 类实例 getter：classMeta.accessors → 表槽 → 蹦床(self) */
+    if ((uint16_t)((uint64_t)recv >> 48) == 0x7FFE) {
+        int32_t clsId; memcpy(&clsId, (const unsigned char *)(uintptr_t)(uint32_t)(uint64_t)recv, 4);
+        int32_t found = 0;
+        int32_t slot = qz_clsmeta_accessor_chain(clsId, keyId, 0, &found);
+        if (found) {
+            JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+            return slot > 0 ? ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(recv, 0, 0, 0, 0) : 0;
+        }
+    }
     JSValue vr = JS_UNDEFINED;
     if (!JS_IsNull(o) && !JS_IsUndefined(o)) {
         size_t klen = 0;
@@ -2073,8 +2131,17 @@ void qz_guest_set_clsmeta(int32_t base)
 }
 
 /* 按 clsId 取 classMeta 项偏移（字节）。无表或 clsId 越界 → 0。*/
+/* 动态类（类表达式工厂：每次求值一个新类）的旁路项表。动态 clsId 从静态
+ * count 起递增；项由本层 malloc 克隆，不动宿主注入的原表。*/
+#define QZ_DYNCLS_CAP 64
+static struct { int32_t clsId; uint32_t off; int32_t nbytes; } g_dyncls[QZ_DYNCLS_CAP];
+static int32_t g_dyncls_n = 0;
+static int32_t g_dyncls_next = -1;
+
 static uint32_t qz_clsmeta_item_off(int32_t clsId)
 {
+    for (int32_t i = 0; i < g_dyncls_n; i++)
+        if (g_dyncls[i].clsId == clsId) return g_dyncls[i].off;
     if (!g_clsmeta_base) return 0;
     const unsigned char *base = (const unsigned char *)(uintptr_t)g_clsmeta_base;
     int32_t count; memcpy(&count, base, 4);
@@ -2082,6 +2149,35 @@ static uint32_t qz_clsmeta_item_off(int32_t clsId)
     uint32_t off;
     memcpy(&off, base + 4 + (uint32_t)clsId * 4, 4);
     return off;
+}
+
+/* 克隆一个类项为新动态类：新 clsId 的 parent 指向原类（语义 = 派生），返回新 clsId。
+ * 方法/静态/访问器项按字节复制，故表槽（蹦床）共享——这正是工厂语义所需。*/
+static int32_t qz_clsmeta_clone(int32_t srcClsId)
+{
+    uint32_t srcOff = qz_clsmeta_item_off(srcClsId);
+    if (!srcOff) return -1;
+    if (g_dyncls_n >= QZ_DYNCLS_CAP) return -1;
+    const unsigned char *p = (const unsigned char *)(uintptr_t)srcOff;
+    int32_t nMethods, nStatics, nAccessors;
+    memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4); memcpy(&nAccessors, p + 24, 4);
+    int32_t nbytes = 28 + nMethods * 16 + nStatics * 12 + nAccessors * 12;
+    unsigned char *dst = (unsigned char *)malloc((size_t)nbytes);
+    if (!dst) return -1;
+    memcpy(dst, p, (size_t)nbytes);
+    if (g_dyncls_next < 0) {
+        int32_t count = 0;
+        if (g_clsmeta_base) memcpy(&count, (const unsigned char *)(uintptr_t)g_clsmeta_base, 4);
+        g_dyncls_next = count > 0 ? count : 0;
+    }
+    int32_t newId = g_dyncls_next++;
+    memcpy(dst, &newId, 4);                    /* [0] = 新 clsId */
+    memcpy(dst + 4, &srcClsId, 4);             /* parent = 原类 */
+    g_dyncls[g_dyncls_n].clsId = newId;
+    g_dyncls[g_dyncls_n].off = (uint32_t)(uintptr_t)dst;
+    g_dyncls[g_dyncls_n].nbytes = nbytes;
+    g_dyncls_n++;
+    return newId;
 }
 
 /* 在 classMeta 项里按方法名找表槽。返回 0=未找到，>0=表槽。*/
@@ -2102,6 +2198,49 @@ static int32_t qz_clsmeta_method_slot(int32_t clsId, int32_t nameStrId, int32_t 
         q += 16;
     }
     return 0;
+}
+
+/* 在 classMeta 项里按名字找 getter 槽（getSlot 在 accessors 段）。*/
+static int32_t qz_clsmeta_accessor_slot(int32_t clsId, int32_t nameStrId, int wantSet)
+{
+    uint32_t off = qz_clsmeta_item_off(clsId);
+    if (!off) return 0;
+    const unsigned char *p = (const unsigned char *)(uintptr_t)off;
+    int32_t nMethods, nStatics, nAccessors;
+    memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4); memcpy(&nAccessors, p + 24, 4);
+    const unsigned char *q = p + 28 + nMethods * 16 + nStatics * 12;
+    for (int32_t i = 0; i < nAccessors; i++) {
+        int32_t nid, g, st;
+        memcpy(&nid, q, 4); memcpy(&g, q+4, 4); memcpy(&st, q+8, 4);
+        if (nid == nameStrId) return wantSet ? st : g;
+        q += 12;
+    }
+    return 0;
+}
+
+/* 沿继承链找 getter/setter 槽（-1 表示缺该方向）。found=0 表示整条链都没有。*/
+static int32_t qz_clsmeta_accessor_chain(int32_t clsId, int32_t nameStrId, int wantSet, int32_t *found)
+{
+    int32_t cur = clsId, guard = 0;
+    if (found) *found = 0;
+    while (cur >= 0 && guard++ < 64) {
+        int32_t slot = qz_clsmeta_accessor_slot(cur, nameStrId, wantSet);
+        uint32_t off = qz_clsmeta_item_off(cur);
+        if (!off) break;
+        /* 命中的方向也可能是 -1（只有 getter 无 setter）→ 需区分「有项无槽」与「无项」 */
+        const unsigned char *p = (const unsigned char *)(uintptr_t)off;
+        int32_t nMethods, nStatics, nAccessors;
+        memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4); memcpy(&nAccessors, p + 24, 4);
+        const unsigned char *q = p + 28 + nMethods * 16 + nStatics * 12;
+        for (int32_t i = 0; i < nAccessors; i++) {
+            int32_t nid; memcpy(&nid, q, 4);
+            if (nid == nameStrId) { if (found) *found = 1; return slot; }
+            q += 12;
+        }
+        int32_t parent; memcpy(&parent, p + 4, 4);
+        cur = parent;
+    }
+    return -1;
 }
 
 /* 沿继承链找方法槽（含父类）。*/
@@ -2478,10 +2617,14 @@ int64_t qz_guest_class_value_dyn(int32_t clsId, int64_t baseObj)
 
 /* new_dynamic(clsId, a0..a3, ovf) → i64：实例化用户类。*/
 __attribute__((export_name("new_dynamic")))
-int64_t qz_guest_new_dynamic(int32_t clsId, int64_t a0, int64_t a1, int64_t a2,
-                             int64_t a3, int64_t ovf)
+int64_t qz_guest_new_dynamic(int64_t clsVal, int64_t a0, int64_t a1, int64_t a2,
+                             int64_t a3)
 {
     if (!g_current_rt) return 0;
+    /* 类值是句柄 0x7FFE|clsId（class_value/class_expr_value 的产物）。*/
+    uint64_t cu = (uint64_t)clsVal;
+    if ((uint16_t)(cu >> 48) != 0x7FFE) return 0;
+    int32_t clsId = (int32_t)(cu & 0xFFFFFFFFu);
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
     /* 找 ctor 表槽 */
@@ -2492,16 +2635,16 @@ int64_t qz_guest_new_dynamic(int32_t clsId, int64_t a0, int64_t a1, int64_t a2,
     /* 分配实例内存（classMeta.size 字段在偏移 28 后，但变长布局里 size 没存）→
      * 用 qz_ret 把 JS 对象当实例句柄：构造一个普通 JS 对象挂 __qz_cls 字段。*/
     JSValue obj = JS_NewObject(ctx);
-    JSValue clsVal = JS_NewInt32(ctx, clsId);
-    JS_SetPropertyStr(ctx, obj, "__qz_cls", clsVal);
+    JSValue jcls = JS_NewInt32(ctx, clsId);
+    JS_SetPropertyStr(ctx, obj, "__qz_cls", jcls);
     /* 调 ctor 蹦床：(env=clsId, self=obj句柄, a0..a3) */
     int64_t selfH = qz_ret(ctx, obj);
     qz_cls_fn f = (qz_cls_fn)(uintptr_t)(uint32_t)ctorSlot;
     int64_t r = f(selfH, a0, a1, a2, a3);
     (void)r;
     JS_FreeValue(ctx, obj);
+    (void)r;
     return selfH;   /* 构造器返回的是 self（与 JS new 语义一致） */
-    (void)r; (void)ovf;   /* ctor 多余实参暂不传（蹦床统一 5 参） */
 }
 
 /* super_method(recv, mid, a0..a3, ovf) → i64：调父类方法。*/
@@ -2567,6 +2710,17 @@ int64_t qz_guest_super_ctor(int32_t clsId, int64_t self, int64_t a0, int64_t a1,
     (void)ovf;
 }
 
+/* class_expr_value(clsId) → i64：类表达式作值求值（每次调用一个新类）。
+ * JS 语义：`const C = class {...}` 每次求值产生独立类对象——clsId 必须唯一，
+ * 否则 `new A() instanceof B` 会误判 true。故克隆原项为新动态类（parent=原类，
+ * 方法槽共享），返回新 clsId 的类值句柄。*/
+__attribute__((export_name("class_expr_value")))
+int64_t qz_guest_class_expr_value(int32_t clsId)
+{
+    int32_t nid = qz_clsmeta_clone(clsId);
+    return qz_guest_class_value(nid >= 0 ? nid : clsId);
+}
+
 /* instanceof_dyn(x, rhs) → i64：动态右值 instanceof。rhs 是类值(0x7FFE|clsId)。*/
 __attribute__((export_name("instanceof_dyn")))
 int64_t qz_guest_instanceof_dyn(int64_t x, int64_t rhs)
@@ -2598,11 +2752,27 @@ int64_t qz_guest_brand_check(int64_t x, int32_t clsId)
     return r;
 }
 
-/* static_get(clsId, nameStrId) → i64：读静态方法/字段值。
- * 当前实现：classMeta 不含静态字段值（仅方法表），按槽调静态方法蹦床。*/
+/* ── 静态字段存储：(clsId, nameStrId) → tagged 值 ────────────────────────
+ * classMeta 只描述方法表；静态**字段**的值是运行期状态，存这里。开放寻址，
+ * 键空间小（每个类的静态字段数 × 类数），容量 256 够用；满则静默丢弃（不崩）。*/
+#define QZ_STATIC_CAP 256
+static uint8_t g_static_ready[QZ_STATIC_CAP];
+static struct { int32_t clsId, nameId; int64_t val; } g_statics[QZ_STATIC_CAP];
+static int32_t g_static_n = 0;
+
+static int32_t qz_static_find(int32_t clsId, int32_t nameStrId)
+{
+    for (int32_t i = 0; i < g_static_n; i++)
+        if (g_statics[i].clsId == clsId && g_statics[i].nameId == nameStrId) return i;
+    return -1;
+}
+
+/* static_get(clsId, nameStrId) → i64：读静态字段值；未命中则调静态方法蹦床。*/
 __attribute__((export_name("static_get")))
 int64_t qz_guest_static_get(int32_t clsId, int32_t nameStrId)
 {
+    /* 先查静态字段值表（已赋值的字段优先于方法） */
+    { int32_t k = qz_static_find(clsId, nameStrId); if (k >= 0) return g_statics[k].val; }
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
@@ -2634,21 +2804,29 @@ int64_t qz_guest_static_get_dyn(int64_t clsVal, int32_t nameStrId)
 }
 
 __attribute__((export_name("static_set")))
-int64_t qz_guest_static_set(int32_t clsId, int32_t nameStrId, int64_t val)
+void qz_guest_static_set(int32_t clsId, int32_t nameStrId, int64_t val)
 {
-    (void)clsId; (void)nameStrId; (void)val;
-    return 0;   /* 静态字段写：classMeta 未含字段值表，暂不支持 */
+    int32_t k = qz_static_find(clsId, nameStrId);
+    if (k < 0) {
+        if (g_static_n >= QZ_STATIC_CAP) return;   /* 满：静默丢弃，不崩 */
+        k = g_static_n++;
+        g_statics[k].clsId = clsId;
+        g_statics[k].nameId = nameStrId;
+    }
+    g_statics[k].val = val;
 }
 
 __attribute__((export_name("statics_ready")))
 int32_t qz_guest_statics_ready(int32_t clsId)
 {
-    return qz_clsmeta_item_off(clsId) != 0 ? 1 : 0;
+    if (clsId >= 0 && clsId < QZ_STATIC_CAP && g_static_ready[clsId]) return 1;
+    return 0;
 }
 
 __attribute__((export_name("statics_has")))
 int32_t qz_guest_statics_has(int32_t clsId, int32_t nameStrId)
 {
+    if (qz_static_find(clsId, nameStrId) >= 0) return 1;
     uint32_t off = qz_clsmeta_item_off(clsId);
     if (!off) return 0;
     int32_t nStatics; memcpy(&nStatics, (const unsigned char *)(uintptr_t)off + 20, 4);
@@ -2663,22 +2841,32 @@ int32_t qz_guest_statics_has(int32_t clsId, int32_t nameStrId)
     return 0;
 }
 
+/* statics_mark(clsId)：标记该类静态已初始化。emitter 的 lazy 初始化序列是
+ * 「statics_ready → 内联初始值 → static_set → statics_mark」，故本函数只需记
+ * 已初始化位，供 statics_ready 回报。 */
 __attribute__((export_name("statics_mark")))
-int32_t qz_guest_statics_mark(int32_t clsId, int32_t nameStrId)
+void qz_guest_statics_mark(int32_t clsId)
 {
-    /* 标记静态已初始化：本实现不维护初始化位（emitter 已保证静态方法可直接调） */
-    (void)clsId; (void)nameStrId;
-    return 1;
+    if (clsId >= 0 && clsId < QZ_STATIC_CAP) g_static_ready[clsId] = 1;
 }
 
-/* obj_accessor(obj, nameStrId, getSlot, setSlot) → i64：注册访问器（getter/setter 蹦床槽）。
- * 当前实现：在对象上挂 JS 访问器属性，getter/setter 指向 wasm 蹦床——但 C 侧
- * 无法把 wasm 函数包成 JSFunction，故退化为在对象上写普通字段（行为偏差，仅占位）。*/
+/* obj_accessor(obj, nameStrId, getClo, setClo)：defineProperty / 字面量访问器。
+ * 参数是闭包**句柄**（0x7FFF|off），不是表槽——闭包值由 emitter 在字面量处生成。
+ * C 侧无法把 wasm 函数包成 JSFunction，故登记到 g_accs 由 prop_get/prop_set
+ * 自行分派。*/
 __attribute__((export_name("obj_accessor")))
-int64_t qz_guest_obj_accessor(int64_t obj, int32_t nameStrId, int32_t getSlot, int32_t setSlot)
+int64_t qz_guest_obj_accessor(int64_t obj, int32_t nameStrId, int64_t getClo, int64_t setClo)
 {
-    (void)obj; (void)nameStrId; (void)getSlot; (void)setSlot;
-    return obj;   /* 占位：不实际挂访问器 */
+    int32_t k = qz_acc_find(obj, nameStrId);
+    if (k < 0) {
+        if (g_acc_n >= QZ_ACC_CAP) return obj;
+        k = g_acc_n++;
+        g_accs[k].obj = obj;
+        g_accs[k].nameId = nameStrId;
+    }
+    g_accs[k].getClo = getClo;
+    g_accs[k].setClo = setClo;
+    return obj;
 }
 
 __attribute__((export_name("object_set_method")))

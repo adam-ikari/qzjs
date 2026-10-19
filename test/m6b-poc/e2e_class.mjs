@@ -41,6 +41,9 @@ export function polyTotal(): number {
   for (const x of xs) s += x.area();
   return s;
 }
+const mkCls = (n: number) => class { v(): number { return n; } };
+const CA = mkCls(1), CB = mkCls(2);
+export function classExprFactory(): number { return new CA() instanceof CB ? 1 : 0; }
 export function higherOrder(n: number): number {
   const f = (x: number): number => x + 1;
   const g = (h: (x: number) => number, y: number): number => h(h(y));
@@ -78,6 +81,7 @@ chk('mk(3,4)', unbox(P.mk(box(3), box(4))), 7);
 chk('mk2(3,4) 继承+super', unbox(P.mk2(box(3), box(4))), 14);
 chk('polyTotal() 多态虚分派', unbox(P.polyTotal()), 4);      // Sq(2).area=4 + Shape(9).area=0
 chk('higherOrder(5) 闭包+类共存', unbox(P.higherOrder(box(5))), 7);
+chk('classExprFactory() 工厂产出独立类', unbox(P.classExprFactory()), 0);   // new A() instanceof B === false
 
 L.qz_destroy(rt);
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }

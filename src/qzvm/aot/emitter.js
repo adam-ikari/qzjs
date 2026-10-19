@@ -118,6 +118,7 @@ const QZ = {
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   class_value: { params: ["i32"], results: ["i64"] },
+  class_expr_value: { params: ["i32"], results: ["i64"] },   // 类表达式作值：每次求值一个新类（克隆 clsId）
   builtin_value: { params: ["i32"], results: ["i64"] },
   brand_check: { params: ["i64", "i32"], results: ["i64"] },   // 私有名 in o（品牌检查）：非对象 → TypeError（JS 语义）
   method_spread: { params: ["i64", "i32", "i64"], results: ["i64"] },   // obj.m(...args)：实参数组 → method_call 分派
@@ -3898,7 +3899,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     if (ts.isClassExpression(e)) {                       // 类表达式作值 → 宿主构造器对象句柄（class_value）
         const synth = this.clsExprMap && this.clsExprMap.get(e);
         const cnC = synth && this.classes.get(synth);
-        if (cnC) { this._emitClassValue(cnC); return; }
+        if (cnC) {
+            /* 每次求值一个新类（JS 语义）：克隆 classMeta 项 → 独立 clsId，
+             * 否则工厂产出的多个类共享 id → instanceof 误判 / .name 串味。*/
+            this.m.i32Const(cnC.id); this.m.call("qz.class_expr_value");
+            return;
+        }
         throw new Error("[tagged] 类表达式作值未实现");
     }
     if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) { this._emitLambdaNew(e); return; }
