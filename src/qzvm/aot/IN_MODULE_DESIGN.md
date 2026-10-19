@@ -1,6 +1,6 @@
 # in-module 档设计
 
-**状态**：设计定稿，M1–M5 已实现（guest 自包含）；M6 未实现——拆 M6a（去 JS 化）+ M6b（qzvm 模块合并，无 ABI 机制核心；前提 emitter 通用化不绑定 qzjs/qzvm）。**M6b multi-module PoC 已验通**（2026-10-19）：WAMR multi-module + memory import 跑通 emitter 产物↔libqzvm 链接（`test/m6b-poc/`），量税 dummy 31.9ns / 真 libqzvm 53.6ns/call（对比 JS shim 3.55µs = 66-111x 加速）→ **multi-module 可作 M6b 终态，免编译期合并**。完整落地剩余：113 原语 C 实现（包装 QuickJS internal，JS_Add 非公开需 eval/internal）+ emitter.js 改 import `qz.memory`+`qz.*`（addMemory→import）+ wasi/qz_host 真接线（当前 stub）+ 表示统一（emitter NaN-box vs QuickJS JSValue，句柄 handle table 待移植 qzvm.js）。详见 `NO_ABI_DESIGN.md`
+**状态**：设计定稿，M1–M5 已实现（guest 自包含）；M6 未实现——拆 M6a（去 JS 化）+ M6b（qzvm 模块合并，无 ABI 机制核心；前提 emitter 通用化不绑定 qzjs/qzvm）。**M6b multi-module PoC 已验通**（2026-10-19）：WAMR multi-module + memory import 跑通 emitter 产物↔libqzvm 链接（`test/m6b-poc/`），量税 dummy 31.9ns / 真 libqzvm 53.6ns/call（对比 JS shim 3.55µs = 66-111x 加速）→ **multi-module 可作 M6b 终态，免编译期合并**。**原语现状（2026-10-19）：88/113 C 实现**，剩余 25 项需 wasm 回调（见 §7「M6b 原语实现进度与结构性边界」）。完整落地剩余： emitter.js 改 import `qz.memory`+`qz.*`（addMemory→import）+ wasi/qz_host 真接线（当前 stub）+ 表示统一（emitter NaN-box vs QuickJS JSValue，句柄 handle table 待移植 qzvm.js）。详见 `NO_ABI_DESIGN.md`
 **范围**：把 **qzvm**（引擎 + `qz.*` 原语 + realm 生命周期 + DAP 调试器 + 扩展注册机制 + 引擎 patches；**不含** Web API 扩展内容、polyfill、pal 接线、libuv）编成 wasm32 模块（`libqzvm.wasm`）的 qzjs 构建形态。`QZ_PROFILE=in-module` 下**不含 wasm 引擎绑定**（`ext_wamr/ext_wasm3` 不进 guest）。
 **方法**：第一性原理推导 guest 真需要什么 + 奥卡姆剃刀取最小产 —— **不追求最小改动**
 **ABI 承诺**：qzjs 只承诺公开 JS API 稳定；wasm 模块内部与 qzvm 交互无 ABI 承诺（内联绑定，见 `NO_ABI_DESIGN.md`）。
@@ -277,6 +277,44 @@ flowchart TB
 | M5 ✅ | guest 跑通（真 JS + 异步） | §10.3 import 面（M5 仅 `fs_read`/`drain`）+ §10.4 回流：`guest_entry.c` 加 op 表（resolve/reject 持 JSValue）+ `fsRead(path)` 原语（Promise）+ `qz_tick` 去自旋（drain 一批 → dispatch → return）+ 结果读出 `qz_result_ptr/len`；导出名 `libqzvm.wasm`（SUFFIX .wasm / PREFIX lib） | **仓内 harness 真跑**（`test/test_inmodule_guest_e2e.sh` + `test/inmodule-e2e/host.mjs`，CI job `in-module`）：`fsRead(data.txt)` → 结果 `"OK len=33 head=hello from host file"`；reject 路径 `fsRead(NOPE.txt)` → `"ERR ENOENT"`；两个并发 op 按 `op_id` 派发（顺序无关）。证明 guest 持 resolve(JSValue)、host 无 JSContext 经队列拉回（§10.4 选型「import 拉」成立）。限制（M6 消除）：单 rt、op 表 static、单事件 ≤512B、仅 1 个原语 |
 | M6a | qzjs native 侧去 JS 化（in-module 专属） | §10.5：`bridge.c` 的 `js_pal_*` 移 qzvm-guest；tcp_io/control/worker 去 JSValue；qzjs native 侧不再**直接**调 QuickJS API | qzjs native 侧零 `JS_NewRuntime`（引擎归 qzvm guest）；AOT/standard 档不受影响 |
 | M6b | qzvm 模块合并+内联绑定（无 ABI 机制核心） | emitter 是**通用 TS→wasm 工具**（产物只声明标准 wasm import，不绑定 qzjs/qzvm，§10.6 line 428）；qzvm 模块合并 emitter 产物 + `libqzvm.wasm` 成单模块，标准 import 变模块内调用（字节码引擎↔wasm 原生代码内联绑定，无 marshalling） | emitter 产物零 qzjs 专有绑定（通用，任何 wasm 引擎可跑）；合并后模块内调用税 ~ns 级（对标 pal 面 45–66ns，非跨界 3.55µs）。见 `NO_ABI_DESIGN.md` |
+
+### M6b 原语实现进度与结构性边界（2026-10-19）
+
+`src/qzvm/guest_entry.c` 已实现 **88 / 113** 个 `qz.*` 原语。已覆盖算术/比较/位运算、
+属性与下标、数组、对象合并、键序登记、闭包环境层链、迭代协议、字符串/正则/BigInt、
+`method_call`、内建全局分派（`builtin*` / `instanceof_builtin`）。
+
+**剩余 25 项是架构边界，不是遗漏**：
+
+```
+closure_call closure_call_spread call_value call_named call_named_rest
+method_spread obj_accessor object_set_method object_set_method_key arr_apply
+class_value class_value_dyn super_method super_ctor new_dynamic fn_value
+static_get static_get_dyn static_set statics_ready statics_has statics_mark
+brand_check instanceof_dyn builtin_spread
+```
+
+共同点：都需要 **wasm 侧回调**——闭包体是产物内独立 wasm 函数（`__lam_*`），类方法/
+静态方法/构造器同样是产物内的 wasm 导出，类元数据（父链、methods 表）由 emitter 以 JS
+对象形式交给 JS 宿主。C 侧原语运行在 wasm 内部，再调 `wasm_runtime_call_wasm_a` 会重入
+执行引擎，因此无法从 C 回调产物导出。
+
+**两条可行落地路径**（择一）：
+
+1. **emitter 加 table/elem 段**：把闭包体与类方法登记进 funcref 表，C 侧用
+   `call_indirect` 分派。`wasm-encoder.js` 已有 `call_indirect` opcode（0x11）但无 table/elem
+   段，需补。这是解锁全部剩余项的最小结构改动。
+2. **classMeta / lamMeta 传表**：仿 `__set_strtab` 增加 `__set_clsmeta(base)`，把类父链与
+   methods 表序列化进共享内存，C 侧按 clsId 查表。仍解决不了「调 wasm 闭包体」本身，
+   只能解决 `instanceof_op` 的父链判定、`statics_*` 等元数据查询类。
+
+**验证**：`test/m6b-poc/` 下 5 条 e2e（`e2e_prims` / `e2e_real_program` / `e2e_prop_get` /
+`e2e_builtin` / `e2e_concat`）+ `test/test_inmodule_guest_e2e.sh` 全绿。真实 TS 产物覆盖
+循环、递归、数组、for-of、字符串拼接、Math/parseInt/String 内建。
+
+**strId 约定**：`qz_str_by_id` 依赖宿主经 `__set_strtab(base)` 注入 `compileTS` 返回的
+`info.strings`；产物自身不带字符串表（JS 宿主按名字直接解析，不需要）。任何用到字符串
+或方法名的 e2e 都必须先注入，否则原语按「无表」返回 0（不是静默错值，但会掩盖失败）。
 
 **M1–M3 全部在 native 上验证**（切分是纯重构，宿主行为不变）→ 风险最低、最先做。M4–M5 引入 wasm 工具链 + 跨界 ABI 不确定性。**M6a/M6b 是 in-module 真正落地**（前 5 步可先跑通 guest 自包含 + 单原语）：M6a 去完 host 侧 JS_ 调用，M6b qzvm 模块合并 emitter 产物 + `libqzvm.wasm` 成单模块（内联绑定字节码引擎↔wasm 原生代码）；emitter 保持**通用 TS→wasm 工具，不绑定 qzjs/qzvm**（§10.6 line 428）。
 
