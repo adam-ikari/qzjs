@@ -598,6 +598,7 @@ if(QZ_WITH_WAMR)
     option(QZ_WAMR_MULTI_MODULE "Enable WAMR multi-module for M6b PoC (linker emitter<->libqzvm)" OFF)
     if(QZ_WAMR_MULTI_MODULE)
         set(WAMR_BUILD_MULTI_MODULE 1)
+        set(WAMR_BUILD_LIBC_WASI 1)  # M6b: libqzvm wasi import（fd_write/clock_time_get 等）解析
     endif()
     # WAMR's Linux platform needs _GNU_SOURCE (pthread_rwlock_t). qzjs's
     # -std=c99 would hide it; inject for the subdirectory only.
