@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WASI } from 'node:wasi';
-import { serializeClassMeta, serializeFields } from './clsmeta_ser.mjs';
+import { serializeClassMeta, serializeFields, serializeLamSynth } from './clsmeta_ser.mjs';
 
 const args = process.argv.slice(2);
 const get = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -34,6 +34,7 @@ const info = compileTS(new URL('../../src/qzvm/aot/cls.ts', import.meta.url).pat
     new Uint8Array(mem.buffer, cur, b.length).set(b); cur += b.length; });
   L.__set_strtab(base);
 }
+if (info.trampSlots && info.lamMeta) serializeLamSynth(L, mem, info.lamMeta, info.trampSlots);
 serializeClassMeta(L, mem, info.classMeta);
 if (info.fields) serializeFields(L, mem, info.fields);
 

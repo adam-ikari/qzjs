@@ -88,3 +88,26 @@ export function serializeFields(L, mem, fields) {
   L.__set_fields(base);
   return base;
 }
+
+// lambda synthThis 表：告知 C 侧哪些蹦床表槽收 receiver（`this` 形参）。
+// 布局：[slotBase:i32][count:i32] 后跟 count 个 (slot:i32, synth:i32)。
+export function serializeLamSynth(L, mem, lamMeta, trampSlots) {
+  if (!lamMeta || !trampSlots) return 0;
+  const rows = [];
+  for (const [fname, slot] of trampSlots) {
+    const base = fname.replace(/\$t$/, '');
+    const meta = Object.values(lamMeta).find(m => m && m.name === base);
+    if (meta && meta.synthThis) rows.push([slot, 1]);
+  }
+  if (!rows.length) return 0;
+  const base = L.alloc(8 + rows.length * 8 + 16);
+  const v = new DataView(mem.buffer);
+  v.setInt32(base, 0, true);
+  v.setInt32(base + 4, rows.length, true);
+  rows.forEach(([s, y], i) => {
+    v.setInt32(base + 8 + i * 8, s, true);
+    v.setInt32(base + 12 + i * 8, y, true);
+  });
+  L.__set_lamsynth(base, rows.length);
+  return base;
+}

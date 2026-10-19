@@ -319,6 +319,136 @@ static int g_handle_count = 2;   /* 槽 0=undefined / 1=null（emitter 固定约
  *   字符串 → malloc buffer [len][utf8] → 0x7FFA|off。
  * 其他 tag（0x7FF9 句柄/0x7FFB 数组/0x7FFC 布尔等）+ handle table 后续。
  * 参考 qzvm.js toJS/ret（~300 行 JS）C 移植，M6b 完整落地工程。 */
+/* ── 闭包物化：把 wasm 侧闭包值（0x7FFF|off，内存 [slot:i32][env:i32]）
+ * 包装成真正的 JS 函数对象。必要性：`f.prototype.m = …`、`typeof f`、
+ * `f.name`、把闭包传给内建都要求它是 JS 对象；原实现让 qz_tojs 对 0x7FFF
+ * 返回 undefined → 属性读写出错值（`ctor.prototype.m = f` 直接 TypeError）。
+ * 缓存按 off 索引：同一闭包句柄必须映射到同一个 JS 函数（=== 语义）。*/
+#define QZ_CLO_CACHE_MAX 4096
+static JSValue g_clo_cache[QZ_CLO_CACHE_MAX];
+static uint32_t g_clo_off[QZ_CLO_CACHE_MAX];
+static int g_clo_count = 0;
+
+static int64_t qz_lam_dispatch(int32_t slot, int32_t env, int64_t a0, int64_t a1,
+                               int64_t a2, int64_t a3);
+
+/* ── lambda 合成 this 表：宿主注入「该蹦床表槽是否收 this」。─────────────
+ * emitter 的 lamMeta 逐 lambda 带 synthThis；C 侧按表槽索引查。
+ * 无注入时一律视为非 synthThis（保守：不前置 receiver）。*/
+static uint32_t g_lamsynth_base = 0;
+static int32_t g_lamsynth_count = 0;
+
+__attribute__((export_name("__set_lamsynth")))
+void qz_guest_set_lamsynth(int32_t base, int32_t count)
+{
+    g_lamsynth_base = (uint32_t)base;
+    g_lamsynth_count = count;
+}
+
+static int qz_lam_synth_this(int32_t slot)
+{
+    if (!g_lamsynth_base || slot < 0) return 0;
+    /* 表布局：[slotBase:i32][count:i32] 后跟 count 个 (slot:i32, synth:i32)。*/
+    const unsigned char *b = (const unsigned char *)(uintptr_t)g_lamsynth_base;
+    int32_t n;
+    memcpy(&n, b + 4, 4);
+    for (int32_t i = 0; i < n; i++) {
+        int32_t sl, sy;
+        memcpy(&sl, b + 8 + i * 8, 4);
+        memcpy(&sy, b + 12 + i * 8, 4);
+        if (sl == slot) return sy;
+    }
+    return 0;
+}
+static int64_t qz_ret(JSContext *ctx, JSValue r);
+static JSValue qz_tojs(JSContext *ctx, int64_t b);
+static int64_t qz_host_obj_handle(JSContext *ctx, JSValue r);
+
+/* CFunctionData 回调：func_data[0] = off(i32)，magic = 0。
+ * JS 调用 → 读闭包值 [slot][env] → 走 wasm 分派 → 结果 tagged。*/
+static JSValue qz_js_closure_cb(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv, int magic, JSValueConst *func_data)
+{
+    (void)magic;
+    int32_t off = 0;
+    JS_ToInt32(ctx, &off, func_data[0]);
+    int32_t slot = 0, env = 0;
+    memcpy(&slot, (const void *)(uintptr_t)(uint32_t)off, 4);
+    memcpy(&env, (const void *)(uintptr_t)((uint32_t)off + 4), 4);
+    int64_t undef = (int64_t)((uint64_t)0x7FF9 << 48);
+    /* synthThis 约定：带 `this` 形参的闭包，receiver 占第一个实参槽。
+     * 物化后的函数被 `new f()` / `obj.m()` 调用时，this 必须透传给闭包体，
+     * 否则 `this.v = 5` 写到一个空 receiver 上（读回 undefined）。*/
+    /* synthThis 约定：只有带 `this` 形参的闭包（对象字面量方法 / 类方法体）
+     * 在蹦床第一个实参槽收 receiver。普通闭包（map 回调等）没有该槽——
+     * 无条件前置 this 会让实参整体错位（"null function or signature mismatch"）。
+     * 判据来自宿主注入的 lamMeta（见 __set_lamsynth）。*/
+    int synth = qz_lam_synth_this(slot);
+    int64_t a[4];
+    int nargs = synth ? 3 : 4;
+    for (int i = 0; i < 3; i++) a[i] = i < argc ? qz_ret(ctx, argv[i]) : undef;
+    if (synth) {
+        a[3] = a[2]; a[2] = a[1]; a[1] = a[0];
+        a[0] = (JS_IsUndefined(this_val) || JS_IsNull(this_val))
+            ? undef : qz_host_obj_handle(ctx, JS_DupValue(ctx, this_val));
+        int64_t r = qz_lam_dispatch(slot, env, a[0], a[1], a[2], a[3]);
+        return qz_tojs(ctx, r);
+    }
+    int64_t r = qz_lam_dispatch(slot, env, a[0], a[1], a[2], a[3]);
+    (void)nargs;
+    return qz_tojs(ctx, r);
+}
+
+/* 物化闭包为 JS 函数（惰性 + 缓存）。off 是闭包值低 32 位。*/
+static JSValue qz_closure_materialize(JSContext *ctx, uint32_t off)
+{
+    for (int i = 0; i < g_clo_count; i++)
+        if (g_clo_off[i] == off) return JS_DupValue(ctx, g_clo_cache[i]);
+    JSValue data[1] = { JS_NewInt32(ctx, (int32_t)off) };
+    JSValue fn = JS_NewCFunctionData(ctx, qz_js_closure_cb, 0, 0, 1, data);
+    /* CFunctionData 产出的函数没有 .prototype，但 JS 函数都有（`new f()` 取它
+     * 当实例原型；`f.prototype.m = …` 要能落上去）。补一个普通对象原型。*/
+    if (JS_IsFunction(ctx, fn) && !JS_IsException(fn)) {
+        JSValue proto = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, fn, "prototype", proto);   /* 转移所有权 */
+    }
+    if (g_clo_count < QZ_CLO_CACHE_MAX) {
+        g_clo_off[g_clo_count] = off;
+        g_clo_cache[g_clo_count] = JS_DupValue(ctx, fn);
+        g_clo_count++;
+    }
+    return fn;
+}
+
+/* ── 数组往返：tagged 数组句柄 ↔ JS 数组 ──────────────────────────────
+ * method_call 把数组交给 JS 内建（reverse/sort/splice/push…）后必须把结果
+ * **写回 wasm 内存**，否则 `a.reverse()` 这类原地变异对后续 `a[0]` 不可见
+ * （静默错值）。缓存保证同一句柄在同一轮转换里复用同一个 JS 数组（别名语义）。*/
+#define QZ_ARR_CACHE_MAX 256
+static struct { uint32_t off; JSValue js; } g_arr_cache[QZ_ARR_CACHE_MAX];
+static int g_arr_cache_n = 0;
+
+static void qz_arr_writeback(uint32_t aoff, JSValue arr)
+{
+    int32_t alen = 0, dataOff = 0;
+    memcpy(&alen, (const void *)(uintptr_t)aoff, 4);
+    memcpy(&dataOff, (const void *)(uintptr_t)(aoff + 8), 4);
+    if (!dataOff) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue lv = JS_GetPropertyStr(ctx, arr, "length");
+    int32_t jlen = 0; JS_ToInt32(ctx, &jlen, lv); JS_FreeValue(ctx, lv);
+    int32_t nwrite = jlen < alen ? jlen : alen;    /* 不超原容量（容量是编译期的）*/
+    for (int32_t i = 0; i < alen; i++) {
+        int64_t el = ((int64_t)0x7FF9) << 48;      /* 超出新长度 → undefined */
+        if (i < nwrite) {
+            JSValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+            el = qz_ret(ctx, v);
+        }
+        memcpy((void *)(uintptr_t)((uint32_t)dataOff + i * 8), &el, 8);
+    }
+}
+
 static JSValue qz_tojs(JSContext *ctx, int64_t b)
 {
     uint64_t bits = (uint64_t)b;
@@ -349,6 +479,50 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
     if (tag == 0x7FF8) {  /* BigInt 句柄（BIG_HI|idx；idx≠0，0=canonical NaN） */
         uint32_t idx = (uint32_t)(b & 0xFFFFFFFF);
         if (idx != 0 && idx < (uint32_t)g_handle_count) return JS_DupValue(ctx, g_handles[idx]);
+    }
+    if (tag == 0x7FFB) { /* 数组：[len:i32][?:i32][dataOff:i32][elem:i64 × len]
+                          * 元素是 tagged i64 → 递归转换。不转会让 method_call 的
+                          * `join`/`indexOf` 等内建收到 undefined 而静默返回 +0。*/
+        uint32_t aoff = (uint32_t)(b & 0xFFFFFFFF);
+        int32_t alen = 0, dataOff = 0;
+        memcpy(&alen, (const void *)(uintptr_t)aoff, 4);
+        memcpy(&dataOff, (const void *)(uintptr_t)(aoff + 8), 4);
+        if (alen < 0 || alen > 1000000) return JS_UNDEFINED;
+        for (int i = 0; i < g_arr_cache_n; i++)        /* 同句柄 → 同一个 JS 数组（别名）*/
+            if (g_arr_cache[i].off == aoff && !JS_IsUndefined(g_arr_cache[i].js))
+                return JS_DupValue(ctx, g_arr_cache[i].js);
+        JSValue arr = JS_NewArray(ctx);
+        if (dataOff) for (int32_t i = 0; i < alen; i++) {
+            int64_t el = 0;
+            memcpy(&el, (const void *)(uintptr_t)((uint32_t)dataOff + i * 8), 8);
+            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, qz_tojs(ctx, el));
+        }
+        if (g_arr_cache_n >= QZ_ARR_CACHE_MAX) {       /* 满：整体丢弃（缓存只是优化）*/
+            for (int i = 0; i < g_arr_cache_n; i++) JS_FreeValue(ctx, g_arr_cache[i].js);
+            g_arr_cache_n = 0;
+        }
+        g_arr_cache[g_arr_cache_n].off = aoff;
+        g_arr_cache[g_arr_cache_n].js = JS_DupValue(ctx, arr);
+        g_arr_cache_n++;
+        return arr;
+    }
+    if (tag == 0x7FFD) { /* 宿主对象：句柄表直取 */ 
+        uint32_t idx = (uint32_t)(b & 0xFFFFFFFF);
+        if (idx < (uint32_t)g_handle_count) return JS_DupValue(ctx, g_handles[idx]);
+        return JS_UNDEFINED;
+    }
+    /* 闭包值不物化：C 侧在 QuickJS 运行时回调 wasm 蹦床会破坏栈
+     * （"null function or function signature mismatch"）。闭包的**调用**统一走
+     * closure_call 的 call_indirect；属性读写由 prop_get/prop_set 的
+     * 专用分支处理（见 qz_clo_props）。*/
+    if (tag == 0x7FFE) { /* 类实例：物化为占位对象（字段/方法走 prop_get/prop_set 的专用分支）*/
+        uint32_t inst = (uint32_t)(b & 0xFFFFFFFF);
+        int32_t clsId = 0;
+        if (inst) memcpy(&clsId, (const void *)(uintptr_t)inst, 4);
+        JSValue o = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, o, "__qzInst", JS_NewInt32(ctx, (int32_t)inst));
+        JS_SetPropertyStr(ctx, o, "__qzCls", JS_NewInt32(ctx, clsId));
+        return o;
     }
     return JS_UNDEFINED;  /* 其他 tag 后续 */
 }
@@ -387,6 +561,18 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
     if (JS_IsBigInt(r)) return ((int64_t)0x7FF8 << 48) | (uint32_t)idx;  /* BigInt 句柄（BIG_HI） */
     /* 对象/闭包/数组等 → handle table 注册（0x7FF9 | idx） */
     return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
+}
+
+/* 把 JSValue 登记为**宿主对象**句柄（0x7FFD|idx）。与 qz_ret 的区别只在 tag：
+ * emitter 对 0x7FFD 走 prop_get/prop_set（宿主属性），对 0x7FF9 走 POJO 内存
+ * 内联快路径。普通函数 `new` 出来的实例是真正的 JS 对象，必须用前者，
+ * 否则字段读按 POJO 偏移解析 → 垃圾值。*/
+static int64_t qz_host_obj_handle(JSContext *ctx, JSValue r)
+{
+    int idx = g_handle_count++;
+    if (idx >= QZ_MAX_HANDLES) { JS_FreeValue(ctx, r); return 0; }
+    g_handles[idx] = r;                     /* 转移所有权 */
+    return ((int64_t)0x7FFD << 48) | (uint32_t)idx;
 }
 
 /* ── M6b PoC: string_concat C（JS 字符串拼接，handle table 原语）────────── */
@@ -568,36 +754,52 @@ int64_t qz_guest_ge(int64_t a, int64_t b)
     return r;
 }
 
+/* 严格相等的共享实现（=== / !==）。JS 语义：
+ *   类型不同 → false；数值 → 位型相等（NaN!==NaN；+0===-0）；
+ *   字符串/对象/其他 → 同类型下按值或引用相等。
+ * **不能** 用 JS_ToFloat64 比较：null 与 0 都变 0（null===0 会误判 true），
+ * undefined 变 NaN（undefined===undefined 误判 false）。*/
+static int qz_strict_eq(JSContext *ctx, int64_t a, int64_t b)
+{
+    /* 先按 tagged 位型快速判：同为数值（非句柄区）→ 位型相等 */
+    uint64_t ua = (uint64_t)a, ub = (uint64_t)b;
+    uint16_t ta = (uint16_t)(ua >> 48), tb = (uint16_t)(ub >> 48);
+    int aHandle = (ta >= 0x7FF8 && ta <= 0x7FFF);
+    int bHandle = (tb >= 0x7FF8 && tb <= 0x7FFF);
+    if (!aHandle && !bHandle) {
+        double fa, fb;
+        memcpy(&fa, &a, 8); memcpy(&fb, &b, 8);
+        if (fa != fa || fb != fb) return 0;      /* NaN !== NaN */
+        return fa == fb;
+    }
+    /* 句柄：tag 不同必不相等（数值 vs 对象/串/null/undefined/布尔/实例） */
+    if (ta != tb) return 0;
+    /* 同 tag：值相等即可（字符串/对象句柄按引用即偏移比较；null/undefined/布尔按低位） */
+    return (uint32_t)(ua & 0xFFFFFFFFu) == (uint32_t)(ub & 0xFFFFFFFFu);
+}
+
 __attribute__((export_name("seq")))
 int64_t qz_guest_seq(int64_t a, int64_t b)
 {
-    if (!g_current_rt) return a;
-    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return a;
-    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
-    double fa = 0, fb = 0;
-    JS_ToFloat64(ctx, &fa, va);
-    JS_ToFloat64(ctx, &fb, vb);
-    JSValue vr = JS_NewBool(ctx, fa == fb);
-    int64_t r = qz_ret(ctx, vr);
-    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
-    return r;
+    int eq;
+    if (!g_current_rt) { eq = (a == b); }
+    else {
+        JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+        eq = ctx ? qz_strict_eq(ctx, a, b) : (a == b);
+    }
+    return (int64_t)(((uint64_t)0x7FFC << 48) | (eq ? 1u : 0u));
 }
 
 __attribute__((export_name("sne")))
 int64_t qz_guest_sne(int64_t a, int64_t b)
 {
-    if (!g_current_rt) return a;
-    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return a;
-    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
-    double fa = 0, fb = 0;
-    JS_ToFloat64(ctx, &fa, va);
-    JS_ToFloat64(ctx, &fb, vb);
-    JSValue vr = JS_NewBool(ctx, fa != fb);
-    int64_t r = qz_ret(ctx, vr);
-    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb); JS_FreeValue(ctx, vr);
-    return r;
+    int eq;
+    if (!g_current_rt) { eq = (a == b); }
+    else {
+        JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+        eq = ctx ? qz_strict_eq(ctx, a, b) : (a == b);
+    }
+    return (int64_t)(((uint64_t)0x7FFC << 48) | (eq ? 0u : 1u));
 }
 
 /* ── M6b PoC: neg/bnot/band/bor/bxor/truthy 原语（一元+位+布尔）────────── */
@@ -969,9 +1171,25 @@ static int32_t qz_field_index(int32_t nameStrId)
 /* 前向：类访问器链查找（定义于 classMeta 节）+ 类方法蹦床类型。*/
 static int32_t qz_clsmeta_accessor_chain(int32_t clsId, int32_t nameStrId, int wantSet, int32_t *found);
 typedef int64_t (*qz_cls_fn)(int64_t, int64_t, int64_t, int64_t, int64_t);
+/* ── 数组 + 闭包回调的 C 侧实现 ────────────────────────────────────────
+ * 必要性：C 侧不能把 wasm 闭包物化成 JS 函数（在 QuickJS 里回调 wasm 蹦床会
+ * "null function or function signature mismatch"），于是交给 JS 内建会让回调
+ * 变 undefined —— 静默错值。这里直接遍历，回调走 closure_call。*/
+#define QZ_NO_CALLBACK_OP (INT64_MIN)
+
+static int qz_is_closure_like(int64_t v)
+{
+    uint16_t t = (uint16_t)((uint64_t)v >> 48);
+    return t == 0x7FFF || t == 0x7FFB;
+}
+
+static int64_t qz_array_callback_op(int64_t recv, const char *nm, int64_t cb, int64_t seed);
+
 /* 前向：闭包分派（定义于 closure_call 节）。*/
 int64_t qz_guest_closure_call(int64_t handle, int64_t a0, int64_t a1, int64_t a2,
                               int64_t a3, int64_t recv);
+int g_dbg_mode = 0;
+__attribute__((export_name("__set_dbg"))) void qz_set_dbg(int v) { g_dbg_mode = v; }
 
 /* ── 运行时访问器表（Object.defineProperty / 对象字面量 getter-setter）──
  * 键 (宿主对象句柄, nameStrId)，值是 getter/setter 闭包句柄（0x7FFF|off，0=无）。
@@ -2330,6 +2548,9 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
     char nm[64];
     if (nlen >= sizeof(nm)) return 0;
     memcpy(nm, mname, nlen); nm[nlen] = '\0';
+    /* emitter 给部分方法名加了 in-module 特化后缀（如 "reduce$i"）——按 '$' 截断，
+     * 否则 strcmp("reduce$i","reduce") 失败，回调路径整段被跳过（静默返回 0）。*/
+    { char *dq = strchr(nm, '$'); if (dq) *dq = '\0'; }
     /* 用户类实例（0x7FFE|off）：recv 内存 [off]=clsId → 沿 classMeta 继承链查
      * 方法槽，调蹦床。emitter 静态分派的类方法已蹦床化进共享表。 */
     uint64_t ru = (uint64_t)recv;
@@ -2343,6 +2564,14 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
             return f(recv, a0, a1, a2, a3);
         }
     }
+    /* 数组 + 闭包回调（map/filter/forEach/reduce/find/findIndex/some/every）：
+     * **不能**把回调交给 JS 内建。qz_tojs(闭包值) 不物化（C 侧回调 wasm 会崩），
+     * 内建会收到 undefined 回调 → 静默错值（返回空数组/undefined）。
+     * 这里自己遍历：回调经 closure_call 走 call_indirect，实参与结果全程 tagged。*/
+    if (qz_is_closure_like(a0)) {
+        int64_t r = qz_array_callback_op(recv, nm, a0, a1);
+        if (r != QZ_NO_CALLBACK_OP) return r;
+    }
     JSValue r = qz_tojs(ctx, recv);
     JSValue fn = JS_GetPropertyStr(ctx, r, nm);
     int64_t out = 0;
@@ -2354,6 +2583,10 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
                                    qz_tojs(ctx, ovf));
         JSValue res = JS_Call(ctx, fn, r, argc, argv);
         for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
+        /* 原地变异方法（reverse/sort/splice/push/pop/shift/unshift/fill/copyWithin）
+         * 改的是 JS 数组 → 必须写回 wasm 内存，否则后续元素读仍是旧值。*/
+        if (!JS_IsException(res) && ((uint64_t)recv >> 48) == 0x7FFB)
+            qz_arr_writeback((uint32_t)((uint64_t)recv & 0xFFFFFFFFu), r);
         if (!JS_IsException(res)) { out = qz_ret(ctx, res); JS_FreeValue(ctx, res); }
         else JS_FreeValue(ctx, res);
     }
@@ -2431,6 +2664,86 @@ int64_t qz_guest_closure_call(int64_t handle, int64_t a0, int64_t a1, int64_t a2
 }
 
 /* closure_call_spread(handle, arr) → i64：实参数组摊平后调用（≤4 参）。*/
+/* 数组元素个数（tagged 数组：句柄低 32 位 = 长度前缀+元素数组）。*/
+static int32_t qz_arr_len(int64_t arr)
+{
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    JSValue a = qz_tojs(ctx, arr);
+    JSValue lv = JS_GetPropertyStr(ctx, a, "length");
+    int32_t n = 0; JS_ToInt32(ctx, &n, lv);
+    JS_FreeValue(ctx, lv); JS_FreeValue(ctx, a);
+    return n;
+}
+
+static int64_t qz_arr_at(int64_t arr, int32_t i)
+{
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    JSValue a = qz_tojs(ctx, arr);
+    JSValue v = JS_GetPropertyUint32(ctx, a, (uint32_t)i);
+    int64_t r = qz_ret(ctx, v);
+    JS_FreeValue(ctx, a);
+    return r;
+}
+
+/* 回调返回值 → 真假（走 tagged truthy 语义：数值非零/非空串/对象/true）。*/
+static int qz_tagged_truthy(int64_t v);
+
+/* 数组 + 闭包回调：map/filter/forEach/reduce/find/findIndex/some/every。
+ * 返回 tagged 结果；不认识的组合返回 QZ_NO_CALLBACK_OP（交回内建路径）。*/
+static int64_t qz_array_callback_op(int64_t recv, const char *nm, int64_t cb, int64_t seed)
+{
+    if (!g_current_rt) return QZ_NO_CALLBACK_OP;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return QZ_NO_CALLBACK_OP;
+    int32_t n = qz_arr_len(recv);
+    if (n < 0) return QZ_NO_CALLBACK_OP;
+    int64_t undef = ((int64_t)0x7FF9) << 48;
+
+    if (!strcmp(nm, "map") || !strcmp(nm, "filter") || !strcmp(nm, "forEach")
+        || !strcmp(nm, "find") || !strcmp(nm, "findIndex")
+        || !strcmp(nm, "some") || !strcmp(nm, "every")) {
+        JSValue outArr = (strcmp(nm, "map") || strcmp(nm, "filter")) ? JS_UNDEFINED : JS_UNDEFINED;
+        int wantArr = !strcmp(nm, "map") || !strcmp(nm, "filter");
+        JSValue out = JS_NewArray(ctx);
+        int32_t oi = 0;
+        int64_t scal = undef;
+        for (int32_t i = 0; i < n; i++) {
+            int64_t el = qz_arr_at(recv, i);
+            int64_t rv = qz_guest_closure_call(cb, el, qz_ret(ctx, JS_NewInt32(ctx, i)), recv, undef, undef);
+            if (!strcmp(nm, "map")) { JS_SetPropertyUint32(ctx, out, (uint32_t)oi++, qz_tojs(ctx, rv)); }
+            else if (!strcmp(nm, "filter")) { if (qz_tagged_truthy(rv)) JS_SetPropertyUint32(ctx, out, (uint32_t)oi++, qz_tojs(ctx, el)); }
+            else if (!strcmp(nm, "forEach")) { /* 丢弃 */ }
+            else if (!strcmp(nm, "find")) { if (qz_tagged_truthy(rv)) { scal = el; goto done; } }
+            else if (!strcmp(nm, "findIndex")) { if (qz_tagged_truthy(rv)) { scal = qz_ret(ctx, JS_NewInt32(ctx, i)); goto done; } }
+            else if (!strcmp(nm, "some")) { if (qz_tagged_truthy(rv)) { scal = ((int64_t)0x7FFC << 48) | 1; goto done; } }
+            else if (!strcmp(nm, "every")) { if (!qz_tagged_truthy(rv)) { scal = ((int64_t)0x7FFC << 48); goto done; } }
+        }
+        if (!strcmp(nm, "find")) { JS_FreeValue(ctx, out); return undef; }
+        if (!strcmp(nm, "findIndex")) { JS_FreeValue(ctx, out); return qz_ret(ctx, JS_NewInt32(ctx, -1)); }
+        if (!strcmp(nm, "some")) { JS_FreeValue(ctx, out); return ((int64_t)0x7FFC << 48); }
+        if (!strcmp(nm, "every")) { JS_FreeValue(ctx, out); return ((int64_t)0x7FFC << 48) | 1; }
+        if (!strcmp(nm, "forEach")) { JS_FreeValue(ctx, out); return undef; }
+        { int64_t rr = qz_ret(ctx, out); JS_FreeValue(ctx, out); return rr; }
+    done:
+        JS_FreeValue(ctx, out);
+        return scal;
+    }
+    if (!strcmp(nm, "reduce")) {
+        /* 初值判定不能用「值为 0」——`reduce(f, 0)` 的初值就是 0。
+         * emitter 约定：无条件传 a1 作初值（语法上无初值时传 undefined 句柄 0x7FF9|0）。*/
+        int64_t acc = seed;
+        int32_t start = 0;
+        if (seed == (int64_t)(((uint64_t)0x7FF9) << 48)) { acc = qz_arr_at(recv, 0); start = 1; }
+        for (int32_t i = start; i < n; i++) {
+            int64_t el = qz_arr_at(recv, i);
+            int64_t nv = qz_guest_closure_call(cb, acc, el, qz_ret(ctx, JS_NewInt32(ctx, i)), recv, undef);
+            acc = nv;
+        }
+        return acc;
+    }
+    return QZ_NO_CALLBACK_OP;
+}
+
 __attribute__((export_name("closure_call_spread")))
 int64_t qz_guest_closure_call_spread(int64_t handle, int64_t arr)
 {
@@ -2653,7 +2966,11 @@ int64_t qz_guest_class_value_dyn(int32_t clsId, int64_t baseObj)
     uint64_t bu = (uint64_t)baseObj;
     if ((uint16_t)(bu >> 48) != 0x7FFE) return 0;   /* 父类值不是类对象 */
     int32_t baseClsId = (int32_t)(bu & 0xFFFFFFFFu);
-    /* 把 classMeta 项 clsId 的 parent 字段改写为 baseClsId（parent 在 off+4）。*/
+    /* 就地改写 parent 字段（parent 在 off+4）。**必须**就地：紧随其后的
+     * super() 调用按 clsId 查 classMeta 找父构造器，返回克隆 id 会让
+     * `super_ctor(clsId,…)` 查不到父链。
+     * 幂等前提：声明式类的链接只走一次（emitter 的 statics guard 保证）；
+     * 工厂每次求值走的是 class_expr_value（克隆出独立 clsId），不共用此路径。*/
     uint32_t off = qz_clsmeta_item_off(clsId);
     if (off) memcpy((void *)(uintptr_t)(off + 4), &baseClsId, 4);
     return qz_guest_class_value(clsId);
@@ -2664,9 +2981,34 @@ __attribute__((export_name("new_dynamic")))
 int64_t qz_guest_new_dynamic(int64_t clsVal, int64_t a0, int64_t a1, int64_t a2,
                              int64_t a3)
 {
-    /* 类值是句柄 0x7FFE|clsId（class_value/class_expr_value 的产物）。*/
+    /* 类值是句柄 0x7FFE|clsId（class_value/class_expr_value 的产物）。
+     * 但 `new f()` 的 f 也可能是普通函数（闭包值 0x7FFF / 宿主函数 0x7FF9）——
+     * JS 语义下按 Function.prototype 构造：建普通对象、原型取 f.prototype、
+     * 以 self 调用 f。原实现只认 0x7FFE → 这类动态构造静默返回 0。*/
     uint64_t cu = (uint64_t)clsVal;
-    if ((uint16_t)(cu >> 48) != 0x7FFE) return 0;
+    uint16_t ctag = (uint16_t)(cu >> 48);
+    if (ctag == 0x7FFF || ctag == 0x7FF9) {
+        JSContext *cx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+        if (!cx) return 0;
+        /* 闭包值走物化函数（qz_tojs 的 0x7FFF 分支已带缓存），
+         * 这样 f.prototype 上的属性（ctor.prototype.m = …）对构造出的实例可见。*/
+        JSValue fn = qz_tojs(cx, clsVal);
+        if (!JS_IsFunction(cx, fn)) { JS_FreeValue(cx, fn); return 0; }
+        JSValue proto = JS_GetPropertyStr(cx, fn, "prototype");
+        JSValue obj = JS_NewObjectProto(cx, JS_IsObject(proto) ? proto : JS_NULL);
+        JS_FreeValue(cx, proto);
+        JSValue argv[4];
+        int argc = qz_collect_args(cx, argv, 4, qz_tojs(cx, a0), qz_tojs(cx, a1),
+                                   qz_tojs(cx, a2), qz_tojs(cx, a3), JS_UNDEFINED);
+        int64_t selfH = qz_ret(cx, JS_DupValue(cx, obj));
+        JSValue res = JS_Call(cx, fn, obj, argc, argv);
+        for (int i = 0; i < argc; i++) JS_FreeValue(cx, argv[i]);
+        if (!JS_IsException(res)) JS_FreeValue(cx, res);
+        else JS_FreeValue(cx, res);
+        JS_FreeValue(cx, obj); JS_FreeValue(cx, fn);
+        return selfH;
+    }
+    if (ctag != 0x7FFE) return 0;
     int32_t clsId = (int32_t)(cu & 0xFFFFFFFFu);
     uint32_t off = qz_clsmeta_item_off(clsId);
     if (!off) return 0;
@@ -2764,11 +3106,32 @@ int64_t qz_guest_super_ctor(int32_t clsId, int64_t self, int64_t a0, int64_t a1,
  * JS 语义：`const C = class {...}` 每次求值产生独立类对象——clsId 必须唯一，
  * 否则 `new A() instanceof B` 会误判 true。故克隆原项为新动态类（parent=原类，
  * 方法槽共享），返回新 clsId 的类值句柄。*/
+void qz_guest_static_set(int32_t clsId, int32_t nameStrId, int64_t val);
+int64_t qz_guest_static_get(int32_t clsId, int32_t nameStrId);
+
 __attribute__((export_name("class_expr_value")))
-int64_t qz_guest_class_expr_value(int32_t clsId)
+int64_t qz_guest_class_expr_value(int32_t clsId, int64_t env, int32_t envKey)
 {
     int32_t nid = qz_clsmeta_clone(clsId);
-    return qz_guest_class_value(nid >= 0 ? nid : clsId);
+    int32_t use = nid >= 0 ? nid : clsId;
+    /* 捕获 env 挂到**克隆后的 clsId** 键下：工厂产出的多个类各持一份，
+     * 按类名挂会串味（匿名类/同名工厂类 → A/B 共读同一 label）。*/
+    if (env != 0) qz_guest_static_set(use, envKey, env);   /* env 已 +1（0=无捕获哨兵）*/
+    return qz_guest_class_value(use);
+}
+
+/* class_env_get(self tagged, "@@qzEnv" strId) → 该类 env 索引（0=无）。
+ * 按实例内存里的**运行时 clsId** 查 statics——克隆类因此各读各的捕获副本。*/
+__attribute__((export_name("class_env_get")))
+int64_t qz_guest_class_env_get(int64_t self, int32_t keyId)
+{
+    uint64_t u = (uint64_t)self;
+    uint16_t tag = (uint16_t)(u >> 48);
+    if (tag != 0x7FFE) return 0;
+    uint32_t inst = (uint32_t)(u & 0xFFFFFFFFu);
+    int32_t clsId = 0;
+    if (inst) memcpy(&clsId, (const void *)(uintptr_t)inst, 4);
+    return qz_guest_static_get(clsId, keyId);
 }
 
 /* instanceof_dyn(x, rhs) → i64：动态右值 instanceof。rhs 是类值(0x7FFE|clsId)。*/
@@ -2776,7 +3139,36 @@ __attribute__((export_name("instanceof_dyn")))
 int64_t qz_guest_instanceof_dyn(int64_t x, int64_t rhs)
 {
     uint64_t r = (uint64_t)rhs;
-    if ((uint16_t)(r >> 48) != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48);  /* 不是类值 → false */
+    uint16_t rtag = (uint16_t)(r >> 48);
+    /* 右值是普通函数（闭包值 / 宿主函数）时按 JS 原生 instanceof：查原型链。
+     * `inst instanceof ctor`（ctor = function 表达式）走这条——类值路径只认
+     * 0x7FFE，会误判 false。*/
+    if (rtag == 0x7FFF || rtag == 0x7FF9 || rtag == 0x7FFD) {
+        if (!g_current_rt) return (int64_t)((uint64_t)0x7FFC << 48);
+        JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+        if (!ctx) return (int64_t)((uint64_t)0x7FFC << 48);
+        JSValue f = qz_tojs(ctx, rhs);
+        if (!JS_IsFunction(ctx, f)) { JS_FreeValue(ctx, f); return (int64_t)((uint64_t)0x7FFC << 48); }
+        JSValue obj = qz_tojs(ctx, x);
+        JSValue proto = JS_GetPropertyStr(ctx, obj, "constructor");
+        (void)proto;
+        JSValue fproto = JS_GetPropertyStr(ctx, f, "prototype");
+        /* 沿 obj 的原型链找 f.prototype */
+        int hit = 0;
+        JSValue cur = JS_GetPrototype(ctx, obj);
+        for (int guard = 0; guard < 256 && JS_IsObject(cur); guard++) {
+            int same = JS_VALUE_GET_PTR(cur) == JS_VALUE_GET_PTR(fproto);
+            if (same) { hit = 1; break; }
+            JSValue nxt = JS_GetPrototype(ctx, cur);
+            JS_FreeValue(ctx, cur);
+            cur = nxt;
+        }
+        if (JS_IsObject(cur)) JS_FreeValue(ctx, cur);
+        JS_FreeValue(ctx, proto); JS_FreeValue(ctx, fproto);
+        JS_FreeValue(ctx, obj); JS_FreeValue(ctx, f);
+        return (int64_t)(((uint64_t)0x7FFC << 48) | (hit ? 1u : 0u));
+    }
+    if (rtag != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48);  /* 不是类值 → false */
     int32_t targetCls = (int32_t)(r & 0xFFFFFFFFu);
     uint64_t xu = (uint64_t)x;
     if ((uint16_t)(xu >> 48) != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48);
@@ -3140,4 +3532,22 @@ int64_t qz_guest_instanceof_op(int64_t obj, int32_t clsId)
     if ((u >> 48) != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48) | 0;
     int32_t cid = *(int32_t *)(uintptr_t)(uint32_t)(u & 0xFFFFFFFFu);
     return (int64_t)((uint64_t)0x7FFC << 48) | (cid == clsId ? 1 : 0);
+}
+
+/* tagged → 真假。数值：非 0 且非 NaN。字符串：非空。其余句柄：真。
+ * 与 emitter 的 truthy 语义一致（false/0/""/null/undefined 为假）。*/
+static int qz_tagged_truthy(int64_t v)
+{
+    uint64_t u = (uint64_t)v;
+    uint16_t t = (uint16_t)(u >> 48);
+    if (t == 0x7FF9) return (uint32_t)u > 1;          /* null(1)/undefined(0) → 假 */
+    if (t == 0x7FFC) return (int)(u & 1u);            /* 布尔 */
+    if (t == 0x7FFA) {                                /* 字符串：长度前缀 */
+        uint32_t off = (uint32_t)(u & 0xFFFFFFFFu);
+        int32_t len = 0; memcpy(&len, (const void *)(uintptr_t)off, 4);
+        return len > 0;
+    }
+    if (t >= 0x7FFB && t <= 0x7FFF) return 1;         /* 数组/闭包/实例/宿主对象 → 真 */
+    double d; memcpy(&d, &v, 8);
+    return (d == d) && (d != 0.0);
 }

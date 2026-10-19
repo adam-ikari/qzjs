@@ -3,7 +3,7 @@
 import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os'; import { join } from 'node:path';
 import { WASI } from 'node:wasi';
-import { serializeClassMeta, serializeFields } from './clsmeta_ser.mjs';
+import { serializeClassMeta, serializeFields, serializeLamSynth } from './clsmeta_ser.mjs';
 const { compileTS } = await import('../../src/qzvm/aot/emitter.js');
 const args = process.argv.slice(2);
 const gi = args.indexOf('--libqzvm');

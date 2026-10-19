@@ -118,7 +118,8 @@ const QZ = {
   // a instanceof C：a 须为类实例（专用 tag 0x7FFE）→ clsId(i32) → tagged bool
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   class_value: { params: ["i32"], results: ["i64"] },
-  class_expr_value: { params: ["i32"], results: ["i64"] },   // 类表达式作值：每次求值一个新类（克隆 clsId）
+  class_expr_value: { params: ["i32", "i64", "i32"], results: ["i64"] },   // 类表达式作值：克隆 clsId + 该类专属 env（0=无捕获）+ "@@qzEnv" 键
+  class_env_get: { params: ["i64", "i32"], results: ["i64"] },   // (self tagged, "@@qzEnv" strId) → 该类 env 索引；按实例**运行时 clsId** 查，克隆类各持一份
   builtin_value: { params: ["i32"], results: ["i64"] },
   brand_check: { params: ["i64", "i32"], results: ["i64"] },   // 私有名 in o（品牌检查）：非对象 → TypeError（JS 语义）
   method_spread: { params: ["i64", "i32", "i64"], results: ["i64"] },   // obj.m(...args)：实参数组 → method_call 分派
@@ -1907,8 +1908,13 @@ class Emitter {
         if (capNames.length) {
             const M = this.m;
             { const ciE = this.classes.get(cname);
-              if (probeLenC === 0 && ciE && ciE.captured && ciE.captured.length) {   // 纯类捕获 → envLocal 直接指向类 env（statics @@qzEnv）
-                M.i32Const(this._strId(ciE.name)); M.i32Const(this._strId("@@qzEnv")); M.call("qz.static_get"); M.i32WrapI64(); M.localSet(this.envLocal);
+              if (ciE && ciE.captured && ciE.captured.length
+                  && capNames.every(n0 => ciE.captured.includes(n0))) {   // 方法捕获 ⊆ 类捕获 → 直接用类 env
+                /* 按实例的**运行时 clsId** 取 env：class_expr_value 克隆出的每个类
+                 * 各持一份捕获副本，按类名查会撞车（A/B 共读同一 label）。*/
+                M.localGet(0); M.i32Const(this._strId("@@qzEnv")); M.call("qz.class_env_get");
+                M.i32WrapI64(); M.i32Const(1); M.i32Sub();   /* env 已 +1（0=无捕获哨兵）→ 还原 */
+                M.localSet(this.envLocal);
               } else { M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal); } }
             for (const n of capNames) {
                 if (n === "this") { M.localGet(this.envLocal); M.i32Const(this._strId("this")); M.localGet(0); M.call("qz.env_set"); }
@@ -3199,6 +3205,10 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
     M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
     M.i32Eqz();
     M.ifBlock("void");
+    /* 类方法捕获 env 在**首次类初始化**时建立（声明式类的 `new A()` 经 new_dynamic
+     * 不触发 class_value，这里补上）。此后 statics_ready 标记 → 不再重复。 */
+    { const ci0 = c.captured && c.captured.length ? c : null;
+      if (ci0) this._emitClassCaptureEnv(c); }
     // 静态初始化按**源码序**（字段与 static 块交错；JS 语义：类定义时按序求值一次）
     for (const it of (c.staticInits || c.staticFields.map(f2 => ({ kind: "field", ...f2 })))) {
         if (it.kind === "field") {
@@ -3898,11 +3908,32 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     }
     if (ts.isClassExpression(e)) {                       // 类表达式作值 → 宿主构造器对象句柄（class_value）
         const synth = this.clsExprMap && this.clsExprMap.get(e);
+        if (process.env.QZDBG) console.error("[cex]", synth, "inClasses=", !!(synth && this.classes.get(synth)));
         const cnC = synth && this.classes.get(synth);
         if (cnC) {
             /* 每次求值一个新类（JS 语义）：克隆 classMeta 项 → 独立 clsId，
-             * 否则工厂产出的多个类共享 id → instanceof 误判 / .name 串味。*/
-            this.m.i32Const(cnC.id); this.m.call("qz.class_expr_value");
+             * 否则工厂产出的多个类共享 id → instanceof 误判 / .name 串味。
+             * 动态父（`class extends Base2`，Base2 是形参）例外：正交要求
+             * 运行期父链可查（super() 按 clsId 找父构造），故走 class_value_dyn
+             * 记录运行时父——与声明式类的链接路径一致。*/
+            const dynN = this._dynParentExpr(cnC);
+            if (dynN) { this._emitClassValue(cnC); return; }
+            /* 类方法/getter 捕获外层变量（`(label) => class { get l(){ return label; } }`）：
+             * 必须在**创建点**把捕获值复制到类 env 并挂到 statics @@qzEnv。
+             * 克隆 classMeta 不会克隆 env 槽——漏了这步，克隆出的类方法读 env 得到空值
+             * （静默 undefined）。复用 _emitClassValue 的捕获段。*/
+            /* 类表达式 + 方法捕获：clone 出的多个类当前共享同一 statics 槽
+             * （类方法读 env 用 static_get(strId(类名), "@@qzEnv")，匿名类/工厂
+             * 类名相同 → 后创建者覆盖前者的捕获，`A`/`B` 读同一 label）。
+             * 与其静默错值，先 loud 报错，等 statics 键带 clsId 后再放开。*/
+            /* 捕获 env 必须随克隆走：克隆出独立的 clsId 后把 env 存到该 clsId 键下，
+             * 方法体按实例运行时 clsId 读（class_env_get）→ A/B 各持一份，不串味。*/
+            this.m.i32Const(cnC.id);
+            if (process.env.QZDBG) console.error("[cev]", cnC.name, "captured=", JSON.stringify(cnC.captured));
+            if (cnC.captured && cnC.captured.length) this._emitClassCaptureEnvValue(cnC);
+            else this.m.i64Const(0n);
+            this.m.i32Const(this._strId("@@qzEnv"));
+            this.m.call("qz.class_expr_value");
             return;
         }
         throw new Error("[tagged] 类表达式作值未实现");
@@ -5054,8 +5085,22 @@ Emitter.prototype._emitStoreProp = function (left) {
     M.ifBlock("void");
     M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.object_set");
     M.else_();
+    // 闭包值(0x7FFF)/类实例(0x7FFE)/字符串(0x7FFA)/数组(0x7FFB) → 宿主 prop_set。
+    // 内存快路径只对 POJO 合法：把闭包偏移当 POJO 基址做 i64Store 会**静默写坏线性内存**
+    // （`ctor.prototype.m = f` 就是这种：ctor 是闭包值，prototype 无处安放）。
+    M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();
+    M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
+    M.i32Or();
+    M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+    M.i32Or();
+    M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+    M.i32Or();
+    M.ifBlock("void");
+    M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set");
+    M.else_();
     if (this.usesDynAcc) { M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set"); }   // 访问器表
     else { M.localGet(t.v); M.i32WrapI64(); M.localGet(t.w); M.i64Store(3, this._fieldIndex(left.name.text)); }
+    M.end();
     M.end();
     M.end();
     this._emitErrCheck(false);                    // undefined/null 写属性 → TypeError（转入本函数 catch；链外检查避免嵌套深度问题）
@@ -5247,6 +5292,12 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
                 || (this.fnNames && this.fnNames.has(tgt.text))     // 顶层函数作类（JS function-as-class：Dog.prototype = …）
                 || (ts.isPropertyAccessExpression(e.expression));
             if (resolvable) {
+                /* 类表达式/动态类值（new A()）：若 tgt 对应一个已知类（含捕获），
+                 * 先触发 statics guard 建立类捕获 env（_emitClassCaptureEnv 经 class_value）。
+                 * 否则类方法读捕获 env 拿到空（声明式类表达式的捕获缺口）。*/
+                const dynCn = this._className(tgt.text) || (this.classes.has(tgt.text) ? tgt.text : undefined);
+                const dynC = dynCn && this.classes.get(dynCn);
+                if (dynC) { this._emitStaticsGuard(dynC.name); }
                 const M2 = this.m, tg2 = this._expEnter();
                 this.emitTaggedExpr(tgt); M2.localSet(tg2.w);        // 类对象 → 槽（先求值，避免嵌套副作用）
                 M2.localGet(tg2.w);                                  // 参数序：obj, a0..a3
@@ -5307,22 +5358,46 @@ Emitter.prototype._emitSuperCall = function (c, args) {
     this._emitFieldDefaults(c);                             // 子类字段默认值在 super 之后
 };
 // 合成派生 ctor：local1..4 = 补齐后的参数槽，原样转发给父 ctor。
+/* 同 _emitClassCaptureEnv，但把 env 索引作为 i64 留在栈上（供 class_expr_value 带着走）。*/
+Emitter.prototype._emitClassCaptureEnvValue = function (c) {
+    const M = this.m;
+    if (!(c.captured && c.captured.length)) { this._emitUndefined(); return; }
+    const envT = this._expEnter();
+    M.i32Const(-1); M.call("qz.env_new"); M.localSet(envT.v);
+    for (const n0 of c.captured) {
+        if (!(this._isCapturable(n0) || (this.moduleGlobals && this.moduleGlobals.get(n0) !== undefined))) continue;
+        const idNode = ts.factory.createIdentifier(n0);
+        idNode.pos = c.id; idNode.end = c.id;
+        M.localGet(envT.v); M.i32WrapI64(); M.i32Const(this._strId(n0));   // env_def 首参 = env 索引(i32)
+        this.emitTaggedExpr(idNode);
+        M.call("qz.env_def");
+    }
+    M.localGet(envT.v);
+    M.i64Const(1n); M.i64Add();            // +1：0 被保留为「无捕获」哨兵（env 索引从 0 起）
+    this._expLeave();
+};
+/* 类方法捕获：创建点(外围作用域活动)复制其值到类 env，存 statics @@qzEnv
+ * （总是存 → 方法侧索引一定合法）。声明式类与类表达式共用。*/
+Emitter.prototype._emitClassCaptureEnv = function (c) {
+    const M = this.m;
+    if (!(c.captured && c.captured.length)) return;
+    const envT = this._expEnter();
+    M.i32Const(-1); M.call("qz.env_new"); M.localSet(envT.v);
+    for (const n0 of c.captured) {
+        if (!(this._isCapturable(n0) || (this.moduleGlobals && this.moduleGlobals.get(n0) !== undefined))) continue;
+        const idNode = ts.factory.createIdentifier(n0);
+        idNode.pos = c.id; idNode.end = c.id;
+        M.localGet(envT.v); M.i32WrapI64(); M.i32Const(this._strId(n0));   // env_def 首参 = handles 索引(i32)
+        this.emitTaggedExpr(idNode);
+        M.call("qz.env_def");
+    }
+    /* 键用 clsId（不是类名）：class_env_get 也按实例运行时 clsId 查，两边一致。*/
+    M.i32Const(c.id); M.i32Const(this._strId("@@qzEnv")); M.localGet(envT.v); M.call("qz.static_set");
+    this._expLeave();
+};
 Emitter.prototype._emitClassValue = function (c) {        // 类对象句柄：动态父 → class_value_dyn(id, 父表达式)；否则 class_value(id)
     const M = this.m;
-    if (c.captured && c.captured.length) {                 // 类方法捕获：创建点(外围作用域活动)复制其值到类 env，存 statics @@qzEnv（总是存 → 方法侧索引一定合法）
-        const envT = this._expEnter();
-        M.i32Const(-1); M.call("qz.env_new"); M.localSet(envT.v);
-        for (const n0 of c.captured) {
-            if (!(this._isCapturable(n0) || (this.moduleGlobals && this.moduleGlobals.get(n0) !== undefined))) continue;
-            const idNode = ts.factory.createIdentifier(n0);
-            idNode.pos = c.id; idNode.end = c.id;
-            M.localGet(envT.v); M.i32WrapI64(); M.i32Const(this._strId(n0));   // env_def 首参 = handles 索引(i32)
-            this.emitTaggedExpr(idNode);
-            M.call("qz.env_def");
-        }
-        M.i32Const(this._strId(c.name)); M.i32Const(this._strId("@@qzEnv")); M.localGet(envT.v); M.call("qz.static_set");
-        this._expLeave();
-    }
+    this._emitClassCaptureEnv(c);
     M.i32Const(c.id);
     const dynN = this._dynParentExpr(c);
     if (dynN) { this.emitTaggedExpr(dynN); M.call("qz.class_value_dyn"); return; }

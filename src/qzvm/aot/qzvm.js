@@ -150,6 +150,7 @@ function makeQzvm(strings, opts) {
   const isH = (b) => (BigInt(b) >> 48n) === TAG_HI;
   const isCloH = (b) => (BigInt(b) >> 48n) === CLO_HI;
   // 闭包值 → JS 函数包装（宿主侧调用回调，如 sort(cmp)/map(fn)）
+  const cloProps = new Map();      // 闭包 cell offset → 稳定包装函数（属性读写共用）
   const cloWrap = (b) => {
     const f = function (...args) {   // JS this → receiver（对象属性上的闭包作方法调用：obj.m() 的 this = obj）
       const a0 = args[0] === undefined ? TAG : ret(args[0]);
@@ -1000,7 +1001,17 @@ function makeQzvm(strings, opts) {
     // instanceof：obj 须为类实例句柄（专用 tag 0x7FFE|off，[off]=clsId）；沿「实例类 → 父链」查目标 clsId。
     // 非实例（数字/字符串/bool/null/数组/POJO/宿主对象）→ false。需 bindClasses 提供 classMeta。
     new_dynamic: (obj, a0, a1, a2, a3) => {          // 运行时类值构造（类表达式工厂）：类对象 → 实例句柄
-      const f = handles[idxOf(obj)];
+      // 目标可能是：宿主句柄(0x7FF9)、类值/实例(0x7FFE)、闭包值(0x7FFF)。
+      // 闭包值不能走 handles[idxOf]——低 32 位是 cell 偏移而非表索引。
+      const uN = BigInt.asUintN(64, obj), hN = uN >> 48n;
+      let f;
+      if (hN === CLO_HI) {   // 闭包值：用 prop_set 写过属性的**同一个**稳定包装（含 prototype.m）
+        const offN = Number(uN & MASK32);
+        f = cloProps.get(offN);
+        if (!f) { f = cloWrap(obj); cloProps.set(offN, f); }
+      }
+      else if (hN === INST_HI) f = classObjImpl(Number(uN & MASK32));
+      else f = handles[idxOf(obj)];
       if (typeof f !== "function") throw new Error("new: 目标不是类（期望类对象）");
       const as4 = [a0, a1, a2, a3].map(x => toJS(x));
       if (typeof f.__qzClsId === "number") return f(...as4);                 // 用户类构造器：返回实例句柄（bigint，Reflect.construct 会丢弃原始值返回 → 必须直调）
@@ -1021,7 +1032,9 @@ function makeQzvm(strings, opts) {
       return h;
     },
     super_ctor: (clsId, self, a0, a1, a2, a3) => {   // 动态父构造转发（mixin 的合成 ctor）
-      const bid = classRuntimeParent.get(clsId);
+      // 父链来源二选一：动态 extends（classRuntimeParent）或 classMeta.parent（克隆派生类）。
+      const bid = classRuntimeParent.has(clsId) ? classRuntimeParent.get(clsId)
+                : (classMeta && classMeta[clsId] && classMeta[clsId].parent != null ? classMeta[clsId].parent : undefined);
       if (bid === undefined) throw new Error("super_ctor: 无运行时父类（动态 extends 未链接）");
       const m = classMeta && classMeta[bid];
       const fn = m && exportsRef && exportsRef[m.ctor];
@@ -1038,8 +1051,29 @@ function makeQzvm(strings, opts) {
       return h2;
     },
     class_value: (clsId) => classValueImpl(clsId),
+    // 类表达式作值：每次求值一个新类（JS 语义）。克隆 classMeta 项到新 clsId
+    // （parent = 原类，方法/访问器表共享）→ 工厂产出的多个类 id 互异，
+    // `new A() instanceof B` 才不会误判 true。C 侧同语义（qz_clsmeta_clone）。
+    class_expr_value: (clsId, env, envKey) => {
+      const meta = classMeta && classMeta[clsId];
+      if (!meta) return classValueImpl(clsId);
+      const src = classMeta;
+      const newId = src.length;
+      const clone = Object.assign(Object.create(Object.getPrototypeOf(meta)), meta, {
+        id: newId, parent: clsId, name: meta.name,
+      });
+      src.push(clone);
+      if (classHandles.size >= 0) classHandles.delete(newId);   // 确保不复用旧句柄
+      // 捕获 env 挂到克隆 clsId 键下（与 C 侧 class_env_get 语义一致）
+      if (env && env !== 0n && envKey !== undefined) statics.set(newId + "|" + strings[envKey], env);
+      return classValueImpl(newId);
+    },
     instanceof_dyn: (x, rhs) => {                // 动态右值 instanceof：用户类值 → 运行时父链；内建函数值 → 按名回退；否则 loud
-      const c = handles[idxOf(rhs)];
+      // rhs 可能是闭包值（0x7FFF，`inst instanceof ctor`）——低 32 位是 cell 偏移，不是表索引。
+      const ur = BigInt.asUintN(64, rhs), hr = ur >> 48n;
+      const c = hr === CLO_HI
+        ? (() => { const o2 = Number(ur & MASK32); let f2 = cloProps.get(o2); if (!f2) { f2 = cloWrap(rhs); cloProps.set(o2, f2); } return f2; })()
+        : handles[idxOf(rhs)];
       const cid = (c && typeof c === "function") ? c.__qzClsId : undefined;
       if (cid !== undefined) return instanceById(x, cid);
       if (typeof c === "function" && !(c.name && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(c.name))) {
@@ -1131,6 +1165,13 @@ function makeQzvm(strings, opts) {
     statics_has: (id, fid) => { const o = statics.get(strings[id]); return o && strings[fid] in o ? 1 : 0; },
     statics_mark: (id) => { if (!statics.has(strings[id])) statics.set(strings[id], {}); },
     static_get: (id, fid) => { const o = statics.get(strings[id]); const v = o ? o[strings[fid]] : undefined; return v === undefined ? TAG : v; },
+    // class_env_get(self, "@@qzEnv")：按实例运行时 clsId 取捕获 env（克隆类各持一份）
+    class_env_get: (self, key) => {
+      const h = handles[idxOf(self)];
+      if (!h || typeof h !== "object") return 0n;
+      const v = statics.get(String(h.__qzClsId) + "|" + strings[key]);
+      return v === undefined ? 0n : v;
+    },
     static_set: (id, fid, v) => { let o = statics.get(strings[id]); if (!o) { o = {}; statics.set(strings[id], o); } o[strings[fid]] = v; },
     // 类 getter/setter 分派（仅当程序内有该类属性访问器时由产物调用）：实例沿继承链找访问器；
     // 命中 → 调 wasm 导出方法；未命中 → 退化为字段读/写（与 qz.get_index/set_index 同语义）。
@@ -1213,6 +1254,10 @@ function makeQzvm(strings, opts) {
         return Array.isArray(hv) ? tagHandle(hv) : typeof hv === "bigint" ? hv : ret(hv);   // BigInt = 已打包句柄（如描述符里的 get/set 闭包句柄）→ 直通（保持 CLO_HI → typeof "function"）
       }
       if (hi === CLO_HI) {                                   // 闭包值：函数自身属性
+        {   // prop_set 可能已在其上写过属性（prototype/custom）→ 先查稳定包装
+          const pf = cloProps.get(off);
+          if (pf) { const cv = pf[name]; return typeof cv === "function" ? tagHandle(cv) : ret(cv); }
+        }
         const dv3 = mem ? new DataView(mem.buffer) : null;
         const ar = dv3 && off + 12 <= mem.buffer.byteLength ? dv3.getInt32(off + 8, true) : 0;
         const nid = dv3 && off + 16 <= mem.buffer.byteLength ? dv3.getInt32(off + 12, true) : -1;   // -1 = 匿名
@@ -1232,6 +1277,11 @@ function makeQzvm(strings, opts) {
           if (name === "call") return tagHandle((this2, x0, x1, x2, x3, ...more) => cm(bitsOf(this2), [bitsOf(x0), bitsOf(x1), bitsOf(x2), bitsOf(x3), ...more.map(bitsOf)]));
           if (name === "apply") return tagHandle((this2, arr3) => cm(bitsOf(this2), ((arr3 === undefined || arr3 === TAG) ? [] : (toJS(arr3) || [])).map(bitsOf)));
           return tagHandle((...xs) => (...ys) => cm(bitsOf(xs[0]), [...xs.slice(1), ...ys].map(bitsOf)));
+        }
+        if (name === "prototype") {                            // 函数 prototype：稳定包装函数的原型对象
+          let pf = cloProps.get(off);
+          if (!pf) { pf = cloWrap(recv); cloProps.set(off, pf); }
+          return tagHandle(pf.prototype);
         }
         return TAG;                                            // 其它属性：闭包值无自有属性
       }
@@ -1262,6 +1312,14 @@ function makeQzvm(strings, opts) {
       const name = strings[id];
       const u = BigInt.asUintN(64, recv), hi = u >> 48n, off = Number(u & MASK32);
       if (hi === TAG_HI && off < 8) { throwValue(new TypeError("Cannot set properties of " + (off === 1 ? "null" : "undefined") + " (setting '" + name + "')")); return; }   // undefined/null 写属性 → TypeError（JS 语义）
+      if (hi === CLO_HI) {                                         // 闭包值写属性（ctor.prototype.m = f / f.custom = x）
+        // 必须落在一个**稳定**的包装函数上：cloWrap 每次新建，写进去的
+        // prototype/custom 会在下次读取时丢失。缓存按 cell offset。
+        let f = cloProps.get(off);
+        if (!f) { f = cloWrap(recv); cloProps.set(off, f); }
+        f[name] = toJS(v);
+        return;
+      }
       if ((hi === TAG_HI && off >= 8) || hi === INST_HI) {          // 运行时 setter（Object.defineProperty）优先于字段写
         syncDynAcc();
         const acc = dynAcc.get(off + "|" + name);
@@ -1318,7 +1376,7 @@ function makeQzvm(strings, opts) {
       const j = toJS(x);
       switch (name) {
         case "Array":    return (hi === 0x7ffbn || Array.isArray(j)) ? 1 : 0;
-        case "Object":   return (j !== null && (typeof j === "object" || typeof j === "function")) ? 1 : 0;
+        case "Object":   return (j !== null && j instanceof Object) ? 1 : 0;   // 须查原型链：Object.create(null) 无原型 → 不是 Object 实例
         case "Function": return typeof j === "function" ? 1 : 0;
         case "String":   return (typeof j === "object" && j !== null && j instanceof String) ? 1 : 0;
         case "Number":   return (typeof j === "object" && j !== null && j instanceof Number) ? 1 : 0;
