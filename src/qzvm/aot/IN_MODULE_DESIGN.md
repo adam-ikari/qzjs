@@ -1,6 +1,6 @@
 # in-module 档设计
 
-**状态**：设计定稿，M1–M5 已实现（guest 自包含）；M6 未实现——拆 M6a（去 JS 化）+ M6b（qzvm 模块合并，无 ABI 机制核心；前提 emitter 通用化不绑定 qzjs/qzvm）。详见 `NO_ABI_DESIGN.md`
+**状态**：设计定稿，M1–M5 已实现（guest 自包含）；M6 未实现——拆 M6a（去 JS 化）+ M6b（qzvm 模块合并，无 ABI 机制核心；前提 emitter 通用化不绑定 qzjs/qzvm）。**M6b multi-module PoC 已验通**（2026-10-19）：WAMR multi-module + memory import 跑通 emitter 产物↔libqzvm 链接（`test/m6b-poc/`），量税 dummy 31.9ns / 真 libqzvm 53.6ns/call（对比 JS shim 3.55µs = 66-111x 加速）→ **multi-module 可作 M6b 终态，免编译期合并**。完整落地剩余：113 原语 C 实现（包装 QuickJS internal，JS_Add 非公开需 eval/internal）+ emitter.js 改 import `qz.memory`+`qz.*`（addMemory→import）+ wasi/qz_host 真接线（当前 stub）+ 表示统一（emitter NaN-box vs QuickJS JSValue，句柄 handle table 待移植 qzvm.js）。详见 `NO_ABI_DESIGN.md`
 **范围**：把 **qzvm**（引擎 + `qz.*` 原语 + realm 生命周期 + DAP 调试器 + 扩展注册机制 + 引擎 patches；**不含** Web API 扩展内容、polyfill、pal 接线、libuv）编成 wasm32 模块（`libqzvm.wasm`）的 qzjs 构建形态。`QZ_PROFILE=in-module` 下**不含 wasm 引擎绑定**（`ext_wamr/ext_wasm3` 不进 guest）。
 **方法**：第一性原理推导 guest 真需要什么 + 奥卡姆剃刀取最小产 —— **不追求最小改动**
 **ABI 承诺**：qzjs 只承诺公开 JS API 稳定；wasm 模块内部与 qzvm 交互无 ABI 承诺（内联绑定，见 `NO_ABI_DESIGN.md`）。
