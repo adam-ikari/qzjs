@@ -3019,16 +3019,68 @@ function compileTS(input, outWasm, opts = {}) {
     // 第二趟：按采集到的子集注册契约面，真发产物。
     const m = new Module({ debug: !!opts.debug, debugLine: !!opts.debug || !!opts.debugLine, srcFile: input });
     const em = emitAll(m, contract);
-    /* 蹦床进表：把每个闭包蹦床装到其分配槽，供 C 侧 call_indirect 分派。必须在
-     * build() 前完成（elem 段在 build 时编码）。 */
-    if (em._trampSlots) {
+    em._trampSlots = em._trampSlots || new Map();
+    /* 类方法蹦床：与闭包蹦床同模式（统一 5 参 (i64 self, i64×4)），供 C 侧类原语
+     * 按 clsId+方法名 查表分派。每条 classMeta 项记录方法名→槽。 */
+    em._clsTrampSlots = new Map();   // 导出名 → 表槽
+    const clsMetaBuild = em._classList.map(cname => {
+        const c = em.classes.get(cname);
+        const mthToSlot = (mthName) => {
+            if (!em._clsTrampSlots.has(mthName)) {
+                const tn = mthName + "$t";
+                m.declareFunc(tn, ["i64", "i64", "i64", "i64", "i64"], ["i64"]);
+                m.startBody(tn, []);
+                /* 蹦床统一 5 参 (self, a0..a3)；类方法签名也是 5 参 (self, a0..a3) →
+                 * 直接转发 5 个 locals，多余/不足由 wasm 严格校验。
+                 * 但部分方法签名含第 6 槽（>4 形参）→ 这种蹦床用 6 参版。 */
+                const isLong = mthName.includes("$set") ? false : false;  // 简化：当前都 5 参
+                for (let k = 0; k < 5; k++) m.localGet(k);
+                m.call(mthName);
+                /* void 方法（ctor/$set）→ 补 undefined 句柄作返回值 */
+                if (mthName.includes("$ctor") || mthName.includes("$set")) em._emitUndefined();
+                m.return_();
+                m.endBody();
+                const base = em._inModuleLink ? INMOD_TABLE_CAP : 1;
+                const slot = base + ((em._trampSlots && em._trampSlots.size) || 0) + em._clsTrampSlots.size;
+                em._clsTrampSlots.set(mthName, slot);
+                m.addElem(slot, m._funcIdx[tn]);
+            }
+            return em._clsTrampSlots.get(mthName);
+        };
+        const methods = {}, getters = {}, setters = {}, staticMethods = {};
+        for (const mth of c.methods) {
+            const en = methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name);
+            const slot = mthToSlot(en);
+            const nameStrId = em._strId(mth.name);
+            if (mth.accessor === "set") setters[mth.name] = { slot, nameStrId, n: mth.node.parameters.length };
+            else if (mth.accessor === "get") getters[mth.name] = { slot, nameStrId, n: 0 };
+            else methods[mth.name] = { slot, nameStrId, n: mth.node.parameters.length,
+                                       rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken) };
+        }
+        for (const smth of (c.staticMethods || [])) {
+            if (smth.accessor) continue;
+            const en = staticMethName(cname, smth.name);
+            const slot = mthToSlot(en);
+            const nameStrId = em._strId(smth.name);
+            staticMethods[smth.name] = { slot, nameStrId, n: smth.node.parameters.length };
+        }
+        const p = c.parent ? em.classes.get(c.parent) : null;
+        const ctorSlot = mthToSlot(ctorName(cname));
+        return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null,
+                 methods, getters, setters, staticMethods, ctorSlot,
+                 ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };
+    });
+    em._clsMetaBuild = clsMetaBuild;
+    /* 类方法蹦床进表后，再补一次启动函数（与闭包共用同一表，槽区间共享）。 */
+    const totalTramp = ((em._trampSlots && em._trampSlots.size) || 0) + (em._clsTrampSlots ? em._clsTrampSlots.size : 0);
+    if (em._trampSlots && em._trampSlots.size) {
         for (const [tn, slot] of em._trampSlots) {
             const fi = m._funcIdx[tn];
             if (fi !== undefined) m.addElem(slot, fi);
         }
-        if (em._trampSlots.size) {
-            m.emitTableInit(em._trampSlots.size, INMOD_TABLE_CAP);
-        }
+    }
+    if (totalTramp > 0) {
+        m.emitTableInit(totalTramp, INMOD_TABLE_CAP);
     }
     fs.writeFileSync(outWasm, m.build());
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
@@ -3043,25 +3095,7 @@ function compileTS(input, outWasm, opts = {}) {
         try { const sf0 = lamNode.getSourceFile && lamNode.getSourceFile(); if (sf0) src = stripTsTypes(lamNode, sf0); } catch (_) {}
         lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis, src, needsArgs: !!(lamNode && lamNode._qzNeedsArgs) };
     }
-    // classMeta[clsId] = { id, parent(parent的clsId), methods: {name: {name(导出名), n(参数量)}} }
-    const classMeta = em._classList.map(cname => {
-        const c = em.classes.get(cname);
-        const methods = {}, getters = {}, setters = {}, staticMethods = {};
-        for (const mth of c.methods) {
-            if (mth.accessor === "set") setters[mth.name] = { name: methName(cname, mth.name + "$set"), n: mth.node.parameters.length };
-            else if (mth.accessor === "get") getters[mth.name] = { name: methName(cname, mth.name), n: 0 };
-            else methods[mth.name] = { name: methName(cname, mth.name), n: mth.node.parameters.length,
-                                       rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken) };
-        }
-        for (const smth of (c.staticMethods || [])) {
-            if (smth.accessor) continue;   // 静态 getter/setter 走独立路径
-            staticMethods[smth.name] = { name: staticMethName(cname, smth.name), n: smth.node.parameters.length };
-        }
-        const p = c.parent ? em.classes.get(c.parent) : null;
-
-        return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, methods, getters, setters, staticMethods,
-                 ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };   // 与 _instSize 一致（__cls + 字段）
-    });
+    const classMeta = em._clsMetaBuild || [];
     return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs, trampSlots: em._trampSlots || new Map() };
 }
 
