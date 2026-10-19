@@ -7,7 +7,8 @@ let failed = 0;
 const fail = (m) => { console.error('FAIL: ' + m); failed++; };
 const eqv = (label, got, want) => {
   const ok = Object.is(got, want);
-  console.log(`${ok ? 'ok  ' : 'FAIL'} ${label} = ${JSON.stringify(got)}${ok ? '' : ' want ' + JSON.stringify(want)}`);
+  const show = (x) => (typeof x === 'bigint' ? `${x}n` : JSON.stringify(x));
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${label} = ${show(got)}${ok ? '' : ' want ' + show(want)}`);
   if (!ok) failed++;
 };
 
@@ -80,7 +81,7 @@ eqv('in_op 非对象接收者', asBool(vm.in_op(str('x'), box(1))), 0);
 
 // ── 字符串表（后续 strId 键原语依赖它）──
 {
-  const names = ['a', 'z', 'a\u0000b\u0000c'];
+  const names = ['a', 'z', 'a\u0000b\u0000c', 'toUpperCase'];
   const base = vm.alloc(256);
   const dv0 = view();
   dv0.setUint32(base, names.length, true);
@@ -175,5 +176,70 @@ eqv('length_of("hello")', unbox(vm.length_of(str('hello'))), 5);
   eqv('libqzvm qz_eval 正常', vm.qz_eval(vm.qz_create(0, 0), p, src.length), 0);
 }
 
+// ── 闭包环境层链 ──
+{
+  const root = Number(vm.env_new(-1));            // 根层（parent=-1）
+  vm.env_def(root, 0, box(42));
+  eqv('env_get 本层', unbox(vm.env_get(root, 0)), 42);
+  const child = Number(vm.env_new(root));
+  eqv('env_get 沿 parent 上溯', unbox(vm.env_get(child, 0)), 42);
+  vm.env_def(child, 1, box(7));
+  eqv('env_get 子层自有名', unbox(vm.env_get(child, 1)), 7);
+  vm.env_set(child, 0, box(99));                  // 写到定义层
+  eqv('env_set 命中定义层', unbox(vm.env_get(root, 0)), 99);
+  eqv('env_get 缺失名 → undefined', isUndef(vm.env_get(child, 5)), true);
+}
+
+// ── 空数组 / 迭代协议 ──
+{
+  const a = vm.empty_array();
+  eqv('empty_array length', unbox(vm.length_of(a)), 0);
+  vm.arr_set_index(a, box(0), box(10));
+  vm.arr_set_index(a, box(1), box(20));
+  const it = vm.iter_new(a);
+  eqv('iter_pull 第一次', Number(vm.iter_pull(it)), 0);
+  eqv('iter_val 第一次', unbox(vm.iter_val(it)), 10);
+  eqv('iter_pull 第二次', Number(vm.iter_pull(it)), 0);
+  eqv('iter_val 第二次', unbox(vm.iter_val(it)), 20);
+  eqv('iter_pull 第三次 done', Number(vm.iter_pull(it)), 1);
+  vm.iter_close(it);
+  eqv('iter_array 长度', unbox(vm.length_of(vm.iter_array(a))), 2);
+  const into = vm.empty_array();
+  vm.spread_into(into, a);
+  eqv('spread_into 长度', unbox(vm.length_of(into)), 2);
+}
+
+// ── 字符串 / 正则 / BigInt / Symbol ──
+{
+  eqv('str_chars 码点数', unbox(vm.length_of(vm.str_chars(str('a\u00e9\u{1f600}')))), 3);
+  eqv('str_method toUpperCase（字符串表 strId 3）', strOf(vm.str_method(str('abc'), 3, 0x7ff9000000000000n, 0x7ff9000000000000n)), 'ABC');
+  eqv('regex 生成了值（strId 1 = "z"）', isUndef(vm.regex(1)), false);
+  eqv('is_symbol_host(数值)', vm.is_symbol_host(box(5)), 0);
+  eqv('bigint_lit 是 BigInt 句柄', (BigInt.asUintN(64, vm.bigint_lit(0)) >> 48n), 0x7ff8n);
+}
+
+// ── object_rest / obj_assign / tagged_strings / err_stack ──
+{
+  const o = vm.object_new();
+  vm.prop_set(o, 0, box(1));                      // "a"
+  vm.prop_set(o, 1, box(2));                      // "z"
+  const rest = vm.object_rest(o, 1, 0, -1, -1);   // 排除 strId 0 = "a"
+  eqv('object_rest 排除 a', isUndef(vm.object_get(rest, 0)), true);
+  eqv('object_rest 保留 z', unbox(vm.object_get(rest, 1)), 2);
+
+  const d = vm.object_new(), s1 = vm.object_new();
+  vm.prop_set(s1, 0, box(77));
+  vm.obj_assign(0, d, s1, 0x7ff9000000000000n, 0x7ff9000000000000n);
+  eqv('obj_assign 复制自有属性', unbox(vm.object_get(d, 0)), 77);
+
+  const cooked = vm.empty_array(); vm.arr_set_index(cooked, box(0), str('hi'));
+  const raw = vm.empty_array(); vm.arr_set_index(raw, box(0), str('hi'));
+  const ts = vm.tagged_strings(cooked, raw);
+  eqv('tagged_strings 长度', unbox(vm.length_of(ts)), 1);
+  eqv('tagged_strings 带 raw', isUndef(vm.get_index(ts, str('raw'))), false);
+
+  eqv('err_stack 普通对象 → undefined', isUndef(vm.err_stack(vm.object_new())), true);
+}
+
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }
-console.log('PASS: primitives + props/arrays/key-order semantics e2e');
+console.log('PASS: primitives + props/arrays/key-order/env/iter semantics e2e');

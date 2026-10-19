@@ -1411,3 +1411,618 @@ int64_t qz_guest_bigint_binop(int32_t op, int64_t a, int64_t b)
     JS_FreeValue(ctx, x); JS_FreeValue(ctx, y); JS_FreeValue(ctx, vr);
     return r;
 }
+
+/* ── M6b: 闭包环境层链 ────────────────────────────────────────────
+ * emitter 约定：env 句柄是 i32 索引（-1 = 根，0 = 无捕获），闭包值 = 0x7FFF|off
+ * 指向 bump arena 的 [funcidx][envIdx][arity][nameStrId]。
+ * 宿主维护一张层表；层内按 strId 存值，读取沿 parent 链上溯。*/
+typedef struct QzEnv {
+    int32_t parent;
+    uint32_t count;
+    uint32_t cap;
+    struct { int32_t nameId; JSValue val; } *slots;
+} QzEnv;
+
+static QzEnv *g_envs = NULL;
+static uint32_t g_envCount = 0, g_envCap = 0;
+
+static void qz_env_release(void)
+{
+    for (uint32_t i = 0; i < g_envCount; i++) {
+        QzEnv *e = &g_envs[i];
+        if (e->slots) {
+            JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+            if (ctx) for (uint32_t k = 0; k < e->count; k++) JS_FreeValue(ctx, e->slots[k].val);
+            free(e->slots);
+        }
+    }
+    free(g_envs); g_envs = NULL; g_envCount = g_envCap = 0;
+}
+
+/* 取（必要时创建）层 i；索引越界返回 NULL。*/
+static QzEnv *qz_env_at(uint32_t i, int create)
+{
+    if (i >= g_envCount) {
+        if (!create || i > g_envCount + 1024) return NULL;
+        if (g_envCount == 0) return NULL;                 /* 必须先 env_new 建根（索引 0） */
+        while (g_envCount <= i) {
+            if (g_envCount == g_envCap) {
+                uint32_t ncap = g_envCap ? g_envCap * 2 : 64;
+                QzEnv *n = (QzEnv *)realloc(g_envs, (size_t)ncap * sizeof(QzEnv));
+                if (!n) return NULL;
+                memset(n + g_envCap, 0, (size_t)(ncap - g_envCap) * sizeof(QzEnv));
+                g_envs = n; g_envCap = ncap;
+            }
+            g_envs[g_envCount].parent = -1;
+            g_envCount++;
+        }
+    }
+    return i < g_envCount ? &g_envs[i] : NULL;
+}
+
+__attribute__((export_name("env_new")))
+int64_t qz_guest_env_new(int32_t parent)
+{
+    if (!g_current_rt) return 0;
+    if (g_envCount == g_envCap) {
+        uint32_t ncap = g_envCap ? g_envCap * 2 : 64;
+        QzEnv *n = (QzEnv *)realloc(g_envs, (size_t)ncap * sizeof(QzEnv));
+        if (!n) return 0;
+        memset(n + g_envCap, 0, (size_t)(ncap - g_envCap) * sizeof(QzEnv));
+        g_envs = n; g_envCap = ncap;
+    }
+    uint32_t idx = g_envCount++;
+    g_envs[idx].parent = parent;
+    g_envs[idx].count = 0;
+    return (int64_t)idx;
+}
+
+__attribute__((export_name("env_def")))
+void qz_guest_env_def(int32_t envIdx, int32_t nameId, int64_t val)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    QzEnv *e = qz_env_at((uint32_t)envIdx, 0);
+    if (!e) return;
+    JSValue v = qz_tojs(ctx, val);
+    for (uint32_t k = 0; k < e->count; k++) {
+        if (e->slots[k].nameId == nameId) { JS_FreeValue(ctx, e->slots[k].val); e->slots[k].val = v; return; }
+    }
+    if (e->count == e->cap) {
+        uint32_t ncap = e->cap ? e->cap * 2 : 8;
+        void *n = realloc(e->slots, (size_t)ncap * sizeof(*e->slots));
+        if (!n) { JS_FreeValue(ctx, v); return; }
+        e->slots = n; e->cap = ncap;
+    }
+    e->slots[e->count].nameId = nameId;
+    e->slots[e->count].val = v;
+    e->count++;
+}
+
+/* 沿 parent 链查名字；找到返回 1 并写出值。*/
+static int qz_env_lookup(JSContext *ctx, int32_t envIdx, int32_t nameId, JSValue *out)
+{
+    int32_t i = envIdx;
+    int guard = 0;
+    while (i >= 0 && (uint32_t)i < g_envCount && guard++ < 4096) {
+        QzEnv *e = &g_envs[i];
+        for (uint32_t k = 0; k < e->count; k++) {
+            if (e->slots[k].nameId == nameId) { *out = JS_DupValue(ctx, e->slots[k].val); return 1; }
+        }
+        i = e->parent;
+    }
+    return 0;
+}
+
+__attribute__((export_name("env_get")))
+int64_t qz_guest_env_get(int32_t envIdx, int32_t nameId)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue v = JS_UNDEFINED;
+    if (!qz_env_lookup(ctx, envIdx, nameId, &v)) return (int64_t)0x7FF9000000000000LL;
+    int64_t r = qz_ret(ctx, v);
+    JS_FreeValue(ctx, v);
+    return r;
+}
+
+__attribute__((export_name("env_set")))
+void qz_guest_env_set(int32_t envIdx, int32_t nameId, int64_t val)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    int32_t i = envIdx, guard = 0;
+    JSValue v = qz_tojs(ctx, val);
+    while (i >= 0 && (uint32_t)i < g_envCount && guard++ < 4096) {
+        QzEnv *e = &g_envs[i];
+        for (uint32_t k = 0; k < e->count; k++) {
+            if (e->slots[k].nameId == nameId) { JS_FreeValue(ctx, e->slots[k].val); e->slots[k].val = v; return; }
+        }
+        i = e->parent;
+    }
+    /* 未找到：写进最内层（JS 语义上的隐式全局在 AOT 中即当前层）*/
+    JS_FreeValue(ctx, v);
+    qz_guest_env_def(envIdx, nameId, val);
+}
+
+/* ── M6b: 迭代协议、字符串/正则/对象杂项 ───────────────────────────
+ * 迭代器状态存宿主句柄表（0x7FF9 低 32 位 = 索引）：每项持有 iterator 对象
+ * 与其 next 方法，pull 一次调 next，val 取当前结果。*/
+typedef struct QzIter {
+    JSValue iter;      /* 迭代器对象 */
+    JSValue next;      /* 其 next 方法 */
+    JSValue cur;       /* 最近一次 next 的 result.value */
+    int done;
+} QzIter;
+
+static QzIter *g_iters = NULL;
+static uint32_t g_iterCount = 0, g_iterCap = 0;
+
+static int qz_iter_slot(uint32_t idx, QzIter **out)
+{
+    if (idx >= g_iterCount) return 0;
+    *out = &g_iters[idx];
+    return 1;
+}
+
+/* 取迭代器方法：v[Symbol.iterator]() → iterator 对象。*/
+static JSValue qz_get_iterator(JSContext *ctx, JSValueConst v)
+{
+    /* quickjs.h 不导出 atom 枚举：取全局 Symbol.iterator 值，再用 JS_GetProperty 查
+     * symbol 键（JS_GetProperty 接受 JSValue atom 形式，Symbol atom 由 JS_ValueToAtom 得到）。*/
+    JSValue g = JS_GetGlobalObject(ctx);
+    JSValue symC = JS_GetPropertyStr(ctx, g, "Symbol");
+    JSValue symIt = JS_GetPropertyStr(ctx, symC, "iterator");
+    JS_FreeValue(ctx, symC); JS_FreeValue(ctx, g);
+    if (!JS_IsSymbol(symIt)) { JS_FreeValue(ctx, symIt); return JS_EXCEPTION; }
+    JSAtom atom = JS_ValueToAtom(ctx, symIt);
+    JSValue method = JS_UNDEFINED;
+    if (atom != JS_ATOM_NULL) {
+        method = JS_GetProperty(ctx, v, atom);
+        JS_FreeAtom(ctx, atom);
+    }
+    JS_FreeValue(ctx, symIt);
+    if (JS_IsException(method) || !JS_IsFunction(ctx, method)) {
+        JS_FreeValue(ctx, method);
+        return JS_EXCEPTION;
+    }
+    JSValue iter = JS_Call(ctx, method, v, 0, NULL);
+    JS_FreeValue(ctx, method);
+    return iter;
+}
+
+__attribute__((export_name("iter_new")))
+int64_t qz_guest_iter_new(int64_t target)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue t = qz_tojs(ctx, target);
+    JSValue iter = qz_get_iterator(ctx, t);
+    JS_FreeValue(ctx, t);
+    if (JS_IsException(iter)) { JS_FreeValue(ctx, iter); return 0; }
+    JSValue next = JS_GetPropertyStr(ctx, iter, "next");
+    if (g_iterCount == g_iterCap) {
+        uint32_t ncap = g_iterCap ? g_iterCap * 2 : 32;
+        QzIter *n = (QzIter *)realloc(g_iters, (size_t)ncap * sizeof(QzIter));
+        if (!n) { JS_FreeValue(ctx, iter); JS_FreeValue(ctx, next); return 0; }
+        memset(n + g_iterCap, 0, (size_t)(ncap - g_iterCap) * sizeof(QzIter));
+        g_iters = n; g_iterCap = ncap;
+    }
+    uint32_t idx = g_iterCount++;
+    g_iters[idx].iter = iter;
+    g_iters[idx].next = next;
+    g_iters[idx].cur = JS_UNDEFINED;
+    g_iters[idx].done = 0;
+    return (int64_t)(((uint64_t)0x7FF9 << 48) | (uint64_t)idx);
+}
+
+/* iter_pull→i64（BigInt 语义：0 = continue，1 = done）。*/
+__attribute__((export_name("iter_pull")))
+int64_t qz_guest_iter_pull(int64_t handle)
+{
+    if (!g_current_rt) return 1;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 1;
+    QzIter *it = NULL;
+    if (!qz_iter_slot((uint32_t)((uint64_t)handle & 0xFFFFFFFFu), &it) || it->done) return 1;
+    JSValue res = JS_Call(ctx, it->next, it->iter, 0, NULL);
+    if (JS_IsException(res)) { JS_FreeValue(ctx, res); it->done = 1; return 1; }
+    JSValue done = JS_GetPropertyStr(ctx, res, "done");
+    int isDone = JS_ToBool(ctx, done);
+    JS_FreeValue(ctx, done);
+    JS_FreeValue(ctx, it->cur);
+    it->cur = JS_GetPropertyStr(ctx, res, "value");
+    JS_FreeValue(ctx, res);
+    if (isDone) { it->done = 1; return 1; }
+    return 0;
+}
+
+__attribute__((export_name("iter_val")))
+int64_t qz_guest_iter_val(int64_t handle)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    QzIter *it = NULL;
+    if (!qz_iter_slot((uint32_t)((uint64_t)handle & 0xFFFFFFFFu), &it)) return 0;
+    int64_t r = qz_ret(ctx, it->cur);
+    return r;
+}
+
+__attribute__((export_name("iter_close")))
+void qz_guest_iter_close(int64_t handle)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    uint32_t idx = (uint32_t)((uint64_t)handle & 0xFFFFFFFFu);
+    QzIter *it = NULL;
+    if (!qz_iter_slot(idx, &it)) return;
+    if (!it->done) {
+        JSValue ret = JS_GetPropertyStr(ctx, it->iter, "return");
+        if (JS_IsFunction(ctx, ret)) {
+            JSValue r = JS_Call(ctx, ret, it->iter, 0, NULL);
+            JS_FreeValue(ctx, r);
+        }
+        JS_FreeValue(ctx, ret);
+        it->done = 1;
+    }
+    JS_FreeValue(ctx, it->cur);
+    it->cur = JS_UNDEFINED;
+}
+
+/* iter_array(v)→i64：可迭代物 → 宿主数组（展开用）。*/
+__attribute__((export_name("iter_array")))
+int64_t qz_guest_iter_array(int64_t v)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue t = qz_tojs(ctx, v);
+    JSValue out = JS_NewArray(ctx);
+    JSValue iter = qz_get_iterator(ctx, t);
+    if (!JS_IsException(iter)) {
+        JSValue next = JS_GetPropertyStr(ctx, iter, "next");
+        uint32_t n = 0;
+        for (;;) {
+            JSValue res = JS_Call(ctx, next, iter, 0, NULL);
+            if (JS_IsException(res)) { JS_FreeValue(ctx, res); break; }
+            JSValue done = JS_GetPropertyStr(ctx, res, "done");
+            int isDone = JS_ToBool(ctx, done);
+            JS_FreeValue(ctx, done);
+            if (isDone) { JS_FreeValue(ctx, res); break; }
+            JSValue val = JS_GetPropertyStr(ctx, res, "value");
+            JS_SetPropertyUint32(ctx, out, n++, val);   /* 接管 val */
+            JS_FreeValue(ctx, res);
+        }
+        JS_FreeValue(ctx, next);
+    }
+    JS_FreeValue(ctx, iter);
+    JS_FreeValue(ctx, t);
+    int64_t r = qz_ret(ctx, out);
+    JS_FreeValue(ctx, out);
+    return r;
+}
+
+/* spread_into(dstArr, src)→i64：[...src] 按迭代协议并入数组。*/
+__attribute__((export_name("spread_into")))
+int64_t qz_guest_spread_into(int64_t dst, int64_t src)
+{
+    if (!g_current_rt) return dst;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return dst;
+    JSValue d = qz_tojs(ctx, dst), s = qz_tojs(ctx, src);
+    if (JS_IsObject(d)) {
+        JSValue lv = JS_GetPropertyStr(ctx, d, "length");
+        double f = 0; JS_ToFloat64(ctx, &f, lv);
+        JS_FreeValue(ctx, lv);
+        uint32_t n = (uint32_t)f;
+        JSValue iter = qz_get_iterator(ctx, s);
+        if (!JS_IsException(iter)) {
+            JSValue next = JS_GetPropertyStr(ctx, iter, "next");
+            for (;;) {
+                JSValue res = JS_Call(ctx, next, iter, 0, NULL);
+                if (JS_IsException(res)) { JS_FreeValue(ctx, res); break; }
+                JSValue done = JS_GetPropertyStr(ctx, res, "done");
+                int isDone = JS_ToBool(ctx, done);
+                JS_FreeValue(ctx, done);
+                if (isDone) { JS_FreeValue(ctx, res); break; }
+                JSValue val = JS_GetPropertyStr(ctx, res, "value");
+                JS_SetPropertyUint32(ctx, d, n++, val);
+                JS_FreeValue(ctx, res);
+            }
+            JS_FreeValue(ctx, next);
+        }
+        JS_FreeValue(ctx, iter);
+    }
+    int64_t r = qz_ret(ctx, d);
+    JS_FreeValue(ctx, d); JS_FreeValue(ctx, s);
+    return r;
+}
+
+/* empty_array()→i64：rest 形参缺省 / 空数组。*/
+__attribute__((export_name("empty_array")))
+int64_t qz_guest_empty_array(void)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue a = JS_NewArray(ctx);
+    int64_t r = qz_ret(ctx, a);
+    JS_FreeValue(ctx, a);
+    return r;
+}
+
+/* str_chars(s)→i64：字符串 → 码点字符数组（按码点切，非 UTF-16 单元）。*/
+__attribute__((export_name("str_chars")))
+int64_t qz_guest_str_chars(int64_t v)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue s = qz_tojs(ctx, v);
+    JSValue out = JS_NewArray(ctx);
+    if (JS_IsString(s)) {
+        size_t len = 0;
+        const char *p = JS_ToCStringLen(ctx, &len, s);
+        if (p) {
+            uint32_t n = 0;
+            size_t i = 0;
+            while (i < len) {
+                unsigned char c = (unsigned char)p[i];
+                size_t cl = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+                if (i + cl > len) cl = len - i;
+                JS_SetPropertyUint32(ctx, out, n++, JS_NewStringLen(ctx, p + i, cl));
+                i += cl;
+            }
+            JS_FreeCString(ctx, p);
+        }
+    }
+    int64_t r = qz_ret(ctx, out);
+    JS_FreeValue(ctx, s); JS_FreeValue(ctx, out);
+    return r;
+}
+
+/* regex(strId)→i64：编译期正则字面量 → 宿主 RegExp。*/
+__attribute__((export_name("regex")))
+int64_t qz_guest_regex(int32_t strId)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t len = 0;
+    const char *s = qz_str_by_id(strId, &len);
+    if (!s) return 0;
+    /* 无公开 RegExp 构造 API：走全局 RegExp（字面量 /re/ 由 QuickJS 侧解析字面量文本）*/
+    JSValue g = JS_GetGlobalObject(ctx);
+    JSValue ctor = JS_GetPropertyStr(ctx, g, "RegExp");
+    JSValue re = JS_EXCEPTION;
+    if (JS_IsFunction(ctx, ctor)) {
+        JSValue arg = JS_NewStringLen(ctx, s, len);
+        re = JS_Call(ctx, ctor, g, 1, &arg);
+        JS_FreeValue(ctx, arg);
+    }
+    JS_FreeValue(ctx, ctor); JS_FreeValue(ctx, g);
+    int64_t r = qz_ret(ctx, re);
+    JS_FreeValue(ctx, re);
+    return r;
+}
+
+/* log(v)：调试输出到 stderr。*/
+__attribute__((export_name("log")))
+void qz_guest_log(int64_t v)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    JSValue s = qz_tojs(ctx, v);
+    size_t len = 0;
+    const char *p = JS_ToCStringLen(ctx, &len, s);
+    if (p) { fwrite(p, 1, len, stderr); fputc('\n', stderr); JS_FreeCString(ctx, p); }
+    JS_FreeValue(ctx, s);
+}
+
+/* is_symbol_host(v)→i32：宿主值是否 JS symbol。*/
+__attribute__((export_name("is_symbol_host")))
+int32_t qz_guest_is_symbol_host(int64_t a)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue v = qz_tojs(ctx, a);
+    int32_t r = JS_IsSymbol(v) ? 1 : 0;
+    JS_FreeValue(ctx, v);
+    return r;
+}
+
+/* err_stack(e)→i64：Error 实例的 .stack 字符串（缺失即 undefined）。*/
+__attribute__((export_name("err_stack")))
+int64_t qz_guest_err_stack(int64_t v)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue e = qz_tojs(ctx, v);
+    JSValue st = JS_GetPropertyStr(ctx, e, "stack");
+    int64_t r = qz_ret(ctx, st);
+    JS_FreeValue(ctx, e); JS_FreeValue(ctx, st);
+    return r;
+}
+
+/* object_rest(src, nExcl, excl0, excl1, excl2)→i64：{...rest}——去掉已绑定键。*/
+__attribute__((export_name("object_rest")))
+int64_t qz_guest_object_rest(int64_t src, int32_t nExcl, int32_t e0, int32_t e1, int32_t e2)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue s = qz_tojs(ctx, src);
+    JSValue out = JS_NewObject(ctx);
+    int32_t excl[3] = { e0, e1, e2 };
+    JSPropertyEnum *tab = NULL;
+    uint32_t n = 0;
+    if (JS_IsObject(s) &&
+        JS_GetOwnPropertyNames(ctx, &tab, &n, s, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            const char *k = JS_AtomToCString(ctx, tab[i].atom);
+            int skip = 0;
+            if (k) {
+                for (int32_t e = 0; e < nExcl && e < 3; e++) {
+                    size_t el = 0;
+                    const char *es = qz_str_by_id(excl[e], &el);
+                    if (es && el == strlen(k) && memcmp(es, k, el) == 0) { skip = 1; break; }
+                }
+                JS_FreeCString(ctx, k);
+            }
+            if (!skip) {
+                JSValue v = JS_GetProperty(ctx, s, tab[i].atom);
+                JS_SetProperty(ctx, out, tab[i].atom, v);
+            }
+            JS_FreeAtom(ctx, tab[i].atom);
+        }
+        js_free(ctx, tab);
+    }
+    int64_t r = qz_ret(ctx, out);
+    JS_FreeValue(ctx, s); JS_FreeValue(ctx, out);
+    return r;
+}
+
+/* prot_check(v, op)：写保护检查（freeze/seal 后写应失败）。
+ * AOT 侧用它在写入点提前 trap；这里把不可写属性检出为异常。*/
+__attribute__((export_name("prot_check")))
+void qz_guest_prot_check(int64_t v, int32_t op)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    /* 冻结对象不可扩展；seal/freeze 的差异（属性可写性）由 JS_SetProperty 自身拒绝，
+     * 故此处以「不可扩展」作为写保护信号。op: 0=写属性 1=读（读不拦截）。*/
+    JSValue o = qz_tojs(ctx, v);
+    int sealed_ = JS_IsObject(o) ? !JS_IsExtensible(ctx, o) : 0;
+    JS_FreeValue(ctx, o);
+    if (sealed_ && op == 0) JS_ThrowTypeError(ctx, "cannot assign to non-extensible object");
+}
+
+/* obj_assign(id, dst, a0, a1, a2)：Object.assign(dst, ...srcs)（最多 3 源）。*/
+__attribute__((export_name("obj_assign")))
+int64_t qz_guest_obj_assign(int32_t id, int64_t dst, int64_t a0, int64_t a1, int64_t a2)
+{
+    (void)id;
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue d = qz_tojs(ctx, dst);
+    int64_t srcs[3] = { a0, a1, a2 };
+    JSValue undef = JS_UNDEFINED;
+    for (int i = 0; i < 3; i++) {
+        JSValue s = qz_tojs(ctx, srcs[i]);
+        /* undefined/null 源按 JS 语义跳过 */
+        if (!JS_IsUndefined(s) && !JS_IsNull(s) && JS_IsObject(s)) {
+            JSPropertyEnum *tab = NULL;
+            uint32_t n = 0;
+            if (JS_GetOwnPropertyNames(ctx, &tab, &n, s, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                for (uint32_t k = 0; k < n; k++) {
+                    JSValue v = JS_GetProperty(ctx, s, tab[k].atom);
+                    JS_SetProperty(ctx, d, tab[k].atom, v);
+                    JS_FreeAtom(ctx, tab[k].atom);
+                }
+                js_free(ctx, tab);
+            }
+        }
+        JS_FreeValue(ctx, s);
+    }
+    (void)undef;
+    int64_t r = qz_ret(ctx, d);
+    JS_FreeValue(ctx, d);
+    return r;
+}
+
+/* tagged_strings(cookedId, rawId)→i64：用户标签模板 strings 对象（含 .raw）。*/
+__attribute__((export_name("tagged_strings")))
+int64_t qz_guest_tagged_strings(int64_t cooked, int64_t raw)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    JSValue c = qz_tojs(ctx, cooked), r0 = qz_tojs(ctx, raw);
+    JSValue out = JS_NewArray(ctx);
+    if (JS_IsArray(c)) {
+        JSValue lv = JS_GetPropertyStr(ctx, c, "length");
+        double f = 0; JS_ToFloat64(ctx, &f, lv);
+        JS_FreeValue(ctx, lv);
+        uint32_t n = (uint32_t)f;
+        for (uint32_t i = 0; i < n; i++)
+            JS_SetPropertyUint32(ctx, out, i, JS_GetPropertyUint32(ctx, c, i));
+        /* strings.raw：不可枚举但可读，按 ECMA-262 定义 */
+        JS_DefinePropertyValueStr(ctx, out, "raw", JS_DupValue(ctx, r0),
+                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    }
+    int64_t r = qz_ret(ctx, out);
+    JS_FreeValue(ctx, c); JS_FreeValue(ctx, r0); JS_FreeValue(ctx, out);
+    return r;
+}
+
+/* bigint_lit(strId)→i64：BigInt 字面量（十进制串）→ 值。*/
+__attribute__((export_name("bigint_lit")))
+int64_t qz_guest_bigint_lit(int32_t strId)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t len = 0;
+    const char *s = qz_str_by_id(strId, &len);
+    if (!s) return 0;
+    JSValue b = JS_NewBigInt64(ctx, 0);
+    /* 走字符串→BigInt 的通用路径，避免自行解析超 64 位 */
+    JSValue g = JS_GetGlobalObject(ctx);
+    JSValue fn = JS_GetPropertyStr(ctx, g, "BigInt");
+    if (JS_IsFunction(ctx, fn)) {
+        JSValue arg = JS_NewStringLen(ctx, s, len);
+        JSValue r0 = JS_Call(ctx, fn, g, 1, &arg);
+        JS_FreeValue(ctx, arg);
+        if (!JS_IsException(r0)) { JS_FreeValue(ctx, b); b = r0; }
+        else JS_FreeValue(ctx, r0);
+    }
+    JS_FreeValue(ctx, fn); JS_FreeValue(ctx, g);
+    int64_t r = qz_ret(ctx, b);
+    JS_FreeValue(ctx, b);
+    return r;
+}
+
+/* str_method(recv, mid, a0, a1)→i64：字符串方法回退（按名调用）。*/
+__attribute__((export_name("str_method")))
+int64_t qz_guest_str_method(int64_t recv, int32_t mid, int64_t a0, int64_t a1)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t nlen = 0;
+    const char *name = qz_str_by_id(mid, &nlen);
+    if (!name) return 0;
+    char nm[64];
+    if (nlen >= sizeof(nm)) return 0;
+    memcpy(nm, name, nlen); nm[nlen] = '\0';
+    JSValue r0 = qz_tojs(ctx, recv);
+    JSValue fn = JS_GetPropertyStr(ctx, r0, nm);
+    int64_t r = 0;
+    if (JS_IsFunction(ctx, fn)) {
+        JSValue argv[2];
+        int argc = 0;
+        JSValue p0 = qz_tojs(ctx, a0);
+        if (!JS_IsUndefined(p0)) argv[argc++] = p0;
+        else JS_FreeValue(ctx, p0);
+        JSValue p1 = qz_tojs(ctx, a1);
+        if (!JS_IsUndefined(p1)) argv[argc++] = p1;
+        else JS_FreeValue(ctx, p1);
+        JSValue res = JS_Call(ctx, fn, r0, argc, argv);
+        for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
+        if (!JS_IsException(res)) { r = qz_ret(ctx, res); JS_FreeValue(ctx, res); }
+        else JS_FreeValue(ctx, res);
+    }
+    JS_FreeValue(ctx, fn); JS_FreeValue(ctx, r0);
+    return r;
+}
