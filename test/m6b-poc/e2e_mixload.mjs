@@ -84,6 +84,8 @@ chk('numWork(3000)', call('numWork', [3000]), 66268200);
 chk('objWork(5)', call('objWork', [5]), 40);
 chk('bigAcc(3000)', call('bigAcc', [3000]), 3000000000000);
 chk('arrWork(3)', call('arrWork', [3]), 6);
+chk('arrGrowWrite()', call('arrGrowWrite', []), 102);
+chk('strConcatEq()', call('strConcatEq', []), 11);
 
 L.qz_destroy(rt);
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }

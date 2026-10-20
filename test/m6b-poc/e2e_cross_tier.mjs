@@ -26,6 +26,8 @@ const LOADS = [
     ['arrAlias', [], 303],
     ['splitIndex', [], 'z3'],
     ['literals', [], 5],
+    ['arrGrowWrite', [], 102],
+    ['strConcatEq', [], 11],
   ]],
   ['cls.ts', [
     ['dogRun', [], 'hi woof/woof!'],

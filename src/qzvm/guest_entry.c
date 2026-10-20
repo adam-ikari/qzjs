@@ -281,27 +281,52 @@ int qz_guest_result_len(void)
  * 前提: emitter 产物 import "qz" "memory" 共享 libqzvm linear memory。
  * NaN-box 句柄（0x7FF9/0x7FFA/0x7FFB）后续: 当前只处理数值(f64 位型),
  * 句柄解 tag + handle table 是 M6b 完整落地工程。 */
+static int64_t qz_ret(JSContext *ctx, JSValue r);
+static JSValue qz_tojs(JSContext *ctx, int64_t b);
+
 __attribute__((export_name("add")))
 int64_t qz_guest_add(int64_t a, int64_t b)
 {
     if (!g_current_rt) return a + b;  /* fallback: 未经 qz_eval 流 */
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return a + b;
-    double fa, fb;
-    memcpy(&fa, &a, sizeof(double));  /* i64 NaN-box → f64 位型（数值假设） */
-    memcpy(&fb, &b, sizeof(double));
-    JSValue va = JS_NewFloat64(ctx, fa);  /* 验 QuickJS API 可达 */
-    JSValue vb = JS_NewFloat64(ctx, fb);
-    double fa2 = 0.0, fb2 = 0.0;
-    int err = JS_ToFloat64(ctx, &fa2, va);  /* round-trip */
-    if (!err) JS_ToFloat64(ctx, &fb2, vb);
-    JS_FreeValue(ctx, va);
-    JS_FreeValue(ctx, vb);
-    if (err) return a + b;
-    double fr = fa2 + fb2;  /* C 加法（JS_Add 非公开 API, 完整 JS 语义 string concat 等后续 eval/internal） */
-    int64_t r;
-    memcpy(&r, &fr, sizeof(double));
-    return r;
+    /* 数值快路径：两位型都不是句柄 → f64 加法（无跨界，最优）。 */
+    uint64_t ua = (uint64_t)a, ub = (uint64_t)b;
+    uint16_t ta = (uint16_t)(ua >> 48), tb = (uint16_t)(ub >> 48);
+    int aH = (ta >= 0x7FF8 && ta <= 0x7FFF) && !(ta == 0x7FF8 && (uint32_t)ua == 0);
+    int bH = (tb >= 0x7FF8 && tb <= 0x7FFF) && !(tb == 0x7FF8 && (uint32_t)ub == 0);
+    if (!aH && !bH) {
+        double fa, fb;
+        memcpy(&fa, &a, sizeof(double));
+        memcpy(&fb, &b, sizeof(double));
+        double fr = fa + fb;
+        int64_t r;
+        memcpy(&r, &fr, sizeof(double));
+        return r;
+    }
+    /* 含句柄（字符串/对象/BigInt…）：走 JS 加法语义。JS_Add 非公开 API，
+     * 用等价公开路径：JS_ToString 双方 → 拼接（ToPrimitive 的字符串分支）。 */
+    JSValue va = qz_tojs(ctx, a), vb = qz_tojs(ctx, b);
+    JSValue sb = JS_ToString(ctx, vb);
+    JSValue sa = JS_ToString(ctx, va);
+    int64_t out;
+    size_t la = 0, lb = 0;
+    const char *pa = JS_IsException(sa) ? NULL : JS_ToCStringLen(ctx, &la, sa);
+    const char *pb = JS_IsException(sb) ? NULL : JS_ToCStringLen(ctx, &lb, sb);
+    if (pa && pb) {
+        char *buf = (char *)malloc(la + lb + 1);
+        if (buf) {
+            memcpy(buf, pa, la); memcpy(buf + la, pb, lb); buf[la + lb] = 0;
+            JSValue vr = JS_NewStringLen(ctx, buf, la + lb);
+            out = qz_ret(ctx, vr);
+            JS_FreeValue(ctx, vr);
+            free(buf);
+        } else out = 0;
+        JS_FreeCString(ctx, pa); JS_FreeCString(ctx, pb);
+    } else out = 0;
+    JS_FreeValue(ctx, sa); JS_FreeValue(ctx, sb);
+    JS_FreeValue(ctx, va); JS_FreeValue(ctx, vb);
+    return out;
 }
 
 /* ── M6b: handle table（0x7FF9 句柄，复杂原语基础）────────── */
@@ -360,8 +385,6 @@ static int qz_lam_synth_this(int32_t slot)
     }
     return 0;
 }
-static int64_t qz_ret(JSContext *ctx, JSValue r);
-static JSValue qz_tojs(JSContext *ctx, int64_t b);
 static int64_t qz_host_obj_handle(JSContext *ctx, JSValue r);
 
 /* CFunctionData 回调：func_data[0] = off(i32)，magic = 0。
@@ -386,6 +409,7 @@ static JSValue qz_js_closure_cb(JSContext *ctx, JSValueConst this_val, int argc,
     int synth = qz_lam_synth_this(slot);
     int64_t a[4];
     int nargs = synth ? 3 : 4;
+    a[3] = undef;                                     /* 未传的第 4 实参槽必须初始化 */
     for (int i = 0; i < 3; i++) a[i] = i < argc ? qz_ret(ctx, argv[i]) : undef;
     if (synth) {
         a[3] = a[2]; a[2] = a[1]; a[1] = a[0];
@@ -428,20 +452,37 @@ static JSValue qz_closure_materialize(JSContext *ctx, uint32_t off)
 static struct { uint32_t off; JSValue js; } g_arr_cache[QZ_ARR_CACHE_MAX];
 static int g_arr_cache_n = 0;
 
+/* arr_writeback(aoff, arr)：把 JS 数组内容写回 wasm 内存数组。
+ * 数组布局 [len:i32][cap:i32][dataOff:i32][pad:i32] + data 块（elem i64×cap）。
+ * push/splice 等增长型方法会改变长度——必须同步写回 len/cap 并在容量不足时
+ * 换新 data 块，否则 wasm 侧看不到新元素（静默错值；对齐宿主 arrSetInPlace）。*/
 static void qz_arr_writeback(uint32_t aoff, JSValue arr)
 {
-    int32_t alen = 0, dataOff = 0;
+    int32_t alen = 0, cap = 0, dataOff = 0;
     memcpy(&alen, (const void *)(uintptr_t)aoff, 4);
+    memcpy(&cap, (const void *)(uintptr_t)(aoff + 4), 4);
     memcpy(&dataOff, (const void *)(uintptr_t)(aoff + 8), 4);
-    if (!dataOff) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return;
     JSValue lv = JS_GetPropertyStr(ctx, arr, "length");
     int32_t jlen = 0; JS_ToInt32(ctx, &jlen, lv); JS_FreeValue(ctx, lv);
-    int32_t nwrite = jlen < alen ? jlen : alen;    /* 不超原容量（容量是编译期的）*/
-    for (int32_t i = 0; i < alen; i++) {
-        int64_t el = ((int64_t)0x7FF9) << 48;      /* 超出新长度 → undefined */
-        if (i < nwrite) {
+    (void)alen;
+    if (jlen < 0) jlen = 0;
+    if (jlen > cap) {
+        /* 容量不足：换新 data 块（同 push 语义：max(4, 2*jlen)），不拷贝旧块——
+         * 下面按 jlen 全量重写。 */
+        int32_t newCap = jlen < 4 ? 4 : jlen * 2;
+        void *nb = malloc((size_t)(uint32_t)newCap * 8);
+        if (!nb) return;
+        dataOff = (int32_t)(uintptr_t)nb;
+        memcpy((void *)(uintptr_t)(aoff + 4), &newCap, 4);
+        memcpy((void *)(uintptr_t)(aoff + 8), &dataOff, 4);
+        cap = newCap;
+    }
+    memcpy((void *)(uintptr_t)aoff, &jlen, 4);
+    for (int32_t i = 0; i < cap; i++) {
+        int64_t el = ((int64_t)0x7FF9) << 48;      /* 洞/超出新长度 → undefined */
+        if (i < jlen) {
             JSValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
             el = qz_ret(ctx, v);
         }
@@ -648,9 +689,11 @@ int64_t qz_guest_str_len(int64_t a)
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
     JSValue va = qz_tojs(ctx, a);
-    size_t len = 0;
-    JS_ToCStringLen(ctx, &len, va);
-    JSValue vr = JS_NewFloat64(ctx, (double)len);
+    /* JS 字符串 .length 是 UTF-16 码元数，不是 UTF-8 字节数（宿主档同口径）。 */
+    JSValue lv = JS_GetPropertyStr(ctx, va, "length");
+    double n = 0; JS_ToFloat64(ctx, &n, lv);
+    JS_FreeValue(ctx, lv);
+    JSValue vr = JS_NewFloat64(ctx, n);
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, va); JS_FreeValue(ctx, vr);
     return r;
@@ -777,7 +820,18 @@ static int qz_strict_eq(JSContext *ctx, int64_t a, int64_t b)
     }
     /* 句柄：tag 不同必不相等（数值 vs 对象/串/null/undefined/布尔/实例） */
     if (ta != tb) return 0;
-    /* 同 tag：值相等即可（字符串/对象句柄按引用即偏移比较；null/undefined/布尔按低位） */
+    /* 字符串（0x7FFA）：按内容比较——运行期拼接的字符串与 data 段字面量
+     * 内容相同但偏移不同（bump 分配），比偏移会误判 false（宿主档走值比较）。 */
+    if (ta == 0x7FFA) {
+        uint32_t la = 0, lb = 0;
+        memcpy(&la, (const void *)(uintptr_t)(uint32_t)ua, 4);
+        memcpy(&lb, (const void *)(uintptr_t)(uint32_t)ub, 4);
+        if (la != lb) return 0;
+        return memcmp((const void *)(uintptr_t)((uint32_t)ua + 4),
+                      (const void *)(uintptr_t)((uint32_t)ub + 4), la) == 0;
+    }
+    /* 其余句柄：引用相等即偏移相等（对象/数组/闭包/实例）；
+     * null/undefined/布尔按低位。 */
     return (uint32_t)(ua & 0xFFFFFFFFu) == (uint32_t)(ub & 0xFFFFFFFFu);
 }
 
@@ -1388,13 +1442,17 @@ int64_t qz_guest_arr_set_len(int64_t arr, int64_t n)
     JSValue a = qz_tojs(ctx, arr), nv = qz_tojs(ctx, n);
     double f = 0; JS_ToFloat64(ctx, &f, nv);
     if (JS_IsObject(a)) JS_SetPropertyStr(ctx, a, "length", JS_NewFloat64(ctx, f));
+    /* 同 arr_set_index：JS 副本改长度必须写回 wasm 内存（含扩容换块）。 */
+    if (((uint64_t)arr >> 48) == 0x7FFB) qz_arr_writeback((uint32_t)(uint64_t)arr, a);
     JSValue vr = JS_NewFloat64(ctx, f);
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, a); JS_FreeValue(ctx, nv); JS_FreeValue(ctx, vr);
     return r;
 }
 
-/* arr_set_index(a,k,v)→i64：a[k]=v（越界由数组语义扩容）。*/
+/* arr_set_index(a,k,v)→i64：a[k]=v（越界由数组语义扩容）。
+ * 越界赋值在 emitter 里走本原语（快路径只覆盖 i<len 且非负整数键），
+ * 而 qz_tojs 给的是 JS 副本 → 必须写回 wasm 内存，否则 a[10]=x 静默丢失。 */
 __attribute__((export_name("arr_set_index")))
 int64_t qz_guest_arr_set_index(int64_t arr, int64_t key, int64_t val)
 {
@@ -1403,7 +1461,14 @@ int64_t qz_guest_arr_set_index(int64_t arr, int64_t key, int64_t val)
     if (!ctx) return val;
     JSValue a = qz_tojs(ctx, arr), k = qz_tojs(ctx, key);
     double fk = 0; JS_ToFloat64(ctx, &fk, k);
+    /* 数组下标：仅接受非负整数（负数/NaN/小数在 JS 里是普通属性键，不参与
+     * 长度与元素布局）；(uint32_t) 强制转换对 NaN 是 UB。 */
+    if (fk < 0 || !(fk == fk) || fk != (double)(uint32_t)fk) {
+        JS_FreeValue(ctx, a); JS_FreeValue(ctx, k);
+        return val;
+    }
     JS_SetPropertyUint32(ctx, a, (uint32_t)fk, qz_tojs(ctx, val));   /* 接管 v */
+    if (((uint64_t)arr >> 48) == 0x7FFB) qz_arr_writeback((uint32_t)(uint64_t)arr, a);
     JSValue vr = JS_NewFloat64(ctx, fk);
     int64_t r = qz_ret(ctx, vr);
     JS_FreeValue(ctx, a); JS_FreeValue(ctx, k); JS_FreeValue(ctx, vr);
@@ -2671,14 +2736,17 @@ __attribute__((export_name("oom")))
 void qz_guest_oom(void)
 {
     JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
-    if (ctx) JS_ThrowTypeError(ctx, "qz arena exhausted: bump heap overflowed literal segment");
+    if (ctx) JS_ThrowRangeError(ctx, "qz arena exhausted: bump heap overflowed literal segment");
 }
 
 /* closure_call_spread(handle, arr) → i64：实参数组摊平后调用（≤4 参）。*/
-/* 数组元素个数（tagged 数组：句柄低 32 位 = 长度前缀+元素数组）。*/
+/* 数组元素个数（tagged 数组：句柄低 32 位 = 长度前缀+元素数组）。
+ * g_current_rt/ctx 为 NULL 时返回 0（裸露调用方不得解引用）。*/
 static int32_t qz_arr_len(int64_t arr)
 {
+    if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
     JSValue a = qz_tojs(ctx, arr);
     JSValue lv = JS_GetPropertyStr(ctx, a, "length");
     int32_t n = 0; JS_ToInt32(ctx, &n, lv);
@@ -2688,7 +2756,9 @@ static int32_t qz_arr_len(int64_t arr)
 
 static int64_t qz_arr_at(int64_t arr, int32_t i)
 {
+    if (!g_current_rt) return (int64_t)((uint64_t)0x7FF9 << 48);
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return (int64_t)((uint64_t)0x7FF9 << 48);
     JSValue a = qz_tojs(ctx, arr);
     JSValue v = JS_GetPropertyUint32(ctx, a, (uint32_t)i);
     int64_t r = qz_ret(ctx, v);

@@ -120,3 +120,18 @@ function bigAscii(): any {
   for (let i = 0; i < 70000; i++) s = s + "a";
   return s.length * 10 + (s.charAt(0) === "a" ? 1 : 0);  // 700001
 }
+
+// 数组越界写：a[k]=v（k>=len）走 arr_set_index 原语——必须写回 wasm 内存，
+// 否则后续快路径读回旧值（复审 C2：静默丢数据）。
+function arrGrowWrite(): any {
+  const a: any[] = [1, 2];
+  a[5] = 42;
+  return a[5] + a.length * 10;              // 42 + 60 = 102
+}
+
+// 字符串值相等：运行期拼接串与字面量内容相同但偏移不同（复审 C1）。
+function strConcatEq(): any {
+  const a = "" + "ab";
+  const b = "ab";
+  return (a === b ? 1 : 0) + (a.length === 2 ? 10 : 0);   // 11
+}
