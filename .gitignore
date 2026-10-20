@@ -106,3 +106,4 @@ src/qzvm/aot/*.aot
 
 # 本地下载的调试工具（如 WAMR 预编译 lldb；非构建依赖，按需获取）
 .tools/
+.worktrees/
