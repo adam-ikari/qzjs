@@ -965,11 +965,20 @@ class Emitter {
         const M = this.m;
         const nPar = params.length;
         const hasRest = nPar > 0 && !!params[nPar - 1].dotDotDotToken;
-        if (allowOverflow && !hasRest && nPar > 4) {
+        if (allowOverflow && nPar > 4) {
             for (let i = 0; i < 3; i++) {
                 if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
             }
-            const ovfA = args.slice(3);
+            const nFix = hasRest ? nPar - 1 : nPar;
+            const ovfA = args.slice(3, nFix);
+            while (ovfA.length < nFix - 3) ovfA.push(ts.factory.createVoidZero());
+            if (hasRest) {
+                const restArgs = args.slice(nFix);
+                if (restArgs.some(a2 => ts.isSpreadElement(a2))) throw new Error(`[tagged] ${fnName} 的 rest 实参与展开混用暂不支持`);
+                const rl = ts.factory.createArrayLiteralExpression(restArgs);
+                rl.pos = args.length ? args[0].pos : 0; rl.end = args.length ? args[args.length - 1].end : 0;
+                ovfA.push(rl);
+            }
             if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error(`[tagged] ${fnName} 的溢出实参与展开混用暂不支持`);
             const litA = ts.factory.createArrayLiteralExpression(ovfA);
             litA.pos = args.length ? args[0].pos : 0; litA.end = args.length ? args[args.length - 1].end : 0;
@@ -1017,7 +1026,20 @@ class Emitter {
             for (let i = 0; i < 4; i++) {
                 if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
             }
-            const ovfN = args.slice(3);
+            const cpRest = cp !== null && cp.length > 0 && !!cp[cp.length - 1].dotDotDotToken;
+            let ovfN;
+            if (cpRest) {
+                const nFixR = cp.length - 1;
+                ovfN = args.slice(3, nFixR);
+                while (ovfN.length < nFixR - 3) ovfN.push(ts.factory.createVoidZero());
+                const restArgs = args.slice(nFixR);
+                if (restArgs.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 闭包调用的 rest 实参与展开混用暂不支持");
+                const rl = ts.factory.createArrayLiteralExpression(restArgs);
+                rl.pos = args.length ? args[0].pos : 0; rl.end = args.length ? args[args.length - 1].end : 0;
+                ovfN.push(rl);
+            } else {
+                ovfN = args.slice(3);
+            }
             if (ovfN.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 闭包调用的溢出实参与展开混用暂不支持");
             const litK = ts.factory.createArrayLiteralExpression(ovfN);
             litK.pos = args.length ? args[0].pos : 0; litK.end = args.length ? args[args.length - 1].end : 0;
@@ -1417,7 +1439,11 @@ class Emitter {
         }
         this._lamById.set(lam, { id, fname, caps, n: params.length, tableSlot: slot0,
                                  rest: !!(lam._qzRest || (astParams.length && astParams[astParams.length - 1].dotDotDotToken)), synthThis: thisSlot });
-        this.m.declareFunc(fname, ["i32"].concat(params.map(() => "i64")), ["i64"]);
+        /* body 签名封顶 4 形参 + 可选 ovf 槽（>4 形参时第 6 槽 = 实参 3.. 数组），
+         * 与类方法 _mEnter 同模式：body 内 _emitOvfParamUnpack 解包到预留 local。
+         * 蹦床签名对齐 body，避免 arity 不匹配的 wasm 验证失败。 */
+        this.m.declareFunc(fname, ["i32"].concat(Array.from({ length: Math.min(params.length, 4) }, () => "i64"))
+            .concat(params.length > 4 ? ["i64"] : []), ["i64"]);
         this._pendingLambdas.push({ lam, fname, params, caps, astParams });
         return { fname, caps };
     }
@@ -1489,10 +1515,12 @@ class Emitter {
         this._lamThisParam = !(lam._qzSynthThis || thisSlotB) && thisSlotB;   // 用**原始**形参表（astParams 已剔除 this 注解）   // 仅**用户**写的 this 注解形参 → 运行时 this = undefined
         const locals = this._collectLocals(lam.body);
         for (const p of lam.parameters) if (!ts.isIdentifier(p.name)) for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);
-        const nParams = 1 + params.length;                 // blk + 参数
+        const wasmParams = params.slice(0, 4).concat(params.length > 4 ? ["$ovf"] : []);
+        for (let i2 = 4; i2 < params.length; i2++) locals.unshift("$ovfArg" + (i2 - 4));
+        const nParams = 1 + wasmParams.length;                 // blk + 封顶 4 参 + 可选 ovf
         const nLoc = nParams + locals.length;
         this.varMap = new Map();
-        (astParams || lam.parameters).forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, 1 + i); });   // 已剔除 TS `this` 注解形参
+        (astParams || lam.parameters).forEach((p, i) => { if (ts.isIdentifier(p.name)) this.varMap.set(p.name.text, i < 4 ? 1 + i : nParams + (i - 4)); });   // 已剔除 TS `this` 注解形参
         locals.forEach((n, i) => this.varMap.set(n, nParams + i));
         this.capMap = new Map();
         for (const n of caps) this.capMap.set(n, 0);        // 外层捕获名 → 创建方 env 索引（= blk 参数 local 0）
@@ -1535,7 +1563,12 @@ class Emitter {
         this.envRef = ownCap.length ? this.envLocal : this.blkLocal;   // 嵌套 lambda 的 env：自身 env（链到 blk）或直接 blk
         M.i64Const(0n); M.globalSet(1);                     // 入口清 __err
         if (lamNeedsArgs) { M.globalGet(this._argGlobal); M.localSet(this._argsLocal); this.varMap.set("arguments", this._argsLocal); }
-        this._emitParamPrologue(astParams || lam.parameters, 1);   // 默认值 / 解构形参（先于写 env；已剔除 TS `this` 注解形参）
+        /* 形参 0..3 走 wasm 参数槽；形参 4.. 由 _emitOvfParamUnpack 从 $ovf 槽解包
+         * 到 $ovfArg* local（>4 形参时前 4 个按 prologue 处理，其余走 ovf）。 */
+        const ap = astParams || lam.parameters;
+        this._emitParamPrologue(ap.slice(0, 4), 1);
+        const thisParamOff = (lam._qzSynthThis || lam.parameters.some(p => ts.isIdentifier(p.name) && p.name.text === "this")) ? 1 : 0;
+        this._emitOvfParamUnpack(ap, wasmParams, thisParamOff);
         if (ownCap.length) {
             M.localGet(0); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // parent = blk(0)
             for (const n of ownCap) this.capMap.set(n, this.envLocal);
@@ -1569,12 +1602,14 @@ class Emitter {
      * 超出形参个数的槽补 undefined 句柄，与直调路径语义一致。 */
     _emitLambdaTrampoline(fname, nParams) {
         const M = this.m, tn = fname + "$t";
-        M.declareFunc(tn, ["i32", "i64", "i64", "i64", "i64"], ["i64"]);
+        const hasOvf = nParams > 4;
+        M.declareFunc(tn, ["i32", "i64", "i64", "i64", "i64"].concat(hasOvf ? ["i64"] : []), ["i64"]);
         M.startBody(tn, []);
         /* 蹦床接收 5 个实参槽（i32 env + 4×i64），闭包体只声明它自己的形参个数 →
          * 按 nParams 精确转发，多出的槽直接丢弃（wasm 调用参数必须严格匹配）。 */
         M.localGet(0);
         for (let i = 0; i < Math.min(nParams, 4); i++) M.localGet(1 + i);
+        if (hasOvf) M.localGet(5);   // ovf 槽透传
         M.call(fname);
         M.return_();
         M.endBody();
@@ -1778,14 +1813,15 @@ class Emitter {
     }
     // 构造器 __m_<C>$ctor(self:i64, a0..a3:i64) → 无返回：self 由调用方 _emitNewCall 内联 bump 分配后传入
     // 方法/静态方法 >4 形参：从第 6 槽（$ovf 数组）解包实参 4.. 到各自 local（含默认值/解构/rest 语义）。
-    _emitOvfParamUnpack(astParams, params) {
+    _emitOvfParamUnpack(astParams, params, paramOff) {
         if (!astParams || astParams.length <= 4) return;
         const M = this.m;
+        const off = paramOff || 0;
         const ovfLocal = 1 + params.length - 1;                  // $ovf 槽（最后一个 wasm 形参）
         for (let i = 4; i < astParams.length; i++) {
             const p = astParams[i];
-            const dst = 1 + params.length + (i - 4);             // 与 _mEnter 的 varMap 一致（params.length 含 $ovf）
-            this._emitElemOf(ovfLocal, ts.factory.createNumericLiteral(i - 3)); M.localSet(dst);   // ovf[0] = 实参 3（已在 a3）
+            const dst = 1 + params.length + (i - 4);             // 与 body varMap / _mEnter 一致（params.length 含 $ovf）
+            this._emitElemOf(ovfLocal, ts.factory.createNumericLiteral(i - 3 - off)); M.localSet(dst);   // ovf[i] → 形参 local
             if (p.dotDotDotToken) {                              // rest：调用方已打包为数组（未传 → 空数组）
                 M.localGet(dst); M.call("qz.is_undef");
                 M.ifBlock("void"); M.call("qz.empty_array"); M.localSet(dst); M.end();

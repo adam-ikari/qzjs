@@ -49,6 +49,12 @@ function jsFn(src, fn) {
       exp = res && typeof res === "object" ? JSON.parse(JSON.stringify(res)) : res;
     } catch (e) { jsErr = "JS:" + String(e.message).split("\n")[0].slice(0, 40); }
     const j = (v) => (typeof v === "number" ? (Number.isNaN(v) ? "NaN" : !isFinite(v) ? (v > 0 ? "Infinity" : "-Infinity") : (Object.is(v, -0) ? "-0" : String(v))) : JSON.stringify(v));
+    /* 已知缺口登记（corpus 条目 `unsupported: "原因"`）：AOT 必须显式报错（loud）才算通过；
+     * 静默返回错值仍判失败（loud 报错可接受，静默错值不可接受）。 */
+    if (c.unsupported) {
+      rows.push({ name: c.name || c.fn, ok: !!aotErr, got: aotErr || j(got), exp: "unsupported: " + c.unsupported });
+      continue;
+    }
     const same = (aotErr || jsErr)
       ? (!!aotErr === !!jsErr)
       : (typeof got === "number" && typeof exp === "number")

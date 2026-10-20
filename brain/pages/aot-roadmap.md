@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-19T17:54:41"
+updated: "2026-10-20T12:59:50"
 ---
 
 <!-- compiled_truth -->
@@ -259,4 +259,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
 - time: 2026-10-19T17:54:41
   kind: note
   summary: "已知结构性缺口（均 loud 报错，非静默）：>4 参数跨 ABI、generator/async 无 Promise 运行时、类方法/getter 捕获外层变量（类蹦床签名无 env 槽）"
+  affects: [aot-roadmap]
+
+- time: 2026-10-20T12:59:50
+  kind: evidence
+  summary: "P3 验收达成（降级路径）：ad0f2d69 已把 qzs_ckmem 的 unreachable trap 改为先调 qz.oom 抛 RangeError（unreachable 仅作宿主未抛时的兜底）。实测：2M 次字符串拼接撑爆 16MiB arena → 宿主捕获 RangeError('qz arena exhausted: bump heap overflowed literal segment')，同实例随后调用 small() 返回 7，实例存活。已知限制：wasm 内 try/catch 捕不到宿主 throw（跨边界异常穿帧变 trap），故降级到宿主层；真正 GC（分代/引用计数）仍是 P2 级工程，不在本阶段。"
+  source: "/tmp 探针: big() 抛 RangeError + small() 返回 7; emitter.js:2366-2373"
   affects: [aot-roadmap]

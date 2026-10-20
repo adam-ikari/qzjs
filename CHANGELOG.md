@@ -5,6 +5,15 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### >4 形参 ABI 统一 + 差分审计 unsupported 登记（2026-10-19）
+- **>4 形参 lambda body 签名封顶**：`_emitLambdaBody` 改为 `[env:i32, a0..a3:i64, $ovf:i64]`（仅 >4 形参时带 ovf 槽），形参 4.. 由 `_emitOvfParamUnpack` 从 `$ovf` 解包到预留 `$ovfArg*` local。此前 body 按 `params.length` 全量声明，与固定 5 参 `call_indirect` 不匹配 → `not enough arguments` / `local.set[0]` 验证失败。
+- **蹦床签名对齐**：`_emitLambdaTrampoline` 的 `declareFunc` 同步加 ovf 槽并透传 `local 5`。
+- **`_emitOvfParamUnpack` 新增 `paramOff`**：lambda 的合成 `this` 占 wasm 参数槽但不对应实参 → 索引 `i - 3 - paramOff`；类方法传 0（原行为不变）。
+- **闭包调用 rest 打包**：`_emitClosureCall` 的 ovf 路径按被调 rest 形参表打包（`ovf[nFix-3]` = rest 数组），中间槽 `void 0` 占位；`_emitCallArgs` 同步支持 `allowOverflow && hasRest`（原 `!hasRest` 守卫让 >4 形参的 rest 调用点漏打包）。
+- **standalone 档 `closureCall` 幂等重打包**：`meta.n > 4` 时若 ovf 里尚无 rest 数组（形参表未知的调用点）按 `meta.n/rest` 重打包，已打包则原样透传；并补齐 `meta.n <= 4 && meta.rest` 的 hasEx 分支（此前 args 只有 blk，rest 静默丢失）。
+- **差分审计 `unsupported` 登记**：`audit_diff.js` 支持 corpus 条目 `unsupported: "原因"`——AOT 必须 loud 报错才算通过，静默错值仍判失败（已用返回 42 的桩验证）。登记 3 项固有未实现：`generator-function`、`async-function`、`object-fromentries-iter`（AOT 侧无协程/微任务基础设施，属 P2 级工程）。
+- 结果：`audit_corpus12` 从 5/16 → **16/16**；c2–c40 全量 **0 diff**。
+
 
 
 ### 第四十批语料 + BigInt 门面收尾（2026-10-18）

@@ -71,7 +71,7 @@ module.exports = [
   out.push(arr4.length, arr4.join(","));
   return out.join("|");
 }` },
-  { name: "object-fromentries-iter", fn: "f", ts: `export function f(): any {
+  { name: "object-fromentries-iter", unsupported: "generator 参与迭代未实现", fn: "f", ts: `export function f(): any {
   const out: any = [];
   const entries: any = [["a", 1], ["b", 2], ["c", 3]];
   const o: any = Object.fromEntries(entries);

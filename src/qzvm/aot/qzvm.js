@@ -496,16 +496,41 @@ function makeQzvm(strings, opts) {
       const nFix = meta.rest ? meta.n - 1 : meta.n;
       args = [blk];
       for (let i = 0; i < Math.min(nFix, 4); i++) args.push(slots[i] === undefined ? TAG : slots[i]);
-      if (meta.rest) {                                // rest：固定参之外的实参（slots 尾部 + 溢出数组）打包成数组
-        const tail = [];
-        for (let i = nFix; i < 4; i++) if (slots[i] !== undefined && slots[i] !== TAG) tail.push(toJS(slots[i]));
-        for (let i = (meta.synthThis ? 0 : 1); i < ex.length; i++) tail.push(ex[i]);   // synthThis 时 receiver 由宿主前置 → slots 已右移，ex[0]（实参 3）不再在 slots 中
-                                                                                     // 否则 ex[0] = 实参 3（已在 slots）→ 跳过
-        args.push(arrWriteback(tail));
-      } else {
-        // 非 synthThis：ex[0] = 实参 3（已在 slots a3）→ 从 ex[1] 起；synthThis：slots 已右移（a0=this），实参 3 = ex[0]
-        const exOff = meta.synthThis ? 4 : 3;
-        for (let i = 4; i < meta.n; i++) args.push((i - exOff) >= 0 && (i - exOff) < ex.length ? bitsOf(ex[i - exOff]) : TAG);
+      /* body 签名封顶 4 形参 + ovf 槽（>4 形参）：ovf[i-3] = 形参 i。
+       * 调用点分两种：已知形参表（emitter 已把 rest 数组放进 ovf[nFix-3]）→ 原样
+       * 透传；形参表未知（变量/参数持闭包，ovf 只装实参 3..）→ 此处按 meta.n/rest
+       * 重打包，否则 body 内的 rest 形参会拿到单个实参而非数组。判定依据：ovf[nFix-3]
+       * 是否已是 wasm 数组（0x7FFB）。 */
+      if (meta.n > 4) {
+        const nFix4 = meta.rest ? meta.n - 1 : meta.n;
+        /* ex 已过 toJS（JS 值，ex[0] = 实参 3）→ 先转回位型再拼，slots 本就是位型。 */
+        const exB = ex.map(bitsOf);
+        const already = meta.rest && Array.isArray(ex[nFix4 - 3]);
+        if (meta.rest && !already && !meta.synthThis) {
+          const full = slots.concat(exB.slice(1));           // 实参 0..
+          const ovfOut = [];
+          for (let i = 3; i < nFix4; i++) ovfOut.push(i < full.length ? full[i] : TAG);   // ovf[0] = 实参 3
+          while (ovfOut.length < nFix4 - 3) ovfOut.push(TAG);
+          ovfOut.push(arrWriteback(full.slice(nFix4).map(toJS)));                          // ovf[nFix-3] = rest 数组
+          args.push(arrWriteback(ovfOut));
+        } else {
+          args.push(ovfArr);
+        }
+      } else if (meta.rest) {
+        /* rest 形参全部落在 a0..a3（nFix ≤ 4）：args = 固定参 + rest 数组。
+         * 已打包（a[nFix] 是 wasm 数组）→ 直取，否则把 a[nFix..3]+ex 打包。 */
+        const nFixR = meta.n - 1;
+        const noneM = (x) => x === undefined || x === TAG;
+        const isArr = (x) => !noneM(x) && (BigInt.asUintN(64, x) >> 48n) === 0x7ffbn;
+        const packedR = nFixR >= 0 && nFixR < 4 && isArr(slots[nFixR]);
+        if (packedR) {
+          args.push(slots[nFixR]);
+        } else {
+          const tailR = [];
+          for (let i = nFixR; i < 4; i++) if (!noneM(slots[i])) tailR.push(toJS(slots[i]));
+          for (let i = 1; i < ex.length; i++) tailR.push(ex[i]);   // ex[0] = slots[3]（已收）
+          args.push(arrWriteback(tailR));
+        }
       }
     } else if (meta.synthThis) {
       // 无溢出数组 + synthThis：slots = [this, 实参 0..2]，synth3 = 实参 3（此前被右移丢弃 → 静默 undefined）

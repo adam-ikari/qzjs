@@ -4,7 +4,7 @@ title: "AOT 跨档语义一致性：闭包/数组/动态类的两档对齐"
 category: decision
 status: active
 created: "2026-10-19T18:41:21"
-updated: "2026-10-19T23:27:44"
+updated: "2026-10-20T12:56:07"
 ---
 
 <!-- compiled_truth -->
@@ -43,4 +43,10 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
 - time: 2026-10-19T23:27:44
   kind: note
   summary: "已知静默错值缺口：类表达式的类方法捕获外层**局部**变量（get label(){return lab}）两档都返回 undefined——类 env 建立时机依赖 statics guard/class_value，局部变量捕获未覆盖。改动前后一致，非本轮回归。loud 化需重构 statics 键。"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-10-20T12:56:07
+  kind: decision
+  summary: "差分审计引入 unsupported 登记：corpus 条目标 unsupported 后，AOT 必须 loud 报错才算通过（静默错值仍判失败，已用返回 42 的桩验证）。当前登记 3 项固有未实现：generator-function（yield→状态机）、async-function（需 Promise/微任务）、object-fromentries-iter（generator 参与迭代）。AOT 侧无协程/微任务基础设施，属 P2 级工程，不在当前路线。"
+  source: "src/qzvm/aot/audit_diff.js:52-57 + audit_corpus7/38 标注"
   affects: [aot-cross-tier-semantics]
