@@ -670,8 +670,7 @@ function makeQzvm(strings, opts) {
     const size = Math.max(meta.size || 16, 16);
     const off = bumpAlloc(size);
     const dv = new DataView(mem.buffer);
-    dv.setInt32(off, clsId, true);
-    dv.setInt32(off + 4, size, true);                          // [4]=size（供宿主物化，与 emitter _emitNewCall 一致）
+      dv.setInt32(off, clsId, true);
     for (let k = 8; k < size; k += 8) dv.setBigInt64(off + k, TAG, true);   // 字段槽 = undefined
     const self = (0x7ffen << 48n) | BigInt(off);
     const fnC = exportsRef && meta.ctor && exportsRef[meta.ctor];
@@ -1014,8 +1013,8 @@ function makeQzvm(strings, opts) {
       else f = handles[idxOf(obj)];
       if (typeof f !== "function") throw new Error("new: 目标不是类（期望类对象）");
       const as4 = [a0, a1, a2, a3].map(x => toJS(x));
-      if (typeof f.__qzClsId === "number") return f(...as4);                 // 用户类构造器：返回实例句柄（bigint，Reflect.construct 会丢弃原始值返回 → 必须直调）
-      const r0 = Reflect.construct(f, as4);                                  // 普通函数作类：JS new 语义（prototype 链；构造器返回对象则用之）
+      if (typeof f.__qzClsId === "number") return f(...as4);
+      const r0 = Reflect.construct(f, as4);
       return typeof r0 === "bigint" ? r0 : ret(r0);
     },
     class_value_dyn: (clsId, baseObj) => {          // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
@@ -1056,7 +1055,6 @@ function makeQzvm(strings, opts) {
     // `new A() instanceof B` 才不会误判 true。C 侧同语义（qz_clsmeta_clone）。
     class_expr_value: (clsId, env, envKey) => {
       const meta = classMeta && classMeta[clsId];
-      if (!meta) return classValueImpl(clsId);
       const src = classMeta;
       const newId = src.length;
       const clone = Object.assign(Object.create(Object.getPrototypeOf(meta)), meta, {
@@ -1173,6 +1171,22 @@ function makeQzvm(strings, opts) {
       const clsId = new DataView(mem.buffer).getInt32(off, true);
       const v = statics.get(String(clsId) + "|" + strings[key]);
       return v === undefined ? 0n : v;
+    },
+    class_env_set: (clsId, kid, env) => { statics.set(String(clsId) + "|" + strings[kid], env); },
+    class_env_get_by_id: (clsId, kid) => { const v = statics.get(String(clsId) + "|" + strings[kid]); return v === undefined ? 0n : v; },
+    class_env_parent_get: (clsId, kid) => {
+      let cur = clsId;
+      const seen = new Set();
+      while (cur !== undefined && cur !== null && !seen.has(cur)) {
+        seen.add(cur);
+        const p = classRuntimeParent.has(cur) ? classRuntimeParent.get(cur)
+          : (classMeta && classMeta[cur] && classMeta[cur].parent != null ? classMeta[cur].parent : null);
+        if (p == null) break;
+        const v = statics.get(String(p) + "|" + strings[kid]);
+        if (v !== undefined) return v;
+        cur = p;
+      }
+      return 0n;
     },
     static_set: (id, fid, v) => { let o = statics.get(strings[id]); if (!o) { o = {}; statics.set(strings[id], o); } o[strings[fid]] = v; },
     // 类 getter/setter 分派（仅当程序内有该类属性访问器时由产物调用）：实例沿继承链找访问器；

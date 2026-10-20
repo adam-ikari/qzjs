@@ -3145,6 +3145,47 @@ int64_t qz_guest_class_env_get(int64_t self, int32_t keyId)
     return qz_guest_static_get(clsId, keyId);
 }
 
+/* class_env_set(clsId, "@@qzEnv" strId, env)：类方法捕获 env 写 statics。
+ * 与 class_env_get 对称——C 侧按 strId 键（statics[strings[clsId]][strings[key]]），
+ * 与 static_get/set 同一空间；独立档按 clsId 字符串键。emitter 统一调本原语，
+ * 两档各自内部键一致即可。*/
+__attribute__((export_name("class_env_set")))
+void qz_guest_class_env_set(int32_t clsId, int32_t keyId, int64_t env)
+{
+    qz_guest_static_set(clsId, keyId, env);
+}
+
+/* class_env_get_by_id(clsId, "@@qzEnv" strId) → statics[clsId|envKey]（按 clsId 直查，不经 self）。
+ * 供子类 env 链接父类 env：_emitClassCaptureEnv 建子 env 时以父类 env 为 __parent。*/
+__attribute__((export_name("class_env_get_by_id")))
+int64_t qz_guest_class_env_get_by_id(int32_t clsId, int32_t keyId)
+{
+    return qz_guest_static_get(clsId, keyId);
+}
+
+/* class_env_parent_get(clsId, "@@qzEnv" strId) → 沿继承链查父类 env。
+ * class_value_dyn 已就地改写 classMeta[clsId].parent（动态父）；本函数沿 parent 链
+ * 查 static_get(父Id, keyId)，返回首个非 0 值（env 句柄，+1 编码）。0=无父 env。*/
+__attribute__((export_name("class_env_parent_get")))
+int64_t qz_guest_class_env_parent_get(int32_t clsId, int32_t keyId)
+{
+    int32_t seen[16]; int n = 0;
+    int32_t cur = clsId;
+    while (cur >= 0 && n < 16) {
+        uint32_t off = qz_clsmeta_item_off(cur);
+        if (!off) break;
+        int32_t parent;
+        memcpy(&parent, (const void *)(uintptr_t)(off + 4), 4);
+        if (parent < 0) break;
+        for (int i = 0; i < n; i++) if (seen[i] == parent) return 0;
+        seen[n++] = parent;
+        int64_t v = qz_guest_static_get(parent, keyId);
+        if (v != 0) return v;
+        cur = parent;
+    }
+    return 0;
+}
+
 /* instanceof_dyn(x, rhs) → i64：动态右值 instanceof。rhs 是类值(0x7FFE|clsId)。*/
 __attribute__((export_name("instanceof_dyn")))
 int64_t qz_guest_instanceof_dyn(int64_t x, int64_t rhs)

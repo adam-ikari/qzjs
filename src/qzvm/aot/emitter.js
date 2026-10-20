@@ -120,6 +120,9 @@ const QZ = {
   class_value: { params: ["i32"], results: ["i64"] },
   class_expr_value: { params: ["i32", "i64", "i32"], results: ["i64"] },   // 类表达式作值：克隆 clsId + 该类专属 env（0=无捕获）+ "@@qzEnv" 键
   class_env_get: { params: ["i64", "i32"], results: ["i64"] },   // (self tagged, "@@qzEnv" strId) → 该类 env 索引；按实例**运行时 clsId** 查，克隆类各持一份
+  class_env_set: { params: ["i32", "i32", "i64"], results: [] },   // (clsId, "@@qzEnv" strId, env) → statics[clsId|envKey]=env（与 class_env_get 键一致）
+  class_env_get_by_id: { params: ["i32", "i32"], results: ["i64"] },   // (clsId, "@@qzEnv" strId) → statics[clsId|envKey]（按 clsId 直查，不经 self；供子类 env 链父类 env）
+  class_env_parent_get: { params: ["i32", "i32"], results: ["i64"] },   // (clsId, "@@qzEnv" strId) → 沿继承链查父类 env（动态父 classRuntimeParent/classMeta.parent 改写后）；0=无
   builtin_value: { params: ["i32"], results: ["i64"] },
   brand_check: { params: ["i64", "i32"], results: ["i64"] },   // 私有名 in o（品牌检查）：非对象 → TypeError（JS 语义）
   method_spread: { params: ["i64", "i32", "i64"], results: ["i64"] },   // obj.m(...args)：实参数组 → method_call 分派
@@ -5384,7 +5387,12 @@ Emitter.prototype._emitClassCaptureEnv = function (c) {
     const M = this.m;
     if (!(c.captured && c.captured.length)) return;
     const envT = this._expEnter();
-    M.i32Const(-1); M.call("qz.env_new"); M.localSet(envT.v);
+    /* __parent = 父类 env（沿继承链）：class_env_parent_get 查 classMeta[clsId].parent
+     * （动态父经 class_value_dyn 就地改写）。env 句柄 +1 编码，wrap 后减 1 还原 idx
+     * （0=无父 env → -1 = 无 parent）。*/
+    M.i32Const(c.id); M.i32Const(this._strId("@@qzEnv")); M.call("qz.class_env_parent_get");
+    M.i32WrapI64(); M.i32Const(1); M.i32Sub();
+    M.call("qz.env_new"); M.localSet(envT.v);
     for (const n0 of c.captured) {
         if (!(this._isCapturable(n0) || (this.moduleGlobals && this.moduleGlobals.get(n0) !== undefined))) continue;
         const idNode = ts.factory.createIdentifier(n0);
@@ -5394,16 +5402,22 @@ Emitter.prototype._emitClassCaptureEnv = function (c) {
         M.call("qz.env_def");
     }
     /* 键用 clsId（不是类名）：class_env_get 也按实例运行时 clsId 查，两边一致。*/
-    M.i32Const(c.id); M.i32Const(this._strId("@@qzEnv")); M.localGet(envT.v); M.call("qz.static_set");
+    M.i32Const(c.id); M.i32Const(this._strId("@@qzEnv")); M.localGet(envT.v); M.i64Const(1n); M.i64Add(); M.call("qz.class_env_set");
     this._expLeave();
 };
 Emitter.prototype._emitClassValue = function (c) {        // 类对象句柄：动态父 → class_value_dyn(id, 父表达式)；否则 class_value(id)
     const M = this.m;
-    this._emitClassCaptureEnv(c);
-    M.i32Const(c.id);
     const dynN = this._dynParentExpr(c);
-    if (dynN) { this.emitTaggedExpr(dynN); M.call("qz.class_value_dyn"); return; }
-    M.call("qz.class_value");
+    if (dynN) {
+        /* 动态父：先 class_value_dyn 就地改写 classMeta[clsId].parent（供后续
+         * class_env_parent_get 沿链查父 env），再 _emitClassCaptureEnv 建子 env
+         * 链接父 env。class_value_dyn 幂等（classHandles 缓存），句柄留栈。*/
+        M.i32Const(c.id); this.emitTaggedExpr(dynN); M.call("qz.class_value_dyn");
+        this._emitClassCaptureEnv(c);
+        return;
+    }
+    this._emitClassCaptureEnv(c);
+    M.i32Const(c.id); M.call("qz.class_value");
 };
 Emitter.prototype._dynParentExpr = function (c) {          // 动态父：extends 非「已知类名/内建」→ 返回父表达式（否则 null）
     if (!c || !c.dynParentNode) return null;
