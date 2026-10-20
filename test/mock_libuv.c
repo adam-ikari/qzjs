@@ -441,6 +441,11 @@ const char *mock_tcp_written(uv_loop_t *loop)
     return loop->written ? loop->written : "";
 }
 
+size_t mock_tcp_written_len(uv_loop_t *loop)
+{
+    return loop->written_len;
+}
+
 int uv_write(uv_write_t *req, uv_stream_t *stream,
              const uv_buf_t bufs[], unsigned int nbufs, uv_write_cb cb)
 {
