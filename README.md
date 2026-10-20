@@ -164,6 +164,28 @@ make build                       # produces build/qzjs build/qzc build/qzjs-rt
 # => ["a","b","c"]
 ```
 
+### Single-file execution model
+
+qzjs runs **single-file scripts** — there is no module loader. `import` /
+`export` / `require` are not available; feeding a file using them fails at
+parse time (`SyntaxError`). Multi-file codebases must be bundled into one
+file first.
+
+**Recommended bundle format:** IIFE. esbuild is the path used by the polyfill
+build and `examples/`:
+
+```bash
+npx esbuild entry.js --bundle --format=iife --platform=browser --outfile=bundled.js
+./build/qzjs bundled.js
+```
+
+`globalThis` is the shared surface — attach entry points there (or use the
+host messaging API). The `examples/fs/fs.js` samples follow this pattern
+(`(async () => { ... })()`).
+
+`process`, `Buffer`, and `__dirname` are absent by design (WinterTC scope);
+use `globalThis.arguments` and `globalThis.env` instead (see above).
+
 ## Architecture
 
 ```mermaid
