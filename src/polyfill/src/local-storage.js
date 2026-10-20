@@ -187,6 +187,12 @@ export function setupLocalStorage(pal) {
         },
         removeItem: function (k) { request('remove', String(k), undefined, domain); },
         clear: function () { request('clear', undefined, undefined, domain); },
+        /* named-properties 镜像（buildStorageObject Proxy trap 用）：
+         * _has/_get 走与 getItem 同 op（owner 已支持）；_keys 返回插入序快照。
+         * 两步 RPC（has+get）虽非最优，但 named access 是冷路径，与同步语义一致即可。 */
+        _has: function (k) { return request('has', String(k), undefined, domain); },
+        _get: function (k) { return request('get', String(k), undefined, domain); },
+        _keys: function () { return request('keys', undefined, undefined, domain); },
       };
     }
     buildStorageObject(proxyImpl('localStorage'), 'localStorage');
@@ -361,6 +367,8 @@ var ssArea = createArea(null);       /* sessionStorage：纯内存（runtime 会
         case 'clear':  area.clear(); reply = { v: null }; break;
         case 'key':    reply = { v: area.key(o.key) }; break;
         case 'length': reply = { v: area.length() }; break;
+        case 'has':    reply = { v: area._has(o.key) }; break;
+        case 'keys':   reply = { v: area._keys() }; break;
         default:       reply = { e: { name: 'Error',
                                       message: 'unknown storage op: ' + o.op } };
       }
