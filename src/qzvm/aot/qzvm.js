@@ -1165,11 +1165,13 @@ function makeQzvm(strings, opts) {
     statics_has: (id, fid) => { const o = statics.get(strings[id]); return o && strings[fid] in o ? 1 : 0; },
     statics_mark: (id) => { if (!statics.has(strings[id])) statics.set(strings[id], {}); },
     static_get: (id, fid) => { const o = statics.get(strings[id]); const v = o ? o[strings[fid]] : undefined; return v === undefined ? TAG : v; },
-    // class_env_get(self, "@@qzEnv")：按实例运行时 clsId 取捕获 env（克隆类各持一份）
+    // class_env_get(self, "@@qzEnv")：self 是 wasm 实例句柄（0x7FFE|off），off 是内存偏移。
+    // 读实例内存首 4 字节 clsId，查 statics[clsId|envKey]（与 C 侧 qz_clsmeta_* 一致）。
     class_env_get: (self, key) => {
-      const h = handles[idxOf(self)];
-      if (!h || typeof h !== "object") return 0n;
-      const v = statics.get(String(h.__qzClsId) + "|" + strings[key]);
+      const u = BigInt.asUintN(64, self), hi = u >> 48n, off = Number(u & MASK32);
+      if (hi !== INST_HI || !mem || !off) return 0n;
+      const clsId = new DataView(mem.buffer).getInt32(off, true);
+      const v = statics.get(String(clsId) + "|" + strings[key]);
       return v === undefined ? 0n : v;
     },
     static_set: (id, fid, v) => { let o = statics.get(strings[id]); if (!o) { o = {}; statics.set(strings[id], o); } o[strings[fid]] = v; },
