@@ -256,9 +256,17 @@ int uv_cancel(uv_req_t *req);
  * (unless the stream closed meanwhile) a UV_EOF read. Returns 0 on success. */
 int mock_tcp_respond(uv_loop_t *loop, const char *bytes, size_t len);
 
-/* test-only: NULL-terminated view of all bytes written via uv_write on this
- * loop (accumulated in order). Caller must not free. */
+/* test-only: view of all bytes written via uv_write on this loop
+ * (accumulated in order). The buffer MAY contain embedded NUL bytes
+ * (e.g. TLS handshake records whose length fields are big-endian and
+ * therefore include 0x00) — strlen() on the returned pointer truncates
+ * at the first NUL. Pair with mock_tcp_written_len() for the true byte
+ * count. Caller must not free. */
 const char *mock_tcp_written(uv_loop_t *loop);
+
+/* test-only: true byte count of the mock_tcp_written buffer (use this
+ * instead of strlen when the captured traffic is binary, e.g. TLS). */
+size_t mock_tcp_written_len(uv_loop_t *loop);
 
 /* ---- fs (mock) ---- */
 int uv_fs_open(uv_loop_t *loop, uv_fs_t *req, const char *path, int flags, int mode, uv_fs_cb cb);

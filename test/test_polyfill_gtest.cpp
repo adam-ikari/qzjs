@@ -287,9 +287,12 @@ TEST_F(PolyfillTest, LocalStorageBasic) {
         "JSON.stringify(r)", &v));
     EXPECT_EQ("[null,\"v1\",3,\"k1\",\"42\",null,\"v42\",\"3\",null,2]", v) << "got: " << v;
 
-    /* Storage 接口实例：方法/访问器不可枚举 */
-    ASSERT_TRUE(host_value(h, "JSON.stringify(Object.keys(localStorage).length)", &v));
-    EXPECT_EQ("0", v) << "got: " << v;
+    /* Storage 接口实例：named properties 可枚举（issue #31），接口方法
+     * （getItem/setItem/…）仍不可枚举。此时剩 2 键（removeItem('k1') 后）。 */
+    ASSERT_TRUE(host_value(h,
+        "r=Object.keys(localStorage);"
+        "JSON.stringify([r.length, r.indexOf('getItem')>=0, r.indexOf('setItem')>=0])", &v));
+    EXPECT_EQ("[2,false,false]", v) << "got: " << v;
 
     /* clear() 清空 */
     ASSERT_TRUE(host_value(h,

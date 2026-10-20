@@ -44,6 +44,17 @@ cd qzjs
 make build          # → build/qzjs build/qzc build/qzjs-rt
 ```
 
+### Upgrading from older clones
+
+If you cloned before `19cff6fc` (which switched `deps/quickjs-ng` to the upstream `quickjs-ng/quickjs` URL), `git pull` + `git submodule update --init --recursive` will fail with `remote error: upload-pack: not our ref <sha>`: an already-initialized submodule's `origin` does not follow `.gitmodules` automatically. Run once:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+See [issue #27](https://github.com/adam-ikari/qzjs/issues/27) for background.
+
 `make` is the command entry point (`make help`-style target list lives in the
 `Makefile` header): `make build` / `make qzjs ARGS='...'` / `make qzc SRC=...`
 / `make bc SRC=...` / `make example NAME=fs` / `make test-offline` /

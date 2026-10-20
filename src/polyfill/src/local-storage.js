@@ -35,11 +35,23 @@
  * 与 qzjs.storage（async in-memory extension API）共存。
  */
 
-/* 组装 Storage 接口实例（方法/访问器不可枚举）并挂到 globalThis[name]
- * （缺省 'localStorage'；'sessionStorage' 挂 sessionStorage 全局）。 */
+/* 组装 Storage 接口实例并挂到 globalThis[name]（缺省 'localStorage'）。
+ *
+ * Storage 是带 named properties 的 legacy platform object：named
+ * getter/setter/deleter + 可枚举 named properties（Object.keys 出现全部
+ * 条目、localStorage.a 直读、localStorage.b='2' 写 map、delete 删条目、
+ * JSON.stringify 输出条目对象）。普通对象 + defineProperties 无法表达
+ * 这三组语义（named setter 会静默落到对象 own property，存储与对象视图
+ * 分叉）。用 Proxy 实现：字符串键一律经 impl（写入 map / 读 map / 删
+ * map），ownKeys 返回条目键快照，descriptor 按条目构造——named 面与
+ * Storage 方法面（原型上的接口方法，enumerable:false）互不干扰。
+ *
+ * 接口方法挂在 target 的原型（proto）上：named keys 之外的一切属性访问
+ * （getItem/setItem/length…）走原型链，Object.keys/JSON.stringify 只反映
+ * ownKeys（条目），与 Chromium 观察一致。 */
 function buildStorageObject(impl, name) {
-  var storage = {};
-  Object.defineProperties(storage, {
+  var proto = {};
+  Object.defineProperties(proto, {
     length: { get: impl.length, enumerable: false, configurable: true },
     key: { value: impl.key, writable: true, enumerable: false, configurable: true },
     getItem: { value: impl.getItem, writable: true, enumerable: false, configurable: true },
@@ -47,12 +59,64 @@ function buildStorageObject(impl, name) {
     removeItem: { value: impl.removeItem, writable: true, enumerable: false, configurable: true },
     clear: { value: impl.clear, writable: true, enumerable: false, configurable: true },
   });
+  var target = Object.create(proto);
+  var storage = new Proxy(target, {
+    get: function (t, prop, receiver) {
+      if (typeof prop === 'string' && impl._has(prop)) return impl._get(prop);
+      return Reflect.get(t, prop, receiver);
+    },
+    set: function (t, prop, value, receiver) {
+      if (typeof prop === 'string') {
+        /* 原型上的只读访问器（length 等）保持只读：Reflect.set 复刻原生
+         * sloppy 静默/strict TypeError 语义；其余字符串键一律走 named
+         * setter 写入 map，绝不落 own property（修复静默孤儿属性）。 */
+        var pd = Object.getOwnPropertyDescriptor(proto, prop);
+        if (pd && typeof pd.get === 'function' && typeof pd.set !== 'function') {
+          return Reflect.set(t, prop, value, receiver);
+        }
+        impl.setItem(prop, value);
+        return true;
+      }
+      return Reflect.set(t, prop, value, receiver);
+    },
+    deleteProperty: function (t, prop) {
+      if (typeof prop === 'string') {
+        impl.removeItem(prop);   /* named deleter：删 map 条目 */
+        return true;
+      }
+      return Reflect.deleteProperty(t, prop);
+    },
+    has: function (t, prop) {
+      if (typeof prop === 'string' && impl._has(prop)) return true;
+      return Reflect.has(t, prop);
+    },
+    ownKeys: function (t) {
+      return impl._keys();
+    },
+    getOwnPropertyDescriptor: function (t, prop) {
+      if (typeof prop === 'string' && impl._has(prop)) {
+        return { value: impl._get(prop), writable: true, enumerable: true,
+                 configurable: true };
+      }
+      return Reflect.getOwnPropertyDescriptor(t, prop);
+    },
+  });
   mountGlobal(name || 'localStorage', storage);
   return storage;
 }
 
 function mountGlobal(name, storage) {
   try {
+    /* 已存在且非 accessor（数据属性 = 外部/宿主覆盖）→ 视为宿主意志，
+     * 跳过重挂（不夺回控制权）；accessor（本单元注册的 lazy getter）→
+     * 替换成数据属性（setup 物化）。configurable:false 数据属性会被
+     * defineProperty 抛错 → try-catch 保持现状。 */
+    var existing = Object.getOwnPropertyDescriptor(globalThis, name);
+    if (existing && typeof existing.get !== 'function' &&
+        typeof existing.set !== 'function' &&
+        typeof globalThis[name] !== 'undefined') {
+      return;
+    }
     Object.defineProperty(globalThis, name, {
       value: storage, writable: false, enumerable: true, configurable: true,
     });
@@ -69,7 +133,10 @@ export function setupLocalStorage(pal) {
    * 非标准环境（如 service worker 线程）与现状一致：静默跳过。 */
   if (isWorker && backend !== 'process') return;
   var QUOTA = 5 * 1024 * 1024;   /* Web Storage default, in code units */
-  if (typeof globalThis.localStorage !== 'undefined') return;
+  /* 两域都已存在（外部/宿主覆盖或重复 setup）→ 不重挂；只覆盖其中一域
+   * 时另一域仍要物化（mountGlobal 逐一尊重外部覆盖）。 */
+  if (typeof globalThis.localStorage !== 'undefined' &&
+      typeof globalThis.sessionStorage !== 'undefined') return;
 
   /* ================= PROCESS worker：同步代理（M-P4 §10.2） =================
    * 每个操作序列化为 {op,key,value?,storageDomain}（structured clone 字节，
@@ -142,8 +209,10 @@ export function setupLocalStorage(pal) {
    * localStorage 持久文件）。 */
   function createArea(persistPath) {
     /* Storage area. map: null prototype so keys like '__proto__' can't pollute;
-     * keys: insertion order (spec key(n) order; updating an existing key does
-     * not reorder); total: sum of key.length + value.length (quota accounting). */
+     * keys: insertion order (spec key(n) order is weakly specified; we use
+     * insertion order, updating an existing key does not reorder — note this
+     * is a self-defined order, not a claim of browser parity); total: sum of
+     * key.length + value.length (quota accounting). */
     var map = Object.create(null);
     var keys = [];
     var total = 0;
@@ -156,7 +225,16 @@ export function setupLocalStorage(pal) {
     if (persistPath === null) return;   /* sessionStorage：内存区无载入 */
     var raw, obj, ks, i;
     try { raw = pal.fsReadSync(persistPath); } catch (e) { return; }  /* missing → empty */
-    try { obj = JSON.parse(raw); } catch (e) { return; }       /* corrupt → empty */
+    try { obj = JSON.parse(raw); } catch (e) {
+      /* corrupt 文件不再静默空载（issue #31 §3「失败在根因处记账」）：
+       * missing 文件是首次运行的正常态，不加噪声；corrupt 是异常态，给
+       * 一个可观测告警，宿主/排查者据此发现存储被吞。console 可能未就绪
+       * 时退化为静默，不阻塞 setup。 */
+      try { console.warn('qzjs localStorage: corrupt file ' + persistPath +
+                         ', starting empty (' + (e && e.message) + ')'); }
+      catch (c) {}
+      return;
+    }
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
     ks = Object.keys(obj);
     for (i = 0; i < ks.length; i++) {
@@ -253,6 +331,11 @@ export function setupLocalStorage(pal) {
     clear: clear,
     key: key,
     length: function () { return keys.length; },
+    /* named-properties 镜像（buildStorageObject 的 Proxy trap 用）：
+     * _has/_get 读当前位置，_keys 返回插入序快照。 */
+    _has: has,
+    _get: function (k) { return map[k]; },
+    _keys: function () { return keys.slice(); },
   };
 }
 
