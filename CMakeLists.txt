@@ -498,9 +498,9 @@ else()
         OUTPUT "${_polyfill_gen_c}"
                "${_polyfill_gen_dir}/worker_boot_default.c"
         COMMAND ${CMAKE_COMMAND} -E echo
-                "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain to build qzjs: the embedded bytecode is a build product and is not committed. Run `npm --prefix src/polyfill ci` (installs node_modules/esbuild) and make sure npm is on PATH, then re-configure."
+                "QZ_POLYFILL_MODE=${_polyfill_mode} needs the polyfill toolchain to build qzjs: the embedded bytecode is a build product and is not committed. Run `npm --prefix src/polyfill ci` (installs node_modules/esbuild) and make sure npm is on PATH, then re-configure (re-run `cmake ..`). NOTE: the toolchain check is a configure-time snapshot; npm ci alone does not refresh the build rule — if you just ran npm ci, re-run cmake to pick it up."
         COMMAND ${CMAKE_COMMAND} -E false
-        VERBATIM
+    VERBATIM
     )
     add_custom_target(polyfill_rebuild DEPENDS
         "${_polyfill_gen_c}"
