@@ -107,7 +107,7 @@ qz_t *qz_create(const qz_config_t *config)
      * 会破坏 futex/pthread_cond 唤醒，导致宿主线程的 cond_wait 永不返回。
      * 不覆盖宿主显式设置的 UV_USE_IO_URING。 */
     setenv("UV_USE_IO_URING", "0", 0);
-    if (!config) return NULL;
+    if (!config) { fprintf(stderr, "qzjs: qz_create: config is NULL\n"); return NULL; }
     /* ABI 门控：qz_config_t 按值传递，整块拷贝进 rt->config。宿主若用不同版本
      * 的头文件编译（本结构体无这些头字段、或多出更新版本的尾字段），库里按
      * 库侧 sizeof 读到的可能是越界的垃圾——本轮追加 strict_mode 等字段时正是
@@ -124,7 +124,7 @@ qz_t *qz_create(const qz_config_t *config)
         return NULL;
     }
     qz_t *rt = (qz_t *)calloc(1, sizeof *rt);
-    if (!rt) return NULL;
+    if (!rt) { fprintf(stderr, "qzjs: qz_create: out of memory allocating runtime\n"); return NULL; }
     rt->magic = QZ_MAGIC;
     rt->config = *config;
     /* 初始化：initial_script / initial_script_path 二选一（path 优先）；
@@ -133,6 +133,8 @@ qz_t *qz_create(const qz_config_t *config)
     if (config->initial_script_path) {
         rt->config.initial_script = qz_read_file(config->initial_script_path, NULL);
         if (!rt->config.initial_script) {
+            fprintf(stderr, "qzjs: qz_create: cannot read initial_script_path: %s\n",
+                    config->initial_script_path ? config->initial_script_path : "(null)");
             free(rt);
             return NULL;
         }
@@ -146,6 +148,7 @@ qz_t *qz_create(const qz_config_t *config)
         size_t n = config->initial_bytecode_len;
         uint8_t *bc = (uint8_t *)malloc(n ? n : 1);
         if (!bc) {
+            fprintf(stderr, "qzjs: qz_create: out of memory copying initial_bytecode (%zu bytes)\n", n);
             free((void *)rt->config.initial_script);
             free(rt);
             return NULL;
@@ -160,6 +163,7 @@ qz_t *qz_create(const qz_config_t *config)
         if (config->sandbox_root && config->sandbox_root[0]) {
             rt->strict_root = strdup(config->sandbox_root);
             if (!rt->strict_root) {
+                fprintf(stderr, "qzjs: qz_create: out of memory copying sandbox_root\n");
                 free((void *)rt->config.initial_script);
                 free((void *)rt->config.initial_bytecode);
                 free(rt);
