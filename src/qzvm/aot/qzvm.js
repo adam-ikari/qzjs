@@ -2329,6 +2329,7 @@ function makeQzvm(strings, opts) {
       return closureCall(handle, a0, a1, a2, a3, undefined, recv);
     },
     bindClosures: (ex, lm) => { exportsRef = ex; lamMeta = lm; },
+    oom: () => { throw new RangeError("qz arena exhausted: bump heap overflowed literal segment"); },
   };
   // this.x 于静态方法内（运行时代）：沿宿主 ctor 的 __proto__ 链（= JS 静态继承链）查静态字段
   api.static_get_dyn = (selfH, id) => {

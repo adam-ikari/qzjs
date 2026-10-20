@@ -761,11 +761,14 @@ int64_t qz_guest_ge(int64_t a, int64_t b)
  * undefined 变 NaN（undefined===undefined 误判 false）。*/
 static int qz_strict_eq(JSContext *ctx, int64_t a, int64_t b)
 {
-    /* 先按 tagged 位型快速判：同为数值（非句柄区）→ 位型相等 */
+    /* 句柄 tag 区间 [0x7FF8, 0x7FFF]，但 0x7FF8|0（低位=0）是 canonical NaN
+     * （数值，box(NaN)/f64Bits(NaN) 恰产此位型；见 emitter _emitIsBig 约定）。
+     * BigInt 句柄 = 0x7FF8|低位≠0。NaN 须走数值分支（NaN!==NaN=false），
+     * 否则两 NaN 会因 tag 相同+低位相等被误判为 true。*/
     uint64_t ua = (uint64_t)a, ub = (uint64_t)b;
     uint16_t ta = (uint16_t)(ua >> 48), tb = (uint16_t)(ub >> 48);
-    int aHandle = (ta >= 0x7FF8 && ta <= 0x7FFF);
-    int bHandle = (tb >= 0x7FF8 && tb <= 0x7FFF);
+    int aHandle = (ta >= 0x7FF8 && ta <= 0x7FFF) && !(ta == 0x7FF8 && (uint32_t)ua == 0);
+    int bHandle = (tb >= 0x7FF8 && tb <= 0x7FFF) && !(tb == 0x7FF8 && (uint32_t)ub == 0);
     if (!aHandle && !bHandle) {
         double fa, fb;
         memcpy(&fa, &a, 8); memcpy(&fb, &b, 8);
@@ -2594,13 +2597,12 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
     return out;
 }
 
-/* 撑大 funcref 表：wasm-ld 按「被取地址的函数数 + 1」定表大小，无法直接指定
- * 容量。产物要把自己的蹦床装进同一张表的 [QZ_TABLE_CAP, +N) 槽，故此处保留
- * 一段函数指针占位数组，让表至少覆盖 QZ_TABLE_CAP + QZ_TABLE_RESERVE 项。
- * 占位项从不被调用（全 NULL），仅用于定表尺寸。*/
-#define QZ_TABLE_CAP     514
-#define QZ_TABLE_RESERVE 4096
-__attribute__((used)) static void *qz_table_pad[QZ_TABLE_CAP + QZ_TABLE_RESERVE];
+/* funcref 表容量来源：wasm-ld 按「被取地址的函数数」定 __indirect_function_table
+ * 大小（本模块 export-table 导出）。实测 libqzvm 表 initial=514（513 个被取地址
+ * 函数 + 1 padding）。emitter 的 INMOD_TABLE_CAP=514 与之对齐；产物 import 同表后
+ * 用 table.grow 扩容到 514+N，再 table.init 装入自己的蹦床到 [514, +N) 槽。
+ * 此前曾用一段 void* 占位数组试图撑大表，但 void* 不进 elem 段、不贡献表项，
+ * 已删除。*/
 
 /* 闭包调用：闭包值 [off]=蹦床表槽 [off+4]=envIdx [off+8]=arity [off+12]=nameStrId。
  *
@@ -2661,6 +2663,15 @@ int64_t qz_guest_closure_call(int64_t handle, int64_t a0, int64_t a1, int64_t a2
     memcpy(&slot, (const void *)(uintptr_t)off, 4);
     memcpy(&env, (const void *)(uintptr_t)(off + 4), 4);
     return qz_lam_dispatch(slot, env, a0, a1, a2, a3);
+}
+/* oom() → void：bump arena 越界（emitter qzs_ckmem 调用）。抛 RangeError 让 JS 层 catch，
+ * 替代 unreachable trap（整实例不可恢复）。QuickJS wasm 调用返回时 runtime 检测
+ * pending exception 并 unwind。*/
+__attribute__((export_name("oom")))
+void qz_guest_oom(void)
+{
+    JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+    if (ctx) JS_ThrowTypeError(ctx, "qz arena exhausted: bump heap overflowed literal segment");
 }
 
 /* closure_call_spread(handle, arr) → i64：实参数组摊平后调用（≤4 参）。*/

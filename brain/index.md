@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-19T23:42:37.637Z._
+_Auto-generated. Last updated 2026-10-20T01:51:49.919Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-bigint-tagged-backend](pages/aot-bigint-tagged-backend.md) — category: decision | tags: [aot, wasm, bigint, qzvm, emitter] | # AOT BigInt tagged 后端（批 39，2026-10-18）
@@ -29,7 +29,7 @@ _Auto-generated. Last updated 2026-10-19T23:42:37.637Z._
 - [dap-variables-expansion](pages/dap-variables-expansion.md) — category: decision | tags: [dap, vscode, debugger, variables] | ## 现状（已实现，gtest 7/7 + e2e 8/8 绿）
 - [debugging-layering](pages/debugging-layering.md) — category: decision | tags: [decision, debug, dap, qzvm, aot, wasm, dwarf, gdb-rsp, debug-interp] | <!-- compiled_truth -->
 - [decision-principles](pages/decision-principles.md) — category: decision | tags: [decision, principles, methodology] | ## 决策三原则 + 极简哲学（用户拍板，项目级约束）
-- [doc-comment-language](pages/doc-comment-language.md) — category: decision | tags: [doc, comments, i18n, convention] | ## 文档与注释语言规范（项目级，用户 2026-10-12 决策）
+- [doc-comment-language](pages/doc-comment-language.md) — category: decision | tags: [doc, comments, i18n, convention] | ## 文档与注释语言规范（项目级，用户 2026-10-12 决策；2026-10-20 追加 commit message）
 - [examples-tree](pages/examples-tree.md) — category: decision | tags: [build, examples] | - 示例程序放在根目录 examples/ 下，每个示例一个子目录（examples/hello, examples/worker），不再放根目录 example.c。
 - [f4-security-audit](pages/f4-security-audit.md) — category: decision | tags: [security, audit] | ## F4 安全审计结论
 - [fetch-proxy-support](pages/fetch-proxy-support.md) — category: decision | tags: [fetch, proxy, connect, tls, uv_io] | - **背景**：B2「fetch 完善」剩余项「代理」—— 出站 fetch 需要能走公司/环境 HTTP 代理。

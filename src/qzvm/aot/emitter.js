@@ -163,6 +163,7 @@ const QZ = {
   object_delete: { params: ["i64", "i32"], results: [] },  // delete 宿主对象字段
   // 对象展开 {..o}：n(i32) + pieces(i64×4) → Object.assign({}, ...) → 宿主对象句柄
   obj_assign: { params: ["i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  oom: { params: [], results: [] },   // bump arena 越界：宿主抛 RangeError（替代 unreachable trap，让宿主可 catch）
 };
 
 // JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。
@@ -2324,11 +2325,12 @@ function emitBumpSet(m, emitNewVal) {
 }
 function emitStringHelpers(m, strBase) {
     // qzs_ckmem(newBump:i32) -> i32：bump 越界守卫。arena = [SCRATCH, STR_BASE)，越过基址
-    // 即 trap（unreachable），杜绝静默覆盖字面量段（STR_BASE 起）或 OOB 崩溃。
+    // 调 qz.oom 让宿主抛 RangeError（可 catch），替代 unreachable trap（整实例死）。
+    // unreachable 作兜底：宿主若未抛（不应发生）仍 trap，杜绝静默覆盖字面量段。
     m.declareFunc("qzs_ckmem", ["i32"], ["i32"]);
     m.startBody("qzs_ckmem", [], []);
     m.localGet(0); m.i32Const(strBase); m.i32GtU();
-    m.ifBlock("void"); m.unreachable(); m.end();
+    m.ifBlock("void"); m.call("qz.oom"); m.unreachable(); m.end();
     m.localGet(0);
     m.endBody();
     // qzs_memcpy(dest, src, n)：先 8 字节块（i64.load/store，wasm 允许非对齐），尾字节。
