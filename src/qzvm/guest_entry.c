@@ -72,6 +72,12 @@ static int32_t g_next_op_id = 1;
  * qz_result_ptr/len 从 guest 内存读。M6 改为宿主直接 eval 取 global。 */
 static char *g_result = NULL;
 static int   g_result_len = 0;
+/* C 侧原语抛出的可捕获异常值（JS 语义错误：reduce 空数组、冻结对象写入等）。
+ * in-module 档 C 侧 JS_Throw* 的 pending exception 到不了产物的 __err(global1)，
+ * 故 C 原语改把错误对象存此槽，由 emitter 的 _emitErrCheck 调 qz.take_err 取回
+ * 写入 __err → catch 绑定拿到该 TypeError/RangeError 句柄。 */
+static JSValue g_throw_val;
+static int g_throw_set = 0;
 
 #define QZ_GUEST_DRAIN_BUF 512
 
@@ -602,6 +608,30 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
     g_handles[idx] = JS_DupValue(ctx, r);
     if (JS_IsBigInt(r)) return ((int64_t)0x7FF8 << 48) | (uint32_t)idx;  /* BigInt 句柄（BIG_HI） */
     /* 对象/闭包/数组等 → handle table 注册（0x7FF9 | idx） */
+    return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
+}
+
+/* C 原语设置可捕获异常（in-module 档 JS_Throw* 不可达产物的 __err）。取 err 所有权。 */
+static void qz_set_throw(JSContext *ctx, JSValue err)
+{
+    if (g_throw_set) JS_FreeValue(ctx, g_throw_val);
+    g_throw_val = err;   /* 取所有权（调用方传 fresh value，不 dup） */
+    g_throw_set = 1;
+}
+
+/* emitter _emitErrCheck 调用：取出 pending throw（转 handle 写入产物 __err），取完清零。 */
+__attribute__((export_name("take_err")))
+int64_t qz_guest_take_err(void)
+{
+    if (!g_throw_set) return 0;
+    g_throw_set = 0;
+    JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+    if (!ctx) return 0;   /* 理论不可达；泄漏 g_throw_val 保命 */
+    /* 手动入表（不经 qz_ret：其表满路径会 free 入参，与所有权转让冲突）。 */
+    int idx = g_handle_count;
+    if (idx >= QZ_MAX_HANDLES) { JS_FreeValue(ctx, g_throw_val); return ((int64_t)0x7FF9 << 48); }
+    g_handle_count = idx + 1;
+    g_handles[idx] = g_throw_val;   /* 转让所有权（不 dup） */
     return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
 }
 
@@ -2313,7 +2343,7 @@ void qz_guest_prot_check(int64_t v, int32_t op)
     JSValue o = qz_tojs(ctx, v);
     int sealed_ = JS_IsObject(o) ? !JS_IsExtensible(ctx, o) : 0;
     JS_FreeValue(ctx, o);
-    if (sealed_ && op == 0) JS_ThrowTypeError(ctx, "cannot assign to non-extensible object");
+    if (sealed_ && op == 0) qz_set_throw(ctx, JS_NewTypeError(ctx, "cannot assign to non-extensible object"));
 }
 
 /* obj_assign(id, dst, a0, a1, a2)：Object.assign(dst, ...srcs)（最多 3 源）。*/
@@ -2818,11 +2848,13 @@ static int64_t qz_array_callback_op(int64_t recv, const char *nm, int64_t cb, in
         int64_t acc = seed;
         int32_t start = 0;
         if (seed == (int64_t)(((uint64_t)0x7FF9) << 48)) { acc = qz_arr_at(recv, 0); start = 1; }
-        /* 空数组无初值（宿主档抛 TypeError）。in-module 档 C 侧无法向产物
-         * __err 回传异常（JS_ThrowTypeError 的 pending exception 到不了 emitter
-         * catch；见 Object.freeze 写入同样吞错），故此处与既有行为一致返回
-         * undefined；可捕获化需新增 qz_host.throw_* 通道，见复审 M5 备注。 */
-        if (n == 0 && seed == (int64_t)(((uint64_t)0x7FF9) << 48)) return undef;
+        /* 空数组无初值 → JS 语义抛 TypeError（与宿主档 a.reduce(fn) 一致）。
+         * C 侧 JS_Throw* 不可达产物 __err，故经 qz_set_throw 存槽，由 emitter
+         * _emitErrCheck 调 qz.take_err 取回写入 __err → catch 绑定拿到 TypeError 句柄。 */
+        if (n == 0 && seed == (int64_t)(((uint64_t)0x7FF9) << 48)) {
+            qz_set_throw(ctx, JS_NewTypeError(ctx, "Reduce of empty array with no initial value"));
+            return undef;   /* 返回值被 errcheck 丢弃（__err≠0 → 转 catch） */
+        }
         for (int32_t i = start; i < n; i++) {
             int64_t el = qz_arr_at(recv, i);
             int64_t nv = qz_guest_closure_call(cb, acc, el, qz_ret(ctx, JS_NewInt32(ctx, i)), recv, undef);

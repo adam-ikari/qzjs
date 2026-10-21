@@ -167,6 +167,7 @@ const QZ = {
   // 对象展开 {..o}：n(i32) + pieces(i64×4) → Object.assign({}, ...) → 宿主对象句柄
   obj_assign: { params: ["i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
   oom: { params: [], results: [] },   // bump arena 越界：宿主抛 RangeError（替代 unreachable trap，让宿主可 catch）
+  take_err: { params: [], results: ["i64"] },   // 取 C 侧 pending throw（reduce 空数组/冻结写入）→ 写 __err，errcheck 转 catch
 };
 
 // JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。
@@ -825,6 +826,15 @@ class Emitter {
     _emitErrCheck(keepValue = true) {
         const M = this.m, t = this._expEnter();
         if (keepValue) M.localSet(t.v);
+        if (this._inModuleLink) {
+            // C 侧原语抛的可捕获异常（reduce 空数组/冻结写入）存 g_throw_val，
+            // 经 qz.take_err 取回写入 __err(global1)。仅在 __err 尚未被用户 throw
+            // 设定时轮询——否则会覆盖用户已抛的值（user throw 直接 globalSet(1)）。
+            M.globalGet(1); M.i64Eqz();
+            M.ifBlock("void");
+            M.call("qz.take_err"); M.globalSet(1);
+            M.end();
+        }
         M.globalGet(1); M.i64Eqz(); M.i32Eqz();                  // __err != 0 ?
         M.ifBlock("void");
         if (this._tryStack.length) {
