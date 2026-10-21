@@ -596,8 +596,9 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
     /* 固定槽：undefined = 0x7FF9|0，null = 0x7FF9|1（emitter 约定，见 _emitUndefined/_emitNull）。*/
     if (JS_IsUndefined(r)) return ((int64_t)0x7FF9 << 48);
     if (JS_IsNull(r))      return ((int64_t)0x7FF9 << 48) | 1;
-    int idx = g_handle_count++;
-    if (idx >= QZ_MAX_HANDLES) return 0;
+    int idx = g_handle_count;
+    if (idx >= QZ_MAX_HANDLES) { JS_FreeValue(ctx, r); return 0; }   /* 表满：释放 r（避免泄漏）+ 返回 undefined（0x7FF9|0），不递增计数 */
+    g_handle_count = idx + 1;
     g_handles[idx] = JS_DupValue(ctx, r);
     if (JS_IsBigInt(r)) return ((int64_t)0x7FF8 << 48) | (uint32_t)idx;  /* BigInt 句柄（BIG_HI） */
     /* 对象/闭包/数组等 → handle table 注册（0x7FF9 | idx） */
@@ -610,8 +611,9 @@ static int64_t qz_ret(JSContext *ctx, JSValue r)
  * 否则字段读按 POJO 偏移解析 → 垃圾值。*/
 static int64_t qz_host_obj_handle(JSContext *ctx, JSValue r)
 {
-    int idx = g_handle_count++;
+    int idx = g_handle_count;
     if (idx >= QZ_MAX_HANDLES) { JS_FreeValue(ctx, r); return 0; }
+    g_handle_count = idx + 1;
     g_handles[idx] = r;                     /* 转移所有权 */
     return ((int64_t)0x7FFD << 48) | (uint32_t)idx;
 }
@@ -2001,18 +2003,21 @@ static JSValue qz_get_iterator(JSContext *ctx, JSValueConst v)
 __attribute__((export_name("iter_new")))
 int64_t qz_guest_iter_new(int64_t target)
 {
-    if (!g_current_rt) return 0;
+    /* 失败哨兵：0x7FF9|0xFFFFFFFF。槽 idx 恒 < g_iterCount ≤ 0xFFFFFFFF，
+     * 故 qz_iter_slot 必拒 → iter_pull 直接 done，不会误用槽 0 的迭代器。 */
+    const int64_t ITER_FAIL = (int64_t)(((uint64_t)0x7FF9 << 48) | 0xFFFFFFFFu);
+    if (!g_current_rt) return ITER_FAIL;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
-    if (!ctx) return 0;
+    if (!ctx) return ITER_FAIL;
     JSValue t = qz_tojs(ctx, target);
     JSValue iter = qz_get_iterator(ctx, t);
     JS_FreeValue(ctx, t);
-    if (JS_IsException(iter)) { JS_FreeValue(ctx, iter); return 0; }
+    if (JS_IsException(iter)) { JS_FreeValue(ctx, iter); return ITER_FAIL; }
     JSValue next = JS_GetPropertyStr(ctx, iter, "next");
     if (g_iterCount == g_iterCap) {
         uint32_t ncap = g_iterCap ? g_iterCap * 2 : 32;
         QzIter *n = (QzIter *)realloc(g_iters, (size_t)ncap * sizeof(QzIter));
-        if (!n) { JS_FreeValue(ctx, iter); JS_FreeValue(ctx, next); return 0; }
+        if (!n) { JS_FreeValue(ctx, iter); JS_FreeValue(ctx, next); return ITER_FAIL; }
         memset(n + g_iterCap, 0, (size_t)(ncap - g_iterCap) * sizeof(QzIter));
         g_iters = n; g_iterCap = ncap;
     }
@@ -2783,8 +2788,6 @@ static int64_t qz_array_callback_op(int64_t recv, const char *nm, int64_t cb, in
     if (!strcmp(nm, "map") || !strcmp(nm, "filter") || !strcmp(nm, "forEach")
         || !strcmp(nm, "find") || !strcmp(nm, "findIndex")
         || !strcmp(nm, "some") || !strcmp(nm, "every")) {
-        JSValue outArr = (strcmp(nm, "map") || strcmp(nm, "filter")) ? JS_UNDEFINED : JS_UNDEFINED;
-        int wantArr = !strcmp(nm, "map") || !strcmp(nm, "filter");
         JSValue out = JS_NewArray(ctx);
         int32_t oi = 0;
         int64_t scal = undef;
@@ -2815,6 +2818,11 @@ static int64_t qz_array_callback_op(int64_t recv, const char *nm, int64_t cb, in
         int64_t acc = seed;
         int32_t start = 0;
         if (seed == (int64_t)(((uint64_t)0x7FF9) << 48)) { acc = qz_arr_at(recv, 0); start = 1; }
+        /* 空数组无初值（宿主档抛 TypeError）。in-module 档 C 侧无法向产物
+         * __err 回传异常（JS_ThrowTypeError 的 pending exception 到不了 emitter
+         * catch；见 Object.freeze 写入同样吞错），故此处与既有行为一致返回
+         * undefined；可捕获化需新增 qz_host.throw_* 通道，见复审 M5 备注。 */
+        if (n == 0 && seed == (int64_t)(((uint64_t)0x7FF9) << 48)) return undef;
         for (int32_t i = start; i < n; i++) {
             int64_t el = qz_arr_at(recv, i);
             int64_t nv = qz_guest_closure_call(cb, acc, el, qz_ret(ctx, JS_NewInt32(ctx, i)), recv, undef);
@@ -3210,8 +3218,11 @@ int64_t qz_guest_class_env_get(int64_t self, int32_t keyId)
     uint16_t tag = (uint16_t)(u >> 48);
     if (tag != 0x7FFE) return 0;
     uint32_t inst = (uint32_t)(u & 0xFFFFFFFFu);
+    /* inst==0（无实例内存）时不得回落到 clsId 0 —— 那会静默读到 0 号类的 statics
+     * （错值）。直接返回 0（无 env），与宿主档 classEnvGet 的 self 校验一致。 */
+    if (!inst) return 0;
     int32_t clsId = 0;
-    if (inst) memcpy(&clsId, (const void *)(uintptr_t)inst, 4);
+    memcpy(&clsId, (const void *)(uintptr_t)inst, 4);
     return qz_guest_static_get(clsId, keyId);
 }
 
