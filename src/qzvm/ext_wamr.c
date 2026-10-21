@@ -1616,11 +1616,14 @@ static JSValue wamr_instance_constructor(JSContext *ctx, JSValueConst new_target
         }
     }
 
-    /* Instantiate */
+    /* Instantiate.
+     * host_managed_heap_size 是 wasm_runtime_module_malloc 的池（guest 侧 malloc
+     * 走的是它自己线性内存里的 wasi-libc 堆，不是这个）；qzjs 从不调 module_malloc，
+     * 故只需最小值。原 8 MiB 每实例 mprotect 提交，是纯浪费。 */
     char error_buf[128] = {0};
     wasm_module_inst_t module_inst = wasm_runtime_instantiate(mod_wrap->module,
                                                               64 * 1024,
-                                                              8 * 1024 * 1024,
+                                                              4 * 1024,
                                                               error_buf, sizeof(error_buf));
     if (!module_inst) {
         if (wrap) {
