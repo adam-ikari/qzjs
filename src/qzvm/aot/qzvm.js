@@ -380,8 +380,9 @@ function makeQzvm(strings, opts) {
     if (v !== 0n) { exportsRef.__err.value = 0n; throw toJS(v); }
   };
   const bindBump = (g) => { bumpRef = g; };
-  // 宿主侧 bump 分配：与 wasm 侧 STR_BASE(8MiB) 同界；越界抛错（绝不静默覆盖字面量段）。
-  const ARENA_END = 16 << 20;          // 与 emitter 的 STR_BASE 一致（bump 堆上限）
+  // 宿主侧 bump 分配：与 wasm 侧 arena 上界（emitter 的 memLayout().arenaEnd）同界；
+  // 越界抛错（绝不静默覆盖字面量段）。opts.arenaEnd 由产物布局传入，缺省 16 MiB。
+  const ARENA_END = (opts && opts.arenaEnd) || (16 << 20);
   const bumpAlloc = (nbytes) => {
     const off = bumpRef.value;
     if (off + nbytes > ARENA_END) throw new Error(`qzvm: bump arena 溢出（${off}+${nbytes} > ${ARENA_END}）；调用间未重置 __bump？`);

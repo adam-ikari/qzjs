@@ -198,7 +198,7 @@ class Module {
     select() { this._emit(OP.select); }
     unreachable() { this._emit(OP.unreachable); }
     // 内存（字符串/数组共享内存用）
-    addMemory(pages) { this.memory = pages; }
+    addMemory(pages, maxPages) { this.memory = pages; this.memoryMax = (maxPages === undefined ? null : maxPages); }
     addData(offset, bytes) { this.data.push({ offset, bytes: Uint8Array.from(bytes) }); }   // 数据段（字符串字面量 UTF-8）
     /* funcref 表：跨模块共享（import 名 __indirect_function_table），供 C 侧原语
      * 经 call_indirect 回调产物内的闭包体/类方法。函数指针在 C 里就是 i32 索引，
@@ -299,9 +299,12 @@ class Module {
         }
         // memory 段
         if (this.memory !== null) {
-            // vec(memorytype)：count=1 + limits{flags=0x01(has max), min, max}
-            // 非 shared（shared 需 import，WAMR 不接受本地定义）
-            const body = [0x01, 0x00, ...uleb(this.memory)];   // count=1 + limits{flags=0x00(min only), min} —— WAMR classic AOT 不支持 max
+            // vec(memorytype)：count=1 + limits。有 max 时 flags=0x01(min,max)，否则 0x00(min)。
+            // 非 shared（shared 需 import，WAMR 不接受本地定义）。
+            const lim = (this.memoryMax === null || this.memoryMax === undefined)
+                ? [0x00, ...uleb(this.memory)]
+                : [0x01, ...uleb(this.memory), ...uleb(this.memoryMax)];
+            const body = [0x01, ...lim];
             out.push(5, ...uleb(body.length), ...body);
         }
         // table 段（id 4）：仅本地表（import 表已在 import 段内）

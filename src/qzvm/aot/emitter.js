@@ -2354,8 +2354,23 @@ const INMOD_HOST_LIMIT = 12 << 20;               // libqzvm 段上界（12 MiB�
 const INMOD_STR_BUMP   = INMOD_HOST_LIMIT;       // in-module bump 堆起始
 const INMOD_TABLE_CAP = 514;      // libqzvm 导出表容量（cmake 链接生成，见 --export-table）
 const INMOD_TABLE_RESERVE = 4096; // 产物蹦床可用槽数（闭包 + 类方法）
-const INMOD_STR_BASE   = 20 << 20;               // in-module 字面量段基址（20 MiB）
+const INMOD_STR_BASE   = 20 << 20;               // in-module 字面量段基址（20 MiB，libqzvm 段 12MiB + arena 8MiB）
 const INMOD_PAGES      = 1024;                   // 64 MiB（字面量段 [20MiB, 64MiB)）
+
+/* 独立档内存布局（opts.memMiB = 线性内存上限，MiB，默认 40，最小 8）。
+ * in-module 的 memory 由 libqzvm 导入，大小归 src/qzvm/CMakeLists.txt 的
+ * --initial-memory 管，不经此处。
+ * 布局：scratch [16,64) / bump arena [STR_BUMP, arenaEnd) / 字面量段 [arenaEnd, total)。
+ * arenaEnd = 总内存的 40%（默认 40MiB → 16MiB = 现状不变），至少 1MiB，
+ * 且至少给字面量段留 4MiB。字面量段用量是编译期常量，富余留给运行时 bump 堆。 */
+function memLayout(opts) {
+    const mib = (opts && opts.memMiB) || 40;
+    if (!(mib >= 8)) throw new RangeError(`memMiB 至少 8（arena + 字面量段下限），收到 ${mib}`);
+    const pages = Math.ceil(mib * 16);
+    const total = pages << 16;
+    const arenaEnd = Math.min(Math.max((total * 0.4) & ~0xfff, 1 << 20), total - (4 << 20));   // 4 KiB 对齐
+    return { pages, arenaEnd };
+}
 
 // 字符串 helper 函数（每模块一份，emitter call 调用）
 
@@ -2985,7 +3000,8 @@ function compileTS(input, outWasm, opts = {}) {
              * → in-module 下整体后移：libqzvm 段 [0, INMOD_HOST_LIMIT) 预留，
              *   bump arena [INMOD_HOST_LIMIT, INMOD_STR_BASE)，字面量段起于 INMOD_STR_BASE。
              * 独立模式保留原布局：bump [128,16MiB) + 字面量 [16MiB,40MiB)。*/
-            em._strBase = opts.inModuleLink ? INMOD_STR_BASE : STR_BASE;
+            const layout = opts.inModuleLink ? null : memLayout(opts);
+            em._strBase = opts.inModuleLink ? INMOD_STR_BASE : layout.arenaEnd;
             em._strBump = opts.inModuleLink ? (INMOD_STR_BUMP + 64) : STR_BUMP;   // +64：让出 scratch 区
             if (opts.inModuleLink) {
                 m.importMemory("qz", "memory", INMOD_PAGES, INMOD_PAGES);
@@ -2996,7 +3012,7 @@ function compileTS(input, outWasm, opts = {}) {
                  * TABLE_CAP（libqzvm 自身表项）+ 余量给产物闭包/类方法。 */
                 m.addTableImport(INMOD_TABLE_CAP, "__indirect_function_table", "qz");
             } else {
-                m.addMemory(640);    // 40 MiB：bump arena [0,STR_BASE=16MiB) + 字面量段 [16MiB,40MiB)
+                m.addMemory(layout.pages);    // 默认 40 MiB：bump arena [0,16MiB) + 字面量段 [16MiB,40MiB)
             }
             m.addGlobal("i32", em._strBump);                 // global0 = bump 堆（字符串/对象）
             m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
@@ -3163,7 +3179,8 @@ function compileTS(input, outWasm, opts = {}) {
         lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis, src, needsArgs: !!(lamNode && lamNode._qzNeedsArgs) };
     }
     const classMeta = em._clsMetaBuild || [];
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs, trampSlots: em._trampSlots || new Map() };
+    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs, trampSlots: em._trampSlots || new Map(),
+             arenaEnd: opts.inModuleLink ? null : memLayout(opts).arenaEnd };
 }
 
 

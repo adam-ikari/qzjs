@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-18T02:27:08"
+updated: "2026-10-21T03:44:38"
 ---
 
 <!-- compiled_truth -->
@@ -617,3 +617,9 @@ updated: "2026-10-18T02:27:08"
   kind: note
   summary: "BIG_HI=0x7FF8 新 tag 落地（批 39）：BigInt 句柄路由优先于通用 qz.*（不入 _emitIsHandle）；0x7FF8|0=canonical NaN → BIG 槽位从 2 起，见 aot-bigint-tagged-backend"
   affects: [aot-bigint-tagged-backend]
+
+- time: 2026-10-21T03:44:38
+  kind: decision
+  summary: "内存上限可配置（2026-10-20）：emitter.js 新增 memLayout(opts)（opts.memMiB，默认 40，最小 8），独立档线性内存页数与 bump arena 上界由它统一推导——arenaEnd = total*0.4 按 4KiB 对齐（默认 40MiB→16MiB，与旧行为一致），下限 1MiB、至少给字面量段留 4MiB；emitter 产物 memory 段可带 max（wasm-encoder addMemory(pages,max)），compileTS 返回 arenaEnd，build.js 写 .meta.json 的 arena 并由 glue 传给 makeQzvm({arenaEnd})，宿主 ARENA_END 随之对齐。in-module 档不经此项（memory 由 CMake --initial-memory 决定）。实测：--mem 8 与 64 的 arena 分别 3.35MiB/26.8MiB，撑爆阈值 209655 vs 1677559 次拼接，均抛 RangeError 且实例存活；test_aot ALL PASS、audit_diff 47/47。"
+  source: "emitter.js:2360-2373, qzvm.js:383-385, build.js:45,104,158,160"
+  affects: [aot-wasm-tagged-backend]

@@ -41,6 +41,14 @@ function extractMakeQzvm() {
     return src.slice(start, end);
 }
 
+// --mem <MiB>：线性内存上限（默认 40）。影响 memory 页数、bump arena 上界与字面量段起点。
+function memOpt() {
+    const i = process.argv.indexOf("--mem");
+    const v = i >= 0 ? Number(process.argv[i + 1]) : 0;
+    if (i >= 0 && !(v > 0)) { console.error("--mem 需要正数 MiB"); process.exit(2); }
+    return v ? { memMiB: v } : {};
+}
+
 // 解析 --main "fn(a, b); fn2(c)" → [{name, args}]
 function parseMain(spec) {
     const calls = [];
@@ -93,7 +101,7 @@ function genGlue(prefix, mainCalls, wasmOnly) {
   WebAssembly.instantiate(bytes, { qz }, { aot }).then(({ instance }) => {`;
     let glue = `${makeQzvm}
 // ── 生成产物：${basename}（分离形态：${note}，同目录）──
-const qz = makeQzvm(${JSON.stringify(strings)});
+const qz = makeQzvm(${JSON.stringify(strings)}, ${JSON.stringify(metaObj.arena ? { arenaEnd: metaObj.arena } : {})});
 const __meta = ${JSON.stringify(meta)};
 const __lams = ${JSON.stringify(lams)};
 const __classes = ${JSON.stringify(classes)};
@@ -147,9 +155,9 @@ if (cmd === "build") {
     // --interp <fn1,fn2>：这些函数不编 wasm，退到宿主 JS 解释器跑。
     const interpIdx = process.argv.indexOf("--interp");
     const interp = interpIdx >= 0 ? process.argv[interpIdx + 1].split(",").filter(Boolean) : [];
-    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp });
+    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp, ...memOpt() });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [] }));
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd }));
     if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
     const nInterp = r.funcMeta.filter(m => m.mode === "interp").length;
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp ? ` interp=${nInterp}` : ""}`);
@@ -174,9 +182,9 @@ if (cmd === "build") {
     fs.mkdirSync(outDir(), { recursive: true });
     const interpIdx2 = process.argv.indexOf("--interp");
     const interp2 = interpIdx2 >= 0 ? process.argv[interpIdx2 + 1].split(",").filter(Boolean) : [];
-    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp: interp2 });
+    const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp: interp2, ...memOpt() });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [] }));
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd }));
     if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
     const nInterp2 = r.funcMeta.filter(m => m.mode === "interp").length;
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp2 ? ` interp=${nInterp2}` : ""}`);
@@ -190,6 +198,7 @@ if (cmd === "build") {
     console.error("usage: build.js build|compile|glue ...");
     console.error("  build  <src.ts> [prefix] [--main \"fn(a);fn2(b)\"] [--target <arch> --target-abi <abi>] [--debug]");
     console.error("  compile <src.ts> [prefix] [--debug]   # 产出 .wasm/.wat/.strings.json/.meta.json（不经 wamrc）");
+    console.error("  --mem <MiB>: 线性内存上限（默认 40；in-module 形态由 libqzvm --initial-memory 决定）");
     console.error("  --debug: 生成 name 段（函数名）+ DWARF 调试段（.debug_*），wat/wasm 反汇编/lldb 源码调试用（不影响执行）");
     console.error("  --no-aot: glue 只加载 .wasm（纯 bytecode）——WAMR debug-interp 拒绝 AOT 实例，调试运行须此模式");
     console.error("  glue <prefix> [--main \"fn(a)\"] [--no-aot]");
