@@ -450,6 +450,81 @@ static JSValue qz_closure_materialize(JSContext *ctx, uint32_t off)
     return fn;
 }
 
+/* ── in-module POJO/实例物化 ──────────────────────────────────────────
+ * in-module 档对象字面量/实例是 wasm 线性内存块（不在句柄表里）。交给 C 侧
+ * 内建（Object.keys/JSON.stringify…）必须物化成真 JS 对象。
+ * 不做跨调用缓存：bump 堆在每次宿主调用前复位，偏移会被复用 → 按偏移缓存
+ * 会把上一轮的对象当成这一轮的内容（静默错值）。同一调用内多次物化得到等值
+ * 对象；内建对物化对象的原地变异不回写内存（已知边界，见 IN_MODULE_DESIGN）。*/
+
+/* in-module 档内存块偏移下界：libqzvm 段 [0, 12MiB)，产物 bump 从 12MiB 起
+ * （emitter INMOD_HOST_LIMIT）。句柄表索引 < 65536，故 0x7FF9|低32 借此分离
+ * 「表索引」与「内存偏移」。*/
+#define QZ_POJO_MIN_OFF (12u << 20)
+
+static int qz_is_pojo(int64_t b)
+{
+    if ((uint16_t)((uint64_t)b >> 48) != 0x7FF9) return 0;
+    uint32_t off = (uint32_t)((uint64_t)b & 0xFFFFFFFFu);
+    return off >= QZ_POJO_MIN_OFF;
+}
+
+static int32_t qz_field_index(int32_t nameStrId);
+static uint32_t g_fields_base;   /* 定义见 __set_fields 节 */
+
+/* 写保护标志存块内第 1 个字段槽（fieldMap 的 "__cls"，POJO 从不写它）：
+ * 分配时被 _emitFillUndef 填成 undefined 句柄，故 1/2 不会与真实值冲突。
+ * 存块内而非旁表——bump 复位会让偏移复用，旁表条目就成了错值。*/
+#define QZ_POJO_FLAGS_FOFF 8u
+#define QZ_POJO_FROZEN 1
+#define QZ_POJO_SEALED 2
+
+static int qz_pojo_flags(uint32_t off)
+{
+    int64_t raw = 0;
+    memcpy(&raw, (const void *)(uintptr_t)(off + QZ_POJO_FLAGS_FOFF), 8);
+    return (raw == QZ_POJO_FROZEN || raw == QZ_POJO_SEALED) ? (int)raw : 0;
+}
+
+static void qz_pojo_set_flags(uint32_t off, int flags)
+{
+    int64_t raw = flags;
+    memcpy((void *)(uintptr_t)(off + QZ_POJO_FLAGS_FOFF), &raw, 8);
+}
+
+/* 物化：块内每个字段槽 → JS 对象属性。属性顺序 = g_fields_base 的全局顺序
+ * （emitter fieldMap 冻结序），足以支撑 Object.keys/JSON.stringify。*/
+static JSValue qz_pojo_materialize(JSContext *ctx, uint32_t off)
+{
+    JSValue o = JS_NewObject(ctx);
+    if (JS_IsException(o)) return o;
+    int32_t sz = 0;
+    memcpy(&sz, (const void *)(uintptr_t)(off + 4), 4);
+    int flags = qz_pojo_flags(off);
+    if (g_fields_base && sz > 8) {
+        const unsigned char *b = (const unsigned char *)(uintptr_t)g_fields_base;
+        int32_t count = 0;
+        memcpy(&count, b, 4);
+        for (int32_t i = 0; i < count; i++) {
+            uint32_t noff, nlen;
+            memcpy(&noff, b + 4 + i * 8, 4);
+            memcpy(&nlen, b + 8 + i * 8, 4);
+            if (nlen == 5 && memcmp((const void *)(uintptr_t)noff, "__cls", 5) == 0) continue;  /* 头槽不是属性 */
+            uint32_t foff = (uint32_t)(i + 1) * 8;
+            if (foff + 8 > (uint32_t)sz) continue;
+            int64_t raw = 0;
+            memcpy(&raw, (const void *)(uintptr_t)(off + foff), 8);
+            if (raw == (int64_t)0x7FF9000000000000ULL) continue;   /* 未赋值槽（分配时填 undefined）不是自有属性 */
+            JSAtom a = JS_NewAtomLen(ctx, (const char *)(uintptr_t)noff, nlen);   /* 名不保证 NUL 结尾 */
+            JS_SetProperty(ctx, o, a, qz_tojs(ctx, raw));
+            JS_FreeAtom(ctx, a);
+        }
+    }
+    if (flags == QZ_POJO_FROZEN) JS_FreezeObject(ctx, o);
+    else if (flags == QZ_POJO_SEALED) JS_SealObject(ctx, o);
+    return o;
+}
+
 /* ── 数组往返：tagged 数组句柄 ↔ JS 数组 ──────────────────────────────
  * method_call 把数组交给 JS 内建（reverse/sort/splice/push…）后必须把结果
  * **写回 wasm 内存**，否则 `a.reverse()` 这类原地变异对后续 `a[0]` 不可见
@@ -521,6 +596,7 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
         uint32_t idx = (uint32_t)(b & 0xFFFFFFFF);
         if (idx == 0) return JS_UNDEFINED;
         if (idx == 1) return JS_NULL;
+        if (idx >= QZ_POJO_MIN_OFF) return qz_pojo_materialize(ctx, idx);   /* in-module POJO/实例内存块（句柄表索引不可能这么大）*/
         if (idx < (uint32_t)g_handle_count) return JS_DupValue(ctx, g_handles[idx]);
     }
     if (tag == 0x7FF8) {  /* BigInt 句柄（BIG_HI|idx；idx≠0，0=canonical NaN） */
@@ -562,14 +638,9 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
      * （"null function or function signature mismatch"）。闭包的**调用**统一走
      * closure_call 的 call_indirect；属性读写由 prop_get/prop_set 的
      * 专用分支处理（见 qz_clo_props）。*/
-    if (tag == 0x7FFE) { /* 类实例：物化为占位对象（字段/方法走 prop_get/prop_set 的专用分支）*/
+    if (tag == 0x7FFE) { /* 类实例：同 POJO 布局（[0]=clsId [4]=size [f…]），同样物化 */
         uint32_t inst = (uint32_t)(b & 0xFFFFFFFF);
-        int32_t clsId = 0;
-        if (inst) memcpy(&clsId, (const void *)(uintptr_t)inst, 4);
-        JSValue o = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, o, "__qzInst", JS_NewInt32(ctx, (int32_t)inst));
-        JS_SetPropertyStr(ctx, o, "__qzCls", JS_NewInt32(ctx, clsId));
-        return o;
+        return inst ? qz_pojo_materialize(ctx, inst) : JS_NewObject(ctx);
     }
     return JS_UNDEFINED;  /* 其他 tag 后续 */
 }
@@ -2333,17 +2404,23 @@ int64_t qz_guest_object_rest(int64_t src, int32_t nExcl, int32_t e0, int32_t e1,
 /* prot_check(v, op)：写保护检查（freeze/seal 后写应失败）。
  * AOT 侧用它在写入点提前 trap；这里把不可写属性检出为异常。*/
 __attribute__((export_name("prot_check")))
-void qz_guest_prot_check(int64_t v, int32_t op)
+void qz_guest_prot_check(int64_t v, int32_t nameId)
 {
+    (void)nameId;   /* 第二参实为属性名 strId（对齐宿主 protGuard），非 op */
     if (!g_current_rt) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return;
-    /* 冻结对象不可扩展；seal/freeze 的差异（属性可写性）由 JS_SetProperty 自身拒绝，
-     * 故此处以「不可扩展」作为写保护信号。op: 0=写属性 1=读（读不拦截）。*/
+    /* 冻结/不可扩展 → 写失败。op 语义不在参数里：产物只在写点调用本函数。*/
+    /* in-module POJO/实例：标志存块内（qz_tojs 每次新建对象，看不到它）。*/
+    if (qz_is_pojo(v)) {
+        uint32_t off = (uint32_t)((uint64_t)v & 0xFFFFFFFFu);
+        if (qz_pojo_flags(off)) qz_set_throw(ctx, JS_NewTypeError(ctx, "cannot assign to non-extensible object"));
+        return;
+    }
     JSValue o = qz_tojs(ctx, v);
     int sealed_ = JS_IsObject(o) ? !JS_IsExtensible(ctx, o) : 0;
     JS_FreeValue(ctx, o);
-    if (sealed_ && op == 0) qz_set_throw(ctx, JS_NewTypeError(ctx, "cannot assign to non-extensible object"));
+    if (sealed_) qz_set_throw(ctx, JS_NewTypeError(ctx, "cannot assign to non-extensible object"));
 }
 
 /* obj_assign(id, dst, a0, a1, a2)：Object.assign(dst, ...srcs)（最多 3 源）。*/
@@ -3624,6 +3701,14 @@ int64_t qz_guest_builtin(int32_t id, int32_t n, int64_t a0, int64_t a1,
     char nm[128];
     memcpy(nm, name, len); nm[len] = '\0';
 
+    /* in-module POJO 的 freeze/seal/preventExtensions：标志必须落回内存块，
+     * 否则 emit 的 prot_check 看不到（qz_tojs 只造临时对象）。返回原句柄。*/
+    if (qz_is_pojo(a0)) {
+        int f = 0;
+        if (!strcmp(nm, "Object.freeze")) f = QZ_POJO_FROZEN;
+        else if (!strcmp(nm, "Object.seal") || !strcmp(nm, "Object.preventExtensions")) f = QZ_POJO_SEALED;
+        if (f) { qz_pojo_set_flags((uint32_t)((uint64_t)a0 & 0xFFFFFFFFu), f); return a0; }
+    }
     JSValue fn = qz_builtin_lookup(ctx, nm);
     if (JS_IsException(fn)) { JS_FreeValue(ctx, fn); return 0; }
     /* 非函数（常量 / 原型对象）：直接作为调用结果 */
