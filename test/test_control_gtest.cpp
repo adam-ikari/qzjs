@@ -7,6 +7,7 @@
 #include <cstring>
 #include <thread>
 #include <cstdio>
+#include <cstdlib>   /* atoll */
 #include <unistd.h>
 
 // 启用控制面的 host 工厂（control_plane=IN_PROC）。
@@ -516,5 +517,113 @@ TEST(control_, timeout) {
     std::string out;
     ASSERT_TRUE(host_wait_ctl(h, "c7", &out, 10000)) << out;
     EXPECT_NE(std::string::npos, out.find("\"code\":\"TIMEOUT\"")) << out;
+    host_destroy(h);
+}
+
+// 8. gc op：造引用环（无外部引用 → 只能 mark-sweep 回收）→ "gc" 回执报回收量，
+//    heap 回落。守「确定性 GC 的显式驱动点确实回收环」这条核心行为：
+//    默认档隐式阈值 GC 已关（JS_SetGCThreshold((size_t)-1)），若 "gc" 没接上
+//    JS_RunGC，这里 heap 不会回落 → 环永久泄漏。
+TEST(control_, gc_reclaims_cycle_heap) {
+    HostCtx *h = host_create_ctl();
+    ASSERT_NE(nullptr, h);
+
+    auto heap_of = [&](const char *correl) -> long long {
+        EXPECT_EQ(0, host_control(h, std::string("{\"op\":\"metrics\",\"correl\":\"") +
+                                      correl + "\"}"));
+        std::string out;
+        EXPECT_TRUE(host_wait_ctl(h, correl, &out)) << out;
+        size_t p = out.find("\"heap_bytes\":");
+        if (p == std::string::npos) return -1;
+        return atoll(out.c_str() + p + 13);
+    };
+
+    long long base = heap_of("g-base");
+    ASSERT_GT(base, 0);
+
+    // 3000 个自引用环：each ~ Array(256)，逃出作用域后无外部引用。
+    ASSERT_EQ(0, host_control(h, ctl_eval_json(
+        "g-mk", "for(let i=0;i<3000;i++){const o={buf:new Array(256).fill(1)};o.self=o;};1")));
+    std::string out;
+    ASSERT_TRUE(host_wait_ctl(h, "g-mk", &out)) << out;
+
+    long long after_alloc = heap_of("g-alloc");
+    EXPECT_GT(after_alloc, base + (1 << 20)) << "环应显著抬高堆；实测差值过小 = 脚本没造出环";
+
+    ASSERT_EQ(0, host_control(h, R"({"op":"gc","correl":"g-run"})"));
+    ASSERT_TRUE(host_wait_ctl(h, "g-run", &out)) << out;
+    EXPECT_NE(std::string::npos, out.find("\"ok\":true")) << out;
+    size_t rp = out.find("\"reclaimed_bytes\":");
+    ASSERT_NE(std::string::npos, rp) << out;
+    long long reclaimed = atoll(out.c_str() + rp + 18);
+    EXPECT_GT(reclaimed, (1 << 20)) << out;
+
+    long long after_gc = heap_of("g-after");
+    // 回落到基线量级（留 2MB 余量吸收引擎内部缓存/碎片）。
+    EXPECT_LT(after_gc, base + (2 << 20)) << "gc 后堆应回落到基线附近；未回落 = 环没被回收";
+    host_destroy(h);
+}
+
+/* GC 计数（约束③ ⑤）：gc_runs 只计**显式**驱动点（qz_gc_drive 是唯一入口），
+ * 所以「驱动 N 次 → N」是跨进程确认通道（宿主驱动 vs RT 实际执行），**不是**
+ * 隐式 GC 的检测器——引擎自发的 GC 不经此处。暂停时长是 wall-clock 诊断量，
+ * 只断言内部一致（单次后 total == last、两次后 total ≥ last），不断言绝对值
+ * （机器相关，也不可能逐位复现）。 */
+TEST(control_, gc_counters_track_explicit_drives) {
+    HostCtx *h = host_create_ctl();
+    ASSERT_NE(nullptr, h);
+
+    /* 从 metrics 回执里取一个整数计数（同一来源 rt->gc_*，无副作用）。 */
+    auto metric = [&](const char *correl, const char *key) -> long long {
+        EXPECT_EQ(0, host_control(h, std::string("{\"op\":\"metrics\",\"correl\":\"") +
+                                      correl + "\"}"));
+        std::string out;
+        EXPECT_TRUE(host_wait_ctl(h, correl, &out)) << out;
+        std::string k = std::string("\"") + key + "\":";
+        size_t p = out.find(k);
+        if (p == std::string::npos) return -1;
+        return atoll(out.c_str() + p + k.size());
+    };
+    /* 控制面 gc op 的回执（会**真的**跑一次回收并记账）。 */
+    auto gc_op = [&](const char *correl, const char *key) -> long long {
+        EXPECT_EQ(0, host_control(h, std::string("{\"op\":\"gc\",\"correl\":\"") + correl + "\"}"));
+        std::string out;
+        EXPECT_TRUE(host_wait_ctl(h, correl, &out)) << out;
+        std::string k = std::string("\"") + key + "\":";
+        size_t p = out.find(k);
+        if (p == std::string::npos) return -1;
+        return atoll(out.c_str() + p + k.size());
+    };
+
+    EXPECT_EQ(0, metric("c0", "gc_runs")) << "刚建好的 runtime 不该有过显式 GC";
+
+    /* 造环把堆抬高（同 gc_reclaims_cycle_heap），但不驱动回收。这里断言的是
+     * 「不过账」：gc_runs 只记我们自己驱动的那几次，堆自己涨不会动它。
+     * （**不是**「引擎没偷偷 GC」的证据——隐式 GC 根本不经过 qz_gc_drive，
+     * 计数看不到它。要检那个得加引擎 hook。） */
+    std::string out;
+    ASSERT_EQ(0, host_control(h, ctl_eval_json(
+        "c-mk", "for(let i=0;i<3000;i++){const o={buf:new Array(256).fill(1)};o.self=o;};1")));
+    ASSERT_TRUE(host_wait_ctl(h, "c-mk", &out)) << out;
+    EXPECT_EQ(0, metric("c1", "gc_runs")) << "没驱动过就不该有计数";
+
+    long long runs1 = gc_op("c-gc1", "gc_runs");
+    EXPECT_EQ(1, runs1) << "跑一次 gc op 应记 1 次";
+    long long last1 = metric("c2", "gc_last_us");
+    long long total1 = metric("c3", "gc_total_us");
+    EXPECT_GE(last1, 0);
+    EXPECT_EQ(last1, total1) << "只跑过一次 → 累计 == 最近一次";
+
+    EXPECT_EQ(2, gc_op("c-gc2", "gc_runs"));
+    EXPECT_EQ(2, metric("c4", "gc_runs")) << "metrics 与 gc 回执须同源";
+    EXPECT_GE(metric("c5", "gc_total_us"), metric("c6", "gc_last_us"))
+        << "两次之后累计应 ≥ 最近一次";
+
+    /* qz_gc()（公共 C API）走的是**另一条**驱动路径：msgq GC_RUN → wake
+     * 安全点 → qz_gc_drive。它与控制命令共用同一条入站 FIFO，所以后面那条
+     * metrics 命令必定在它之后被处理。三处调用点都得过账，漏一个计数就偏小。 */
+    ASSERT_EQ(0, qz_gc(h->rt));
+    EXPECT_EQ(3, metric("c7", "gc_runs")) << "qz_gc() 也该计入（另一条驱动路径）";
+
     host_destroy(h);
 }

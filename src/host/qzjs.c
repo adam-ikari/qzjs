@@ -14,6 +14,7 @@
  */
 
 #include "base/qz_rt.h"
+#include "ipc/ipc_process.h"   /* QZ_IPC_CTL_GC_MSG：ISOLATED 下 qz_gc 的跨进程形式 */
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
@@ -442,6 +443,62 @@ int qz_ping_path_if_available(qz_t *rt, const int32_t *path, int path_len,
 }
 #endif
 
+/* ── 显式 GC 驱动（qzjs.h 声明）──
+ *
+ * 语义：把「跑一次 mark-sweep」入队到主执行体的事件循环安全点，返回 0 =
+ * **已入队**（不是已回收——异步）。两条路径按进程模型分叉：
+ *
+ *   ISOLATED（QZ_HOST_SPLIT）：宿主进程没有 JSRuntime（JS 在主RT 进程），
+ *   走通道发系统 CONTROL {"qzjs":1,"gc":1}——与 ping 同族，但**不经控制面
+ *   路由**（qz_control_route 受 control_plane 档位门控，OFF 档会静默丢弃；
+ *   GC 驱动是内存管理，与「暴露不暴露控制面」正交）。主RT 读回调把它转成
+ *   msgq flags=GC_RUN，wake 分割点就地 JS_RunGC。
+ *
+ *   THREAD：同进程，直接 qz_msg_push + uv_async_send 唤醒 qzjs 线程。
+ *
+ * 不阻塞等回收完成：回收在事件循环上发生，调用方要观测结果用控制面
+ * "gc" op（回执带 heap_bytes）。这与 qz_ping 的阻塞等待刻意不同——ping
+ * 测的是 loop 健康度（必须等），gc 只需要「已排入确定点」。
+ */
+int qz_gc(qz_t *rt)
+{
+    if (!rt || rt->magic != QZ_MAGIC) return -1;
+    if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE)) return -1;
+#ifdef QZ_HOST_SPLIT
+    /* 宿主侧：只有到主RT 的通道。未启动（qz_create 尚未完成）时 proc 为
+     * NULL——显式失败而非静默丢弃（§5.3）。 */
+    if (!rt->proc || rt->proc->state != QZ_PROC_RUN) return -1;
+    if (qz_proc_post(rt->proc, QZ_IPC_HOST_ID, QZ_IPC_MAIN_ID,
+                       IPC_ENV_KIND_CONTROL, 0,
+                       (const uint8_t *)QZ_IPC_CTL_GC_MSG,
+                       (uint32_t)(sizeof QZ_IPC_CTL_GC_MSG - 1)) < 0)
+        return -1;
+    return 0;
+#else
+    /* THREAD：本进程即执行体，入队 + 唤醒。 */
+    if (qz_msg_push(rt, QZ_IPC_CTL_GC_MSG, sizeof QZ_IPC_CTL_GC_MSG - 1,
+                      QZ_MSG_SRC_HOST, QZ_MSG_FLAG_GC_RUN) != 0)
+        return -1;
+    uv_async_send(&rt->wake);
+    return 0;
+#endif
+}
+
+/* 显式 GC 驱动点的唯一实现（qz_rt.h 声明，约束③ ⑤）。
+ * 所有会就地跑 JS_RunGC 的宿主侧位置都走这里——记账与回收同处一地，计数才
+ * 不会有洞（新增一个漏接此处的 JS_RunGC 调用点 = 计数偏小，而且没有任何东西
+ * 会变红）。耗时用 uv_hrtime（单调，ns 精度）→ 微秒。 */
+void qz_gc_drive(qz_t *rt)
+{
+    if (!rt || !rt->jsrt) return;
+    uint64_t t0 = uv_hrtime();
+    JS_RunGC(rt->jsrt);
+    uint64_t dt_us = (uv_hrtime() - t0) / 1000u;
+    rt->gc_runs++;
+    rt->gc_last_us = dt_us;
+    rt->gc_total_us += dt_us;
+}
+
 void  qz_free(void *ptr) {
     if (!ptr) return;
     qz_t *rt = (qz_t *)ptr;
@@ -502,6 +559,32 @@ int qz_runtime_init(qz_t *rt)
 #endif
     /* CTL-0 §3.9：安装 runtime 级中断处理器——只读 ctl_interrupt 原子标志。 */
     JS_SetInterruptHandler(rt->jsrt, qz_ctl_interrupt_handler, rt);
+
+    /* 确定性内存（brain/pages/qzvm-qzjs-layering.md 约束③）：引擎默认自动
+     * GC（quickjs 初值 256KB，触发点随机落在任意分配路径）使**环回收时机
+     * 不确定**——同一脚本两次运行的堆峰值/回收次数可能不同，破坏「输出与
+     * 内存行为逐位可复现」。默认（gc_threshold == 0）关掉隐式阈值 GC：回收
+     * 只发生在确定点（qz_gc() 宿主驱动 / 控制面 "gc" op）。gc_threshold > 0
+     * 是显式选择安全网（长跑、宿主不驱动回收）——代价即回收时机不确定。
+     * 注意：JS_SetGCThreshold((size_t)-1) 之后仍可由宿主 qz_gc() /
+     * 控制面 "gc" 显式回收，二者都直接调 JS_RunGC，不经阈值。 */
+    JS_SetGCThreshold(rt->jsrt, rt->config.gc_threshold ? rt->config.gc_threshold
+                                                        : (size_t)-1);
+
+    /* 确定性随机（约束③）：random_seed != 0 时 runtime 的全部 context 以它作
+     * 初始 random_state（引擎 patch 的 JS_SetRandomSeed）→ Math.random() 与
+     * Map/Set 迭代序逐次可复现。必须在任何 context 创建**之前**生效
+     * （JS_NewContextRaw 由 random_state 派生 hash_seed）。0 = 沿用时钟播种。 */
+    JS_SetRandomSeed(rt->jsrt, rt->config.random_seed);
+
+    /* 堆硬上限（约束③）：memory_limit != 0 时透传引擎的 JS_SetMemoryLimit
+     * ——分配使堆超过该值时引擎让分配失败 → JS 层 InternalError: out of memory
+     * （可 try/catch），与 gc_threshold 的「惰性触发点」正交。0 = 不限（引擎缺省）。
+     * 相对引擎的堆账（malloc 用量 + MALLOC_OVERHEAD），非 RSS；检查点在
+     * rt->malloc_state（非 per-context），首次分配前设置即可。 */
+    if (rt->config.memory_limit)
+        JS_SetMemoryLimit(rt->jsrt, rt->config.memory_limit);
+
     JS_SetRuntimeOpaque(rt->jsrt, rt);
 
     /* Initialize context table */
@@ -509,8 +592,8 @@ int qz_runtime_init(qz_t *rt)
     rt->active_ctx_id = -1;
     for (int i = 0; i < QZ_MAX_CONTEXTS; i++) rt->contexts[i] = NULL;
 
-    /* Create initial context (ext init / polyfill 注入在 qz_ctx_create 内) */
-    qz_ctx_t *ctx = qz_ctx_create(rt, &rt->config);
+    /* Create initial context: 内核建 realm + 宿主接线（polyfill / ext init） */
+    qz_ctx_t *ctx = qz_ctx_create_host(rt, &rt->config);
     if (!ctx) {
         JS_FreeRuntime(rt->jsrt);
         rt->jsrt = NULL;
@@ -642,9 +725,7 @@ void qz_thread_teardown(qz_t *rt)
      * JS_FreeRuntime 会在非空 gc_obj_list 上断言（Promise 反应引用着
      * 尚未执行的闭包/值）。 */
     if (rt->jsrt) {
-        JSContext *job_ctx = NULL;
-        int ret;
-        while ((ret = JS_ExecutePendingJob(rt->jsrt, &job_ctx)) > 0) {}
+        qz_tick(rt);
     }
     /* 2.5) 排空 libuv 已排队但未处理的 request 完成（work_done）。
      * 必须在销毁 contexts / 释放 JSRuntime 之前：完成回调（bridge_io_done）
@@ -654,10 +735,7 @@ void qz_thread_teardown(qz_t *rt)
      * 导致 busy-spin（UV_RUN_NOWAIT 的返回值是 loop-alive，不是"处理数"）。 */
     for (int i = 0; i < 16; i++) {
         if (uv_run(&rt->loop, UV_RUN_NOWAIT) == 0) break;
-        if (rt->jsrt) {
-            JSContext *job_ctx = NULL;
-            while (JS_ExecutePendingJob(rt->jsrt, &job_ctx) > 0) {}
-        }
+        if (rt->jsrt) qz_tick(rt);
     }
 
     /* 3) DAP detach 必须先于 contexts/JSRuntime 释放：qz_debug_detach 会调
@@ -673,9 +751,9 @@ void qz_thread_teardown(qz_t *rt)
      * 条目/锁不依赖 loop/JSRuntime。 */
     qz_ctl_teardown(rt);
 
-    /* 4) 销毁所有 contexts（内含扩展 destroy） */
+    /* 4) 销毁所有 contexts（宿主接线：扩展 destroy + 资源清理） */
     for (int i = 0; i < QZ_MAX_CONTEXTS; i++) {
-        if (rt->contexts[i]) qz_ctx_destroy(rt, rt->contexts[i]);
+        if (rt->contexts[i]) qz_ctx_destroy_host(rt, rt->contexts[i]);
     }
 
     /* 5) 释放 JSRuntime（gc_obj_list 已空） */
@@ -704,7 +782,7 @@ void qz_thread_teardown(qz_t *rt)
     rt->ca_pem_len = 0;
     rt->ca_pem_cap = 0;
 
-    /* 6.7) 释放 polyfill 字节码缓存（qz_ctx_create_at 惰性加载，各 context
+    /* 6.7) 释放 polyfill 字节码缓存（qz_ctx_wire_up 惰性加载，各 context
      * 共享同一份）。C mode 无堆分配（unload 是 no-op）；A/B/D 释放堆缓冲。 */
     qz_polyfill_unload(rt->polyfill_owner);
     rt->polyfill_owner = NULL;

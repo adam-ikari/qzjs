@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [polyfill, bundling, memory]
 created: "2026-09-10T01:38:27"
-updated: "2026-09-13T10:52:49"
+updated: "2026-10-13T08:06:27"
 ---
 
 <!-- compiled_truth -->
@@ -56,4 +56,10 @@ updated: "2026-09-13T10:52:49"
 - time: 2026-09-13T10:52:49
   kind: note
   summary: "polyfill 模式产物分家（fix(build)）：build.js 与 CMakeLists 把生成 C 文件按 QZ_POLYFILL_MODE 拆分——rodata 仍写 tracked 基线 src/polyfill_default.c，compressed/external/host 各写 untracked src/polyfill_<mode>.c（CMake _polyfill_gen_c 同映射）。修掉「三模式共写同一 tracked 文件、互覆产物」缺陷；external 的 SHA-256 锚定符号 qz_polyfill_external_sha256 随 polyfill_external.c 落盘；运行时行为与 SHA-256 校验语义不变。验证：rodata/compressed/external 三模式各自 configure+build 通过、ctest offline 21/21、external 篡改 .polyfill 被拒绝、tracked 基线 hash 不变"
+  affects: [polyfill-bundling-policy]
+
+- time: 2026-10-13T08:06:27
+  kind: reversal
+  summary: "反转 2026-09-13 条目的「rodata 仍写 tracked 基线 src/polyfill_default.c」：该 tracked 基线政策已被 bytecode-build-artifact（2026-09-30）推翻。现状：所有模式产物（default/compressed/external/host + worker_boot_default.c）全部 untracked，生成目录 build/generated/polyfill/（CMakeLists.txt:106-108 _polyfill_gen_dir）。理由=非可复现（同源两构建可差几字节 → committed 副本必然漂移，反复误伤 fuzz-corpus 对齐门）。模式分家（各模式写不同文件而非互覆）仍成立。同时作废 build.js 旧注释「fresh clone 无需 polyfill 工具链」。built 需要 node + npm --prefix polyfill ci。"
+  source: ".gitignore:13-31 + CMakeLists.txt:106-108 + bytecode-build-artifact 页"
   affects: [polyfill-bundling-policy]

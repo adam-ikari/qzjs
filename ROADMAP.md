@@ -135,7 +135,7 @@ fetch 拦截 + Cache + update，2026-09 合入 master，见 D6）。
 |---|--------|------|------|
 | G1 | API 参考 ✅ | serve / fs / compress / crypto / worker 文档（网站 + repo）。 | 文档可跑通 |
 | G2 | examples 扩充 ✅ | httpserver 已做；worker 编排、流式管道已有；fetch-proxy 独立 example 已补（HTTP(S)_PROXY / NO_PROXY 三行为演示）。examples/CMakeLists.txt 全量收编 4 个 JS example，qjsc 编译校验进门。 | example 可跑 |
-| G3 | **打包** ✅ | `qzjs.pc`（原 libqzjs.pc，完整 Libs）、静态库目标（libqzjs/libam_full）+ 全部 vendored 依赖归档安装完整、无系统依赖构建；WAMR fast-jit 关闭（vmlib 纯 C）。 | CMake 验证 ✅（pkg-config 消费方编译/链接/运行 OK） |
+| G3 | **打包** ✅ | `qzjs.pc`（原 libqzjs.pc，完整 Libs）、静态库目标（libqzjs/qz_full）+ 全部 vendored 依赖归档安装完整、无系统依赖构建；WAMR fast-jit 关闭（vmlib 纯 C）。 | CMake 验证 ✅（pkg-config 消费方编译/链接/运行 OK） |
 
 ### H. gRPC/HTTP2
 
