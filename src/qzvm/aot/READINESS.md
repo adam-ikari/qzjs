@@ -81,7 +81,7 @@ glue 装配路径。测试路径与产物路径不一致 → 缺陷在测试中�
 | # | 项 | 类型 | 影响 | 工作量 |
 |---|---|---|---|---|
 | ~~1~~ | ~~`Map`/`Set` 对象值身份断裂~~ | ~~静默错误~~ | ~~致命~~ | **已修复**（build.js 丢弃 fields） |
-| 2 | emitter `reading 'kind'` 崩溃 | 崩溃 | 阻断 | 小（加防御） |
+| ~~2~~ | ~~emitter `reading 'kind'` 崩溃~~ | ~~崩溃~~ | ~~阻断~~ | **已修复**（collectClasses 跳过无 body 成员） |
 | 3 | 匿名默认导出 | 覆盖 | 阻断 104/125 | 中（合成名，已有 `__clsExpr_N` 先例） |
 | 4 | `export *` re-export | 覆盖 | 阻断 12/125 | 中 |
 | 5 | 命名空间导入捕获 | 覆盖 | 阻断 | 中 |
@@ -92,5 +92,36 @@ glue 装配路径。测试路径与产物路径不一致 → 缺陷在测试中�
 
 - **数值/计算密集场景**：可用。已在真实负载验证，性能优势明确。
 - **通用 TS 应用场景**：不可用。6.4% 真实库覆盖 + Map 静默错误两项独立致命。
-- 第 1 项已修复。但**教训比缺陷本身更重要**：测试路径与产物路径不一致时，
+- 第 1、2 项已修复。但**教训比缺陷本身更重要**：测试路径与产物路径不一致时，
   全绿的测试套件会给出虚假信心。新增 `glue_audit.js` 专门守装配层。
+
+### 第 2 项修复详情（2026-10-21）
+
+**根因**：`collectClasses` 收集类方法时不过滤 `mem.body`，TS 重载签名
+（`write(fn: F): void;`）只是类型信息、无实现体，却被当成方法入列，
+`emitAll` 取 `mth.node.body` 得 `undefined` → `ts.isArrowFunction` 崩。
+
+复现源：zod `src/v4/core/doc.ts`（`Doc` 类 `write` 三个签名 + 一个实现）。
+
+**修复**：成员循环开头跳过 `!mem.body` 的 `MethodDeclaration`；构造器仅在
+`mem.body` 存在时赋值（重载签名在前、实现在后）；无 body 访问器跳过。
+
+**附带**：`qzvm.js` 两处 `process.env.QZDBG` 调试残留（`object_get` /
+`prop_set`），qzjs 无 `process` 全局，命中即 `process is not defined`。已删。
+
+**新增验证**：`glue_corpus_overload.js`（4 例），走 `glue_audit.js` 链路。
+修复前 1/4 → 修复后 4/4。
+
+### 新发现（未修）
+
+`audit_diff` 的 pure-wasm 路径（`instantiate` 两参、无 AOT）在「类字段为
+数组字面量」时崩 `Cannot convert undefined to a BigInt`，而**同一份 wasm
+经 AOT 执行正确**：
+
+```ts
+class C { content: string[] = []; add(s: string) { this.content.push(s); } }
+export function f() { const c = new C(); c.add("a"); return c.content.join("|"); }
+```
+
+这是 WAMR AOT 与 wasm 解释器的语义差异，独立于本次修复（修复前即存在）。
+影响面：仅 `audit_diff` 这条测试路径；产物走 AOT 不受影响。
