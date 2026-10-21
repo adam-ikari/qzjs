@@ -25,7 +25,7 @@
 关键结构性事实：`util.ts` 自身无匿名导出，但因 import 链传递到 `km.ts` 而失败。
 **功能缺口沿 import 图传播**——这是覆盖率对真实代码库偏低的主因。
 
-## 二、静默语义错误（最严重，优先级最高）
+## 二、静默语义错误（**已修复**，见下）
 
 **`Map` 的读写身份断裂**：`Map.set(k, obj)` 后 `Map.get(k)` 取不到 obj。
 
@@ -48,9 +48,25 @@ function run(): string {
 `m.size` 正确为 1，`m.has(1)` 正确为 true，但取出的值不是存入的句柄。
 **现象**：不抛异常、不报错、编译成功、可运行，结果错误。
 
-这是生产级不可接受的一类缺陷——比编译失败严重得多，因为编译失败在构建期暴露，
-静默错误进入运行时才可能被用户发现。现有 889 例 corpus 差分对拍未覆盖此路径
-（说明 corpus 的 Map 用例不走对象值，或未与 V8 对拍对象身份）。
+### 修复（2026-10-21）
+
+**真实根因不是 Map，而是 build.js 两处丢弃 `compileTS` 返回的 `fields`（字段偏移表）**：
+写 `.meta.json` 时未带 `fields`；`makeQzvm(strings,{arenaEnd})` 未传 `fields`。
+→ glue 里 `fieldEntries` 恒空 → `toJS` 判据 `(mem && fieldEntries.length)` 为假
+→ POJO 句柄走 `handles[idx]`（undefined）而非 `materialize()`。
+
+影响面是**全局性**的，不止 Map：任何跨宿主边界的对象字面量都会退化。
+
+**为什么 889 例 corpus 全绿仍漏检**：`audit_diff.js` 直调 `compileTS` 后手动
+`makeQzvm(r.strings, { fields: r.fields })`，自己补了字段表，绕开 `build.js` 的
+glue 装配路径。测试路径与产物路径不一致 → 缺陷在测试中不可见。
+
+**新增验证**：
+- `audit_corpus41.js`：5 例宿主容器对象值（compileTS 直调路径）
+- `glue_audit.js`：走真实 `build.js build` → glue → qzjs，与 V8 对比。
+  唯一能捕获装配层缺陷的测试。
+
+验证：`glue_audit` 修复前 1/5 → 修复后 5/5；`audit_diff` 全量 corpus1..41 零 diff。
 
 ## 三、已成立的部分（可信）
 
@@ -64,7 +80,7 @@ function run(): string {
 
 | # | 项 | 类型 | 影响 | 工作量 |
 |---|---|---|---|---|
-| 1 | `Map`/`Set` 对象值身份断裂 | 静默错误 | 致命 | 待查（root cause 在 set/get 句柄装箱路径） |
+| ~~1~~ | ~~`Map`/`Set` 对象值身份断裂~~ | ~~静默错误~~ | ~~致命~~ | **已修复**（build.js 丢弃 fields） |
 | 2 | emitter `reading 'kind'` 崩溃 | 崩溃 | 阻断 | 小（加防御） |
 | 3 | 匿名默认导出 | 覆盖 | 阻断 104/125 | 中（合成名，已有 `__clsExpr_N` 先例） |
 | 4 | `export *` re-export | 覆盖 | 阻断 12/125 | 中 |
@@ -76,4 +92,5 @@ function run(): string {
 
 - **数值/计算密集场景**：可用。已在真实负载验证，性能优势明确。
 - **通用 TS 应用场景**：不可用。6.4% 真实库覆盖 + Map 静默错误两项独立致命。
-- **关键是第 1 项必须先修**：静默错误存在时，任何覆盖率数字都不可信——通过编译不代表语义正确。
+- 第 1 项已修复。但**教训比缺陷本身更重要**：测试路径与产物路径不一致时，
+  全绿的测试套件会给出虚假信心。新增 `glue_audit.js` 专门守装配层。
