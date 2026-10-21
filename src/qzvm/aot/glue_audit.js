@@ -27,7 +27,7 @@ const BUILD = path.join(__dirname, "build.js");
 
 const corpusPath = process.argv[2]
   ? path.resolve(process.argv[2])
-  : path.join(__dirname, "audit_corpus41.js");
+  : path.join(__dirname, "glue_corpus_overload.js");
 const corpus = require(corpusPath);
 
 const OUT_DIR = process.env.AOT_OUT_DIR || path.join(ROOT, "build", "aot");

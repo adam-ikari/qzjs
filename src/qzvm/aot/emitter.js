@@ -1650,13 +1650,17 @@ class Emitter {
             let ctor = null;
             const isStatic = (mem) => !!mem.modifiers && mem.modifiers.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
             for (const mem of st.members) {
+                // TS 重载签名（`write(fn: F): void;` / `write(line: string): void;`）只有类型、没有
+                // 实现体：不进 methods（否则 emitAll 取 mth.node.body 得 undefined → 崩溃）。
+                // 实现体是后面那个同名的带 body 声明，正常入列。
+                if (ts.isMethodDeclaration(mem) && !mem.body) continue;
                 if (ts.isPropertyDeclaration(mem) && ts.isIdentifier(mem.name)) {
                     if (isStatic(mem)) { staticFields.push({ name: mem.name.text, init: mem.initializer || null }); staticInits.push({ kind: "field", name: mem.name.text, init: mem.initializer || null }); }
                     else fields.push({ name: mem.name.text, init: mem.initializer || null });
                 } else if (ts.isClassStaticBlockDeclaration(mem)) {
                     staticBlocks.push(mem); staticInits.push({ kind: "block", blk: mem });   // static { … }：首次访问静态时执行（保持源码序）
                 } else if (ts.isConstructorDeclaration(mem)) {
-                    ctor = mem;
+                    if (mem.body) ctor = mem;   // 无 body（重载签名/declare）→ 忽略，实现在后
                 } else if (ts.isPropertyDeclaration(mem) && ts.isComputedPropertyName(mem.name)) {
                     // ["d"+"yn"] / [KEY+"2"]：常量折叠为静态字段名（无法折叠 → loud，避免静默错名）
                     const nm = this._foldPropName(mem.name.expression);
@@ -1678,6 +1682,8 @@ class Emitter {
                     const sx = symbolNameOf(mem.name.expression) || (ts.isIdentifier(mem.name.expression) && this._modSymLit && this._modSymLit.get(mem.name.expression.text)) || null;   // Symbol.x 或持有它的模块级常量
                     if (!sx) throw new Error("[tagged] 类计算属性名方法仅支持 Symbol.<well-known>（如 [Symbol.iterator]）或持有它的模块级常量");
                     (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem });
+                } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && !mem.body) {
+                    continue;   // 无 body 的访问器声明（declare/抽象）→ 忽略
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isComputedPropertyName(mem.name)) {
                     const sx = symbolNameOf(mem.name.expression) || (ts.isIdentifier(mem.name.expression) && this._modSymLit && this._modSymLit.get(mem.name.expression.text)) || null;   // Symbol.x 或持有它的模块级常量
                     if (!sx) throw new Error("[tagged] 类计算属性名访问器仅支持 Symbol.<well-known>（如 [Symbol.toStringTag]）或持有它的模块级常量");
