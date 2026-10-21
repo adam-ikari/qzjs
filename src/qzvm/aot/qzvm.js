@@ -736,6 +736,10 @@ function makeQzvm(strings, opts) {
     };
     return tagHandle(it);
   };
+  // void 方法（wasm 签名无 result）在 V8 解释执行时 `fn(...)` 返回 undefined，
+  // 而 method_call 的导入签名是 (result i64) → 「Cannot convert undefined to a BigInt」。
+  // WAMR AOT 容忍该错配，故只有 pure-wasm 路径崩。此处统一归一为 TAG（= undefined 的句柄表示）。
+  const callM = (fn, args) => { const r = fn(...args); return r === undefined ? TAG : r; };
   const doArrMethod = (recv, mid, a0, a1, a2, a3, ex) => {   // ex = 溢出实参（ovf[1..]，ovf[0] 已在 a3）
     const extra = (first) => [a0, a1, a2, a3].slice(first).filter(givenSlot).map(toJS);
     const name = strings[mid];
@@ -2108,6 +2112,7 @@ function makeQzvm(strings, opts) {
         const m = own(c.methods, name);
         if (m) {
           const fn = exportsRef[m.name];
+          const R = callM;   // void 方法（i64 签名缺失）在 pure-wasm 下返回 undefined → 归一为 TAG
           {   // 平坦实参 = a0..a3 + ovf[1..]（ovf[0] = 实参 3，已在 a3）；rest 形参把尾部打包成数组
             const ex = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
             const flat = [a0, a1, a2, a3].concat(ex.slice(1).map(bitsOf));   // 统一为 tagged（ex 元素是 JS 值）
@@ -2117,15 +2122,15 @@ function makeQzvm(strings, opts) {
               const head = flat.slice(0, nFix);
               const out2 = [recv].concat(head, [arrWriteback(tail.map(toJS))]);   // rest 数组落在其形参槽；arrWriteback 收 JS 值
               while (out2.length < 5) out2.push(TAG);
-              return fn(...out2);
+              return R(fn, out2);
             }
             if ((m.n || 0) > 4) {
               const n2 = m.n;
               const ovfA2 = flat.slice(3, n2).map(x => x === undefined ? TAG : x);   // ovf[0] = 实参 3（与 callee 的 ovf[i-3] 约定一致；tagged）
-              return fn(recv, flat[0], flat[1], flat[2], flat[3], arrWriteback(ovfA2.map(toJS)));   // arrWriteback 收 JS 值；flat 为 tagged → toJS
+              return R(fn, [recv, flat[0], flat[1], flat[2], flat[3], arrWriteback(ovfA2.map(toJS))]);   // arrWriteback 收 JS 值；flat 为 tagged → toJS
             }
           }
-          return fn(recv, a0, a1, a2, a3);
+          return R(fn, [recv, a0, a1, a2, a3]);
         }
         c = chainNext(c);
       }
