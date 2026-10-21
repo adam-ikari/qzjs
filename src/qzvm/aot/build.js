@@ -101,7 +101,7 @@ function genGlue(prefix, mainCalls, wasmOnly) {
   WebAssembly.instantiate(bytes, { qz }, { aot }).then(({ instance }) => {`;
     let glue = `${makeQzvm}
 // ── 生成产物：${basename}（分离形态：${note}，同目录）──
-const qz = makeQzvm(${JSON.stringify(strings)}, ${JSON.stringify(metaObj.arena ? { arenaEnd: metaObj.arena } : {})});
+const qz = makeQzvm(${JSON.stringify(strings)}, ${JSON.stringify({ ...(metaObj.arena ? { arenaEnd: metaObj.arena } : {}), ...(metaObj.fields && metaObj.fields.length ? { fields: metaObj.fields } : {}) })});
 const __meta = ${JSON.stringify(meta)};
 const __lams = ${JSON.stringify(lams)};
 const __classes = ${JSON.stringify(classes)};
@@ -157,7 +157,7 @@ if (cmd === "build") {
     const interp = interpIdx >= 0 ? process.argv[interpIdx + 1].split(",").filter(Boolean) : [];
     const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp, ...memOpt() });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd }));
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd, fields: r.fields || [] }));
     if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
     const nInterp = r.funcMeta.filter(m => m.mode === "interp").length;
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp ? ` interp=${nInterp}` : ""}`);
@@ -184,7 +184,7 @@ if (cmd === "build") {
     const interp2 = interpIdx2 >= 0 ? process.argv[interpIdx2 + 1].split(",").filter(Boolean) : [];
     const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp: interp2, ...memOpt() });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd }));
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd, fields: r.fields || [] }));
     if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
     const nInterp2 = r.funcMeta.filter(m => m.mode === "interp").length;
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp2 ? ` interp=${nInterp2}` : ""}`);
