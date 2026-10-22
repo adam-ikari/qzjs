@@ -25,16 +25,15 @@ const OUT = path.join(ROOT, "build", "aot");
 const QZJS = path.resolve(process.env.QZJS || path.join(ROOT, "build", "dbg", "qzjs"));
 
 // 每负载：[glue 前缀, 导出名, 参数, interp 回退名单]
-// interp：这些函数不编 wasm，退到宿主解释器跑（`--interp`）。字符串密集型即此类——
-// 实测 strWork（best of 7，qzjs 同机）：50000 次 解释器 6.11ms / AOT wasm 6.40ms；
-// 200000 次 解释器 27.68ms / AOT wasm 27.47ms —— **wasm 无收益**（噪声内持平）。
-// 原因：每轮 `s = s + i` 都跨 `qz.string_concat` 调宿主 JS，边界开销吃掉 AOT 收益。
-// 故 str 放弃 wasm 化，走 interp 回退（回退实测 50000: 6.14ms / 200000: 26.97ms）。
-// 纯数值/对象循环仍走 AOT（numWork 26x / objWork ~7x 对解释器）。
+// interp：这些函数不编 wasm，退到宿主解释器跑（`--interp`）。
+// strWork 曾因每轮 `s = s + i` 走 `qz.str_dup` 复制整串（Θ(n²)，200000 次直接 arena 溢出）
+// 而放弃 wasm 化。逃逸分析放宽「函数末尾纯返回」后累加器走 `qzs_append` 原地追加（O(n)），
+// 实测 200000 次 28ms vs 解释器 24ms —— 同档，故重新纳入 AOT 覆盖。
+// 纯数值/对象循环仍走 AOT（numWork 30x / objWork ~3x 对解释器）。
 const LOADS = [
     { shim: "mix", name: "numWork", arg: 3000, interp: [] },
     { shim: "mix", name: "objWork", arg: 30000, interp: [] },
-    { shim: "str", name: "strWork", arg: 200000, interp: ["strWork", "strWorkEq", "strMethods"] },
+    { shim: "str", name: "strWork", arg: 200000, interp: [] },
 ];
 
 function runQzjs(script, cwd) {

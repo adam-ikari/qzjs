@@ -785,6 +785,16 @@ class Emitter {
         walk(node);
         return n;
     }
+    _countLoops(node) {
+        let n = 0;
+        const walk = (x) => {
+            if (ts.isIterationStatement(x, false)) n++;
+            ts.forEachChild(x, walk);
+        };
+        walk(node);
+        return n;
+    }
+
 
     // ++obj.a / obj.a-- / this.#v++：接收者求值一次 → 属性读 ±1 → 属性写回（宿主/POJO/访问器统一分派）。
     // prefix：表达式结果 = 新值；postfix：结果 = 旧值。
@@ -1380,6 +1390,13 @@ class Emitter {
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;                 // ++/-- 成员接收者句柄临时（i64）
+        // 循环 arena 回滚槽（仅 tagged）：每个嵌套循环层一个 i32，存循环入口的 bump 值。
+        // 深度按最外层循环嵌套数静态上界；不足时（极少见）退回不复位。
+        const nLoopSave = this.mode === "tagged" ? this._countLoops(f.body) + 1 : 0;
+        const loopSaveDecls = new Array(nLoopSave).fill("i32");
+        this._loopSaveBase = this.scratchObj + 1;
+        this._loopSaveCount = nLoopSave;
+        this._loopSaveDepth = 0;
         this.cloSlotsLen = cloSlots.length;
         // debug：局部名数组（参数在前、局部在后，与 wasm local 序号一致）；仅命名可见变量，合成槽留空。
         const localNames = this.m.debug
@@ -1391,7 +1408,7 @@ class Emitter {
         const envDecls = capNames.length ? ["i32"] : [];
         const needsArgs0 = this.mode === "tagged" && !!(this._fnArgs && f.name && this._fnArgs.has(f.name.text));
         const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool)
-            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(needsArgs0 ? ["i64"] : []).concat(envDecls).concat(numArrDecls);
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(loopSaveDecls).concat(needsArgs0 ? ["i64"] : []).concat(envDecls).concat(numArrDecls);
         // num 数组的 base/len local 索引（一对 i32/名字）
         {
             let base = f.parameters.length + decls.length - numArrDecls.length;
@@ -2147,6 +2164,7 @@ class Emitter {
     // 结构：block(brk) loop block(cont) body end; cond ? br 0 : 落 end end
     emitDoWhile(s, tagged) {
         const M = this.m;
+        const saveSlot = tagged ? this._arenaLoopEnter(s.statement || s) : undefined;
         M.block(); this.depth++;
         M.loop(); this.depth++;
         M.block(); this.depth++;
@@ -2156,6 +2174,7 @@ class Emitter {
             this.emitTaggedStmt(s.statement); } else this.emitStmt(s.statement);
         this.labels.pop();
         this.depth--; M.end();                             // end cont block
+        this._arenaLoopLeave(saveSlot);                    // continue 也经过此处
         if (tagged) this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
         else { this.emitExpr(s.expression !== undefined ? s.expression : s.condition); this.emitCond(); }
         M.brIf(0);                                         // 条件真 → 回 loop 顶
@@ -2532,7 +2551,9 @@ function emitBumpAlloc(m, emitTotal) {
 function emitBumpSet(m, emitNewVal) {
     emitNewVal(); m.call("qzs_ckmem"); m.globalSet(0);
 }
-function emitStringHelpers(m, strBase) {
+// 基础内存 helper（qzs_ckmem / qzs_memcpy）：num 数组扩容与字符串路径共用，
+// 故无条件发射（--interp 全退时无字符串 helper，num 数组仍需此二者）。
+function emitMemHelpers(m, strBase) {
     // qzs_ckmem(newBump:i32) -> i32：bump 越界守卫。arena = [SCRATCH, STR_BASE)，越过基址
     // 调 qz.oom 让宿主抛 RangeError（可 catch），替代 unreachable trap（整实例死）。
     // unreachable 作兜底：宿主若未抛（不应发生）仍 trap，杜绝静默覆盖字面量段。
@@ -2566,7 +2587,8 @@ function emitStringHelpers(m, strBase) {
     m.localGet(3); m.i32Const(1); m.i32Sub(); m.localSet(3);
     m.br(0); m.end(); m.end();
     m.endBody();
-
+}
+function emitStringHelpers(m) {
     // qzs_numstr(dest:i32, n:i64) -> i32（写 [dest]=len:i32, digits@dest+4；返回 dest）
     // locals: 2=pos(i32), 3=count(i32), 4=neg(i32), 5=mag32(i32), 6=nn64(i64)
     // 小值(≤0xFFFFFFFF)走 i32 除法（硬件），大值回退 i64（软件 libcall，慢）。
@@ -3288,9 +3310,10 @@ function compileTS(input, outWasm, opts = {}) {
             m.startBody("qzs_getargs", []);
             m.globalGet(em._argGlobal);
             m.endBody();
-            emitStringHelpers(m, em._strBase || STR_BASE);
+            emitMemHelpers(m, em._strBase || STR_BASE);
+            emitStringHelpers(m);
+            emitNumArrHelpers(m);
         }
-        emitNumArrHelpers(m);
         for (const st of fns) {
             if (interpSet.has(st.name.text)) continue;   // interp 函数不进 wasm
             const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
@@ -3626,6 +3649,50 @@ Emitter.prototype._strAccSetOf = function (body) {
         }
         return null;
     };
+    // 某变量在「某个 return 之后」是否还会被赋值。用于放宽 return 逃逸：
+    // 只有函数末尾的纯返回（返回后不再改写）才能安全地让它走原地追加。
+    // 保守策略：任何 return 语句之后（含 else 分支、循环体内提前 return 之后）还能到达的赋值，
+    // 都把该变量记入 accAfterReturn → 该变量不得原地追加。
+    const accAfterReturn = new Set();
+    // 注意：ts.forEachChild 的回调若返回真值会提前终止遍历，故回调必须返回 undefined。
+    const assignedNames = (n, out) => {              // 子树内所有赋值目标名
+        if (!n) return;
+        if (ts.isBinaryExpression(n) && n.left && ts.isIdentifier(n.left)) {
+            const op = n.operatorToken.kind;
+            if (op === ts.SyntaxKind.EqualsToken
+                || (op >= ts.SyntaxKind.FirstCompoundAssignment && op <= ts.SyntaxKind.LastCompoundAssignment))
+                out.add(n.left.text);
+        }
+        ts.forEachChild(n, c => { assignedNames(c, out); });
+    };
+    const reachableAfter = (n) => {                  // n 之后同一语句列表中仍能执行到的语句
+        const out = [];
+        if (!n || !n.parent || !n.parent.statements) return out;
+        const stmts = n.parent.statements, i = stmts.indexOf(n);
+        for (let k = i + 1; k < stmts.length; k++) out.push(stmts[k]);
+        return out;
+    };
+    const scanReturns = (n) => {
+        if (ts.isReturnStatement(n)) {
+            const after = new Set();
+            // 循环体内的 return → 后续迭代仍会赋值（改到已返回的缓冲区）→ 整函数赋值目标一律不安全。
+            let inLoop = false;
+            for (let p = n.parent; p && !ts.isFunctionLike(p); p = p.parent)
+                if (ts.isIterationStatement(p, true)) { inLoop = true; break; }
+            if (inLoop) {
+                for (const st of body.statements) assignedNames(st, after);
+            } else {
+                for (const st of reachableAfter(n)) assignedNames(st, after);
+                // 分支/try 内的 return：该分支之后同层的语句仍可能赋值
+                for (let p = n.parent; p && !ts.isFunctionLike(p); p = p.parent)
+                    if (ts.isIfStatement(p) || ts.isBlock(p) || ts.isTryStatement(p))
+                        for (const st of reachableAfter(p)) assignedNames(st, after);
+            }
+            for (const nm of after) accAfterReturn.add(nm);
+        }
+        ts.forEachChild(n, scanReturns);
+    };
+    scanReturns(body);
     const walk = (n) => {
         if (ts.isIdentifier(n)) {
             const nm = n.text, p = n.parent;
@@ -3643,6 +3710,11 @@ Emitter.prototype._strAccSetOf = function (body) {
                 /* 声明 → 安全 */
             } else if (assignTarget(n) === nm) {
                 /* 出现在「赋值给 x 的右侧」→ 安全（x = x + y 的累加模式） */
+            } else if (p && ts.isReturnStatement(p) && !accAfterReturn.has(nm)) {
+                /* 纯返回（函数末尾 escape）→ 安全：追加都发生在 return 之前，
+                 * 返回后调用方持有的是最终缓冲区，没人再改写它。
+                 * 但若 return 之后还有赋值（循环内提前 return、多 return 分支），
+                 * 后续原地追加会改到已返回的缓冲区 → 仍判 unsafe。 */
             } else {
                 unsafe.add(nm);
             }
@@ -3732,6 +3804,54 @@ Emitter.prototype._emitStrParts = function () {
     this.m.localGet(this.sT[1]); this.m.i32Load(2, 0); this.m.localSet(this.sT[0]);
     this.m.localGet(this.sT[1]); this.m.i32Const(4); this.m.i32Add(); this.m.localSet(this.sT[2]);
 };
+// 循环体内分配的对象能否在每轮迭代后整体回滚（bump 复位到循环入口）？
+// 判据严格保守，任一不满足即放弃：循环体里每个「对象字面量初始化」的 let/const 变量 x
+//   ① 只以 x.<field> / x[..] 形式出现（读或写自身字段），从不作为值被传递/返回/存入容器；
+//   ② 循环体内没有 return/throw（中途退出会带走活引用）；
+//   ③ 循环体不含闭包（闭包可能把 x 存到外面）。
+// 满足 → 对象生命周期不越过当前迭代，迭代末尾复位 bump 安全，分配量 O(n) → O(1)。
+Emitter.prototype._loopArenaFree = function (body) {
+    if (!body) return false;
+    const cand = new Set(), bad = new Set();
+    let hasNonLocalExit = false, hasClosure = false;
+    // 收集候选（第一遍：只认对象字面量初始化）
+    const collect = (n) => {
+        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) { hasClosure = true; return; }
+        if (ts.isReturnStatement(n) || ts.isThrowStatement(n)) { hasNonLocalExit = true; return; }
+        if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectLiteralExpression(n.initializer)
+            && ts.isIdentifier(n.name)) cand.add(n.name.text);
+        ts.forEachChild(n, c => { collect(c); });
+    };
+    collect(body);
+    if (hasNonLocalExit || hasClosure || !cand.size) return false;
+    // 检查（第二遍：候选标识符只允许作为属性/元素访问的接收者）
+    const check = (n) => {
+        if (ts.isIdentifier(n) && cand.has(n.text)) {
+            const p = n.parent;
+            const ok = (p && ((ts.isPropertyAccessExpression(p) && p.expression === n)
+                           || (ts.isElementAccessExpression(p) && p.expression === n)))
+                    || (p && ts.isVariableDeclaration(p) && p.name === n);   // 声明处自身
+            if (!ok) bad.add(n.text);
+        }
+        ts.forEachChild(n, c => { check(c); });
+    };
+    check(body);
+    return bad.size === 0;
+};
+// 循环 arena 回滚的入口/出口：进入时保存 bump 到当前深度的槽，离开时复位。
+// 判定不通过或槽位耗尽时返回 undefined，两个函数都退化为空操作。
+Emitter.prototype._arenaLoopEnter = function (body) {
+    if (this._loopSaveBase === undefined || this.scratchObj === undefined) return undefined;
+    if (this._loopSaveDepth >= (this._loopSaveCount || 0)) return undefined;
+    if (!this._loopArenaFree(body)) return undefined;
+    const slot = this._loopSaveBase + this._loopSaveDepth;
+    this.m.globalGet(0); this.m.localSet(slot); this._loopSaveDepth++;
+    return slot;
+};
+Emitter.prototype._arenaLoopLeave = function (slot) {
+    if (slot === undefined) return;
+    this.m.localGet(slot); this.m.globalSet(0); this._loopSaveDepth--;
+};
 Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
 Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));
@@ -3780,6 +3900,9 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         this.depth--; this.m.end(); return;
     }
     if (ts.isWhileStatement(s)) {
+        // while 的 continue 直接跳回条件（无独立 cont 块），会跳过下面的复位 → 该轮不回收，
+        // 只是少优化、不影响正确性。
+        const saveSlot = this._arenaLoopEnter(s.statement || s);
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
         this.labels.push({ brk: this.depth - 1, cont: this.depth, label: this._curLabel() });
         this.emitCondI32(s.expression !== undefined ? s.expression : s.condition);
@@ -3787,6 +3910,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         { const cap = this._loopCaptured([], s.statement || s);                                 // let/const 每迭代绑定
           if (cap) this._emitPerIterEnv(cap.headerNames, cap.bodyNames); }
         this.emitTaggedStmt(s.statement);
+        this._arenaLoopLeave(saveSlot);
         this.m.br(0);
         this.labels.pop(); this.depth--; this.m.end(); this.depth--; this.m.end(); return;
     }
@@ -3796,6 +3920,10 @@ Emitter.prototype.emitTaggedStmt = function (s) {
                 for (const d of s.initializer.declarations) if (d.initializer) { this.emitTaggedExpr(d.initializer); this._emitVarStore(d.name.text, this.scratchB); this.m.drop(); }
             } else { this.emitTaggedExpr(s.initializer); this.m.drop(); }
         }
+        // 循环级 arena 回滚：循环体分配的对象若不逃逸出当前迭代，每轮末尾把 bump 复位到入口，
+        // 分配量从 O(迭代数) 降为 O(1)——否则 40 万次分配即耗尽 16 MiB arena 崩溃。
+        // 恢复点放在 cont 块之后（continue 也经过），incrementor 之前（它只操作循环头标量）。
+        const saveSlot = this._arenaLoopEnter(s.statement || s);
         // block(brk) loop block(cont) body end; incr; br 0 end end（continue 跳 incr 前）
         this.m.block(); this.depth++; this.m.loop(); this.depth++;
         if (s.condition) { this.emitCondI32(s.condition); this.m.i32Eqz(); this.m.brIf(1); }
@@ -3804,6 +3932,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         if (s.statement) this.emitTaggedStmt(s.statement);
         this.labels.pop();
         this.depth--; this.m.end();                       // end cont block
+        this._arenaLoopLeave(saveSlot);
         { const neg = this._loopCaptured(this._headerNames(s), s.statement || s);               // for(let i…) 闭包捕获 → 增量前换新绑定
           if (neg) this._emitPerIterEnv(neg.headerNames, neg.bodyNames); }
         if (s.incrementor) { this.emitTaggedExpr(s.incrementor); this.m.drop(); }
@@ -5127,41 +5256,25 @@ const CMP_GUARD = {
     [ts.SyntaxKind.ExclamationEqualsToken]: ["qz.ne", "f64Ne"],
     [ts.SyntaxKind.ExclamationEqualsEqualsToken]: ["qz.sne", "f64Ne"],
 };
-// 栈顶 i64 句柄判定 → 在栈上留 i32：高16位 == 0x7FF9（对象）或 0x7FFA（字符串）。
-// 仅靠 0x7FF9 会漏字符串句柄，导致字符串比较回落 f64（两 NaN eq → 恒 false）。
+// 栈顶 i64 句柄判定 → 在栈上留 i32：非「纯 f64 数值」即 true。
+// 句柄标签恰好连续占满 [0x7FF8_0000_0000_0001, 0x7FFF_FFFF_FFFF_FFFF]：
+//   0x7FF8 BigInt(槽) | 0x7FF9 对象 | 0x7FFA 字符串 | 0x7FFB wasm 数组 | 0x7FFC 布尔
+//   0x7FFD 宿主对象 | 0x7FFE 类实例 | 0x7FFF 闭包
+// 唯一坑：0x7FF8|0 是 canonical NaN（box(NaN) 的位型），必须当数值——它正好卡在区间下界前一位。
+// 于是整个判定退化为一次无符号区间测试：bits - 基址 <= 跨度。负数位型（≥0x8000…）因无符号
+// 减法结果越界而天然排除，无需额外分支。24+ 条指令 → 5 条。
 Emitter.prototype._emitIsHandle = function (scratch) {
     const M = this.m;
-    // 非「纯 f64 数值」判定 = 句柄(0x7FF9) | 字符串(0x7FFA) | 布尔(0x7FFC) | 类实例(0x7FFE)。
-    // 均须回退宿主（f64ReinterpretI64 对它们是 NaN 位型 → 原生 f64 运算全错）。
-    // 注：BigInt（0x7FF8）**不入此表**——双 BIG 先由 _emitBinOp 前置走 qz.bigint_binop；
-    // 混合 BIG×number 进 f64 快路径得垃圾（JS 应抛 TypeError，批 39 已知限制）。
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
-    M.i32Or();
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();   // wasm 数组（===/== 需引用同一性）
-    M.i32Or();
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffcn); M.i64Eq();
-    M.i32Or();
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
-    M.i32Or();
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();   // 闭包值（函数）
-    M.i32Or();
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();   // 宿主对象(JSON.parse 结果/函数等)
-    M.i32Or();
-    // BigInt（0x7FF8|低32≠0）：可交宿主（toJS 还原真 BigInt → 原生 JS 语义；BIG×number 混合 = JS TypeError）
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff8n); M.i64Eq();
-    M.localGet(scratch); M.i64Const(0xffff_ffffn); M.i64And(); M.i64Eqz(); M.i32Eqz();
-    M.i32And();
-    M.i32Or();
+    M.localGet(scratch); M.i64Const(0x7ff8_0000_0000_0001n); M.i64Sub();
+    M.i64Const(0x0007_ffff_ffff_fffen); M.i64LeU();
 };
 // BigInt 句柄判定（0x7FF8|低32=handles 槽，槽位从 2 起）：_emitBinOp 双 BIG 前置路由用。
-// 排除 0x7FF8|0 —— 那是 canonical NaN（box(NaN) 恰产此位型；BIG 槽恒 payload≠0，故用低32非零判定）。
+// 排除 0x7FF8|0 —— 那是 canonical NaN（box(NaN) 恰产此位型；BIG 槽恒 payload≠0）。
+// 同样退化为无符号区间测试：BIG 位型恰好是 [0x7FF8_0000_0000_0001, 0x7FF8_FFFF_FFFF_FFFF]。
 Emitter.prototype._emitIsBig = function (scratch) {
     const M = this.m;
-    M.localGet(scratch); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff8n); M.i64Eq();
-    M.localGet(scratch); M.i64Const(0xffff_ffffn); M.i64And(); M.i64Eqz();
-    M.i32Eqz();
-    M.i32And();
+    M.localGet(scratch); M.i64Const(0x7ff8_0000_0000_0001n); M.i64Sub();
+    M.i64Const(0x0000_0000_ffff_fffen); M.i64LeU();
 };
 // 纯数字判定 = 非句柄(0x7FF9)/字符串(0x7FFA)/数组(0x7FFB)/布尔(0x7FFC)/实例(0x7FFE)。
 // 用于 _emitConcat 区分「数值」与「须走宿主 ToPrimitive/ToNumber 的值」。
@@ -5586,10 +5699,23 @@ Emitter.prototype._emitLambdaNew = function (lam, selfName) {
     M.i64ConstBits(0, 0x7fff0000); M.i64Or();
 };
 // 类实例分配：size 覆盖全局字段表最大偏移（+8 头），clsId 写 [0]；返回 self 句柄。
-// 把 [base+8, base+size) 的槽逐个写为 undefined 句柄（POJO/实例字段「未赋值」表示；循环避免展开膨胀）。
+// 把 [base+8, base+size) 的槽逐个写为 undefined 句柄（POJO/实例字段「未赋值」表示）。
+// size 是编译期常量（全局字段表最大偏移 +8 头）：小对象直接展开成定长 store，
+// 省掉每次分配的循环控制开销（比较/分支/指针自增）——分配是热路径上的逐次操作。
+// 大对象（字段多）仍用循环，避免代码膨胀。
 Emitter.prototype._emitFillUndef = function (size) {
     const M = this.m, t = this._expEnter();
     M.localSet(t.a);                                                     // base(i32) ← 栈顶
+    // 只在 size 是编译期常量时展开（调用点也可能传运行时变量）
+    const n = (typeof size === "number") ? Math.ceil((size - 8) / 8) : 0;
+    if (n > 0 && n <= 8) {
+        for (let i = 0; i < n; i++) {
+            M.localGet(t.a); M.i32Const(8 + i * 8); M.i32Add();          // base + 8 + i*8
+            M.i64ConstBits(0, 0x7ff90000); M.i64Store(3, 0);
+        }
+        this._expLeave();
+        return;
+    }
     M.localGet(t.a); M.i32Const(8); M.i32Add(); M.localSet(t.c);         // p = base + 8
     M.localGet(t.a); M.i32Const(size); M.i32Add(); M.localSet(t.b);      // end = base + size
     M.block("void"); M.loop("void");

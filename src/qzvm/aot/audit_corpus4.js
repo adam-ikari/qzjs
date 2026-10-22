@@ -257,4 +257,107 @@ export function f(): any { const c = new C(); return c.make() + "|" + c.make2();
   const d: any = { ...b, ...a };
   const k = (o: any) => Object.keys(o).sort().map((n: any) => n + "=" + o[n]).join(",");\n  return k(c) + "|" + k(d) + "|" + c.y + "|" + d.y;
 }` },
+  // 累加器原地追加的边界：只有「函数末尾纯返回」才可原地追加；
+  // 别名/自拼接/循环内提前 return/多 return 分支必须走复制（否则改到别处引用或已返回的缓冲区）。
+  { name: "str-acc-alias", fn: "f", ts: `export function f(): any {
+  let s = "a"; const a = s; s = s + "b";
+  return a + "|" + s;
+}` },
+  { name: "str-acc-selfconcat", fn: "f", ts: `export function f(): any {
+  let s = "x"; s = s + s; s = s + s;
+  return s;
+}` },
+  { name: "str-acc-early-return", fn: "f", ts: `export function f(n: any): any {
+  let s = "";
+  for (let i = 0; i < n; i++) { s = s + i; if (i > 3) return s; }
+  return s + "!";
+}` },
+  { name: "str-acc-two-returns", fn: "f", ts: `export function f(n: any): any {
+  let s = "0";
+  if (n > 0) { s = s + "a"; return s; }
+  s = s + "b"; return s;
+}` },
+  { name: "str-acc-nested-loop", fn: "f", ts: `export function f(): any {
+  let s = "p";
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) s = s + i + j;
+  return s;
+}` },
+  { name: "str-acc-array-push", fn: "f", ts: `export function f(): any {
+  const out: any = []; let s = "z";
+  for (let i = 0; i < 4; i++) { s = s + i; out.push(s); }
+  return out.join(",");
+}` },
+  { name: "str-acc-long-tail", fn: "f", ts: `export function f(n: any): any {
+  let s = "0";
+  for (let i = 0; i < n; i++) s = s + i;
+  return s;
+}` },
+  // 循环 arena 回滚的安全边界：不安全（对象逃逸出迭代）时绝不能复位 bump，
+  // 否则后续迭代会覆盖仍被引用的对象 → 悬空/串值。
+  { name: "loop-alloc-escape-array", fn: "f", ts: `export function f(): any {
+  const keep: any = [];
+  for (let i = 0; i < 5; i++) { const r = { id: i, sq: i * i }; keep.push(r); }
+  return keep.map((x: any) => x.id + ":" + x.sq).join(",");
+}` },
+  { name: "loop-alloc-escape-var", fn: "f", ts: `export function f(): any {
+  let last: any = null;
+  for (let i = 0; i < 5; i++) { const r = { id: i }; last = r; }
+  return last.id;
+}` },
+  { name: "loop-alloc-escape-return", fn: "f", ts: `export function f(): any {
+  for (let i = 0; i < 5; i++) { const r = { id: i }; if (i === 3) return r; }
+  return null;
+}` },
+  { name: "loop-alloc-escape-closure", fn: "f", ts: `export function f(): any {
+  const fns: any = [];
+  for (let i = 0; i < 5; i++) { const r = { id: i }; fns.push(() => r.id); }
+  return fns[3]().toString();
+}` },
+  { name: "loop-alloc-safe-scalar", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) { const r = { id: i, sq: i * i }; t = t + r.id + r.sq; }
+  return t;
+}` },
+  { name: "loop-alloc-safe-nested", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) { const r = { v: i * j }; t = t + r.v; } }
+  return t;
+}` },
+  // while / do-while 与 for 同享循环级 arena 回滚（三形态都必须触发，否则等价写法行为不一致）。
+  { name: "loop-alloc-while-safe", fn: "f", ts: `export function f(): any {
+  let t = 0, i = 0;
+  while (i < 5) { const r = { id: i, sq: i * i }; t = t + r.id + r.sq; i = i + 1; }
+  return t;
+}` },
+  { name: "loop-alloc-do-safe", fn: "f", ts: `export function f(): any {
+  let t = 0, i = 0;
+  do { const r = { id: i, sq: i * i }; t = t + r.id + r.sq; i = i + 1; } while (i < 5);
+  return t;
+}` },
+  { name: "loop-alloc-while-escape", fn: "f", ts: `export function f(): any {
+  const keep: any = []; let i = 0;
+  while (i < 5) { const r = { id: i }; keep.push(r); i = i + 1; }
+  return keep.map((x: any) => x.id).join(",");
+}` },
+  // 判定边界的「保守拒绝」：这些场景对象可能被外部持有，必须不复位。
+  { name: "loop-alloc-host-call", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) { const r = { id: i }; t = t + JSON.stringify(r).length; }
+  return t;
+}` },
+  { name: "loop-alloc-try-inside", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) { const r = { id: i }; try { t = t + r.id; } catch (e) { t = t + 1000; } }
+  return t;
+}` },
+  { name: "loop-alloc-field-self-assign", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) { const r = { id: i }; r.id = r.id * 2; t = t + r.id; }
+  return t;
+}` },
+  { name: "loop-alloc-nested-escape", fn: "f", ts: `export function f(): any {
+  const keep: any = [];
+  for (let i = 0; i < 3; i++) { const r = { id: i }; for (let j = 0; j < 2; j++) { const q = { v: j }; keep.push(q); } }
+  return keep.length + keep[5].v;
+}` },
 ];

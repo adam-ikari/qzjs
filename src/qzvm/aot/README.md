@@ -48,10 +48,15 @@ wat 仅作按需旁路中间产物，不进编译链路。
 **`--interp <fn1,fn2>`（可选）：把指定函数**从 wasm 里摘出去**，退到宿主解释器跑**（同一个
 qzjs 进程内的 qzvm），调用者经传递闭包一并退（`.ts` 里没有 wasm 函数索引可指）。glue 内联
 transpile 出的 JS（去类型 + 去模块语法），`__call` 对 `mode === "interp"` 直接走它。
-**何时用**：字符串密集型函数——每轮 `s = s + i` 都要跨 `qz.string_concat` 调宿主 JS，跨界税
-吃掉全部 AOT 收益。实测 strWork(200000)（best-of-10 × 6 轮 A/B 交替）：AOT wasm 中位 28.18ms
-vs interp 回退 26.50ms —— **wasm 零收益、回退省 ~6%**，故 str 直接放弃 wasm 化（`bench_mix.js`
-的 `str` 负载即此配置）。纯数值/对象循环不要加（numWork 27x / objWork ~9x 对解释器）。
+**何时用**：`s = s + i` 这类累加器现已能**原地追加**（走 `qzs_append` 的 bump-顶分支），
+复杂度 O(n)——实测 strWork(200000) **28ms**（修复前 ∵ 每轮 `qz.str_dup` 复制整串，
+是 Θ(n²)，N>2291 直接 arena 溢出崩溃）。原地追加的前提由 `_strAccSetOf` 逃逸分析判定：
+仅当变量只作自身赋值目标 / 赋值右侧 / 只读访问 / **函数末尾纯返回**时才安全；
+别名（`const a = s` 后再 `s = s + …`）、自拼接（`s = s + s`）、循环内提前 return、
+多 return 分支一律回退复制。新增边界语料见 `audit_corpus4.js` 的 `str-acc-*`。
+**何时仍用 `--interp`**：单次拼接但字符串不走累加器模式（每次都是不同临时量）、
+或依赖 `qz.string_concat` 宿主语义的复杂插值。纯数值/对象循环不要加
+（numWork 30x / objWork ~3x 对解释器）。
 `compile` 子命令同样支持；产物多一个 `<name>.interp.js`。
 
 - **JS 技术栈**：`build.js` 是唯一主入口（node 编排 compile→wamrc→glue），全部 JS（wamrc 是唯一外部后端）
