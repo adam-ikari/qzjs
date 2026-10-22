@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-10-22T22:46:15"
+updated: "2026-10-22T23:32:29"
 ---
 
 <!-- compiled_truth -->
@@ -13,19 +13,35 @@ updated: "2026-10-22T22:46:15"
 
 AOT 编译覆盖率实测（zod 4.6.7，332 个 .ts 含测试）：成功 10（3.0%）。
 
-**本日累计修复四类阻塞**（原合计 498 例 → 19 例）：
-- #3 匿名默认导出（131→0）：collectDecls 就地补合成名 `__default_N`。
-- #4 `export *` re-export（145→0）：不产生绑定，只校验目标在源码内。
+**五轮修复累计消解六类阻塞**（原合计 584 例 → 75 例）：
+- 匿名默认导出（131→0）：collectDecls 就地补合成名 `__default_N`。
+- `export *` re-export（145→0）：不产生绑定，只校验目标在源码内。
 - TS 重载签名（115→0）：collectDecls + 4 处嵌套收集统一加 `n.body` 过滤。
-- 跨文件同名私有函数（107→19）：非导出函数按文件前缀改名 `__m_<stem>_<name>`，用 checker 符号身份重写声明+调用点。剩余 19 例是导出函数同名（外部契约，不能改名）。
+- 跨文件同名私有函数（107→19）：非导出函数按文件前缀改名 `__m_<stem>_<name>`，checker 符号身份重写声明+调用点。剩余 19 例是导出函数同名（外部契约）。
+- `new` 属性访问目标（86→0）：非标识符目标统一走「运行时求值类对象 → qz.new_dynamic」。
+- 类成员 `PropertyDeclaration` / rest 解构（8→0、5→0）。
 
-**当前头号阻塞**：`[tagged] new 目标必须是标识符`（86 例）。`new A.B()` 属性访问式构造未实现。属已登记未实现路径。
+**当前头号阻塞**：`[tagged] 内建类 Proxy 未实现`（75 例）。需宿主 trap 分发
+（get/set/has/deleteProperty/ownKeys/getOwnPropertyDescriptor），是实质性新功能。
+zod `createTransparentProxy` 是唯一非测试用法。
 
-**未修复**：#5 命名空间导入捕获、#6 generator/async、#7 corpus 与 V8 对拍。
+**次级**：async 12（需 Promise 运行时/状态机）、`defaultErrorMap` 7
+（模块级变量跨文件导出）、导出函数同名 19。
 
-## 结构性事实（未变）
+**未修复**：#5 命名空间导入捕获（部分已修，成员作值已通）、#6 generator/async、
+#7 corpus 与 V8 对拍。
 
-功能缺口沿 import 图传播：一个阻塞点连带其整个传递依赖树失败。修复 498 例阻塞后总成功数仍 10，因剩余文件被 new 属性访问连带。
+## 结构性事实
+
+功能缺口沿 import 图传播：一个阻塞点连带其整个传递依赖树失败。
+zod 单文件编译会拉入整棵 import 树，故每修一类阻塞，失败类别数量会重新洗牌
+（修完 `new` 后 Proxy 从 75 浮现，因为原先被 `new` 挡住）。
+
+## 本轮方法学
+
+`new` 修完后逐个编译 zod core 五个文件（compile/parse/api/util/schemas），
+每次报错都定位到具体 TS 语法形态再决定是否值得做——避免为单一库的
+一个用法引入大抽象。
 
 
 ## Timeline
@@ -142,4 +158,16 @@ AOT 编译覆盖率实测（zod 4.6.7，332 个 .ts 含测试）：成功 10（3
   kind: decision
   summary: "重载签名+跨文件同名私有函数已修，头号阻塞转为 new 属性访问"
   source: commit 256928be
+  affects: [aot-readiness]
+
+- time: 2026-10-22T23:32:18
+  kind: evidence
+  summary: "第五轮修复（commit 21986e0d，zod 4.6.7 332 文件）。四类阻塞一次消解：① new 属性访问目标 86→0：new A.B() / new ns.C() / new (a ?? b)() / new inst._zod.constr() 统一走运行时求值类对象 + qz.new_dynamic（宿主本就支持 CLO_HI/INST_HI/handles 三路，无新增宿主接口）；原 ts.isPropertyAccessExpression(e.expression) 死分支删除。② 命名空间成员作值（新发现）：util.codePointLength / util.esc 在 tagged 属性访问路径不查 nsAlias，直接读裸名 util → 未定义捕获变量；修法是在 tagged 属性访问开头查 _nsMember，命中按目标顶层名重发（stripModuleSyntax 早有同规则但只走 interp 回退）。③ 计算属性名（对象字面量展开路径）：{...base,[k]:v} 时 p.name.text 为 undefined → Buffer.from 崩；展开路径内改经 qz.set_index(obj,key,value)（i64,i64,i64），键序登记跳过计算键。④ 类成员字面量名 + rest 解构：\"~standard\"=42 / \"~validate\"(x) 此前落「不支持的类成员」；rest 排除键上限 4→8，object_rest 参数同步扩到 8，未用槽传 -1。副作用：PropertyDeclaration 8→0、rest 解构 5→0。新头号阻塞 Proxy 75（宿主 trap 分发，未实现）、async 12、defaultErrorMap 7（模块级变量跨文件导出）。test_aot.js ALL PASS，新增 5 项用例。"
+  source: "src/qzvm/aot/emitter.js, src/qzvm/aot/qzvm.js"
+  affects: [aot-readiness]
+
+- time: 2026-10-22T23:32:29
+  kind: decision
+  summary: "五轮修复消解六类阻塞，头号阻塞转为 Proxy 未实现（75 例）"
+  source: commit 21986e0d
   affects: [aot-readiness]
