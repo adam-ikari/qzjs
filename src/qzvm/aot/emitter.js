@@ -308,7 +308,7 @@ class Emitter {
         };
         const walk = (n) => {
             if (ts.isVariableDeclaration(n)) bindName(n.name);
-            else if (ts.isFunctionDeclaration(n) && n.name && !(this.hoistedFns && this.hoistedFns.has(n))) { names.push(n.name.text); return; }   // 嵌套函数名是本层局部，但其体属另一作用域
+            else if (ts.isFunctionDeclaration(n) && n.name && n.body && !(this.hoistedFns && this.hoistedFns.has(n))) { names.push(n.name.text); return; }   // 嵌套函数名是本层局部，但其体属另一作用域；无 body = 重载签名，不引入绑定
             else if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) return;   // 不深入嵌套函数体
             ts.forEachChild(n, walk);
         };
@@ -456,7 +456,7 @@ class Emitter {
     _collectLambdas(node, out = []) {
         const walk = (n) => {
             if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) out.push(n);
-            else if (ts.isFunctionDeclaration(n) && n.name && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n);
+            else if (ts.isFunctionDeclaration(n) && n.name && n.body && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n);   // 无 body = 重载签名，不是 lambda
             else if ((ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n))
                      && ts.isObjectLiteralExpression(n.parent)) out.push(this._memberLambda(n));
             ts.forEachChild(n, walk);
@@ -1298,7 +1298,7 @@ class Emitter {
     // 本作用域（含块/if/for/try 内，JS 提升到函数作用域）的函数声明；不深入嵌套函数体。
     _collectScopeFnDecls(body, out = []) {
         const walk = (n) => {
-            if (ts.isFunctionDeclaration(n)) { if (n.name && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n); return; }
+            if (ts.isFunctionDeclaration(n)) { if (n.name && n.body && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n); return; }   // 无 body = TS 重载签名，无闭包可建
             if (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isClassDeclaration(n)) return;
             ts.forEachChild(n, walk);
         };
@@ -3131,7 +3131,10 @@ function compileTS(input, outWasm, opts = {}) {
                 if (mods && mods.some(m => m.kind === ts.SyntaxKind.DefaultKeyword))
                     st.name = ts.factory.createIdentifier("__default_" + (++defaultSeq));
             }
-            if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
+            // TS 重载签名（`export function issue(x: string): R;`）只有类型、没有实现体：
+            // 不与实现体同名冲突（此前当成独立函数收集 → 「顶层函数名冲突」连带整棵 import 树失败），
+            // 也无 body 可发射。实现体是后面那个同名的带 body 声明，正常入列。
+            if (ts.isFunctionDeclaration(st) && st.name && st.body) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
             if (ts.isVariableStatement(st)) {                       // 模块级 const/let → wasm 全局（模块初始化时赋值一次）
                 for (const d of st.declarationList.declarations) {
                     if (!ts.isIdentifier(d.name) || !d.initializer) continue;
@@ -3338,17 +3341,50 @@ function compileTS(input, outWasm, opts = {}) {
             }
         }
     }
-    // 内联到同一 wasm 模块 ⇒ 顶层函数名必须全局唯一。冲突宁可显式报错，
-    // 不静默覆盖（覆盖 = 调错函数，属语义错误）。
+    // 内联到同一 wasm 模块 ⇒ 顶层函数名必须全局唯一。
+    // 跨文件同名是真实常态（zod v4 core/compile.ts 与 core/schemas.ts 各有一份
+    // `getTupleOptStart`，都是模块私有）。私有函数的作用域就是其模块，改名安全；
+    // 导出函数的名字是外部契约（import 侧按名解析），不能改，只能报错。
+    // 改名走 AST + 符号身份：先按 checker 拿目标符号，再重写该文件内所有指向它的
+    // 标识符，这样调用点自动跟着改（只改声明节点会让调用点仍指向旧名）。
     {
-        const seenFn = new Map();
+        const byName = new Map();          // 原名 → [fnNode...]
         for (const f of fns) {
             const n = f.name.text;
-            const fs2 = fnSf.get(f);
-            const where = fs2 ? fs2.fileName : "(unknown)";
-            if (seenFn.has(n))
-                throw new Error(`[inline] 顶层函数名冲突: "${n}" 同时出现在 ${path.basename(seenFn.get(n))} 与 ${path.basename(where)}`);
-            seenFn.set(n, where);
+            if (!byName.has(n)) byName.set(n, []);
+            byName.get(n).push(f);
+        }
+        const isExported = (node) => {
+            const mods = ts.getModifiers(node);
+            return !!(mods && mods.some(m => m.kind === ts.SyntaxKind.ExportKeyword || m.kind === ts.SyntaxKind.DefaultKeyword));
+        };
+        const renameInFile = (sf3, oldName, newName) => {
+            const decl = sf3.statements.find(st => ts.isFunctionDeclaration(st) && st.name && st.name.text === oldName);
+            if (!decl) return;
+            const target = checker.getSymbolAtLocation(decl.name);
+            if (!target) return;
+            const visit = (n) => {
+                if (ts.isIdentifier(n) && n.text === oldName && checker.getSymbolAtLocation(n) === target)
+                    n.escapedText = newName;      // .text 反映 escapedText；emitter 全程只读 .text
+                ts.forEachChild(n, visit);
+            };
+            visit(sf3);
+        };
+        for (const [oldName, group] of byName) {
+            if (group.length < 2) continue;
+            // 与既有文件重名的导出函数无法消解（契约名），保持显式报错。
+            const exported = group.filter(isExported);
+            if (exported.length > 1) {
+                const f0 = exported[0], f1 = exported[1];
+                throw new Error(`[inline] 顶层导出函数名冲突: "${oldName}" 同时出现在 ${path.basename((fnSf.get(f0) || {}).fileName || "?")} 与 ${path.basename((fnSf.get(f1) || {}).fileName || "?")}`);
+            }
+            for (const f of group) {
+                if (isExported(f)) continue;      // 导出的保留原名
+                const sf3 = fnSf.get(f);
+                if (!sf3) continue;
+                const stem = path.basename(sf3.fileName).replace(/\.(ts|tsx|js|mts|cts)$/, "").replace(/[^A-Za-z0-9_$]/g, "_");
+                renameInFile(sf3, oldName, `__m_${stem}_${oldName}`);
+            }
         }
     }
     // ── interp 回退：opts.interp 列出的函数不编 wasm，退到 JS 跑在宿主解释器里。

@@ -561,7 +561,16 @@ async function runMultiFile() {
     let threw = "";
     try { compileTS(path.join(dir, "m.ts"), path.join(dir, "m.wasm"), {}); }
     catch (e) { threw = e.message; }
-    check("多文件.同名冲突显式报错", threw.includes("顶层函数名冲突"), true);
+    check("多文件.同名冲突显式报错", threw.includes("导出函数名冲突"), true);
+
+    // 同名私有函数：两模块各有一份非导出 helper → 自动按文件前缀改名，互不干扰。
+    fs.writeFileSync(path.join(dir, "pa.ts"), "function helper(x: number): number { return x * 2; }\nexport function pa(y: number): number { return helper(y); }\n");
+    fs.writeFileSync(path.join(dir, "pb.ts"), "function helper(x: number): number { return x + 100; }\nexport function pb(y: number): number { return helper(y); }\n");
+    fs.writeFileSync(path.join(dir, "pm.ts"), "import { pa } from './pa';\nimport { pb } from './pb';\nexport function runPm(x: number): number { return pa(x) + pb(x); }\n");
+    const wasmPm = path.join(dir, "pm.wasm");
+    compileTS(path.join(dir, "pm.ts"), wasmPm, {});
+    const { instance: instPm } = await WebAssembly.instantiate(fs.readFileSync(wasmPm), {});
+    check("多文件.同名私有自动消解 runPm(3)", instPm.exports.runPm(3), 109);
 
     // re-export 链：export { foo as bar } from "./bar" + import { bar } from "./a"
     // checker 须穿透 re-export 链解析 bar → foo（否则 _fnName 找不到函数）
@@ -610,6 +619,20 @@ async function runMultiFile() {
     try { compileTS(path.join(dir, "extstar.ts"), path.join(dir, "extstar.wasm"), {}); }
     catch (e) { extStarErr = e.message; }
     check("export*.外部模块显式报错", extStarErr.includes("外部模块"), true);
+
+    // TS 重载签名（无实现体）不应与实现体同名冲突：只有带 body 的声明进 fns。
+    fs.writeFileSync(path.join(dir, "ovl.ts"),
+        "export function pick(a: string): string;\n" +
+        "export function pick(a: number): number;\n" +
+        "export function pick(a: any): any { return typeof a === 'string' ? a + '!' : a * 2; }\n" +
+        "export function runOvl(x: number): any { return pick(x); }\n");
+    const wasmOvl = path.join(dir, "ovl.wasm");
+    const rOvl = compileTS(path.join(dir, "ovl.ts"), wasmOvl, {});
+    const qzOvl = makeQzvm(rOvl.strings, { fields: rOvl.fields });
+    const { instance: instOvl } = await WebAssembly.instantiate(fs.readFileSync(wasmOvl), { qz: qzOvl });
+    qzOvl.bindMem(instOvl.exports.memory);
+    if (instOvl.exports.__bump) qzOvl.bindBump(instOvl.exports.__bump);
+    check("重载签名.不冲突 runOvl(21)", qzOvl._toJS(instOvl.exports.runOvl(qzOvl._fromJS(21))), 42);
 
     // 默认导入：`import d from './m'`（d 为目标模块命名默认导出）
     fs.writeFileSync(path.join(dir, "dm.ts"), "function df(n: number): number { return n + 100; }\nexport default df;\n");
