@@ -33,7 +33,7 @@ function nott(a: number): number { if (!a) return 7; return 1; }
 function inc(n: number): number { let x = n; x++; return x; }
 function postfix_ret(n: number): number { let x = n; let y = x++; return x * 10 + y; }
 function wsum(n: number): number { let s = 0; let i = 0; while (i < n) { s += i; i++; } return s; }
-function flo(a: number): number { return Math_floor(a); }
+function flo(a: number): number { return Math.floor(a); }
 // 逻辑运算**值语义**（守 2026-10-15 修复：曾结果强制 0/1，且 ||= 曾非真短路）
 function and_val(a: number, b: number): number { const r: any = a && b; return r; }
 function or_val(a: number, b: number): number { const r: any = a || b; return r; }

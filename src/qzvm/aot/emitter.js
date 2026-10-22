@@ -3318,7 +3318,6 @@ function compileTS(input, outWasm, opts = {}) {
         em._modObjKeys = modObjKeys;    // 模块级 const 的静态键序（对象字面量 + 已知 const 展开）
         em._inModInit = false;
         if (!m.collect) {
-            if (opts.needMathFloor) m.importFn("qz", "math_floor", ["i32"], ["i32"]);
             if (contract) registerQz(m, contract);
         }
         if (anyTagged) {
@@ -6443,7 +6442,6 @@ module.exports = { compileTS, Emitter };
 if (require.main === module) {
     const input = process.argv[2];
     const out = process.argv[3] || "/tmp/out.wasm";
-    const opts = { needMathFloor: true };
-    const r = compileTS(input, out, opts);
+    const r = compileTS(input, out, {});
     console.log("wrote", out, fs.statSync(out).size, "bytes; imports:", r.module.imports.length, "funcs:", r.module.funcs.length, "strings:", r.strings.length);
 }
