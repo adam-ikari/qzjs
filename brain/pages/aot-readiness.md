@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-10-22T22:27:29"
+updated: "2026-10-22T22:46:15"
 ---
 
 <!-- compiled_truth -->
@@ -13,28 +13,19 @@ updated: "2026-10-22T22:27:29"
 
 AOT 编译覆盖率实测（zod 4.6.7，332 个 .ts 含测试）：成功 10（3.0%）。
 
-**已修复的阻塞**（原头两名，共 276 例）：
-- #3 匿名默认导出 `export default function(){}` / `export default class{}`：
-  `collectDecls` 就地补合成名 `__default_N`，import 解析走原路径。
-- #4 `export * from './m'`：不产生绑定，内联后无代码可发，只校验目标在源码内；
-  消费方经 checker 自动穿透 star 链。
+**本日累计修复四类阻塞**（原合计 498 例 → 19 例）：
+- #3 匿名默认导出（131→0）：collectDecls 就地补合成名 `__default_N`。
+- #4 `export *` re-export（145→0）：不产生绑定，只校验目标在源码内。
+- TS 重载签名（115→0）：collectDecls + 4 处嵌套收集统一加 `n.body` 过滤。
+- 跨文件同名私有函数（107→19）：非导出函数按文件前缀改名 `__m_<stem>_<name>`，用 checker 符号身份重写声明+调用点。剩余 19 例是导出函数同名（外部契约，不能改名）。
 
-**当前头号阻塞**：同名函数跨目录冲突。zod v3 与 v4 各有一份 `util.ts`/`types.ts`，
-内联到同一 wasm 模块后顶层名撞车（实测 101+8+6 例）。这是内联架构的固有约束，
-解法需要命名空间化（按模块路径前缀改写顶层名）或按需闭包化，工作量中等偏大。
+**当前头号阻塞**：`[tagged] new 目标必须是标识符`（86 例）。`new A.B()` 属性访问式构造未实现。属已登记未实现路径。
 
-**未修复**：#5 命名空间导入捕获、#6 generator/async（功能缺失）、#7 corpus 与 V8 对拍。
+**未修复**：#5 命名空间导入捕获、#6 generator/async、#7 corpus 与 V8 对拍。
 
 ## 结构性事实（未变）
 
-功能缺口沿 import 图传播：一个阻塞点连带其整个传递依赖树失败。这解释了为何
-修复 276 例阻塞后总成功数不涨——剩余文件被下层同名冲突连带。
-
-## 判断
-
-数值/计算密集场景可用（numWork 28.3x）。通用 TS 应用仍不可用：同名冲突 +
-generator/async 缺失是独立致命项。教训：测试路径与产物路径不一致时，全绿测试
-会给出虚假信心（见 Map 静默错误一节）。
+功能缺口沿 import 图传播：一个阻塞点连带其整个传递依赖树失败。修复 498 例阻塞后总成功数仍 10，因剩余文件被 new 属性访问连带。
 
 
 ## Timeline
@@ -139,4 +130,16 @@ generator/async 缺失是独立致命项。教训：测试路径与产物路径�
   kind: decision
   summary: "READINESS #3 #4 已修复，头号阻塞转为同名冲突"
   source: commit de528c87
+  affects: [aot-readiness]
+
+- time: 2026-10-22T22:45:26
+  kind: evidence
+  summary: "READINESS 新增修复（commit 256928be）：① TS 重载签名（export function issue(x:string):R; 无实现体）此前被当独立函数收集 → 顶层名冲突连带 import 树失败（zod v4 core/util.ts 的 issue 三声明占 101 例）。修法：collectDecls + 4 处嵌套函数收集（_collectScopeFnDecls/_collectLambdas/自由变量分析/lambda 收集）统一加 n.body 过滤。无 body = 重载签名，不进 fns/不建闭包/不当 lambda/不入局部名表。② 跨文件同名私有函数自动消解：zod v4 core/compile.ts 与 core/schemas.ts 各一份 getTupleOptStart，都模块私有，内联后顶层名撞车。修法：同名组里非导出函数按文件前缀改名 __m_<stem>_<oldName>，用 checker 符号身份重写该文件内所有指向它的标识符（声明+调用点一并改），emitter 全程只读 .text 故自动跟随。导出函数名是外部契约，保留显式报错（消息改「导出函数名冲突」）。zod 332 文件实测：重载 115→0，同名 107→19。新头号阻塞 [tagged] new 目标必须是标识符（86 例，new A.B() 属性访问式构造，已登记未实现）。READINESS 差距 #3 #4 #5（重载）均已修，#6 generator/async 仍未实现。"
+  source: "src/qzvm/aot/emitter.js, coverage_real.js"
+  affects: [aot-readiness]
+
+- time: 2026-10-22T22:46:15
+  kind: decision
+  summary: "重载签名+跨文件同名私有函数已修，头号阻塞转为 new 属性访问"
+  source: commit 256928be
   affects: [aot-readiness]
