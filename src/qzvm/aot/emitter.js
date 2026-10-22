@@ -3815,6 +3815,15 @@ Emitter.prototype._emitStrParts = function () {
     this.m.localGet(this.sT[1]); this.m.i32Load(2, 0); this.m.localSet(this.sT[0]);
     this.m.localGet(this.sT[1]); this.m.i32Const(4); this.m.i32Add(); this.m.localSet(this.sT[2]);
 };
+// 初始化表达式是否在 bump arena 上分配，且分配物只由该变量持有？
+// 对象字面量 / 数组字面量 / new 都落到 bump 堆；其余（标量、字符串拼接、调用）
+// 要么不分配、要么分配物不归本变量所有，不在此判定范围。
+Emitter.prototype._allocInitName = function (d) {
+    if (!d.initializer || !ts.isIdentifier(d.name)) return null;
+    const i = d.initializer;
+    if (ts.isObjectLiteralExpression(i) || ts.isArrayLiteralExpression(i) || ts.isNewExpression(i)) return d.name.text;
+    return null;
+};
 // 循环体内分配的对象能否在每轮迭代后整体回滚（bump 复位到循环入口）？
 // 判据严格保守，任一不满足即放弃：循环体里每个「对象字面量初始化」的 let/const 变量 x
 //   ① 只以 x.<field> / x[..] 形式出现（读或写自身字段），从不作为值被传递/返回/存入容器；
@@ -3829,8 +3838,7 @@ Emitter.prototype._loopArenaFree = function (body) {
     const collect = (n) => {
         if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) { hasClosure = true; return; }
         if (ts.isReturnStatement(n) || ts.isThrowStatement(n)) { hasNonLocalExit = true; return; }
-        if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectLiteralExpression(n.initializer)
-            && ts.isIdentifier(n.name)) cand.add(n.name.text);
+        if (ts.isVariableDeclaration(n)) { const nm = this._allocInitName(n); if (nm) cand.add(nm); }
         ts.forEachChild(n, c => { collect(c); });
     };
     collect(body);
@@ -3881,17 +3889,21 @@ Emitter.prototype._fnArenaFree = function (f) {
     if (!(k === ts.SyntaxKind.NumberKeyword || k === ts.SyntaxKind.BooleanKeyword
        || k === ts.SyntaxKind.VoidKeyword || k === ts.SyntaxKind.UndefinedKeyword)) return false;
     const cand = new Set(), bad = new Set();
-    let hasAlloc = false;
     const collect = (n) => {
-        if (ts.isObjectLiteralExpression(n)) hasAlloc = true;
-        if (ts.isNewExpression(n) || ts.isTryStatement(n) || ts.isThrowStatement(n)) bad.add("\u0000fn");
+        if (ts.isTryStatement(n) || ts.isThrowStatement(n)) bad.add("\u0000fn");
         if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) bad.add("\u0000fn");
-        if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectLiteralExpression(n.initializer)
-            && ts.isIdentifier(n.name)) cand.add(n.name.text);
+        if (ts.isVariableDeclaration(n)) {
+            const nm = this._allocInitName(n);
+            if (nm) {
+                cand.add(nm);
+                // new C(…)：构造体若把 this 存到外部，复位会让那个引用悬空 → 拒绝。
+                if (ts.isNewExpression(n.initializer) && !this._ctorKeepsThis(n.initializer)) bad.add("\u0000ctor");
+            }
+        }
         ts.forEachChild(n, c => { collect(c); });
     };
     collect(f.body);
-    if (bad.size || !hasAlloc) return false;
+    if (bad.size || !cand.size) return false;
     const check = (n) => {
         if (ts.isIdentifier(n) && cand.has(n.text)) {
             const p = n.parent;
@@ -3906,6 +3918,34 @@ Emitter.prototype._fnArenaFree = function (f) {
     check(f.body);
     return bad.size === 0;
 };
+// new C(…) 的实例能否在返回时回收？构造体本身（含继承链）若把 `this` 交给外部
+// （return this、存容器、赋给自由变量、传给调用、被闭包捕获），复位会让那个引用悬空。
+// 只在构造体对本实例只做字段写/读时判定安全。找不到类定义 → 一律拒绝。
+Emitter.prototype._ctorKeepsThis = function (newExpr) {
+    const clsNode = newExpr.expression;
+    if (!ts.isIdentifier(clsNode)) return true;                      // 动态表达式 → 不可证
+    let c = this.classes.get(clsNode.text);
+    if (!c || !c.ctor) return true;                                  // 无显式构造 → 字段初始化可能逃逸，保守拒绝
+    let leak = false;
+    const walk = (n) => {
+        if (leak) return;
+        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) { leak = true; return; }   // 闭包可能捕获 this
+        if (ts.isReturnStatement(n) && n.expression) { leak = true; return; }             // return this
+        if (ts.isThis(n)) {
+            const p = n.parent;
+            // 只允许 this.field（读写）与本构造链的 super(…) 转发
+            const okField = p && (ts.isPropertyAccessExpression(p) && p.expression === n);
+            const okCall = p && ts.isCallExpression(p)
+                && ts.isPropertyAccessExpression(p.expression) && p.expression.name.text === "super";
+            if (!okField && !okCall) leak = true;
+            if (leak) return;
+        }
+        ts.forEachChild(n, walk);
+    };
+    walk(c.ctor);
+    return leak;
+};
+
 Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
 Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));

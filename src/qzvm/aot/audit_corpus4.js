@@ -386,12 +386,36 @@ function h(a: number): any { const p = { v: a }; return p; }` },
   return o.v + o.w;
 }
 function k(a: number): any { const p = { v: a, w: a + 1 }; return p; }` },
-  // 保守拒绝：函数内有 new → 构造分配逃逸性不可证。
-  { name: "fn-alloc-new-reject", fn: "f", ts: `export function f(): any {
+  // 返回对象本身 → 句柄逃出函数，无论分配方式是 new 还是字面量都拒绝。
+  { name: "fn-alloc-new-ret-reject", fn: "f", ts: `export function f(): any {
   const a = n(2);
   return a.v;
 }
 class Box { v: number = 7; w: number = 1; }
 function n(a: number): any { const b = new Box(); return b; }` },
+  // new 实例、只读字段、返回标量，且构造体只写 this.field → 可回收。
+  { name: "fn-alloc-new-ok", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) t = t + mk(i);
+  return t;
+}
+class Box { v: number = 0; w: number = 0; }
+function mk(a: number): number { const b = new Box(); b.v = a; b.w = a * a; return b.v + b.w; }` },
+  // 构造体把 this 交给外部（存静态数组）→ 复位会让该引用悬空，必须拒绝。
+  { name: "fn-alloc-ctor-leak-reject", fn: "f", ts: `export function f(): any {
+  const o = mk(3);
+  return o.v;
+}
+class C { v: number = 0; }
+const kept: any[] = [];
+class D { v: number = 0; constructor() { kept.push(this); } }
+function mk(a: number): number { const d = new D(); d.v = a; return d.v; }` },
+  // 数组字面量局部、只读下标、返回标量 → 可回收。
+  { name: "fn-alloc-array-ok", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) t = t + mk(i);
+  return t;
+}
+function mk(a: number): number { const p = [a, a * a]; return p[0] + p[1]; }` },
 
 ];
