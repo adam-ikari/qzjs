@@ -360,4 +360,38 @@ export function f(): any { const c = new C(); return c.make() + "|" + c.make2();
   for (let i = 0; i < 3; i++) { const r = { id: i }; for (let j = 0; j < 2; j++) { const q = { v: j }; keep.push(q); } }
   return keep.length + keep[5].v;
 }` },
+  // 函数级 arena 回滚：函数内造临时对象、只读字段、返回标量 → 返回前复位 bump。
+  // 关键前提是返回类型标注为标量（编译期可证返回值不是句柄）。
+  { name: "fn-alloc-numeric-ret", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) t = t + mk(i);
+  return t;
+}
+function mk(a: number): number { const p = { x: a, sq: a * a }; return p.x + p.sq; }` },
+  { name: "fn-alloc-readonly-fields", fn: "f", ts: `export function f(): any {
+  let t = 0;
+  for (let i = 0; i < 5; i++) t = t + g(i);
+  return t;
+}
+function g(a: number): number { const p = { v: a, w: a + 1 }; const q = { z: p.v }; return q.z + p.w; }` },
+  // 保守拒绝：返回类型是 any（可能是对象句柄）→ 绝不复位。
+  { name: "fn-alloc-any-ret-reject", fn: "f", ts: `export function f(): any {
+  const o = h(3);
+  return o.v;
+}
+function h(a: number): any { const p = { v: a }; return p; }` },
+  // 保守拒绝：返回对象本身 → 句柄逃出，复位会悬空。
+  { name: "fn-alloc-obj-ret-reject", fn: "f", ts: `export function f(): any {
+  const o = k(4);
+  return o.v + o.w;
+}
+function k(a: number): any { const p = { v: a, w: a + 1 }; return p; }` },
+  // 保守拒绝：函数内有 new → 构造分配逃逸性不可证。
+  { name: "fn-alloc-new-reject", fn: "f", ts: `export function f(): any {
+  const a = n(2);
+  return a.v;
+}
+class Box { v: number = 7; w: number = 1; }
+function n(a: number): any { const b = new Box(); return b; }` },
+
 ];

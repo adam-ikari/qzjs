@@ -1397,6 +1397,11 @@ class Emitter {
         this._loopSaveBase = this.scratchObj + 1;
         this._loopSaveCount = nLoopSave;
         this._loopSaveDepth = 0;
+        // 函数级 arena 回滚槽（仅 tagged）：一个 i32 存函数入口的 bump；返回类型是标量且
+        // 函数体内分配不逃逸时，在每个 return 前复位（见 _fnArenaFree）。
+        this._fnArenaFreeThis = this.mode === "tagged" && this._fnArenaFree(f);
+        const fnArenaDecls = this._fnArenaFreeThis ? ["i32"] : [];
+        this._fnArenaSlot = this.scratchObj + 1 + nLoopSave;
         this.cloSlotsLen = cloSlots.length;
         // debug：局部名数组（参数在前、局部在后，与 wasm local 序号一致）；仅命名可见变量，合成槽留空。
         const localNames = this.m.debug
@@ -1408,7 +1413,7 @@ class Emitter {
         const envDecls = capNames.length ? ["i32"] : [];
         const needsArgs0 = this.mode === "tagged" && !!(this._fnArgs && f.name && this._fnArgs.has(f.name.text));
         const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool)
-            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(loopSaveDecls).concat(needsArgs0 ? ["i64"] : []).concat(envDecls).concat(numArrDecls);
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(loopSaveDecls).concat(fnArenaDecls).concat(needsArgs0 ? ["i64"] : []).concat(envDecls).concat(numArrDecls);
         // num 数组的 base/len local 索引（一对 i32/名字）
         {
             let base = f.parameters.length + decls.length - numArrDecls.length;
@@ -1440,6 +1445,7 @@ class Emitter {
         }
         this.depth = 0; this.labels = [];
         this._staticVars = this.mode === "tagged" ? this._computeStaticVars(f.body, f.parameters.map(p => p.name.text)) : new Map();
+        if (this._fnArenaFreeThis) { this.m.globalGet(0); this.m.localSet(this._fnArenaSlot); }
         if (this.mode === "tagged") { this._emitFnDeclClosures(f.body); this.emitTaggedBlock(f.body); }
         else this.emitBlock(f.body);
         // 末尾非 return 且函数有返回值 → fallthrough 路径缺值（穷尽 switch/if-else 全 return）。
@@ -1606,14 +1612,16 @@ class Emitter {
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
-        this.cloSlotsLen = cloSlots.length;
+        this._fnArenaFreeThis = false;      // lambda 体布局与 emitFunc 不同，不复位
+        this._loopSaveBase = this.scratchObj + 1; this._loopSaveCount = this._countLoops(lam.body) + 1; this._loopSaveDepth = 0;
+        const lamLoopSaveDecls = new Array(this._loopSaveCount).fill("i32");
         // 本 lambda 的局部若被（嵌套）lambda 捕获 → 建自身 env（__parent 链到 blk）
         const ownCap = this._probeCaptured(lam.body, params, locals);
         const envDecls = ownCap.length ? ["i32"] : [];
         const lamNeedsArgs = usesArguments(lam.body);
         lam._qzNeedsArgs = lamNeedsArgs;
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool)
-            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(lamNeedsArgs ? ["i64"] : []).concat(envDecls);
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(lamLoopSaveDecls).concat(lamNeedsArgs ? ["i64"] : []).concat(envDecls);
         this._argsLocal = lamNeedsArgs ? (1 + params.length) + bodyLocals.length - 1 - envDecls.length : undefined;
         const localNames = this.m.debug ? ["blk"].concat(params).concat(locals) : null;
         M.startBody(fname, bodyLocals, localNames);
@@ -1993,6 +2001,9 @@ class Emitter {
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
+        this._fnArenaFreeThis = false;      // 方法体不复位（布局同上，槽位号不同）
+        this._loopSaveBase = this.scratchObj + 1; this._loopSaveCount = this._countLoops(body) + 1; this._loopSaveDepth = 0;
+        const mthLoopSaveDecls = new Array(this._loopSaveCount).fill("i32");
         this.cloSlotsLen = cloSlots.length;
         // 方法体内被（嵌套）lambda 捕获的 this/参数/局部 → 共享环境（同 emitFunc）
         const capNames = this._probeCaptured(extraNodes ? [body].concat(extraNodes) : body, params, locals);
@@ -2001,7 +2012,7 @@ class Emitter {
           if (probeLenC === 0 && ciC && ciC.captured) for (const n0 of ciC.captured) if (!capNames.includes(n0)) capNames.push(n0); }
         const envDecls = capNames.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
-            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(envDecls);
+            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(mthLoopSaveDecls).concat(envDecls);
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
         this.m.i64Const(0n); this.m.globalSet(1);           // 入口清 __err
@@ -3852,6 +3863,49 @@ Emitter.prototype._arenaLoopLeave = function (slot) {
     if (slot === undefined) return;
     this.m.localGet(slot); this.m.globalSet(0); this._loopSaveDepth--;
 };
+// 函数级 arena 回滚：函数返回时把 bump 复位到入口，本次调用内的分配一并回收。
+// 适用于「函数内造临时对象、只读字段、返回标量」的形态——被循环反复调用时，否则每次调用
+// 泄漏 40 字节，41.9 万次后 arena 耗尽崩溃。
+// 前提是能**证明返回值不指向 arena**，否则复位让返回值悬空（静默内存 corruption，比崩溃更糟）。
+// 判据（任一不满足即放弃，宁可泄漏也不误判）：
+//   ① 返回类型标注必须是 number/boolean/void/undefined —— 编译期即可证明返回值不是句柄；
+//   ② 函数体内确有对象字面量分配（否则无回收收益）；
+//   ③ 无 try/throw（finally 可能在复位后访问对象）、无闭包（可能把局部存进 env）、
+//      无 new（构造分配不在此分析范围，逃逸性不可证）；
+//   ④ 每个对象字面量局部只以 x.field / x[..] 出现；且 return 表达式里不出现这些名字。
+Emitter.prototype._fnArenaFree = function (f) {
+    if (this.mode !== "tagged") return false;
+    const ty = f.type;
+    if (!ty) return false;
+    const k = ty.kind;
+    if (!(k === ts.SyntaxKind.NumberKeyword || k === ts.SyntaxKind.BooleanKeyword
+       || k === ts.SyntaxKind.VoidKeyword || k === ts.SyntaxKind.UndefinedKeyword)) return false;
+    const cand = new Set(), bad = new Set();
+    let hasAlloc = false;
+    const collect = (n) => {
+        if (ts.isObjectLiteralExpression(n)) hasAlloc = true;
+        if (ts.isNewExpression(n) || ts.isTryStatement(n) || ts.isThrowStatement(n)) bad.add("\u0000fn");
+        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) bad.add("\u0000fn");
+        if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectLiteralExpression(n.initializer)
+            && ts.isIdentifier(n.name)) cand.add(n.name.text);
+        ts.forEachChild(n, c => { collect(c); });
+    };
+    collect(f.body);
+    if (bad.size || !hasAlloc) return false;
+    const check = (n) => {
+        if (ts.isIdentifier(n) && cand.has(n.text)) {
+            const p = n.parent;
+            const ok = (p && ((ts.isPropertyAccessExpression(p) && p.expression === n)
+                           || (ts.isElementAccessExpression(p) && p.expression === n)))
+                    || (p && ts.isVariableDeclaration(p) && p.name === n);   // 声明处自身
+            if (!ok) bad.add(n.text);
+        }
+        // `return p` 这类整体逃逸由上面的 ok 判定兜住（返回位置的标识符不是属性访问基址）。
+        ts.forEachChild(n, c => { check(c); });
+    };
+    check(f.body);
+    return bad.size === 0;
+};
 Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
 Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));
@@ -3871,6 +3925,9 @@ Emitter.prototype.emitTaggedStmt = function (s) {
         } else {
             if (s.expression) this.emitTaggedExpr(s.expression); else this._emitUndefined();
         }
+        // 函数级 arena 回滚：返回值已算好（标量，不指向 arena），把 bump 复位到函数入口。
+        // 必须在返回值求值之后——求值本身可能还要分配。
+        if (this._fnArenaFreeThis) { this.m.localGet(this._fnArenaSlot); this.m.globalSet(0); }
         this.m.return_(); return; }
     if (ts.isBreakStatement(s)) { this._jumpOut(s.label && s.label.text, true); return; }
     if (ts.isContinueStatement(s)) { this._jumpOut(s.label && s.label.text, false); return; }
