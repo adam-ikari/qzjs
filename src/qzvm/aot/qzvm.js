@@ -2391,12 +2391,11 @@ function makeQzvm(strings, opts) {
       const end = bumpRef.value;
       if (end <= start) return 0;
       const dv = new DataView(mem.buffer);
-      // ── 1. 收集块表（hdr → {rc,size,kind,nslots}），顺带校验链完整性 ──
-      const blocks = new Map();
+      // ── 1. 校验块链（不建索引：size/kind/nslots 都在块头里，用时装 dv 直读）──
+      // 建 Map<hdr,{...}> 会在每块上分配一个对象字面量，GC 自身成了分配源（实测 3MB 堆 86ms）。
       for (let h = start; h < end;) {
-        const rc = dv.getInt32(h, true), size = dv.getInt32(h + 4, true), kind = dv.getInt32(h + 8, true);
+        const size = dv.getInt32(h + 4, true);
         if (size < RC_HDR || (size & 7) !== 0 || h + size > end) return 0;   // 链损坏 → 放弃（宁漏勿错）
-        blocks.set(h, { rc, size, kind, nslots: dv.getInt32(h + 12, true) });
         h += size;
       }
       // ── 2. 标记：句柄低 32 位是**数据区**偏移，块表以**块头**为键，故差 RC_HDR ──
@@ -2404,16 +2403,21 @@ function makeQzvm(strings, opts) {
       // 结果「保留可达根」时也把所有块当垃圾回收（实测 freed=480 且根对象被清）。
       const marked = new Set();
       const stack = [];
-      const pushHandle = (v) => {
-        const bits = BigInt.asUintN(64, BigInt(v));
-        const hi = bits >> 48n, low = Number(bits & MASK32);
-        /* 低 32 位是**堆数据区偏移**的标签：0x7FF9 对象、0x7FFB 数组、0x7FFE 实例、0x7FFF 闭包。
-         * 漏掉 0x7FFF 会让闭包块被判不可达而回收（实测：mk() 返回闭包后 gc freed=72，
-         * 闭包块连同其环境一起被清）。0x7FF8 BigInt 的低 32 位是 handles 槽而非堆偏移，
-         * 0x7FFA 字符串、0x7FFC 布尔、0x7FFD 宿主句柄同样不在堆内，一律跳过。 */
-        if (!(hi === 0x7ff9n || hi === 0x7ffbn || hi === 0x7ffen || hi === 0x7fffn)) return;
+      /* 句柄 → 块头。堆内标签：0x7FF9 对象、0x7FFB 数组、0x7FFE 实例、0x7FFF 闭包。
+       * 漏掉 0x7FFF 会让闭包块被判不可达而回收（实测 mk() 返回闭包后 gc freed=72）。
+       * 0x7FF8 BigInt 低 32 位是 handles 槽、0x7FFA 字符串、0x7FFC 布尔、0x7FFD 宿主句柄
+       * 都不在线性堆里，一律跳过。 */
+      const pushHiLo = (hi, low) => {
+        if (hi !== 0x7ff9 && hi !== 0x7ffb && hi !== 0x7ffe && hi !== 0x7fff) return;
         const hdr = low - RC_HDR;
-        if (blocks.has(hdr)) stack.push(hdr);
+        if (hdr < start || hdr >= end) return;                       // 堆外
+        const size = dv.getInt32(hdr + 4, true);
+        if (size < RC_HDR || (size & 7) !== 0 || hdr + size > end) return;   // 非块首
+        stack.push(hdr);
+      };
+      const pushHandle = (v) => {
+        const b = BigInt.asUintN(64, BigInt(v));
+        pushHiLo(Number(b >> 48n), Number(b & MASK32));
       };
       // 静态根来自 wasm 导出的 __dump_roots(0)：直接写内存，避免 i64 全局被降为 Number。
       if (exportsObj && exportsObj.__dump_roots && bumpRef) {
@@ -2434,12 +2438,13 @@ function makeQzvm(strings, opts) {
         const h = stack.pop();
         if (marked.has(h)) continue;
         marked.add(h);
-        const b = blocks.get(h);
-        if (b.kind === K_ARR) {                              // [8]=dataOff，子引用在 dataOff 起 nslots 个
+        const kind = dv.getInt32(h + 8, true), size = dv.getInt32(h + 4, true);
+        if (kind === K_ARR) {                                // [8]=dataOff，子引用在 dataOff 起 nslots 个
           const dataOff = dv.getInt32(h + RC_HDR + 8, true);
-          for (let i = 0, p = dataOff; i < b.nslots; i++, p += 8) pushHandle(dv.getBigInt64(p, true));
-        } else if (b.kind === K_POJO) {                      // 槽 [8,size) 每 8 字节
-          for (let p = h + RC_HDR + 8; p + 8 <= h + b.size; p += 8) pushHandle(dv.getBigInt64(p, true));
+          const n = dv.getInt32(h + 12, true);
+          for (let i = 0, p = dataOff; i < n; i++, p += 8) pushHandle(dv.getBigInt64(p, true));
+        } else if (kind === K_POJO) {                         // 槽 [8,size) 每 8 字节
+          for (let p = h + RC_HDR + 8; p + 8 <= h + size; p += 8) pushHandle(dv.getBigInt64(p, true));
         }
       }
       // ── 3. 清扫：不可达即回收，挂空闲链 ──
@@ -2447,10 +2452,13 @@ function makeQzvm(strings, opts) {
       // （模块级根被清空后 rc 仍为 1）。以 rc 为条件会让这些块永不回收（实测 freed=0）。
       let freed = 0;
       const fl = exportsObj && exportsObj.__freelist;
-      for (const [h, b] of blocks) {
-        if (marked.has(h)) continue;
-        if (fl) { dv.setInt32(h, fl.value, true); fl.value = h; }   // hdr[0] = 旧链头；链头 = h
-        freed += b.size;
+      for (let h = start; h < end;) {
+        const size = dv.getInt32(h + 4, true);
+        if (!marked.has(h)) {
+          if (fl) { dv.setInt32(h, fl.value, true); fl.value = h; }   // hdr[0] = 旧链头；链头 = h
+          freed += size;
+        }
+        h += size;
       }
       return freed;
     },

@@ -2644,11 +2644,21 @@ function emitBumpAlloc(m, emitTotal, fl) {
         m.globalGet(fl.list); m.globalSet(fl.cur);                 // cur = 链头
         m.block("void"); m.loop("void");
           m.globalGet(fl.cur); m.i32Eqz(); m.brIf(1);              // 空链 → 出
-          m.globalGet(fl.cur); total(); m.i32Load(2, 4); m.i32GeU();
+          /* 顺序关键：先压 cur 再 i32Load（地址=cur，得块旧 size），最后求请求大小 total。
+           * 原先把 total() 排在 i32Load 之前 → load 把 total 这个**大小**当地址读 memory[total+4]，
+           * 拿到的垃圾与请求大小比较，会匹配到错误节点并把块头 size 写成垃圾
+           * （实测复用后 hdr=184 size=2147155968，块链直接断）。 */
+          m.globalGet(fl.cur); m.i32Load(2, 4); total(); m.i32GeU();
           m.ifBlock("void");
             m.globalGet(fl.cur); m.i32Load(2, 0); m.globalSet(fl.list);   // 链头 = cur.next
-            m.globalGet(fl.cur); m.i32Const(1); m.i32Store(2, 0);         // rc = 1
+            m.globalGet(fl.cur); m.i32Const(1); m.i32Store(2, 0);         // rc = 1（覆盖链 next 指针）
             m.globalGet(fl.cur); total(); m.i32Store(2, 4);               // size = total
+            /* kind/nslots **必须清零**：空闲链节点的 [hdr+8]/[hdr+12] 仍是上一个占用者的值。
+             * 不清会留下幽灵引用——实测复用 {id,name,tags} 的块后，GC 按旧 kind=K_ARR/nslots=2
+             * 去遍历已被覆盖的数据区，把垃圾指针当根 → 整轮 freed=0（对象永不回收）。
+             * 调用方随后会按需自行落定真正的 kind/nslots。 */
+            m.globalGet(fl.cur); m.i32Const(0); m.i32Store(2, 8);
+            m.globalGet(fl.cur); m.i32Const(0); m.i32Store(2, 12);
             m.globalGet(fl.cur); m.i32Const(RC_HDR); m.i32Add(); m.globalSet(fl.hit);  // 数据区偏移
             m.br(2);                                                      // 跳出 loop+block
           m.end();
