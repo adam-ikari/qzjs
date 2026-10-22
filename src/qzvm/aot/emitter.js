@@ -47,7 +47,7 @@ const QZ = {
   length_of: { params: ["i64"], results: ["i64"] },   // .length 宿主回退（宿主数组/POJO 物化）
   prop_get: { params: ["i64", "i32"], results: ["i64"] },      // 实例属性读（经 getter 链）
   prop_set: { params: ["i64", "i32", "i64"], results: [] },    // 实例属性写（经 setter 链）
-  object_rest: { params: ["i64", "i32", "i32", "i32", "i32"], results: ["i64"] },  // {...rest}
+  object_rest: { params: ["i64", "i32", "i32", "i32", "i32", "i32", "i32", "i32", "i32"], results: ["i64"] },  // {...rest}（排除键最多 8）
   is_undef: { params: ["i64"], results: ["i32"] },           // v === undefined
   instanceof_builtin: { params: ["i64", "i32"], results: ["i32"] },   // x instanceof 内建类 → 0/1
   call_named: { params: ["i32", "i64", "i32"], results: ["i64"] },      // 展开实参：按名动态调用（isNum=1 → f64 ABI）
@@ -426,9 +426,9 @@ class Emitter {
                     throw new Error("[tagged] 暂不支持计算属性名的解构");
                 }
                 if (el.dotDotDotToken) {                               // {...rest} → 宿主 object_rest
-                    if (restExcl.length > 4) throw new Error("[tagged] 对象 rest 解构最多排除 4 个键");
+                    if (restExcl.length > 8) throw new Error("[tagged] 对象 rest 解构最多排除 8 个键");
                     M.localGet(this.scratch);
-                    for (let i = 0; i < 4; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
+                    for (let i = 0; i < 8; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
                     M.call("qz.object_rest");
                     this._emitBindingTarget(el.name);
                     continue;
@@ -1198,9 +1198,9 @@ class Emitter {
             for (const el of pat.elements) {
                 if (!ts.isBindingElement(el)) continue;
                 if (el.dotDotDotToken) {
-                    if (restExcl.length > 4) throw new Error("[tagged] 对象 rest 解构最多排除 4 个键");
+                    if (restExcl.length > 8) throw new Error("[tagged] 对象 rest 解构最多排除 8 个键");
                     M.localGet(valLocal);
-                    for (let i = 0; i < 4; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
+                    for (let i = 0; i < 8; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
                     M.call("qz.object_rest");
                     this._emitBindingTarget(el.name);
                     continue;
@@ -1725,9 +1725,11 @@ class Emitter {
                 // 实现体：不进 methods（否则 emitAll 取 mth.node.body 得 undefined → 崩溃）。
                 // 实现体是后面那个同名的带 body 声明，正常入列。
                 if (ts.isMethodDeclaration(mem) && !mem.body) continue;
-                if (ts.isPropertyDeclaration(mem) && ts.isIdentifier(mem.name)) {
-                    if (isStatic(mem)) { staticFields.push({ name: mem.name.text, init: mem.initializer || null }); staticInits.push({ kind: "field", name: mem.name.text, init: mem.initializer || null }); }
-                    else fields.push({ name: mem.name.text, init: mem.initializer || null });
+                if (ts.isPropertyDeclaration(mem) && (ts.isIdentifier(mem.name) || ts.isStringLiteral(mem.name) || ts.isNumericLiteral(mem.name))) {
+                    // 字符串/数字字面量属性名（`"~standard": T` / `0: T`）与标识符同处理：名字即键。
+                    const nm = mem.name.text;
+                    if (isStatic(mem)) { staticFields.push({ name: nm, init: mem.initializer || null }); staticInits.push({ kind: "field", name: nm, init: mem.initializer || null }); }
+                    else fields.push({ name: nm, init: mem.initializer || null });
                 } else if (ts.isClassStaticBlockDeclaration(mem)) {
                     staticBlocks.push(mem); staticInits.push({ kind: "block", blk: mem });   // static { … }：首次访问静态时执行（保持源码序）
                 } else if (ts.isConstructorDeclaration(mem)) {
@@ -1746,7 +1748,7 @@ class Emitter {
                     } else fields.push({ name: "#" + cname + "#" + mem.name.text, init: mem.initializer || null });   // 私有字段：类名限定
                 } else if (ts.isMethodDeclaration(mem) && ts.isPrivateIdentifier(mem.name)) {
                     (isStatic(mem) ? staticMethods : methods).push({ name: "#" + cname + "#" + mem.name.text, node: mem });   // 私有方法/私有静态方法
-                } else if (ts.isMethodDeclaration(mem) && ts.isIdentifier(mem.name)) {
+                } else if (ts.isMethodDeclaration(mem) && (ts.isIdentifier(mem.name) || ts.isStringLiteral(mem.name) || ts.isNumericLiteral(mem.name))) {
                     (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
                 } else if (ts.isMethodDeclaration(mem) && ts.isComputedPropertyName(mem.name)) {
                     // [Symbol.iterator] / [Symbol.toPrimitive] …：编译为 @@<symbol 名> 方法；物化时挂到真 Symbol 上
@@ -4972,10 +4974,19 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     if (this.usesKeyOrder) { Ma.localGet(ta.v); Ma.localGet(ta.w); Ma.call("qz.spread_order"); }
                     Ma.end();
                 } else if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
-                    Ma.localGet(ta.v); Ma.i32WrapI64();
-                    this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);
-                    Ma.i64Store(3, this._fieldIndex(p.name.text));
-                    if (this.usesKeyOrder) { Ma.localGet(ta.v); this._emitStrLitHandle(p.name.text); Ma.call("qz.field_order"); }   // 显式属性也登记键序
+                    if (ts.isComputedPropertyName(p.name)) {
+                        // 计算键 `{ [k]: v }`：键在运行期才知道，写不进静态字段槽 → 经宿主 set_index
+                        // （POJO 上落 extras，get_index 同表读取）。
+                        Ma.localGet(ta.v);
+                        this.emitTaggedExpr(p.name.expression);
+                        this.emitTaggedExpr(p.initializer);
+                        Ma.call("qz.set_index");
+                    } else {
+                        Ma.localGet(ta.v); Ma.i32WrapI64();
+                        this.emitTaggedExpr(ts.isShorthandPropertyAssignment(p) ? p.name : p.initializer);
+                        Ma.i64Store(3, this._fieldIndex(p.name.text));
+                    }
+                    if (this.usesKeyOrder && !ts.isComputedPropertyName(p.name)) { Ma.localGet(ta.v); this._emitStrLitHandle(p.name.text); Ma.call("qz.field_order"); }   // 显式属性也登记键序
                 } else throw new Error("[tagged] 对象展开仅支持 属性/展开 混合（方法/访问器不支持）");
             }
             Ma.localGet(ta.v);
@@ -5228,10 +5239,15 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isPropertyAccessExpression(e)) {
-        // obj.a：宿主对象(0x7FFD) → qz.object_get；POJO(0x7FF9|off≥8)/类实例(0x7FFE|off)
-        //   → wasm 内存 load，**越界（该对象无此字段）→ undefined**（此前会读到对象外内存/对象头 → 静默错值）；
-        //   其余（数组/字符串/数字上的普通属性）→ undefined。
+        // `ns.member`（命名空间导入成员作值，如 `util.codePointLength`、`util.esc`）：
+        // 解析为目标顶层名后按普通标识符读（局部/捕获/模块级/顶层函数值），
+        // 与 stripModuleSyntax 的改写规则一致。否则会落到下面读 e.expression=命名空间名 → 未定义捕获变量。
+        if (ts.isIdentifier(e.expression)) {
+            const nsResolved = this._nsMember(e.expression.text, e.name.text);
+            if (nsResolved !== undefined) { this.emitTaggedExpr(ts.factory.createIdentifier(nsResolved)); return; }
+        }
         const M = this.m, t = this._expEnter();
+        // obj.a：宿主对象(0x7FFD) → qz.object_get；POJO(0x7FF9|off≥8)/类实例(0x7FFE|off)
         this.emitTaggedExpr(e.expression); M.localSet(t.v);
         this._emitPropReadFromLocal(t.v, e.name.text);
         this._emitErrCheck();          // undefined/null 读属性 → TypeError（转入本函数 catch）
@@ -6141,7 +6157,27 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     let tgt = e.expression;                                  // new (C as any)(…) / new (C)() 亦按类名解析
     while (tgt && (ts.isParenthesizedExpression(tgt) || ts.isAsExpression(tgt) || ts.isNonNullExpression(tgt)
         || ts.isTypeAssertionExpression(tgt) || ts.isSatisfiesExpression(tgt))) tgt = tgt.expression;
-    if (!ts.isIdentifier(tgt)) throw new Error("[tagged] new 目标必须是标识符");
+    // `new ns.C(...)`：命名空间成员访问 → 解析到目标类名，改写成标识符后走静态构造
+    // （zod 里大量 new checks.$ZodCheckXxx）。命名空间成员不在 classes 里时落到下面的动态路径。
+    if (ts.isPropertyAccessExpression(tgt) && ts.isIdentifier(tgt.expression)) {
+        const nsCls = this._nsMember(tgt.expression.text, tgt.name.text);
+        if (nsCls && this.classes.has(nsCls)) tgt = ts.factory.createIdentifier(nsCls);
+    }
+    // 其他非标识符目标（深层属性链 `new inst._zod.constr(...)`、条件式 `new (a ?? b)(...)`）：
+    // 运行时求值成类对象，交宿主按 __qzClsId 建实例。
+    if (!ts.isIdentifier(tgt)) {
+        if (argSrc) throw new Error("[tagged] new 动态目标的实参展开不支持");
+        if (e.arguments.length > 4) throw new Error("[tagged] new 最多 4 参");
+        const M2 = this.m, tg2 = this._expEnter();
+        this.emitTaggedExpr(tgt); M2.localSet(tg2.w);
+        M2.localGet(tg2.w);
+        for (let i = 0; i < 4; i++) {
+            if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+        }
+        M2.call("qz.new_dynamic");
+        this._expLeave();
+        return;
+    }
     const cname = this._className(tgt.text);   // 导入类本地名 → 目标类名
     // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.builtin（构造语义）；未登记者报错
     if (!this.classes.has(cname)) {
@@ -6149,8 +6185,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
         {   // 动态类值（类表达式工厂 / 变量持有类）：运行时取类对象 → 宿主按 __qzClsId 建实例
             const resolvable = this._local(tgt.text) !== undefined || this.capMap.has(tgt.text)
                 || (this.moduleGlobals && this.moduleGlobals.has(tgt.text))
-                || (this.fnNames && this.fnNames.has(tgt.text))     // 顶层函数作类（JS function-as-class：Dog.prototype = …）
-                || (ts.isPropertyAccessExpression(e.expression));
+                || (this.fnNames && this.fnNames.has(tgt.text));    // 顶层函数作类（JS function-as-class：Dog.prototype = …）
             if (resolvable) {
                 /* 类表达式/动态类值（new A()）：若 tgt 对应一个已知类（含捕获），
                  * 先触发 statics guard 建立类捕获 env（_emitClassCaptureEnv 经 class_value）。

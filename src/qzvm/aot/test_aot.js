@@ -667,6 +667,19 @@ async function runMultiFile() {
     if (instNs.exports.__bump) qzNs.bindBump(instNs.exports.__bump);
     check("命名空间导入.runNs(5)", qzNs._toJS(instNs.exports.runNs(qzNs._fromJS(5))), 18);
 
+    // `new ns.C(...)`：命名空间成员的类 → 构造（zod v4 大量 new checks.$ZodCheckXxx）
+    fs.writeFileSync(path.join(dir, "nscls.ts"),
+        "export class Box { v: number; constructor(n: number) { this.v = n * 2; } }\n");
+    fs.writeFileSync(path.join(dir, "usenscls.ts"),
+        "import * as K from './nscls';\nexport function runNc(n: number): number { const b = new K.Box(n); return b.v; }\n");
+    const wasmNc = path.join(dir, "nscls.wasm");
+    const rNc = compileTS(path.join(dir, "usenscls.ts"), wasmNc, {});
+    const qzNc = makeQzvm(rNc.strings, { fields: rNc.fields });
+    const { instance: instNc } = await WebAssembly.instantiate(fs.readFileSync(wasmNc), { qz: qzNc });
+    qzNc.bindMem(instNc.exports.memory);
+    if (instNc.exports.__bump) qzNc.bindBump(instNc.exports.__bump);
+    check("new 命名空间类.runNc(5)", qzNc._toJS(instNc.exports.runNc(qzNc._fromJS(5))), 10);
+
     // 命名空间导入 default 成员：`M.default(...)`
     fs.writeFileSync(path.join(dir, "nsd2.ts"),
         "function nd(n: number): number { const s = 'ab'; return n + 7 + s.length - 2; }\nexport default nd;\n");
@@ -810,6 +823,9 @@ async function runSemantics() {
       + "export function finThrow(): any { const o: any = []; try { try { throw \"s1\"; } catch (e: any) { o.push(\"in:\" + e); throw \"s2\"; } finally { o.push(\"f1\"); } } catch (e: any) { o.push(\"out:\" + e); } return o.join(\"|\"); }\n"
       + "export function litAccessor(): any { const o: any = { n: 5, get v() { return this.n * 2; }, set v(x: any) { this.n = x + 1; }, inc() { this.n = this.n + 1; return this.n; } }; const out: any = []; out.push(o.v); o.v = 10; out.push(o.n); out.push(o.v); out.push(o.inc()); out.push(typeof o.inc); return out.join(\"|\"); }\n"
       + "export function spreadAlias(): any { const a: any = { y: { z: 2 }, x: 1 }; const b: any = { ...a, w: 3 }; b.y.z = 9; return a.y.z + \"|\" + b.w + \"|\" + b.x; }\n"
+      + "export function computedKeySpread(): any { const k: any = \"dyn\"; const base: any = { a: 1 }; const o: any = { ...base, [k]: 9 }; return o.a + \"|\" + o.dyn; }\n"
+      + "export function restMany(): any { const o: any = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, keep: 8 }; const { a, b, c, d, e, f, g, ...rest } = o; return rest.keep + \"|\" + Object.keys(rest).length; }\n"
+      + "export function strLitMember(): any { class S { \"~standard\" = 42; } const s: any = new S(); return s[\"~standard\"]; }\n"
       + "export function forOfStr(): any { let s = \"\"; for (const ch of \"abc\") s += ch + \".\"; return s; }\n"
       + "export function destrAssign(): any { let a = 1, b = 2; [a, b] = [b, a]; let x = 0, y = 0; ({ m: x, n: y } = { m: 7, n: 8 }); return a + \"|\" + b + \"|\" + x + \"|\" + y; }\n"
       + "export function bitMixed(): any { const out: any = []; out.push((3.9 | 0) + (2.1 & 3)); out.push(NaN | 0); out.push(1e9 * 1e9 | 0); out.push(\"12\" | 0); return out.join(\"|\"); }\n"
@@ -829,12 +845,15 @@ async function runSemantics() {
     check("finally.throw 穿透", call("finThrow"), "in:s1|f1|out:s2");
     check("字面量.访问器+方法", call("litAccessor"), "10|11|22|12|function");
     check("展开.别名共享", call("spreadAlias"), "9|3|1");
+    check("展开.计算键", call("computedKeySpread"), "1|9");
     check("for-of.字符串", call("forOfStr"), "a.b.c.");
     check("解构.赋值", call("destrAssign"), "2|1|7|8");
     check("位运算.混合表达式", call("bitMixed"), "5|0|-1486618624|12");
     check("new.嵌套实参槽", call("nestedNew"), "q:a");
     check("数组.越界读/写扩容", call("arrOOB"), "1|5|9");
     check("instanceof.实例tag+内建", call("instOf"), "1|1|1|0|0|1|0");   // 原始值 instanceof String/Number = false
+    check("解构.rest 8 键排除", call("restMany"), "8|1");
+    check("类.字面量名成员", call("strLitMember"), 42);
 }
 
 (async () => {

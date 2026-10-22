@@ -1501,8 +1501,8 @@ function makeQzvm(strings, opts) {
     },
     is_undef: (v) => (BigInt.asUintN(64, v) === TAG ? 1 : 0),   // undefined = 0x7FF9|0（null = |1 不触发默认值）
     // {...rest}：物化后去掉指定键，返回**宿主对象**（可继续读写）。
-    object_rest: (v, i0, i1, i2, i3) => {
-      const skip = [i0, i1, i2, i3].map(i => strings[i]);
+    object_rest: (v, i0, i1, i2, i3, i4, i5, i6, i7) => {
+      const skip = [i0, i1, i2, i3, i4, i5, i6, i7].map(i => strings[i]);
       const o = toJS(v);
       const out = {};
       for (const k of Object.keys(o || {})) if (!skip.includes(k)) out[k] = o[k];
