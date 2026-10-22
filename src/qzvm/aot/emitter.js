@@ -2216,8 +2216,12 @@ class Emitter {
         if (e.kind === ts.SyntaxKind.FalseKeyword) { this.m.f64Const(0); return; }
         if (ts.isIdentifier(e)) {
             const idx = this._local(e.text);
-            if (idx === undefined) throw new Error("未定义变量: " + e.text);
-            this.m.localGet(idx); return;
+            if (idx !== undefined) { this.m.localGet(idx); return; }
+            /* 模块级变量存在 i64 tagged 全局里（无独立 f64 全局）。num 模式读 number 型模块级
+             * 变量按位重解释：tagged number 的 i64 位型就是 f64 本身。 */
+            const g = this.moduleGlobals && this.moduleGlobals.get(e.text);
+            if (g !== undefined) { this.m.globalGet(g); this.m.f64ReinterpretI64(); return; }
+            throw new Error("未定义变量: " + e.text);
         }
         if (ts.isParenthesizedExpression(e)) { this.emitExpr(e.expression); return; }
         // 纯类型层构造（运行时恒等，TS 会在 emit 前擦除）→ 直接透传表达式：
@@ -2228,9 +2232,17 @@ class Emitter {
             // ++/-- 需先判是否自增自减
             if (ts.isIdentifier(e.operand) && (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken)) {
                 const idx = this._local(e.operand.text);
-                if (idx === undefined) throw new Error("未定义变量: " + e.operand.text);
+                const g = idx === undefined ? (this.moduleGlobals && this.moduleGlobals.get(e.operand.text)) : undefined;
+                if (idx === undefined && g === undefined) throw new Error("未定义变量: " + e.operand.text);
                 const dec = e.operator === ts.SyntaxKind.MinusMinusToken;
-                this.m.localGet(idx); this.m.f64Const(1); dec ? this.m.f64Sub() : this.m.f64Add(); this.m.localTee(idx);
+                if (g !== undefined) { this.m.globalGet(g); this.m.f64ReinterpretI64(); }
+                else this.m.localGet(idx);
+                this.m.f64Const(1); dec ? this.m.f64Sub() : this.m.f64Add();
+                if (g !== undefined) {
+                    this.m.localSet(this.scratchA);
+                    this.m.localGet(this.scratchA); this.m.i64ReinterpretF64(); this.m.globalSet(g);
+                    this.m.localGet(this.scratchA);
+                } else this.m.localTee(idx);
                 return;
             }
             this.emitExpr(e.operand);
@@ -2243,8 +2255,16 @@ class Emitter {
         }
         if (ts.isPostfixUnaryExpression(e)) {
             const idx = this._local(e.operand.text);
-            if (idx === undefined) throw new Error("未定义变量: " + e.operand.text);
+            const g = idx === undefined ? (this.moduleGlobals && this.moduleGlobals.get(e.operand.text)) : undefined;
+            if (idx === undefined && g === undefined) throw new Error("未定义变量: " + e.operand.text);
             const dec = e.operator === ts.SyntaxKind.MinusMinusToken;
+            if (g !== undefined) {                       // x++ 的表达式值是**旧值**（先压旧值再更新）
+                this.m.globalGet(g); this.m.f64ReinterpretI64(); this.m.localTee(this.scratchA);
+                this.m.f64Const(1); dec ? this.m.f64Sub() : this.m.f64Add();
+                this.m.i64ReinterpretF64(); this.m.globalSet(g);
+                this.m.localGet(this.scratchA);
+                return;
+            }
             // x++：栈留旧值（localTee scratch），x 更新
             this.m.localGet(idx); this.m.localTee(this.scratch);
             this.m.localGet(idx); this.m.f64Const(1); dec ? this.m.f64Sub() : this.m.f64Add(); this.m.localSet(idx);
@@ -2378,16 +2398,25 @@ class Emitter {
             }
             if (!ts.isIdentifier(e.left)) throw new Error("赋值左值必须是标识符");
             const idx = this._local(e.left.text);
-            if (idx === undefined) throw new Error("未定义变量: " + e.left.text);
+            /* 模块级变量（num 模式）：读旧值（binop）→ 算 → f64→i64 位型写回全局。
+             * 此前只查 _local → 直接抛「未定义变量」（let g = 0; g = 5 编译失败）。 */
+            const gidx = idx === undefined ? (this.moduleGlobals && this.moduleGlobals.get(e.left.text)) : undefined;
+            if (idx === undefined && gidx === undefined) throw new Error("未定义变量: " + e.left.text);
             const binop = assignOps[op];
             if (binop !== null) {
-                this.m.localGet(idx);
+                if (gidx !== undefined) { this.m.globalGet(gidx); this.m.f64ReinterpretI64(); }
+                else this.m.localGet(idx);
                 this.emitExpr(e.right);
                 this.emitBinaryOp(binop);
             } else {
                 this.emitExpr(e.right);
             }
-            this.m.localTee(idx);
+            /* globalSet 消耗栈顶 → 先存临时 local，写全局后再压回（赋值表达式结果为 f64）。 */
+            if (gidx !== undefined) {
+                this.m.localSet(this.scratchA);                      // f64 暂存（赋值表达式结果）
+                this.m.localGet(this.scratchA); this.m.i64ReinterpretF64(); this.m.globalSet(gidx);
+                this.m.localGet(this.scratchA);
+            } else this.m.localTee(idx);
             return;
         }
         // ?? / ??=：num 模式值恒为 f64（永非 null/undefined）→ a ?? b = a、a ??= b 不变。
@@ -2400,19 +2429,31 @@ class Emitter {
         if (op === ts.SyntaxKind.BarBarEqualsToken || op === ts.SyntaxKind.AmpersandAmpersandEqualsToken) {
             if (!ts.isIdentifier(e.left)) throw new Error("赋值左值必须是标识符");
             const idx = this._local(e.left.text);
-            if (idx === undefined) throw new Error("未定义变量: " + e.left.text);
+            const g = idx === undefined ? (this.moduleGlobals && this.moduleGlobals.get(e.left.text)) : undefined;
+            if (idx === undefined && g === undefined) throw new Error("未定义变量: " + e.left.text);
             const isAnd = op === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
+            // 全局路径经 i64↔f64 位型重解释；局部路径保持 localTee 一步到位。
+            const pushA = () => { if (g !== undefined) { this.m.globalGet(g); this.m.f64ReinterpretI64(); } else this.m.localGet(idx); };
+            const popA = () => { if (g !== undefined) { this.m.i64ReinterpretF64(); this.m.globalSet(g); } else this.m.localSet(idx); };
+            const popAKeep = () => {
+                if (g !== undefined) {
+                    this.m.localSet(this.scratchA);
+                    this.m.localGet(this.scratchA); this.m.i64ReinterpretF64(); this.m.globalSet(g);
+                    this.m.localGet(this.scratchA);
+                } else this.m.localTee(idx);
+            };
             this.m.block("f64");                              // block(result f64)
-            this.m.localGet(idx);                             // [a]
+            pushA();                                          // [a]
             this.m.localTee(this.scratch);                    // scratch=a；栈 [a]（短路时作块结果）
             this.m.localGet(this.scratch); this.emitCond();   // [a, truthy(a)]
             if (isAnd) this.m.i32Eqz();                       // && : falsy(a) → 跳出（返回 a）
             this.m.brIf(0);                                   // 条件真（|| 的 a 真 / && 的 a 假）→ 返回 a
             this.m.drop();                                    // 落下路径丢弃 a
             this.emitBinaryOperandValue(e.right);             // 仅此路径求值 b
-            this.m.localSet(idx);                             // 副作用：a = b
-            this.m.localGet(idx);                             // 块结果 = b
-            this.m.end(); this.m.localTee(idx);               // 写回 a，栈留结果值
+            this.m.localSet(this.scratchA);                   // b → 暂存（下一句写回会消耗栈顶）
+            this.m.localGet(this.scratchA); popA();           // 副作用：a = b
+            this.m.localGet(this.scratchA);                   // 块结果 = b
+            this.m.end(); popAKeep();                         // 写回 a，栈留结果值
             return;
         }
 
