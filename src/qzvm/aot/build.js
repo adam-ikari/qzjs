@@ -88,7 +88,8 @@ function genGlue(prefix, mainCalls, wasmOnly) {
     // 主逻辑体：--main 生成逐调用行；否则 __main 钩子（用户追加）
     const mainBody = (mainCalls && mainCalls.length)
         ? mainCalls.map(c => `console.log("${c.name}(${c.args.join(",")}) =", __call("${c.name}", [${c.args.join(",")}]));`).join("\n")
-        : `if (typeof globalThis.__main === "function") globalThis.__main(__call, __ex);`;
+        // __qz 暴露给 __main：GC/调试探针需要 qz.gc(exports, roots) 与句柄转换。
+        : `if (typeof globalThis.__main === "function") globalThis.__main(__call, __ex, qz);`;
     // wasmOnly（--no-aot）：WAMR debug-interp 直接拒绝 AOT 实例，调试运行须纯 bytecode 加载。
     const note = wasmOnly ? `本文件 + ${basename}.wasm（wasm-only）` : `本文件 + ${basename}.wasm + ${basename}.aot`;
     const load = wasmOnly
@@ -118,8 +119,8 @@ ${load}
     if (__ex.__bump) qz.bindBump(__ex.__bump);
     qz.bindClosures(__ex, __lams);
     qz.bindClasses(__ex, __classes);
-    // __call(name, args)：按 funcMeta 自动转换 num(裸) vs tagged(_fromJS/_toJS)
-    // 每次调用前重置 bump arena（静态编译无 GC：调用内分配随调用结束失效，与调用时长解耦）。
+    // __call(name, args)：按 funcMeta 自动转换 num(裸) vs tagged(_fromJS/_toJS)。
+    // wasm 帧存活期间 qz.gc 会抛错（局部句柄不可扫描，见 qzvm.js 的 inWasm）。
     const __call = (name, args) => {
       const m = __meta.find(f => f.name === name);
       if (!m) throw new Error("未知导出: " + name);
@@ -131,7 +132,12 @@ ${load}
       }
       if (__ex.__bump_reset) __ex.__bump_reset();
       const conv = m.mode === "num" ? args : args.map(a => qz._fromJS(a));
-      const r = __ex[name](...conv);
+      qz.setInWasm(true);
+      let r;
+      try { r = __ex[name](...conv); } finally { qz.setInWasm(false); }
+      // **不做自动 GC**：宿主侧任意 i64 局部（含 __main 里直接经 __ex.f() 拿到的句柄）不可枚举，
+      // 自动触发必然漏根 → 存活对象被复写（实测：闭包经 churn 后返回 undefined）。
+      // 回收须由调用者显式 qz.gc(__ex, roots)，并保证 roots 覆盖所有存活句柄。
       return m.mode === "num" ? r : qz._toJS(r);
     };
     // ── 主逻辑（--main）──

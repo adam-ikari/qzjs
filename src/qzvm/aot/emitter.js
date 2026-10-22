@@ -2533,6 +2533,17 @@ const STR_TAG_HI = 0x7ffa;                       // 字符串句柄高 16 位标
 const ARR_TAG_HI = 0x7ffb;                       // 数组句柄高 16 位标记（布局 [len:i32][pad:i32][elem:i64×N]，元素 +8 起）。
                                                  // 不可用 0x7FF8：那是 canonical quiet NaN（宿主 box(NaN) 恰产此位型），
                                                  // 与 f64 算术结果相撞 → 任何 NaN 会被误判为数组句柄。
+/* 引用计数块头（每个 bump 分配前置 16 字节，位于数据区之前）：
+ *   [hdr+0] = rc     : i32 引用计数。0 = 空闲块，可被后续分配复用。
+ *   [hdr+4] = size   : i32 覆盖「头 + 数据」的总字节数（回收时按此推进到下一块）。
+ *   [hdr+8] = kind   : i32 块种类（K_* 常量），决定 rc_dec 如何遍历子引用。
+ *   [hdr+12]= nslots : i32 数据区内可含句柄的槽数（macrotask 统一递归用）。
+ * 分配仍返回数据区偏移（hdr+16），故所有既有字段偏移 [0]/[4]/[8]… 语义不变。 */
+const RC_HDR = 16;
+/* 块种类：决定 rm/rc_dec 递归时如何解释数据区。宿主侧按同值解释（见 qzvm.js）。 */
+const K_PLAIN = 0;        // 无子引用（字符串、num 数组、闭包环境等）
+const K_POJO  = 1;        // 对象字面量/实例：槽 [4, size) 每 8 字节一个句柄
+const K_ARR   = 2;        // 数组头：[0]=len [4]=cap [8]=dataOff；子引用在 dataOff 起每个 i64
 const SCRATCH = 16;                              // numstr 临时区（48 字节，够 20 位 + 负号 + len）
 const STR_BASE = 128;                            // 独立档字面量段基址（紧跟 scratch，跳过 [0,128)）
 const STR_BUMP = 128;                            // 无字面量时的 arena 起点（= STR_BASE；有字面量时后移）
@@ -2572,10 +2583,57 @@ function memLayout(opts) {
 function emitBumpGrow(m, emitDelta) {
     m.globalGet(0); emitDelta(); m.i32Add(); m.call("qzs_ckmem"); m.globalSet(0);
 }
-// 分配 emitTotal 字节：bump 经守卫增长后回退，栈顶留 offset(i32)（= 增长前的 bump）。
-function emitBumpAlloc(m, emitTotal) {
-    emitBumpGrow(m, emitTotal);
-    m.globalGet(0); emitTotal(); m.i32Sub();
+/* 分配 emitTotal 字节：bump 经守卫增长后回退，栈顶留「数据区 offset」(i32)。
+ * 每次分配前置 RC_HDR 字节块头：[rc][size][kind][nslots]（见 K_* 与 RC_HDR 注释）。
+ * 返回数据区偏移（hdr+RC_HDR），故所有既有字段偏移 [0]/[4]/[8]… 语义不变。
+ * hdr 由 `bump - total` 重算（emitTotal 是常量/localGet，无分配、可重复求值），
+ * 因此不需要临时 local 或全局 scratch。
+ * kind/nslots 由调用方在本函数返回后自行落定（多数块无子引用，默认下为 0）。 */
+function emitBumpAlloc(m, emitTotal, fl) {
+    fl = fl === undefined ? m.freeGlobals : fl;      // 调用点无需重复传（m.freeGlobals 由 emitAll 绑定）
+    const total = () => { emitTotal(); m.i32Const(RC_HDR); m.i32Add(); };   // 头 + 数据
+    const hdr = () => { m.globalGet(0); total(); m.i32Sub(); };             // 块头偏移
+    /* 先试空闲链：rc 归零的块已由 qzs_rc_dec 或宿主 GC 清扫挂上（链节点复用块头 [hdr+0] 存 next）。
+     * 只复用**首个 size 足够**的块，不切分剩余空间——切分要再写一个块头，
+     * 对当前负载（同尺寸对象反复分配）收益为零。
+     * 状态全放全局（freeCur/freeHit），因为本函数在任意表达式求值中间被调，
+     * 不能安全新增 wasm 局部变量。fl=undefined（无空闲链）时直接走 bump。 */
+    if (fl !== undefined) {
+        m.i32Const(0); m.globalSet(fl.hit);                        // 每次分配前清零命中槽
+        m.globalGet(fl.list); m.globalSet(fl.cur);                 // cur = 链头
+        m.block("void"); m.loop("void");
+          m.globalGet(fl.cur); m.i32Eqz(); m.brIf(1);              // 空链 → 出
+          m.globalGet(fl.cur); total(); m.i32Load(2, 4); m.i32GeU();
+          m.ifBlock("void");
+            m.globalGet(fl.cur); m.i32Load(2, 0); m.globalSet(fl.list);   // 链头 = cur.next
+            m.globalGet(fl.cur); m.i32Const(1); m.i32Store(2, 0);         // rc = 1
+            m.globalGet(fl.cur); total(); m.i32Store(2, 4);               // size = total
+            m.globalGet(fl.cur); m.i32Const(RC_HDR); m.i32Add(); m.globalSet(fl.hit);  // 数据区偏移
+            m.br(2);                                                      // 跳出 loop+block
+          m.end();
+          m.globalGet(fl.cur); m.i32Load(2, 0); m.globalSet(fl.cur);      // cur = cur.next
+          m.br(0);
+        m.end(); m.end();
+    }
+    if (fl === undefined) {                            // 无空闲链（未绑定全局）→ 纯 bump 路径
+      emitBumpGrow(m, total);
+      hdr(); m.i32Const(1); m.i32Store(2, 0);
+      hdr(); total(); m.i32Store(2, 4);
+      hdr(); m.i32Const(0); m.i32Store(2, 8);
+      hdr(); m.i32Const(0); m.i32Store(2, 12);
+      hdr(); m.i32Const(RC_HDR); m.i32Add();           // → 数据区偏移
+      return;
+    }
+    m.globalGet(fl.hit); m.i32Eqz();
+    m.ifBlock("void");
+      emitBumpGrow(m, total);
+      hdr(); m.i32Const(1); m.i32Store(2, 0);          // [hdr+0]  = rc = 1（新建即被调用方持有）
+      hdr(); total(); m.i32Store(2, 4);                // [hdr+4]  = size
+      hdr(); m.i32Const(0); m.i32Store(2, 8);          // [hdr+8]  = kind（默认无子引用）
+      hdr(); m.i32Const(0); m.i32Store(2, 12);         // [hdr+12] = nslots
+      hdr(); m.i32Const(RC_HDR); m.i32Add(); m.globalSet(fl.hit);   // 新块数据区偏移
+    m.end();
+    m.globalGet(fl.hit);                               // → 数据区偏移（i32）
 }
 // 直接落定 bump 新值：emitNewVal 压栈得 newBump(i32)，经 qzs_ckmem 守卫后写回 global0。
 function emitBumpSet(m, emitNewVal) {
@@ -2583,7 +2641,7 @@ function emitBumpSet(m, emitNewVal) {
 }
 // 基础内存 helper（qzs_ckmem / qzs_memcpy）：num 数组扩容与字符串路径共用，
 // 故无条件发射（--interp 全退时无字符串 helper，num 数组仍需此二者）。
-function emitMemHelpers(m, strBase, arenaCeilGlobal, maxPages) {
+function emitMemHelpers(m, strBase, arenaCeilGlobal, maxPages, freeListGlobal) {
     // qzs_ckmem(newBump:i32) -> i32：bump 越界守卫 + 自动扩容。
     // 布局：字面量段固定在低地址 [.., strBase)，arena 在 [strBase, ceil) 向上长。
     // arena 上界存在 global（arenaCeilGlobal）里，越界时 memory.grow 抬高上界，
@@ -2635,6 +2693,54 @@ function emitMemHelpers(m, strBase, arenaCeilGlobal, maxPages) {
     m.localGet(4); m.i32Const(1); m.i32Add(); m.localSet(4);
     m.localGet(3); m.i32Const(1); m.i32Sub(); m.localSet(3);
     m.br(0); m.end(); m.end();
+    m.endBody();
+    // ── 引用计数（确定性回收）────────────────────────────────────────────
+    // qzs_rc_inc(off:i32)：数据区 off → 块头 = off-RC_HDR，rc+1。
+    m.declareFunc("qzs_rc_inc", ["i32"], []);
+    m.startBody("qzs_rc_inc", []);
+    m.localGet(0); m.i32Const(RC_HDR); m.i32Sub();                   // hdr（写地址）
+    m.localGet(0); m.i32Const(RC_HDR); m.i32Sub(); m.i32Load(2, 0); m.i32Const(1); m.i32Add(); m.i32Store(2, 0);
+    m.endBody();
+    /* qzs_rc_dec(off:i32)：rc-1；归零则级联回收并挂空闲链。
+     * 空闲链：块头 [hdr+0] 复用为 next（rc=0 已无意义），链头 = freeList 全局。
+     * locals: 1=hdr 2=size 3=kind 4=p 5=end 6=tmp 7=child(i64) */
+    m.declareFunc("qzs_rc_dec", ["i32"], []);
+    m.startBody("qzs_rc_dec", ["i32", "i32", "i32", "i32", "i32", "i32", "i64"]);
+    m.localGet(0); m.i32Const(RC_HDR); m.i32Sub(); m.localSet(1);        // hdr
+    m.localGet(1); m.localGet(1); m.i32Load(2, 0); m.i32Const(1); m.i32Sub(); m.i32Store(2, 0);
+    m.localGet(1); m.i32Load(2, 0); m.i32Eqz(); m.ifBlock("void");
+    m.localGet(1); m.i32Load(2, 8); m.localSet(3);                       // kind
+    m.localGet(1); m.i32Load(2, 4); m.localSet(2);                       // size（含头）
+    // 子槽区间：p..end。ARR → [dataOff, dataOff+len*8)；POJO → [off+8, hdr+size)；其余空。
+    m.localGet(3); m.i32Const(K_ARR); m.i32Eq(); m.ifBlock("void");
+    m.localGet(0); m.i32Load(2, 8); m.localSet(4);                       // p = dataOff
+    m.localGet(4); m.localGet(0); m.i32Load(2, 0); m.i32Const(8); m.i32Mul(); m.i32Add(); m.localSet(5);
+    m.else_();
+    m.localGet(3); m.i32Const(K_POJO); m.i32Eq(); m.ifBlock("void");
+    m.localGet(0); m.i32Const(8); m.i32Add(); m.localSet(4);             // p = off + 8（跳过 clsId/size）
+    m.localGet(1); m.localGet(2); m.i32Add(); m.localSet(5);             // end = hdr + size
+    m.else_();
+    m.i32Const(0); m.localSet(4); m.localGet(4); m.localSet(5);          // 空区间
+    m.end(); m.end();
+    m.block("void"); m.loop("void");
+    m.localGet(4); m.localGet(5); m.i32GeU(); m.brIf(1);
+    m.localGet(4); m.i64Load(3, 0); m.localSet(7);                       // child
+    // 仅堆句柄（0x7FF9/0x7FFE/0x7FFA/0x7FFB）且落在 arena 内才递归；f64 位型与字面量跳过。
+    m.localGet(7); m.i64Const(32n); m.i64ShrU(); m.i64Const(0x7ff9n); m.i64Eq();
+    m.localGet(7); m.i64Const(32n); m.i64ShrU(); m.i64Const(0x7ffen); m.i64Eq(); m.i32Or();
+    m.localGet(7); m.i64Const(32n); m.i64ShrU(); m.i64Const(0x7ffan); m.i64Eq(); m.i32Or();
+    m.localGet(7); m.i64Const(32n); m.i64ShrU(); m.i64Const(0x7ffbn); m.i64Eq(); m.i32Or();
+    m.ifBlock("void");
+    m.localGet(7); m.i32WrapI64(); m.i32Const(strBase); m.i32GeU();
+    m.ifBlock("void");
+    m.localGet(7); m.i32WrapI64(); m.call("qzs_rc_dec");
+    m.end(); m.end();
+    m.localGet(4); m.i32Const(8); m.i32Add(); m.localSet(4);
+    m.br(0);
+    m.end(); m.end();
+    m.localGet(1); m.globalGet(freeListGlobal); m.i32Store(2, 0);        // hdr[0] = 链头
+    m.localGet(1); m.globalSet(freeListGlobal);                          // 链头 = hdr
+    m.end();
     m.endBody();
 }
 function emitStringHelpers(m) {
@@ -3347,6 +3453,13 @@ function compileTS(input, outWasm, opts = {}) {
             // global2 = arena 上界（字节）。初值 = 内存总字节；扩容时 qzs_ckmem 抬高它。
             // in-module 档内存由 C 侧管、不可 grow，故给常量上界（等价原行为）。
             em._arenaCeilGlobal = m.addGlobal("i32", opts.inModuleLink ? INMOD_STR_BASE : (layout.pages << 16));
+            /* 空闲链链头：0 = 空链。链节点复用块头 [hdr+0] 存 next（释放时 rc 已无意义）。
+             * qzs_rc_dec（rc 归零）与宿主 GC 清扫都往这里挂，emitBumpAlloc 优先从此取。 */
+            em._freeListGlobal = m.addGlobal("i32", 0);
+            // emitBumpAlloc 的工作状态：该函数在任意表达式求值中间被调，不能安全新增 wasm 局部变量。
+            em._freeCurGlobal = m.addGlobal("i32", 0);       // 遍历游标
+            em._freeHitGlobal = m.addGlobal("i32", 0);       // 0=未命中；否则=数据区偏移
+            m.freeGlobals = { list: em._freeListGlobal, cur: em._freeCurGlobal, hit: em._freeHitGlobal };
             em.moduleGlobals = new Map();                    // 模块级变量名 → wasm 全局索引（i64 tagged，索引 2 起）
             em._modInitNames = new Set(modVars.map(v => v.name.text));
             for (const v of modVars) em.moduleGlobals.set(v.name.text, m.addGlobal("i64", 0));
@@ -3403,19 +3516,50 @@ function compileTS(input, outWasm, opts = {}) {
         if (m.memory !== null) m.exportMemory();
         if (anyTagged) {
             m.exportGlobal("__bump", m.globalIdx());
+
+            /* 模块级变量作 GC 静态根。**不能**用 exportGlobal 暴露 i64 全局：
+             * qzjs 的 WebAssembly 绑定把 i64 全局降级为 Number，超过 2^53 的位型被抹平
+             * （实测：句柄 0x7FF9000000000400 读回成 0x7FF9000000000000 → 高 16 位丢失）。
+             * 改为导出 __dump_roots(dest)：把每个根的 i64 原值写进线性内存，宿主按 i64 读。 */
+            /* dest 由宿主传入（通常 = 当前 bump）：写在那里、宿主立即读，
+             * 不占固定布局区也能容纳任意多个模块级变量。 */
+            m.declareFunc("__dump_roots", ["i32"], ["i32"]);   // param0=dest, local1=i
+            m.startBody("__dump_roots", ["i32"], ["i32"]);
+            m.i32Const(0); m.localSet(1);
+            for (const [, gidx] of em.moduleGlobals) {
+                m.localGet(0); m.localGet(1); m.i32Const(8); m.i32Mul(); m.i32Add();
+                m.globalGet(gidx); m.i64Store(3, 0);
+                m.localGet(1); m.i32Const(1); m.i32Add(); m.localSet(1);
+            }
+            m.localGet(1);                                     // 返回根个数
+            m.endBody();
+            m.exportFn("__dump_roots", "__dump_roots");
+            m.exportGlobal("__freelist", em._freeListGlobal);   // GC 清扫时需要写入空闲链头
             m.exportGlobal("__err", 1);                       // 跨函数 throw 出口：glue 调用后检查，非 0 则向宿主抛出
             m.declareFunc("__set_err", ["i64"], []);          // 宿主侧抛出（如 reduce 空数组）：设 __err，调用点检查后转异常
             m.startBody("__set_err", []);
             m.localGet(0); m.globalSet(1);
             m.endBody();
             m.exportFn("__set_err", "__set_err");
-            // __bump_reset()：把 bump 堆指针重置到起点。glue 在每次宿主 __call 前调用，
-            // 使一次调用的 arena 占用与调用时长解耦（否则长循环累加耗尽 arena）。
+            /* __bump_reset()：**空操作**（保留导出名以兼容既有 glue，行为改为无害）。
+             * 历史实现把 bump 无条件重置到模块初始化水位 perm，其前提「模块级对象都分配在
+             * perm 以下」**不成立**——`cache.slot = {...}` 恰分配在 perm 之上，下次调用即覆盖它，
+             * 读回错值（实测：setSlot(7) 后 allocThenRead() 得 undefined，V8 得 7）。
+             * 无静态证明的跨调用复位 = use-after-free，故禁用。
+             * 回收职责移交引用计数（qzs_rc_dec：rc 归零立即挂空闲链，可被复用）；
+             * 循环回滚 _arenaLoopEnter 与函数回滚 _fnArenaFree 保留——那两处有局部证明。 */
+            em._permBumpGlobal = m.addGlobal("i32", em._strBump || STR_BUMP);
+            m.exportGlobal("__perm_bump", em._permBumpGlobal);
             m.declareFunc("__bump_reset", [], []);
             m.startBody("__bump_reset", [], []);
-            m.i32Const(em._strBump || STR_BUMP); m.globalSet(0);
             m.endBody();
             m.exportFn("__bump_reset", "__bump_reset");
+            // __bump_seal()：模块初始化完时调用，把当前 bump 记为永久基址。
+            m.declareFunc("__bump_seal", [], []);
+            m.startBody("__bump_seal", [], []);
+            m.globalGet(0); m.globalSet(em._permBumpGlobal);
+            m.endBody();
+            m.exportFn("__bump_seal", "__bump_seal");
         }
         em.emitLambdaBodies();                                // __module_init 体内惰性登记的闭包
         for (const meta of em._lamById.values()) m.exportFn(meta.fname, meta.fname);
@@ -4686,6 +4830,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             Ma.localGet(ta.a); Ma.i64ExtendI32U(); Ma.i64ConstBits(0, 0x7ff90000); Ma.i64Or(); Ma.localSet(ta.v);
             Ma.localGet(ta.a); Ma.i32Const(0); Ma.i32Store(2, 0);                  // [0]=clsId（POJO=0）
             Ma.localGet(ta.a); Ma.i32Const(cap); Ma.i32Store(2, 4);                // [4]=size
+            Ma.localGet(ta.a); Ma.i32Const(RC_HDR); Ma.i32Sub(); Ma.i32Const(K_POJO); Ma.i32Store(2, 8);  // GC 需知槽是句柄
             Ma.localGet(ta.a); this._emitFillUndef(cap);                           // 未赋值槽 = undefined
             for (const p of e.properties) {
                 if (ts.isSpreadAssignment(p)) {
@@ -4743,6 +4888,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         // 头：[0]=clsId(0=非实例)、[4]=size；槽 [8,size) 全写 undefined 句柄（未赋值字段 = undefined）
         this.m.localGet(slot); this.m.i32WrapI64(); this.m.i32Const(0); this.m.i32Store(2, 0);
         this.m.localGet(slot); this.m.i32WrapI64(); this.m.i32Const(size); this.m.i32Store(2, 4);
+        // 块头 kind = K_POJO：让 qzs_rc_dec 知道槽 [8, size) 每 8 字节是一个子句柄，可级联。
+        this.m.localGet(slot); this.m.i32WrapI64(); this.m.i32Const(RC_HDR); this.m.i32Sub();
+        this.m.i32Const(K_POJO); this.m.i32Store(2, 8);
         this.m.localGet(slot); this.m.i32WrapI64(); this._emitFillUndef(size);
         for (let i = 0; i < NF; i++) {
             const p = e.properties[i];
@@ -4802,6 +4950,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         Mt.localGet(t.a); Mt.i32Const(N); Mt.i32Store(2, 0);    // len
         Mt.localGet(t.a); Mt.i32Const(N); Mt.i32Store(2, 4);    // cap
         Mt.localGet(t.a); Mt.localGet(t.a); Mt.i32Const(16); Mt.i32Add(); Mt.i32Store(2, 8);   // dataOff = off+16
+        /* 块头 kind/nslots：**必须**写，否则 GC 视此块为无子引用（K_PLAIN），
+         * 数组元素持有的对象会被判不可达而回收 → 用-after-free（实测：keep=[{v:99},5] 后
+         * gc 报 freed=48，正是那个 {v:99}）。块头 = headerOff - RC_HDR。 */
+        Mt.localGet(t.a); Mt.i32Const(RC_HDR); Mt.i32Sub(); Mt.i32Const(K_ARR); Mt.i32Store(2, 8);
+        Mt.localGet(t.a); Mt.i32Const(RC_HDR); Mt.i32Sub(); Mt.i32Const(N); Mt.i32Store(2, 12);
         for (let i = 0; i < N; i++) {
             Mt.localGet(t.a); Mt.i32Load(2, 8);            // dataOff
             if (ts.isOmittedExpression(e.elements[i])) Mt.i64ConstBits(2, 0x7ff90000);   // [1,,3] → 洞

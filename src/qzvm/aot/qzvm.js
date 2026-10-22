@@ -22,6 +22,14 @@ const STR_HI = 0x7ffan;                   // 字符串句柄高 16 位
 const BOOL_HI = 0x7ffcn;                  // 布尔句柄高 16 位（0x7FFC|低32=0/1）
 const INST_HI = 0x7ffen;                  // 类实例句柄高 16 位（0x7FFE|低32=内存 offset；[off:i32]=clsId）
 const HOST_TAG = 0x7ffd_0000_0000_0000n;  // 宿主对象句柄标记（0x7FFD|低32=handles 索引）
+/* 引用计数块头（每个 bump 分配前置 16 字节）——必须与 emitter.js 的同名常量**逐字一致**，
+ * 否则两侧对同一块内存的解释不同（链推进错位 = 静默 corruption）。
+ *   [hdr+0]=rc  [hdr+4]=size(含头)  [hdr+8]=kind  [hdr+12]=nslots
+ * 分配返回数据区偏移（hdr+16），故字段偏移 [0]/[4]/[8]… 语义不变。 */
+const RC_HDR = 16;
+const K_PLAIN = 0;    // 无子引用（字符串、num 数组、闭包环境）
+const K_POJO  = 1;    // 槽 [8, size) 每 8 字节一个句柄
+const K_ARR   = 2;    // 头 [0]=len [4]=cap [8]=dataOff；子引用在 dataOff 起每 8 字节
 const CLO_HI = 0x7fffn;                   // 闭包值（函数）句柄高 16 位（0x7FFF|低32=cell offset）
 const BIG_HI = 0x7ff8n;                    // BigInt 句柄高 16 位（0x7FF8|低32=handles 槽，handles[槽]=JS BigInt）
 const HOLE = 0x7ff9000000000002n;         // 数组「洞」（稀疏）：读作 undefined，数组方法跳过，JSON → null
@@ -334,6 +342,7 @@ function makeQzvm(strings, opts) {
   const boxBool = (b) => (BOOL_HI << 48n) | BigInt(b ? 1 : 0);   // 0x7FFC | 低32=0/1：bool 独立 tag（与 f64 0/1 区分，宿主 toJS 还原真布尔）
   const bool = (b) => boxBool(b);
   let bump = 0, mem = null, memU8 = null, bumpRef = null, exportsRef = null, lamMeta = null, classMeta = null;
+  let inWasm = false;                      // wasm 帧存活中：GC 不安全（局部句柄不落线性内存，不可扫描）
   // 运行期新增字段（POJO/实例上静态未预登记的名字，如 o[k] 中 k 由运行期决定）：
   // 存宿主侧旁表，键 = 内存偏移 + "|" + 字段名；bump 复位（偏移复用）时整体清空。
   const extras = new Map();
@@ -373,6 +382,9 @@ function makeQzvm(strings, opts) {
     _modInitDone = true;
     const f = exportsRef && exportsRef.__module_init;
     if (typeof f === "function") { try { f(); } catch (err) { throwValue(err); } }
+    // 模块级对象已落定 → 记下 bump 高水位为永久基址；此后每次调用只回收该线以上。
+    const seal = exportsRef && exportsRef.__bump_seal;
+    if (typeof seal === "function") seal();
   };
   const takeErr = () => {
     if (!exportsRef || !exportsRef.__err) return;
@@ -383,16 +395,25 @@ function makeQzvm(strings, opts) {
   // 宿主侧 bump 分配：与 wasm 侧 arena 同界。arena 不再是编译期硬上限——
   // 越界时 memory.grow 扩容（memU8/mem.view 随 buffer 替换重建），直到 wasm 内存上限。
   // opts.arenaEnd 仅作初始提示（缺省取当前内存大小）。
-  const bumpAlloc = (nbytes) => {
+  // 块头与 wasm 侧 emitBumpAlloc 严格一致：[hdr+0]=rc [hdr+4]=size(含头) [hdr+8]=kind [hdr+12]=nslots。
+  // 这是**跨分配器遍历的前提**：qzs_rc_dec / sweep 从固定起点按 size 推进块链，
+  // 任何一处不写头就会让链在此断开，其后的块永久不可达（此前正是如此，回收器看不到宿主块）。
+  const bumpAlloc = (nbytes, kind = 0, nslots = 0) => {
+    const total = (RC_HDR + nbytes + 7) & ~7;          // 头 + 数据，8 字节对齐
     let off = bumpRef.value;
-    const need = off + nbytes;
+    const need = off + total;
     if (need > mem.buffer.byteLength) {
       const curPages = mem.buffer.byteLength >> 16, wantPages = Math.ceil(need / 65536);
       if (mem.grow(wantPages - curPages) < 0) throw new Error(`qzvm: bump arena 无法扩容（需 ${need} 字节，内存已到上限）`);
       memU8 = new Uint8Array(mem.buffer);      // grow 后旧视图失效 → 重建
     }
+    const dv = new DataView(mem.buffer);
+    dv.setInt32(off + 0, 1, true);                     // rc = 1（新建即被调用方持有）
+    dv.setInt32(off + 4, total, true);                 // size 含头
+    dv.setInt32(off + 8, kind, true);
+    dv.setInt32(off + 12, nslots, true);
     bumpRef.value = need;
-    return off;
+    return off + RC_HDR;
   };
   // JS 字符串 → wasm 堆（[len:i32 LE][utf8]），bump 分配，返回 0x7FFA 句柄。
   const strWriteback = (str) => {
@@ -439,7 +460,7 @@ function makeQzvm(strings, opts) {
   // .length/索引/push/pop（此前返回 JS 句柄 0x7FF9，wasm 侧 .length 落到 str_len 读垃圾 → 静默返回 0）。
   const arrWriteback = (js) => {
     const N = js.length;
-    const start = bumpAlloc((16 + N * 8 + 7) & ~7);
+    const start = bumpAlloc((16 + N * 8 + 7) & ~7, K_ARR, N);   // 子引用在 dataOff 起 N 个槽
     { const ks = Object.keys(js);                 // 数字索引之外的属性（exec 的 index/input…）→ 旁表
       if (ks.some(k => !/^\d+$/.test(k))) { syncArrMeta(); const o2 = {}; for (const k of ks) if (!/^\d+$/.test(k)) o2[k] = js[k]; arrMeta.set(start, o2); } }
     const dataOff = start + 16;
@@ -460,7 +481,7 @@ function makeQzvm(strings, opts) {
     const N = js.length;
     if (N > cap) {
       cap = N < 4 ? 4 : N * 2;
-      dataOff = bumpAlloc(cap * 8);
+      dataOff = bumpAlloc(cap * 8, K_ARR, cap);   // data 块本身是句柄数组：kind=K_ARR 使其可被级联遍历
       dv.setInt32(off + 8, dataOff, true);
       dv.setInt32(off + 4, cap, true);
     }
@@ -699,7 +720,7 @@ function makeQzvm(strings, opts) {
     const meta = classMeta && classMeta[clsId];
     if (!meta || !mem) return TAG;
     const size = Math.max(meta.size || 16, 16);
-    const off = bumpAlloc(size);
+    const off = bumpAlloc(size, K_POJO, (size - 8) >> 3);   // 实例布局同 POJO：槽 [8,size) 每组 8 字节
     const dv = new DataView(mem.buffer);
     dv.setInt32(off, clsId, true);
     dv.setInt32(off + 4, size, true);   // [4]=size（与 wasm 侧 _emitNewCall 一致；字段越界检查 + 内联读写都依赖此槽）
@@ -2353,6 +2374,86 @@ function makeQzvm(strings, opts) {
     bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; tryRunModuleInit(); },   // 最后一次 bind → 触发模块初始化
     bindFields,
     bindBump,
+    setInWasm: (v) => { inWasm = !!v; },   // glue 的 __call 在进入/退出 wasm 时置位，供 gc 拒绝不安全的时机
+    /* gc(exportsObj)：从静态根 + 显式传入的额外根出发，标记可达块，其余挂空闲链。
+     * 前提：堆块链可遍历（每个 bump 分配都写了 [rc][size][kind][nslots] 头，
+     * wasm 侧 emitBumpAlloc 与宿主侧 bumpAlloc 一致）。此前宿主块不写头 → 链断。
+     *
+     * 根集：wasm 侧 __dump_roots 给出的模块级变量 + 调用方给的 extraRoots。
+     * 返回回收字节数（便于压测观察稳态）。 */
+    gc: (exportsObj, extraRoots) => {
+      /* 只能在宿主边界调用（wasm 帧不存活时）。wasm 内的 tagged 局部变量既有句柄不落线性内存，
+       * 无法扫描：若在帧存活期间回收，那些句柄会指向已挂空闲链的块 → use-after-free。
+       * inWasm 由调用点置位（见 build.js 的 __call 包装），此处直接拒绝而不是静默破坏堆。 */
+      if (inWasm) throw new Error("qz.gc: 不能在 wasm 调用进行中回收（局部句柄不可扫描）");
+      if (!mem || !bumpRef) return 0;
+      const start = bumpRef.value === 0 ? 0 : (exportsObj && exportsObj.__perm_bump ? exportsObj.__perm_bump.value : 0);
+      const end = bumpRef.value;
+      if (end <= start) return 0;
+      const dv = new DataView(mem.buffer);
+      // ── 1. 收集块表（hdr → {rc,size,kind,nslots}），顺带校验链完整性 ──
+      const blocks = new Map();
+      for (let h = start; h < end;) {
+        const rc = dv.getInt32(h, true), size = dv.getInt32(h + 4, true), kind = dv.getInt32(h + 8, true);
+        if (size < RC_HDR || (size & 7) !== 0 || h + size > end) return 0;   // 链损坏 → 放弃（宁漏勿错）
+        blocks.set(h, { rc, size, kind, nslots: dv.getInt32(h + 12, true) });
+        h += size;
+      }
+      // ── 2. 标记：句柄低 32 位是**数据区**偏移，块表以**块头**为键，故差 RC_HDR ──
+      // 此前直接用句柄偏移查块表 → 永远查不到（句柄 dataOff = hdr+16），
+      // 结果「保留可达根」时也把所有块当垃圾回收（实测 freed=480 且根对象被清）。
+      const marked = new Set();
+      const stack = [];
+      const pushHandle = (v) => {
+        const bits = BigInt.asUintN(64, BigInt(v));
+        const hi = bits >> 48n, low = Number(bits & MASK32);
+        /* 低 32 位是**堆数据区偏移**的标签：0x7FF9 对象、0x7FFB 数组、0x7FFE 实例、0x7FFF 闭包。
+         * 漏掉 0x7FFF 会让闭包块被判不可达而回收（实测：mk() 返回闭包后 gc freed=72，
+         * 闭包块连同其环境一起被清）。0x7FF8 BigInt 的低 32 位是 handles 槽而非堆偏移，
+         * 0x7FFA 字符串、0x7FFC 布尔、0x7FFD 宿主句柄同样不在堆内，一律跳过。 */
+        if (!(hi === 0x7ff9n || hi === 0x7ffbn || hi === 0x7ffen || hi === 0x7fffn)) return;
+        const hdr = low - RC_HDR;
+        if (blocks.has(hdr)) stack.push(hdr);
+      };
+      // 静态根来自 wasm 导出的 __dump_roots(0)：直接写内存，避免 i64 全局被降为 Number。
+      if (exportsObj && exportsObj.__dump_roots && bumpRef) {
+        const base = bumpRef.value;
+        const n = exportsObj.__dump_roots(base);              // 写到 bump 当前处（只读不改 bump）
+        for (let i = 0; i < n; i++) pushHandle(dv.getBigInt64(base + i * 8, true));
+      }
+      for (const r of (extraRoots || [])) pushHandle(r);
+      /* 宿主 handles 池里的对象也持有堆句柄（例：闭包环境 {__parent, env: 0x7FF9|off}），
+       * 它们不在 wasm 线性内存里，mark 遍历看不到 → 必须整体当根扫。
+       * 漏了这层：实测 gc 后 env 槽指向的 {v:88} 块被回收，churn 把它复用成数组块，
+       * 闭包调用结果从 88 变成 undefined。 */
+      for (const o of handles) {
+        if (o === null || typeof o !== "object") continue;
+        for (const k in o) { const v = o[k]; if (typeof v === "bigint") pushHandle(v); }
+      }
+      while (stack.length) {
+        const h = stack.pop();
+        if (marked.has(h)) continue;
+        marked.add(h);
+        const b = blocks.get(h);
+        if (b.kind === K_ARR) {                              // [8]=dataOff，子引用在 dataOff 起 nslots 个
+          const dataOff = dv.getInt32(h + RC_HDR + 8, true);
+          for (let i = 0, p = dataOff; i < b.nslots; i++, p += 8) pushHandle(dv.getBigInt64(p, true));
+        } else if (b.kind === K_POJO) {                      // 槽 [8,size) 每 8 字节
+          for (let p = h + RC_HDR + 8; p + 8 <= h + b.size; p += 8) pushHandle(dv.getBigInt64(p, true));
+        }
+      }
+      // ── 3. 清扫：不可达即回收，挂空闲链 ──
+      // 判据只用可达性，不看 rc：rc 由引用计数增量维护，二者会不一致
+      // （模块级根被清空后 rc 仍为 1）。以 rc 为条件会让这些块永不回收（实测 freed=0）。
+      let freed = 0;
+      const fl = exportsObj && exportsObj.__freelist;
+      for (const [h, b] of blocks) {
+        if (marked.has(h)) continue;
+        if (fl) { dv.setInt32(h, fl.value, true); fl.value = h; }   // hdr[0] = 旧链头；链头 = h
+        freed += b.size;
+      }
+      return freed;
+    },
     // 供宿主检查用（不在 wasm import 面）
     // 宿主 JS 值 → wasm 句柄位型：复用 bitsOf（string→0x7FFA 写回、array→0x7FFB、bool→num、其它→0x7FF9）。
     // 此前仅 number→numToBits、其余一律 tagHandle → 字符串入参得 0x7FF9 假句柄，wasm 侧 .length/concat
