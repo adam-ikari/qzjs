@@ -833,7 +833,13 @@ async function runSemantics() {
       + "class KBase { v: any = 1; }\n"
       + "class KDer extends KBase { w: any = 2; }\n"
       + "export function instOf(): any { const d = new KDer(); const out: any = []; out.push(d instanceof KDer ? 1 : 0); out.push(d instanceof KBase ? 1 : 0); out.push(d instanceof Object ? 1 : 0); out.push(d instanceof Array ? 1 : 0); out.push(\"s\" instanceof String ? 1 : 0); out.push([1] instanceof Array ? 1 : 0); out.push(1 instanceof Number ? 1 : 0); return out.join(\"|\"); }\n"
-      + "export function arrOOB(): any { const a: any = [1,2]; const out: any = []; out.push(a[5] === undefined ? 1 : 0); a[4] = 9; out.push(a.length); out.push(a[4]); return out.join(\"|\"); }\n");
+      + "export function arrOOB(): any { const a: any = [1,2]; const out: any = []; out.push(a[5] === undefined ? 1 : 0); a[4] = 9; out.push(a.length); out.push(a[4]); return out.join(\"|\"); }\n"
+      + "export namespace util { export function join2(a: any, b: any): any { return a + sep + b; } export const sep: any = \"-\"; }\n"
+      + "export function nsFlat(): any { return util.join2(\"a\", \"b\") + \"|\" + util.sep; }\n"
+      + "export function implOnly(): any { interface Iface { b: number; } class Impl implements Iface { b = 2; } const i: any = new Impl(); return i.b; }\n"
+      + "export function staticArrowField(): any { class C { static make = (x: any): any => ({ v: x }); } return C.make(7).v; }\n"
+      + "export function proxyTrap(): any { let t: any; return new Proxy({}, { get(_: any, p: any) { t = t || { a: 5 }; const g: any = Reflect.get; return g(t, p); } }); }\n"
+      + "export function proxyUse(): any { const p: any = proxyTrap(); return p.a; }\n");
     const wasm = path.join(os.tmpdir(), "qz_aot_sem.wasm");
     const r = compileTS(src, wasm, {});
     const qz = makeQzvm(r.strings, { fields: r.fields });
@@ -854,6 +860,10 @@ async function runSemantics() {
     check("instanceof.实例tag+内建", call("instOf"), "1|1|1|0|0|1|0");   // 原始值 instanceof String/Number = false
     check("解构.rest 8 键排除", call("restMany"), "8|1");
     check("类.字面量名成员", call("strLitMember"), 42);
+    check("命名空间.展平", call("nsFlat"), "a-b|-");
+    check("类.implements 不算父类", call("implOnly"), 2);
+    check("类.静态箭头字段作方法", call("staticArrowField"), 7);
+    check("Proxy.内建构造+trap 派发", call("proxyUse"), 5);
 }
 
 (async () => {

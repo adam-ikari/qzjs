@@ -51,6 +51,7 @@ const BUILTIN_FNS = {
   "String": String, "Number": Number, "Boolean": Boolean, "String.raw": String.raw,
   "parseInt": parseInt, "parseFloat": parseFloat,
   "isNaN": isNaN, "isFinite": isFinite,
+  "atob": atob, "btoa": btoa,
   "JSON.stringify": JSON.stringify, "JSON.parse": JSON.parse,
   "Object.keys": Object.keys, "Object.values": Object.values, "Object.entries": Object.entries,
   "Object.keysIn": (o) => { const out = []; if (o != null) for (const k in o) out.push(k); return out; },   // for-in 键（含继承可枚举）
@@ -81,7 +82,8 @@ const BUILTIN_FNS = {
 // 内建全局常量（属性读非调用）：Math.PI 等。
 // 内建构造器（new X(...) / X(...)）：宿主直接调用（返回宿主对象句柄 0x7FFD）。
 const BUILTIN_CTORS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
-  "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp", "Promise"]);
+  "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp", "Promise", "Proxy",
+  "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "ArrayBuffer", "DataView", "URL", "URLSearchParams", "File", "Blob"]);
 
 const BUILTIN_CONSTS = {
   "Symbol.iterator": Symbol.iterator, "Symbol.asyncIterator": Symbol.asyncIterator, "Symbol.hasInstance": Symbol.hasInstance,
@@ -1465,7 +1467,13 @@ function makeQzvm(strings, opts) {
         case "Promise":  return (j instanceof Promise) ? 1 : 0;
         case "RegExp":   return (j instanceof RegExp) ? 1 : 0;
         case "Date":     return (j instanceof Date) ? 1 : 0;
-        default: throw new Error("instanceof_builtin: 未知内建类 " + name);
+        default: {
+          // 宿主内建类通用回退：File/Blob/URL/URLSearchParams/ArrayBuffer/Uint8Array…
+          // zod v4 的 `x instanceof File` 等 Web API 类，宿主有就用原生原型链判定。
+          const C = globalThis[name];
+          if (typeof C === "function") return (j instanceof C) ? 1 : 0;
+          throw new Error("instanceof_builtin: 未知内建类 " + name);
+        }
       }
     },
     // 展开实参动态调用：call_named(nameId, argsArr, isNum)；isNum=1 → 目标为 f64 ABI（传数字）。

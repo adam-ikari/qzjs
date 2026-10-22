@@ -175,10 +175,12 @@ const BUILTIN_GLOBALS = new Set(["Math", "JSON", "Array", "Object", "String", "N
     "Function", "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Symbol", "BigInt", "Error", "TypeError",
     "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", "Reflect", "Proxy",
     "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent",
-    "encodeURI", "decodeURI", "structuredClone", "globalThis", "Intl", "Atomics", "SharedArrayBuffer"]);
+    "encodeURI", "decodeURI", "structuredClone", "globalThis", "Intl", "Atomics", "SharedArrayBuffer",
+    "atob", "btoa"]);
 // 可作为 `new X(...)` 目标的内建类（宿主构造；与 qzvm BUILTIN_CTORS 一致）。
 const EMITTER_BUILTIN_CTORS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
-    "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp"]);
+    "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp", "Proxy",
+    "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "ArrayBuffer", "DataView", "URL", "URLSearchParams", "File", "Blob"]);
 // 注册 qz.* import。only = 采集到的「实际用到」集合（Set<"qz.<name>">）；缺省/undefined
 // 则全量注册（向后兼容）。按需注册是 brain [[aot-generic-compiler-target]] 的要求：
 // import 面 = 需求驱动的最小契约面，不是 qzjs 私有 ABI 的全集。
@@ -607,6 +609,14 @@ class Emitter {
         if (idx === undefined) {
             const g = this.moduleGlobals && this.moduleGlobals.get(name);
             if (g !== undefined) { M.globalGet(g); return; }   // 模块级变量
+            // 跨文件导入的模块级变量（`import defaultErrorMap from './locales/en.js'` 指向
+            // 目标文件的 `const errorMap`）：importAlias 记的是目标名，值在 moduleGlobals 里。
+            // 此前只查本名 → 「未定义捕获变量」（zod v3 errors.ts / parseUtil.ts 7 例）。
+            if (this.importAlias) {
+                const tgt = this.importAlias.get(name);
+                const g2 = tgt !== undefined && this.moduleGlobals && this.moduleGlobals.get(tgt);
+                if (g2 !== undefined) { M.globalGet(g2); return; }
+            }
             if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
                 // 顶层函数作值（回调/别名/属性宿主）→ 包装为宿主函数句柄（此前 loud：未定义捕获变量）
                 M.i32Const(this._strId(this._fnName(name))); M.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0);
@@ -626,6 +636,11 @@ class Emitter {
         if (idx === undefined) {
             const g = this.moduleGlobals && this.moduleGlobals.get(name);
             if (g !== undefined) { this.m.globalGet(g); return; }   // 模块级变量
+            if (this.importAlias) {                                 // 导入的模块级变量（同 _emitCapturedRead）
+                const tgt = this.importAlias.get(name);
+                const g2 = tgt !== undefined && this.moduleGlobals && this.moduleGlobals.get(tgt);
+                if (g2 !== undefined) { this.m.globalGet(g2); return; }
+            }
             if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
                 this.m.i32Const(this._strId(this._fnName(name))); this.m.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0);
                 this.m.i32Const(this._fnHasThis && this._fnHasThis.get(this._fnName(name)) ? 1 : 0); this.m.call("qz.fn_value");
@@ -1044,7 +1059,13 @@ class Emitter {
         if (this.capMap.has(fn)) { M.localGet(this.capMap.get(fn)); M.i32Const(this._strId(fn)); M.call("qz.env_get"); M.localSet(t.v); }
         else {
             const hIdx = this._local(fn);
-            const gIdx = this.moduleGlobals && this.moduleGlobals.get(fn);
+            // 导入的模块级闭包（`import { makeIssue } from './parseUtil.js'`，目标是
+            // `export const makeIssue = (...) => ...`）：importAlias 指向目标名，值在 moduleGlobals。
+            const aliasTgt = this.importAlias && this.importAlias.get(fn);
+            const gKey = (this.moduleGlobals && this.moduleGlobals.get(fn) !== undefined) ? fn
+                       : (aliasTgt !== undefined && this.moduleGlobals && this.moduleGlobals.get(aliasTgt) !== undefined) ? aliasTgt
+                       : undefined;
+            const gIdx = gKey !== undefined ? this.moduleGlobals.get(gKey) : undefined;
             if (hIdx === undefined && gIdx === undefined) throw new Error(BUILTIN_GLOBALS.has(fn)
                 ? `[tagged] 内建 ${fn}() 未实现（AOT 仅编译用户代码 + qz.* 契约面）`
                 : "未定义函数: " + fn);
@@ -1052,7 +1073,7 @@ class Emitter {
             M.localSet(t.v);
         }
         M.localGet(t.v);
-        const cp0raw = this._calleeParams(fn);
+        const cp0raw = this._calleeParams(fn) || (this.importAlias && this._calleeParams(this.importAlias.get(fn)));
         // 带 `this` 形参的被调：receiver 由宿主按 `synthThis` 约定前置（本处不占实参槽）
         const cp = (cp0raw && cp0raw.length && ts.isIdentifier(cp0raw[0].name) && cp0raw[0].name.text === "this") ? cp0raw.slice(1) : cp0raw;
         const needOvf = (cp === null && args.length > 3) || (cp !== null && cp.length > 4);   // >4 形参（含 rest）恒用溢出约定
@@ -1714,8 +1735,11 @@ class Emitter {
             if (!ts.isClassDeclaration(st)) continue;
             if (!st.name) throw new Error("[tagged] 匿名类不支持");
             const cname = st.name.text;
-            const parent = st.heritageClauses && st.heritageClauses.length
-                ? st.heritageClauses[0].types[0] : null;
+            // 只认 `extends`：`implements` 是纯类型子句（token = ImplementsKeyword），
+            // 取 heritageClauses[0] 在「只有 implements 没有 extends」的类上会把它当父类
+            // → 父类名解析成类型名（zod v3 `class ParseInputLazyPath implements ParseInput`）。
+            const extClause = st.heritageClauses && st.heritageClauses.find(h => h.token === ts.SyntaxKind.ExtendsKeyword);
+            const parent = extClause && extClause.types.length ? extClause.types[0] : null;
             const parentName = parent ? this._className(parent.expression.text) : null;   // 类表达式绑定名/导入别名 → 真实类名（此前取原文 → ctorName 落空）
             const fields = [], methods = [], staticMethods = [], staticFields = [], staticBlocks = [], staticInits = [];
             let ctor = null;
@@ -3104,6 +3128,8 @@ function compileTS(input, outWasm, opts = {}) {
     const modConstLit = new Map();   // 模块级字面量 const（名字 → 字符串/数值），供计算属性名折叠
     const modVars = [];          // 模块级变量声明（含初值）
     const modStmts = [];         // 模块级变量语句（合成 __module_init 的函数体）
+    const checker = program.getTypeChecker();   // 收集阶段就要解析符号身份（see `export namespace` 展平）
+    const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)；收集阶段就要写（see `export namespace`）
     const collectDecls = (f) => {
         const walkCls = (n, bind) => {          // class 仍整树提升（含函数内 class）；bind = 最近绑定名（class 表达式名推断用，勿依赖 n.parent：collectDecls 阶段尚未类型绑定）
             if (ts.isClassDeclaration(n)) clsStmts.push(n);
@@ -3123,7 +3149,56 @@ function compileTS(input, outWasm, opts = {}) {
                 && n.name && ts.isIdentifier(n.name)) childBind = n.name.text;
             ts.forEachChild(n, (c) => walkCls(c, childBind));
         };
+        /* `export namespace X { export const f = …, export function g(){} }`：TS 命名空间是
+         * 编译期构造，内联后模块边界消失 → 把**有值**的成员就地改名为 `X$<member>` 并按
+         * 普通顶层声明收集，同时登记 nsAlias（`X.member` → `X$member`），
+         * `X.member(...)` 与 `X.member` 作值两条路径都走既有 nsAlias 解析。
+         * 此前整个 ModuleDeclaration 被 filter 掉 → 「未定义捕获变量: util」（zod v3 全部文件）。 */
+        const decls = [];
         for (const st of f.statements) {
+            if (!ts.isModuleDeclaration(st) || !st.name || !ts.isIdentifier(st.name) || !st.body
+                || !ts.isModuleBlock(st.body)) { decls.push(st); continue; }
+            const nsName = st.name.text;
+            const members = nsAlias.get(nsName) || new Map();
+            for (const mem of st.body.statements) {
+                if (ts.isTypeAliasDeclaration(mem) || ts.isInterfaceDeclaration(mem)) continue;   // 纯类型：无值可发射
+                const flat = nsName + "$" + (mem.name ? mem.name.text : "__anon");
+                if (ts.isFunctionDeclaration(mem) && mem.name && mem.body) {
+                    members.set(mem.name.text, flat);
+                    mem.name = ts.factory.createIdentifier(flat);
+                    decls.push(mem);
+                } else if (ts.isVariableStatement(mem)) {
+                    for (const d of mem.declarationList.declarations) {
+                        if (!ts.isIdentifier(d.name)) continue;
+                        members.set(d.name.text, nsName + "$" + d.name.text);
+                        d.name = ts.factory.createIdentifier(nsName + "$" + d.name.text);
+                    }
+                    decls.push(mem);
+                }
+            }
+            /* 成员体内对**同命名空间成员**的裸名引用要跟着改名（`return a + sep + b` 里的 sep）。
+             * 靠 checker 符号身份判定：符号的某个声明在 st.body 内 → 换成展平名。
+             * 属性访问的 name 位置（`util.sep` 的 sep）不动，那条走 nsAlias 在发射期解析。 */
+            for (const mem of st.body.statements) {
+                const visit = (n) => {
+                    if (ts.isIdentifier(n)) {
+                        const p = n.parent;
+                        const isPropName = p && ((ts.isPropertyAccessExpression(p) && p.name === n) || (ts.isQualifiedName(p) && p.right === n));
+                        if (!isPropName) {
+                            const sym = checker.getSymbolAtLocation(n);
+                            if (sym && sym.declarations && sym.declarations.some(d => d.pos >= st.body.pos && d.end <= st.body.end)) {
+                                const tgt = members.get(n.text);
+                                if (tgt !== undefined) { n.escapedText = tgt; return; }
+                            }
+                        }
+                    }
+                    ts.forEachChild(n, visit);
+                };
+                visit(mem);
+            }
+            nsAlias.set(nsName, members);
+        }
+        for (const st of decls) {
             /* 匿名默认导出 `export default function(){}` / `export default class{}`：TS 符号表里
              * valueDeclaration.name 为空 → 无稳定顶层名可折回，此前整条 import 链失败（104/125）。
              * 就地补合成名 `__default_N`（节点身份不变，checker 仍指向它；后续 emit/解析走 st.name.text）。
@@ -3139,8 +3214,11 @@ function compileTS(input, outWasm, opts = {}) {
             if (ts.isFunctionDeclaration(st) && st.name && st.body) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
             if (ts.isVariableStatement(st)) {                       // 模块级 const/let → wasm 全局（模块初始化时赋值一次）
                 for (const d of st.declarationList.declarations) {
-                    if (!ts.isIdentifier(d.name) || !d.initializer) continue;
+                    // 无初值的模块级 `let x: T;` 也要分配全局（zod v4 `let installing: object | undefined;`
+                    // 否则读它报「未定义变量」）。全局初值 undefined，语句本身留在 __module_init 里不赋值。
+                    if (!ts.isIdentifier(d.name)) continue;
                     modVars.push(d);
+                    if (!d.initializer) continue;
                     if (ts.isStringLiteral(d.initializer)) modConstLit.set(d.name.text, d.initializer.text);   // 字面量 const → 计算属性名可折叠
                     else if (ts.isNumericLiteral(d.initializer)) modConstLit.set(d.name.text, Number(d.initializer.text.replace(/_/g, "")));
                     else if (ts.isPropertyAccessExpression(d.initializer)) { const sx0 = symbolNameOf(d.initializer); if (sx0) modSymLit.set(d.name.text, sx0); }   // const s = Symbol.iterator → 类计算属性名可静态解析
@@ -3243,10 +3321,8 @@ function compileTS(input, outWasm, opts = {}) {
     // 用 checker 穿透 re-export 链解析到最终目标——AST 级 `sp.propertyName` 只
     // 处理 `import { x as y }` 自身别名，穿不过 `export { x as y } from` 链。
     // 同时检测外部模块 re-export（不可内联 → 显式报错，不静默丢绑定）。
-    const checker = program.getTypeChecker();
     const sfNames = new Set(sfs.map(f => f.fileName));
     const importAlias = new Map();
-    const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)
     const classAlias = new Map();    // 导入的类本地名 → 目标类名（默认/具名导入类）+ 类表达式绑定
     {
         const walkCE = (n) => {
@@ -3575,7 +3651,7 @@ function compileTS(input, outWasm, opts = {}) {
             m.freeGlobals = { list: em._freeListGlobal, cur: em._freeCurGlobal, hit: em._freeHitGlobal };
             em.moduleGlobals = new Map();                    // 模块级变量名 → wasm 全局索引（i64 tagged，索引 2 起）
             em._modInitNames = new Set(modVars.map(v => v.name.text));
-            for (const v of modVars) em.moduleGlobals.set(v.name.text, m.addGlobal("i64", 0));
+            for (const v of modVars) em.moduleGlobals.set(v.name.text, m.addGlobal("i64", v.initializer ? 0 : 0x7ff9000000000000n));   // 无初值 → undefined（否则读作数值 0）
             em._argGlobal = m.addGlobal("i64", 0);      // __args：调用点写入「全量实参数组」（arguments 支持）
             m.declareFunc("qzs_setargs", ["i64"], []);  // 宿主侧写入（闭包调用经 closureCall）
             m.exportFn("qzs_setargs", "qzs_setargs");
@@ -5371,6 +5447,12 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             if (ts.isIdentifier(rx)) {
                 const resolved = this._nsMember(rx.text, method);
                 if (resolved !== undefined) {
+                    // 命名空间里有值成员是 const 箭头函数（`export const f = (…) => …`）：
+                    // 展平后是模块级全局持闭包，没有 _funcIdx → 取全局值后走值调用。
+                    if (this.m._funcIdx[this._fnName(resolved)] === undefined) {
+                        this._emitClosureCall(resolved, e.arguments);
+                        return;
+                    }
                     const cn = this._calleeInfo(resolved);
                     const xn = cn && cn.mode !== this.mode;
                     for (const a of e.arguments) { this.emitTaggedExpr(a); if (xn) this._argToCallee(resolved); }
@@ -5458,9 +5540,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitClosureCall(fn, e.arguments);
             return;
         }
-        if (this.m._funcIdx[this._fnName(fn)] === undefined && !this.fnNames.has(this._fnName(fn))) {
-            // 非顶层函数 → 变量持有闭包：closure_call(handle, a0..a3)。
-            // 句柄来源：本层局部变量，或**捕获**（嵌套函数声明/上层局部闭包 → env_get）。
+        if (this.m._funcIdx[this._fnName(fn)] === undefined) {
+            // 没有对应的 wasm 函数 → 名字持有闭包值：closure_call(handle, a0..a3)。
+            // 句柄来源：本层局部变量、**捕获**，或模块级 const（含跨文件导入的模块级闭包
+            // `export const makeIssue = (...) => ...` —— 导入名在 fnNames 里但没有 _funcIdx，
+            // 直调会撞 wasm-encoder 的「call 未定义」）。
             this._emitClosureCall(fn, e.arguments);
             return;
         }
@@ -6386,8 +6470,21 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         const cnS = this._classOfExpr(rx);
         let owner = cnS;
         while (owner && !(this.classes.get(owner).staticMethods || []).some(s => s.name === method)) owner = this.classes.get(owner).parent;
-        if (!owner) throw new Error(`[tagged] 静态方法 ${cnS}.${method}() 未定义`);
-        this._checkStaticThis(owner, cnS, (this.classes.get(owner).staticMethods || []).find(s => s.name === method), method);
+        if (!owner) {
+            // 静态**字段**持函数：`static create = (p) => …`（zod v3 types.ts 全部 create 都是这种）。
+            // 此时类对象上的 create 是闭包值 → 取属性后走值调用（qz.call_value 分派）。
+            let fowner = cnS;
+            while (fowner && !(this.classes.get(fowner).staticFields || []).some(f => f.name === method)) fowner = this.classes.get(fowner).parent;
+            const sf = fowner && (this.classes.get(fowner).staticFields || []).find(f => f.name === method);
+            if (sf && sf.init && (ts.isArrowFunction(sf.init) || ts.isFunctionExpression(sf.init))) {
+                this._emitStaticsGuard(cnS);
+                const pacc = ts.factory.createPropertyAccessExpression(rx, ts.factory.createIdentifier(method));
+                pacc.pos = rx.pos; pacc.end = rx.end;
+                this._emitValueCall(pacc, args, rx);
+                return;
+            }
+            throw new Error(`[tagged] 静态方法 ${cnS}.${method}() 未定义`);
+        }
         this._emitStaticsGuard(cnS);
         this._emitClassValue(this.classes.get(cnS));   // self = 接收者类（JS：B.describe() 内 this = B，含继承自 A 的方法）
         this._emitMethodArgs(((this.classes.get(owner).staticMethods || []).find(s => s.name === method) || {}).node ? (this.classes.get(owner).staticMethods || []).find(s => s.name === method).node.parameters : null, args);
@@ -6443,7 +6540,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         let right = e.right;
         while (right && (ts.isParenthesizedExpression(right) || ts.isAsExpression(right) || ts.isNonNullExpression(right)
             || ts.isTypeAssertionExpression(right) || ts.isSatisfiesExpression(right))) right = right.expression;   // d instanceof (Animal as any)
-        if (ts.isIdentifier(right) && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(right.text)
+        if (ts.isIdentifier(right) && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet|Proxy|File|Blob|URL|URLSearchParams|ArrayBuffer|SharedArrayBuffer|DataView|Uint8Array|Int8Array|Uint16Array|Int16Array|Uint32Array|Int32Array|Float32Array|Float64Array|BigInt64Array|BigUint64Array|FormData|AbortController|AbortSignal|ReadableStream|WritableStream|TransformStream)$/.test(right.text)
             && !this.classes.has(this._className(right.text))) {
             // 内建类：宿主按 tag/物化判定（Array/Object/String/Number/Boolean/Function…）
             this.emitTaggedExpr(e.left);

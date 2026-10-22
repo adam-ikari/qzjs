@@ -5,43 +5,45 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-10-22T23:32:29"
+updated: "2026-10-23T00:12:56"
 ---
 
 <!-- compiled_truth -->
-## 当前状态（2026-10-22）
+## 当前状态（2026-10-23）
 
-AOT 编译覆盖率实测（zod 4.6.7，332 个 .ts 含测试）：成功 10（3.0%）。
+AOT 编译覆盖率实测（zod，332 个 .ts 含测试）：成功 11（3.3%）。
 
-**五轮修复累计消解六类阻塞**（原合计 584 例 → 75 例）：
+**六轮修复累计消解九类阻塞**（原合计 584 例 → 87 例）：
 - 匿名默认导出（131→0）：collectDecls 就地补合成名 `__default_N`。
 - `export *` re-export（145→0）：不产生绑定，只校验目标在源码内。
 - TS 重载签名（115→0）：collectDecls + 4 处嵌套收集统一加 `n.body` 过滤。
-- 跨文件同名私有函数（107→19）：非导出函数按文件前缀改名 `__m_<stem>_<name>`，checker 符号身份重写声明+调用点。剩余 19 例是导出函数同名（外部契约）。
-- `new` 属性访问目标（86→0）：非标识符目标统一走「运行时求值类对象 → qz.new_dynamic」。
+- 跨文件同名私有函数（107→19）：非导出函数按文件前缀改名 `__m_<stem>_<name>`。
+- `new` 属性访问目标（86→0）：运行时求值类对象 → `qz.new_dynamic`。
 - 类成员 `PropertyDeclaration` / rest 解构（8→0、5→0）。
+- **`Proxy`（75→0）**：两端 ctor 白名单加 `Proxy`/TypedArray/Web API 类；
+  宿主侧 `Reflect.construct` 已通用，`Reflect.get/has/ownKeys/...`
+  走 `builtin` 的 `globalThis` 逐级回退，无需逐个登记。
+- **`instanceof` 内建族（75→0）**：emitter 白名单扩到 TypedArray/File/Blob/URL 族；
+  宿主 `instanceof_builtin` 加 `default: globalThis[name]` 通用原型链回退。
+- **`export namespace X` 声明（7→0）**：TS 命名空间是编译期构造，内联后模块边界消失。
+  collectDecls 把值成员就地改名 `X$<member>` 展平为普通顶层声明，登记 `nsAlias`；
+  成员体内对同命名空间成员的裸名引用按 checker 符号身份改写（只写 `escapedText`，
+  `IdentifierObject.text` 是只读 getter）。
+- 顺带：`implements` 子句不再被当成 `extends`（只认 `ExtendsKeyword`）；
+  静态箭头函数字段可作方法调用；模块级无初值 `let` 分配全局且初值为 undefined
+  （`0x7ff9000000000000n`，需 `sleb64` 编码 i64 全局初值）。
 
-**当前头号阻塞**：`[tagged] 内建类 Proxy 未实现`（75 例）。需宿主 trap 分发
-（get/set/has/deleteProperty/ownKeys/getOwnPropertyDescriptor），是实质性新功能。
-zod `createTransparentProxy` 是唯一非测试用法。
+**当前头号阻塞**：`[tagged] async 函数未实现`（87 例 = 26%）。需 Promise 状态机，
+是唯一剩下的「大」工作量级项。
 
-**次级**：async 12（需 Promise 运行时/状态机）、`defaultErrorMap` 7
-（模块级变量跨文件导出）、导出函数同名 19。
-
-**未修复**：#5 命名空间导入捕获（部分已修，成员作值已通）、#6 generator/async、
-#7 corpus 与 V8 对拍。
+**次级**：re-export 聚合同名值 19（`index.ts` 同时从 util.ts/schemas.ts 导出 `nullish`）、
+`AwaitExpression` 8（v3 遗留 async 用法）。
 
 ## 结构性事实
 
 功能缺口沿 import 图传播：一个阻塞点连带其整个传递依赖树失败。
 zod 单文件编译会拉入整棵 import 树，故每修一类阻塞，失败类别数量会重新洗牌
-（修完 `new` 后 Proxy 从 75 浮现，因为原先被 `new` 挡住）。
-
-## 本轮方法学
-
-`new` 修完后逐个编译 zod core 五个文件（compile/parse/api/util/schemas），
-每次报错都定位到具体 TS 语法形态再决定是否值得做——避免为单一库的
-一个用法引入大抽象。
+（修完 `Proxy` 后 async 从 12 涨到 87，因为原先被 Proxy 挡住）。
 
 
 ## Timeline
@@ -170,4 +172,15 @@ zod 单文件编译会拉入整棵 import 树，故每修一类阻塞，失败�
   kind: decision
   summary: "五轮修复消解六类阻塞，头号阻塞转为 Proxy 未实现（75 例）"
   source: commit 21986e0d
+  affects: [aot-readiness]
+
+- time: 2026-10-23T00:12:52
+  kind: decision
+  summary: "六轮修复：Proxy/instanceof 内建族/命名空间声明/implements/静态箭头字段全清；头号阻塞变为 async（87/332）"
+  source: brain update-truth
+  affects: [aot-readiness]
+
+- time: 2026-10-23T00:12:56
+  kind: decision
+  summary: "语言特性补齐：Proxy+instanceof 内建族+namespace 展平+implements+静态箭头字段；cookie 级细节见 compiled_truth"
   affects: [aot-readiness]
