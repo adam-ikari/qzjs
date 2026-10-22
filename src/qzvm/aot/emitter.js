@@ -2558,7 +2558,7 @@ function memLayout(opts) {
     if (!(mib >= 8)) throw new RangeError(`memMiB 至少 8（arena + 字面量段下限），收到 ${mib}`);
     const pages = Math.ceil(mib * 16);
     const total = pages << 16;
-    const arenaEnd = Math.min(Math.max((total * 0.4) & ~0xfff, 1 << 20), total - (4 << 20));   // 4 KiB 对齐
+    const arenaEnd = Math.min(Math.max((total * 0.85) & ~0xfff, 1 << 20), total - (4 << 20));   // arena 占 85%（默认 40MiB → 34MiB），字面量段至少 4MiB
     return { pages, arenaEnd };
 }
 
