@@ -54,7 +54,7 @@ const OP = {
     i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, i32_shl: 0x74, i32_shr_s: 0x75, i32_shr_u: 0x76,
     i64_add: 0x7c, i64_sub: 0x7d, i64_mul: 0x7e, i64_div_s: 0x7f, i64_div_u: 0x80, i64_rem_s: 0x81, i64_rem_u: 0x82,
     i64_and: 0x83, i64_or: 0x84, i64_xor: 0x85, i64_shl: 0x86, i64_shr_s: 0x87, i64_shr_u: 0x88,
-    f64_neg: 0x9a, f64_floor: 0x9c, f64_trunc: 0x9d, f64_abs: 0x99,
+    f64_neg: 0x9a, f64_ceil: 0x9b, f64_floor: 0x9c, f64_trunc: 0x9d, f64_nearest: 0x9e, f64_sqrt: 0x9f, f64_abs: 0x99,
     f64_add: 0xa0, f64_sub: 0xa1, f64_mul: 0xa2, f64_div: 0xa3, f64_min: 0xa4, f64_max: 0xa5,
     i32_wrap_i64: 0xa7, i32_trunc_f64_s: 0xaa, i32_trunc_f64_u: 0xab,
     i64_extend_i32_s: 0xac, i64_extend_i32_u: 0xad, i64_trunc_f64_s: 0xb0,
@@ -181,7 +181,10 @@ class Module {
     i32LtU() { this._emit(OP.i32_lt_u); } i32GtU() { this._emit(OP.i32_gt_u); } i32LeU() { this._emit(OP.i32_le_u); } i32GeU() { this._emit(OP.i32_ge_u); }
     f64Eq() { this._emit(OP.f64_eq); } f64Lt() { this._emit(OP.f64_lt); } f64Gt() { this._emit(OP.f64_gt); }
     f64Le() { this._emit(OP.f64_le); } f64Ge() { this._emit(OP.f64_ge); } f64Ne() { this._emit(OP.f64_ne); }
-    f64Neg() { this._emit(OP.f64_neg); } f64Max() { this._emit(OP.f64_max); } f64Trunc() { this._emit(OP.f64_trunc); } f64Floor() { this._emit(OP.f64_floor); }
+    f64Neg() { this._emit(OP.f64_neg); } f64Max() { this._emit(OP.f64_max); } f64Min() { this._emit(OP.f64_min); }
+    f64Trunc() { this._emit(OP.f64_trunc); } f64Floor() { this._emit(OP.f64_floor); }
+    f64Ceil() { this._emit(OP.f64_ceil); } f64Nearest() { this._emit(OP.f64_nearest); }
+    f64Sqrt() { this._emit(OP.f64_sqrt); } f64Abs() { this._emit(OP.f64_abs); }
     f64ConvertI32S() { this._emit(OP.f64_convert_i32_s); } f64ConvertI32U() { this._emit(OP.f64_convert_i32_u); }
     i32TruncF64S() { this._emit(OP.i32_trunc_f64_s); }
     i32Shl() { this._emit(OP.i32_shl); } i32ShrU() { this._emit(OP.i32_shr_u); } i32ShrS() { this._emit(OP.i32_shr_s); } i32Or() { this._emit(OP.i32_or); } i32And() { this._emit(OP.i32_and); }
@@ -243,6 +246,8 @@ class Module {
     i64Store(align, offset) { this._emit(OP.i64_store, ...uleb(align), ...uleb(offset)); }
     i64Store32(align, offset) { this._emit(OP.i64_store32, ...uleb(align), ...uleb(offset)); }
     i64Load(align, offset) { this._emit(OP.i64_load, ...uleb(align), ...uleb(offset)); }
+    f64Load(align, offset) { this._emit(OP.f64_load, ...uleb(align), ...uleb(offset)); }
+    f64Store(align, offset) { this._emit(OP.f64_store, ...uleb(align), ...uleb(offset)); }
     // export
     setStart(fnName) { this.startIdx = this._funcIdx[fnName]; }   // start 段：实例化时自动执行（模块级初始化）
     exportFn(name, fnName) { this.exports.push({ name, idx: this._funcIdx[fnName], kind: 0x00 }); }

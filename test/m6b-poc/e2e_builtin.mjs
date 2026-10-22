@@ -78,7 +78,7 @@ for (const im of WebAssembly.Module.imports(prod)) {
 }
 if (missing.length) { console.error('FAIL: libqzvm 缺原语 ' + missing.join(' ')); process.exit(1); }
 const P = new WebAssembly.Instance(prod, { qz, wasi_snapshot_preview1: wasi.wasiImport }).exports;
-chk('产物 fl(3.7)', unbox(P.fl(box(3.7))), 3);
+chk('产物 fl(3.7)', P.fl(3.7), 3);
 chk('产物 mx(2,9)', unbox(P.mx(box(2), box(9))), 9);
 chk('产物 pi()', unbox(P.pi()), Math.PI);
 chk('产物 parse("42")', unbox(P.parse(writeStr('42'))), 42);

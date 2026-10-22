@@ -1304,6 +1304,25 @@ class Emitter {
         for (const lam of lams) for (const c of this._capturesOf(lam)) if (own.has(c) && !seen.has(c)) { seen.add(c); out.push(c); }
         return out;
     }
+    // 填充 this._numArr（name → {base, len}）——用 standalone numArrNames(f)。
+    _probeNumArrs(f) {
+        for (const name of numArrNames(f)) this._numArr.set(name, {});
+    }
+    // 填充 this._inlineArrows（name → ArrowFunction）——零参数、返回 number、num-safe body。
+    // funcMode 已验证安全；此处只扫描声明，不做重复安全检查。
+    _probeInlineArrows(f) {
+        this._inlineArrows = new Map();
+        const walk = (n) => {
+            if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)
+                && n.initializer && ts.isArrowFunction(n.initializer)
+                && n.initializer.parameters.length === 0
+                && n.initializer.type && n.initializer.type.kind === ts.SyntaxKind.NumberKeyword)
+                this._inlineArrows.set(n.name.text, n.initializer);
+            if (ts.isArrowFunction(n) || ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n)) return;
+            ts.forEachChild(n, walk);
+        };
+        if (f.body) walk(f.body);
+    }
     emitFunc(f) {
         // 多文件编译：em.sf 由 compileTS 按「本函数所属源文件」设置（行号/DWARF 用）。
         const savedCurClass = this._curClass, savedCapActive = this.capListActive, savedStatic = this._staticVars;
@@ -1332,6 +1351,13 @@ class Emitter {
         this.scratchA = nLoc + 1;                            // 暂存 a
         this.scratchB = nLoc + 2;                            // 暂存 b
         // tagged guard 快路径需 f64 浮点临时（值 local 是 i64）；num 模式 scratchA/B 本就是 f64
+        // num 数组：const a: number[] = []，用 bump 堆连续块 + i32 base/len local，
+        // push/[i]/[i]=/.length 全内联 f64.load/store，零宿主往返。
+        // 只在 num 模式启用；分析器找声明 + 仅用于 push/下标/length 的变量。
+        this._numArr = new Map();
+        if (this.mode === "num") { this._probeNumArrs(f); this._probeInlineArrows(f); }
+        const numArrDecls = [];
+        for (const [name] of this._numArr) numArrDecls.push("i32", "i32");
         const extra = this.mode === "tagged" ? ["f64", "f64"] : [];
         this.scratchFA = nLoc + 3; this.scratchFB = nLoc + 4;
         // 字符串逻辑临时（仅 tagged）：sT0..sT7 共 8 个 i32
@@ -1365,7 +1391,12 @@ class Emitter {
         const envDecls = capNames.length ? ["i32"] : [];
         const needsArgs0 = this.mode === "tagged" && !!(this._fnArgs && f.name && this._fnArgs.has(f.name.text));
         const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool)
-            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(needsArgs0 ? ["i64"] : []).concat(envDecls);
+            .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(needsArgs0 ? ["i64"] : []).concat(envDecls).concat(numArrDecls);
+        // num 数组的 base/len local 索引（一对 i32/名字）
+        {
+            let base = f.parameters.length + decls.length - numArrDecls.length;
+            for (const [name] of this._numArr) { this._numArr.get(name).base = base; this._numArr.get(name).len = base + 1; base += 2; }
+        }
         this._argsLocal = needsArgs0 ? f.parameters.length + decls.length - 1 - envDecls.length : undefined;
         this.m.startBody(f.name.text, decls, localNames, this._line(f));
         this.envLocal = capNames.length ? f.parameters.length + decls.length - 1 : undefined;   // 参数在 local 0..n-1 之后
@@ -1996,7 +2027,19 @@ class Emitter {
         this.m.markLine(this._line(s));
         if (ts.isVariableStatement(s)) {
             for (const d of s.declarationList.declarations) {
-                if (d.initializer) { this.emitExpr(d.initializer); this.m.localSet(this._local(d.name.text)); }
+                if (!ts.isIdentifier(d.name)) { if (d.initializer) { this.emitExpr(d.initializer); this.m.localSet(this._local(d.name.text)); } continue; }
+                const nm = d.name.text, na = this._numArr.get(nm);
+                if (na) {
+                    // num 数组：分配 8 字节头 [cap=0][pad]，base = headerOff+8（数据起始）。
+                    emitBumpAlloc(this.m, () => this.m.i32Const(8));   // headerOff on stack
+                    this.m.i32Const(8); this.m.i32Add(); this.m.localSet(na.base);   // base = headerOff+8
+                    this.m.localGet(na.base); this.m.i32Const(8); this.m.i32Sub();
+                    this.m.i32Const(0); this.m.i32Store(2, 0);       // [base-8] = cap = 0
+                    this.m.i32Const(0); this.m.localSet(na.len);     // len = 0
+                    continue;   // 不调 emitExpr(initializer)
+                }
+                if (this._inlineArrows && this._inlineArrows.has(nm)) continue;   // 内联箭头函数：跳过声明
+                if (d.initializer) { this.emitExpr(d.initializer); this.m.localSet(this._local(nm)); }
             }
             return;
         }
@@ -2123,6 +2166,9 @@ class Emitter {
     // ---------- 表达式（number 域） ----------
     emitExpr(e) {
         if (ts.isNumericLiteral(e)) { this.m.f64Const(Number(e.text)); return; }
+        // num 模式 bool 值就是 f64 0/1（boolean[] 用 f64 存，见 numArrNames）。
+        if (e.kind === ts.SyntaxKind.TrueKeyword) { this.m.f64Const(1); return; }
+        if (e.kind === ts.SyntaxKind.FalseKeyword) { this.m.f64Const(0); return; }
         if (ts.isIdentifier(e)) {
             const idx = this._local(e.text);
             if (idx === undefined) throw new Error("未定义变量: " + e.text);
@@ -2169,6 +2215,54 @@ class Emitter {
             return;
         }
         if (ts.isCallExpression(e)) {
+            // Math.* 单参内建 → 直接映射 wasm f64 指令（无宿主往返）。
+            // 必须在 _nsMember 之前：Math 是宿主全局对象，不在 import 命名空间表里。
+            // 缺这一段时 Math.sqrt(x) 只能走 tagged（属性访问）→ 整个函数掉出快路径。
+            if (ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression)
+                && e.expression.expression.text === "Math") {
+                const f64Op = {
+                    sqrt: "f64Sqrt", abs: "f64Abs", floor: "f64Floor", ceil: "f64Ceil",
+                    trunc: "f64Trunc", round: "f64Nearest",
+                }[e.expression.name.text];
+                if (!f64Op) throw new Error("不支持的 Math 成员: " + e.expression.name.text);
+                this.emitExpr(e.arguments[0]); this.m[f64Op](); return;
+            }
+            // num 数组 a.push(v)：bump 扩容（len==cap 时 qz_numarr_grow）+ f64Store + len++。
+            if (ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression)
+                && e.expression.name.text === "push") {
+                const na = this._numArr.get(e.expression.expression.text);
+                if (na) {
+                    this.emitExpr(e.arguments[0]); this.m.localSet(this.scratchA);   // 保存 val
+                    // if len == cap: base = qz_numarr_grow(base, len)
+                    this.m.localGet(na.len);
+                    this.m.localGet(na.base); this.m.i32Const(8); this.m.i32Sub(); this.m.i32Load(2, 0);
+                    this.m.i32Eq(); this.m.ifBlock("void");
+                        this.m.localGet(na.base); this.m.localGet(na.len); this.m.call("qz_numarr_grow");
+                        this.m.localSet(na.base);
+                    this.m.end();
+                    // store val at base + len*8
+                    this.m.localGet(na.base); this.m.localGet(na.len); this.m.i32Const(3); this.m.i32Shl(); this.m.i32Add();
+                    this.m.localGet(this.scratchA); this.m.f64Store(3, 0);
+                    // len++
+                    this.m.localGet(na.len); this.m.i32Const(1); this.m.i32Add(); this.m.localSet(na.len);
+                    // push 返回新长度（f64）
+                    this.m.localGet(na.len); this.m.f64ConvertI32S();
+                    return;
+                }
+            }
+            // 内联零参箭头函数：rnd() → 直接 emit body（funcMode 已验证安全）。
+            if (ts.isIdentifier(e.expression) && this._inlineArrows && this._inlineArrows.has(e.expression.text)) {
+                const arrow = this._inlineArrows.get(e.expression.text);
+                if (ts.isBlock(arrow.body)) {
+                    const stmts = arrow.body.statements;
+                    for (let i = 0; i < stmts.length - 1; i++) this.emitStmt(stmts[i]);
+                    const last = stmts[stmts.length - 1];
+                    this.emitExpr(last.expression);   // return expr → 栈顶
+                } else {
+                    this.emitExpr(arrow.body);   // 表达式体
+                }
+                return;
+            }
             let fn;
             if (ts.isIdentifier(e.expression)) fn = e.expression.text;
             else if (ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression)) {
@@ -2176,13 +2270,29 @@ class Emitter {
                 if (resolved === undefined) throw new Error("不支持的调用目标");
                 fn = resolved;
             } else throw new Error("不支持的调用目标");
-            if (fn === "Math_floor") { this.emitExpr(e.arguments[0]); this.m.f64Floor(); return; }
             const ciNum = this._calleeInfo(fn);
             const xNum = ciNum && ciNum.mode !== this.mode;
             for (const a of e.arguments) { this.emitExpr(a); if (xNum) this._argToCallee(fn); }
             this.m.call(this._fnName(fn));
             this._retFromCallee(fn);
             return;
+        }
+        // num 数组 a[i] 读 → f64Load(base + i*8)
+        if (ts.isElementAccessExpression(e) && ts.isIdentifier(e.expression)) {
+            const na = this._numArr.get(e.expression.text);
+            if (na) {
+                this.m.localGet(na.base);
+                this.emitExpr(e.argumentExpression); this.m.i32TruncF64S();
+                this.m.i32Const(3); this.m.i32Shl(); this.m.i32Add();
+                this.m.f64Load(3, 0);
+                return;
+            }
+        }
+        // num 数组 a.length → len（f64）
+        if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression)
+            && e.name.text === "length") {
+            const na = this._numArr.get(e.expression.text);
+            if (na) { this.m.localGet(na.len); this.m.f64ConvertI32S(); return; }
         }
         throw new Error("不支持的表达式: " + ts.SyntaxKind[e.kind]);
     }
@@ -2192,6 +2302,35 @@ class Emitter {
         // 赋值：x = rhs → localTee（保留值供表达式上下文）；x op= rhs → 读-算-写
         const assignOps = { [ts.SyntaxKind.EqualsToken]: null, [ts.SyntaxKind.AsteriskAsteriskEqualsToken]: ts.SyntaxKind.AsteriskAsteriskToken, [ts.SyntaxKind.PlusEqualsToken]: ts.SyntaxKind.PlusToken, [ts.SyntaxKind.MinusEqualsToken]: ts.SyntaxKind.MinusToken, [ts.SyntaxKind.AsteriskEqualsToken]: ts.SyntaxKind.AsteriskToken, [ts.SyntaxKind.SlashEqualsToken]: ts.SyntaxKind.SlashToken, [ts.SyntaxKind.PercentEqualsToken]: ts.SyntaxKind.PercentToken, [ts.SyntaxKind.LessThanLessThanEqualsToken]: ts.SyntaxKind.LessThanLessThanToken, [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanToken, [ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken, [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken, [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken, [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken };
         if (Object.prototype.hasOwnProperty.call(assignOps, op)) {
+            // num 数组 a[i] = v / a[i] op= v → f64Store(base + i*8, val)
+            if (ts.isElementAccessExpression(e.left) && ts.isIdentifier(e.left.expression)) {
+                const na = this._numArr.get(e.left.expression.text);
+                if (na) {
+                    const binop = assignOps[op];
+                    // f64Store 需要 [addr:i32, val:f64]（addr 在底，val 在顶）。
+                    // 保存值到 scratchA(f64)，地址到 swIdx(i32)，再 store + 留结果。
+                    if (binop !== null) {
+                        // a[i] op= v：存地址 → 读旧值 → 算 → 存结果
+                        this.m.localGet(na.base);
+                        this.emitExpr(e.left.argumentExpression); this.m.i32TruncF64S();
+                        this.m.i32Const(3); this.m.i32Shl(); this.m.i32Add();
+                        this.m.localSet(this.swIdx);                        // addr → i32 temp
+                        this.m.localGet(this.swIdx); this.m.f64Load(3, 0);  // old a[i]
+                        this.emitExpr(e.right);
+                        this.emitBinaryOp(binop);
+                    } else {
+                        // a[i] = v：存值 → 算地址 → store
+                        this.emitExpr(e.right);
+                    }
+                    this.m.localSet(this.scratchA);                        // val → f64 temp
+                    this.m.localGet(na.base);
+                    this.emitExpr(e.left.argumentExpression); this.m.i32TruncF64S();
+                    this.m.i32Const(3); this.m.i32Shl(); this.m.i32Add();  // addr
+                    this.m.localGet(this.scratchA); this.m.f64Store(3, 0);
+                    this.m.localGet(this.scratchA);                        // 表达式结果
+                    return;
+                }
+            }
             if (!ts.isIdentifier(e.left)) throw new Error("赋值左值必须是标识符");
             const idx = this._local(e.left.text);
             if (idx === undefined) throw new Error("未定义变量: " + e.left.text);
@@ -2537,6 +2676,77 @@ function emitStringHelpers(m, strBase) {
     m.endBody();
 }
 
+// num 数组扩容：qz_numarr_grow(base:i32, len:i32) -> i32(新 base)。
+// 布局 [cap:i32][pad:i32][f64 data...]，cap 存 base-8。
+// cap==0 → newCap=4；否则 newCap=cap*2。从 bump 堆分配 newCap*8+8，拷贝旧 len*8 字节，写新 cap。
+function emitNumArrHelpers(m) {
+    m.declareFunc("qz_numarr_grow", ["i32", "i32"], ["i32"]);
+    m.startBody("qz_numarr_grow", ["i32", "i32", "i32", "i32", "i32", "i32"]);
+    // 0=base 1=len 2=cap 3=newCap 4=total 5=newBase
+    m.localGet(0); m.i32Const(8); m.i32Sub(); m.i32Load(2, 0); m.localSet(2);   // cap = [base-8]
+    m.localGet(2); m.i32Eqz(); m.ifBlock("i32");
+        m.i32Const(4);
+    m.else_();
+        m.localGet(2); m.i32Const(1); m.i32Shl();
+    m.end();
+    m.localSet(3);                                                              // newCap
+    m.localGet(3); m.i32Const(3); m.i32Shl(); m.i32Const(8); m.i32Add();
+    m.localSet(4);                                                              // total = newCap*8+8
+    emitBumpAlloc(m, () => m.localGet(4));                                      // headerOff on stack
+    m.i32Const(8); m.i32Add(); m.localSet(5);                                  // newBase = headerOff+8
+    m.localGet(5); m.i32Const(8); m.i32Sub(); m.localGet(3); m.i32Store(2, 0); // [newBase-8]=newCap
+    m.localGet(5); m.localGet(0); m.localGet(1); m.i32Const(3); m.i32Shl();
+    m.call("qzs_memcpy");                                                       // memcpy(newBase, base, len*8)
+    m.localGet(5);
+    m.endBody();
+}
+
+// 检测函数体里的 num 数组变量：const a: number[] = []（空数组初始化），
+// 且后续仅用于 push/[i]/[i]=/.length。返回 Set<name>。
+function numArrNames(f) {
+    const decls = new Set();
+    // number[] / boolean[] 都走同一套 f64 连续块（bool 存 0/1，见 emitExpr True/False）。
+    const isNumArrType = (t) => t && ts.isArrayTypeNode(t) && t.elementType
+        && (t.elementType.kind === ts.SyntaxKind.NumberKeyword || t.elementType.kind === ts.SyntaxKind.BooleanKeyword);
+    const isEmptyArr = (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 0;
+    const walk1 = (n) => {
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && isNumArrType(n.type) && isEmptyArr(n.initializer))
+            decls.add(n.name.text);
+        if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) return;
+        ts.forEachChild(n, walk1);
+    };
+    if (f.body) walk1(f.body);
+    const ok = new Set();
+    for (const name of decls) {
+        let safe = true;
+        const walk2 = (n) => {
+            if (!safe) return;
+            if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) return;
+            if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "push"
+                && ts.isIdentifier(n.expression.expression) && n.expression.expression.text === name) {
+                for (const a of n.arguments) walk2(a); return;   // 只走参数，不走 a.push 接收者
+            }
+            if (ts.isElementAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name) {
+                walk2(n.argumentExpression); return;   // 只走下标表达式，不走 a 本身
+            }
+            if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name
+                && n.name.text === "length") return;
+            if (ts.isBinaryExpression(n) && ts.isElementAccessExpression(n.left)
+                && ts.isIdentifier(n.left.expression) && n.left.expression.text === name) {
+                // a[i] = v / a[i] op= v：走下标和值，不走 a
+                walk2(n.left.argumentExpression); walk2(n.right); return;
+            }
+            if (ts.isIdentifier(n) && n.text === name && !(n.parent && ts.isVariableDeclaration(n.parent) && n.parent.name === n)) {
+                safe = false; return;
+            }
+            if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) return;
+            ts.forEachChild(n, walk2);
+        };
+        if (f.body) walk2(f.body);
+        if (safe) ok.add(name);
+    }
+    return ok;
+}
 /* 函数编译模式：参数全 number、返回 number/void、且函数体**只含 num 安全表达式**
  * → "num"（f64 快路径）。任一不安全表达式 → "tagged"。
  * num emitExpr 只支持：Identifier / NumericLiteral / BinaryExpression(算术/逻辑/比较) /
@@ -2549,10 +2759,51 @@ function funcMode(f) {
     const rt = f.type;
     const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
     const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
-    // 非安全表达式：只要函数体含任一即退 tagged
     let unsafe = false;
+    // Math.* 单参内建 + num 数组（number[] 用 push/[i]/[i]=/.length）→ num 安全。
+    const MATH1 = new Set(["sqrt", "abs", "floor", "ceil", "trunc", "round"]);
+    const isMath1 = (n) => ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)
+        && n.expression.text === "Math" && MATH1.has(n.name.text);
+    const numArrs = numArrNames(f);   // Set<name>：num 数组变量
+    const isNumArrPA = (n) => ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)
+        && numArrs.has(n.expression.text) && (n.name.text === "length" || n.name.text === "push");
+    const isNumArrEA = (n) => ts.isElementAccessExpression(n) && ts.isIdentifier(n.expression)
+        && numArrs.has(n.expression.text);
+    const isNumArrEmpty = (n) => ts.isArrayLiteralExpression(n) && n.elements.length === 0;
+    // 零参数箭头函数（(): number => { num-safe body }）→ 可内联，不算 unsafe。
+    // 限制：body 只含 num 安全表达式；block body 仅末句 return（无提前 return）。
+    const isInlineArrow = (n) => {
+        if (!ts.isArrowFunction(n) || n.parameters.length !== 0) return false;
+        if (!n.type || n.type.kind !== ts.SyntaxKind.NumberKeyword) return false;
+        let safe = true, retCount = 0;
+        const cb = (bn) => {
+            if (!safe || bn === n) { ts.forEachChild(bn, cb); return; }
+            if (isMath1(bn)) { ts.forEachChild(bn, cb); return; }
+            if (isNumArrPA(bn) || isNumArrEA(bn) || isNumArrEmpty(bn)) { ts.forEachChild(bn, cb); return; }
+            if (ts.isReturnStatement(bn)) retCount++;
+            if (ts.isArrowFunction(bn) || ts.isFunctionExpression(bn) || ts.isNewExpression(bn)
+                || ts.isPropertyAccessExpression(bn) || ts.isElementAccessExpression(bn)
+                || ts.isObjectLiteralExpression(bn) || ts.isArrayLiteralExpression(bn)
+                || ts.isTemplateExpression(bn) || ts.isSpreadElement(bn) || ts.isTaggedTemplateExpression(bn)
+                || ts.isClassExpression(bn) || ts.isAwaitExpression(bn) || ts.isYieldExpression(bn)
+                || ts.isStringLiteral(bn) || ts.isNoSubstitutionTemplateLiteral(bn)
+                || ts.isTypeOfExpression(bn) || ts.isVoidExpression(bn) || ts.isDeleteExpression(bn)
+                || (ts.isBinaryExpression(bn) && bn.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword))
+                { safe = false; return; }
+            ts.forEachChild(bn, cb);
+        };
+        cb(n);
+        if (ts.isBlock(n.body)) {
+            const stmts = n.body.statements;
+            if (retCount !== 1 || !stmts.length || !ts.isReturnStatement(stmts[stmts.length - 1])) safe = false;
+        } else { if (retCount !== 0) safe = false; }
+        return safe;
+    };
     const walk = (n) => {
         if (n === f) { ts.forEachChild(n, walk); return; }
+        if (isMath1(n)) { ts.forEachChild(n, walk); return; }
+        if (isNumArrPA(n) || isNumArrEA(n) || isNumArrEmpty(n)) { ts.forEachChild(n, walk); return; }
+        if (isInlineArrow(n)) { ts.forEachChild(n, walk); return; }
         if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isNewExpression(n)
             || ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)
             || ts.isObjectLiteralExpression(n) || ts.isArrayLiteralExpression(n)
@@ -2945,7 +3196,8 @@ function compileTS(input, outWasm, opts = {}) {
         }
     }
     // interp 函数不占 wasm，故不参与「是否需要 tagged 运行时」的判定。
-    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "tagged") || hasClasses;
+    const hasNumArr = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "num" && numArrNames(f).size > 0);
+    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "tagged") || hasClasses || hasNumArr;
     // 顶层函数名 → {mode, void}：跨模式调用点据此插入 f64↔i64 按位重解释。
     // interp 函数不进 wasm（其调用者经传递闭包一并退），故不在表内 —— 表内即 wasm 内可直调者。
     const fnMode = new Map();
@@ -3038,6 +3290,7 @@ function compileTS(input, outWasm, opts = {}) {
             m.endBody();
             emitStringHelpers(m, em._strBase || STR_BASE);
         }
+        emitNumArrHelpers(m);
         for (const st of fns) {
             if (interpSet.has(st.name.text)) continue;   // interp 函数不进 wasm
             const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;

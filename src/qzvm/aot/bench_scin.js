@@ -19,21 +19,20 @@ const ROOT = path.join(__dirname, "..", "..", "..");
 const OUT = path.join(ROOT, "build", "aot");
 const QZJS = path.resolve(process.env.QZJS || path.join(ROOT, "build", "qzjs"));
 
-// [名字, 实参, 说明]。前 7 个是自然写法（含数组/箭头函数），后 4 个是 num 快路径版
-// （去掉数组依赖保持 num 模式）。funcMode 判定见 emitter.js：函数体含数组字面量、
-// 箭头函数、属性访问等任一 → 退 tagged（句柄 + 内存操作），性能差数十倍。
+// [名字, 实参, 说明]。说明里的模式标签由 glue 的 __meta 动态补全（见下方 aotMode）。
+// 前 7 个是自然写法（含数组/箭头函数），后 4 个是纯标量对照版。
 const CASES = [
-    ["integrate", [100000], "Simpson 求 π · num"],
-    ["matmul", [120], "120×120 矩阵乘 · tagged"],
-    ["nbody", [60], "32 体引力 60 步 · tagged"],
-    ["sieve", [200000], "素数筛 ≤2e5 · tagged"],
-    ["lorenz", [20000], "Lorenz RK4 2e4 步 · num"],
-    ["mcpi", [500000], "蒙特卡洛 π 5e5 点 · tagged"],
-    ["mandel", [300, 200], "Mandelbrot 300×200 · num"],
-    ["nbodyNum", [60], "32 体引力 60 步 · num"],
-    ["mcpiNum", [500000], "蒙特卡洛 π 5e5 点 · num"],
-    ["sieveNum", [3000], "试除素数 ≤3e3 · num"],
-    ["matmulNum", [120], "张量积和式 120³ · num"],
+    ["integrate", [100000], "Simpson 求 π"],
+    ["matmul", [120], "120×120 矩阵乘"],
+    ["nbody", [60], "32 体引力 60 步"],
+    ["sieve", [200000], "素数筛 ≤2e5"],
+    ["lorenz", [20000], "Lorenz RK4 2e4 步"],
+    ["mcpi", [500000], "蒙特卡洛 π 5e5 点"],
+    ["mandel", [300, 200], "Mandelbrot 300×200"],
+    ["nbodyNum", [60], "32 体引力 60 步·标量"],
+    ["mcpiNum", [500000], "蒙特卡洛 π 5e5 点·标量"],
+    ["sieveNum", [3000], "试除素数 ≤3e3·标量"],
+    ["matmulNum", [120], "张量积和式 120³·标量"],
 ];
 
 const REPEAT = 3;   // 每个负载跑 REPEAT 次取最好
@@ -62,6 +61,15 @@ function parse(stdout) {
         if (m) out[m[1]] = { ms: parseFloat(m[2]), val: m[3] };
     }
     return out;
+}
+
+// 从产物 glue 的 __meta 提取真实编译模式（num/tagged/interp），标签不再硬编码。
+function aotModes() {
+    const glue = path.join(OUT, "scin.glue.js");
+    if (!fs.existsSync(glue)) return {};
+    const m = fs.readFileSync(glue, "utf8").match(/const __meta = (\[.*?\]);/);
+    if (!m) return {};
+    try { return Object.fromEntries(JSON.parse(m[1]).map(f => [f.name, f.mode])); } catch { return {}; }
 }
 
 // AOT：把 __main 钩子追加到 glue 尾部，跑完还原。
@@ -148,7 +156,7 @@ console.log("> qzjs 解释器…");
 const interp = benchInterp();
 console.log("> V8 JIT (node)…");
 const v8 = benchV8();
-
+const modes = aotModes();
 const pad = (s, n) => String(s).padEnd(n);
 const padL = (s, n) => String(s).padStart(n);
 console.log("");
@@ -163,7 +171,7 @@ for (const [n, a, desc] of CASES) {
     const chk = sameAI && sameAV ? "OK" : `差异 AOT=${A.val} 解释=${I.val} V8=${V.val}`;
     if (!sameAI || !sameAV) okAll = false;
     console.log(
-        pad(`${n} ${desc}`, 22)
+        pad(`${n} ${desc}${modes[n] ? " · " + modes[n] : ""}`, 30)
         + padL(A.ms, 10) + padL(I.ms, 12) + padL(V.ms, 10)
         + padL((I.ms / A.ms).toFixed(2) + "×", 11) + padL((V.ms / A.ms).toFixed(2) + "×", 9)
         + "  " + chk
