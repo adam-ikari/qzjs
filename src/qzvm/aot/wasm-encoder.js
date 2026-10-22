@@ -60,6 +60,7 @@ const OP = {
     i64_extend_i32_s: 0xac, i64_extend_i32_u: 0xad, i64_trunc_f64_s: 0xb0,
     f64_convert_i32_s: 0xb7, f64_convert_i32_u: 0xb8, f64_convert_i64_s: 0xb9, f64_convert_i64_u: 0xba,
     i64_reinterpret_f64: 0xbd, f64_reinterpret_i64: 0xbf,
+    memory_size: 0x3f, memory_grow: 0x40,
     unreachable: 0x00,
 };
 
@@ -201,6 +202,8 @@ class Module {
     select() { this._emit(OP.select); }
     unreachable() { this._emit(OP.unreachable); }
     // 内存（字符串/数组共享内存用）
+    memorySize() { this._emit(OP.memory_size, 0x00); }   // 栈：当前页数(i32)
+    memoryGrow() { this._emit(OP.memory_grow, 0x00); }   // 栈：增量页数(i32) → 旧页数(i32)，失败 = -1
     addMemory(pages, maxPages) { this.memory = pages; this.memoryMax = (maxPages === undefined ? null : maxPages); }
     addData(offset, bytes) { this.data.push({ offset, bytes: Uint8Array.from(bytes) }); }   // 数据段（字符串字面量 UTF-8）
     /* funcref 表：跨模块共享（import 名 __indirect_function_table），供 C 侧原语

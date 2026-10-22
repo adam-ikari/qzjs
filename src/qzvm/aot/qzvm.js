@@ -380,13 +380,18 @@ function makeQzvm(strings, opts) {
     if (v !== 0n) { exportsRef.__err.value = 0n; throw toJS(v); }
   };
   const bindBump = (g) => { bumpRef = g; };
-  // 宿主侧 bump 分配：与 wasm 侧 arena 上界（emitter 的 memLayout().arenaEnd）同界；
-  // 越界抛错（绝不静默覆盖字面量段）。opts.arenaEnd 由产物布局传入，缺省 16 MiB。
-  const ARENA_END = (opts && opts.arenaEnd) || (16 << 20);
+  // 宿主侧 bump 分配：与 wasm 侧 arena 同界。arena 不再是编译期硬上限——
+  // 越界时 memory.grow 扩容（memU8/mem.view 随 buffer 替换重建），直到 wasm 内存上限。
+  // opts.arenaEnd 仅作初始提示（缺省取当前内存大小）。
   const bumpAlloc = (nbytes) => {
-    const off = bumpRef.value;
-    if (off + nbytes > ARENA_END) throw new Error(`qzvm: bump arena 溢出（${off}+${nbytes} > ${ARENA_END}）；调用间未重置 __bump？`);
-    bumpRef.value = off + nbytes;
+    let off = bumpRef.value;
+    const need = off + nbytes;
+    if (need > mem.buffer.byteLength) {
+      const curPages = mem.buffer.byteLength >> 16, wantPages = Math.ceil(need / 65536);
+      if (mem.grow(wantPages - curPages) < 0) throw new Error(`qzvm: bump arena 无法扩容（需 ${need} 字节，内存已到上限）`);
+      memU8 = new Uint8Array(mem.buffer);      // grow 后旧视图失效 → 重建
+    }
+    bumpRef.value = need;
     return off;
   };
   // JS 字符串 → wasm 堆（[len:i32 LE][utf8]），bump 分配，返回 0x7FFA 句柄。

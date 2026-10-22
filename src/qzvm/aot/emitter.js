@@ -2534,9 +2534,8 @@ const ARR_TAG_HI = 0x7ffb;                       // 数组句柄高 16 位标记
                                                  // 不可用 0x7FF8：那是 canonical quiet NaN（宿主 box(NaN) 恰产此位型），
                                                  // 与 f64 算术结果相撞 → 任何 NaN 会被误判为数组句柄。
 const SCRATCH = 16;                              // numstr 临时区（48 字节，够 20 位 + 负号 + len）
-const STR_BASE = 16 << 20;                       // 字面量 data 段基址（16 MiB）：bump 堆 arena 上限，越过即 trap
-                                                 // （字符串拼接不再原地追加 → 内存需求约翻倍，故 arena 加倍）
-const STR_BUMP = 128;                            // bump 堆起始（跳过 scratch）
+const STR_BASE = 128;                            // 独立档字面量段基址（紧跟 scratch，跳过 [0,128)）
+const STR_BUMP = 128;                            // 无字面量时的 arena 起点（= STR_BASE；有字面量时后移）
 /* in-module 合并形态布局（与 libqzvm 共享 memory）。
  * 依据：libqzvm wasi-libc 堆自 __heap_base(≈698KB) 向上增长，实测 5 万对象后堆顶
  * 7.19MiB；取 12MiB 为界留余量。emitter arena 全在其上，字面量段再上抬 8MiB。*/
@@ -2547,19 +2546,24 @@ const INMOD_TABLE_RESERVE = 4096; // 产物蹦床可用槽数（闭包 + 类方�
 const INMOD_STR_BASE   = 20 << 20;               // in-module 字面量段基址（20 MiB，libqzvm 段 12MiB + arena 8MiB）
 const INMOD_PAGES      = 1024;                   // 64 MiB（字面量段 [20MiB, 64MiB)）
 
-/* 独立档内存布局（opts.memMiB = 线性内存上限，MiB，默认 40，最小 8）。
+/* 独立档内存布局（opts.memMiB = 线性内存初始大小，MiB，默认 40，最小 8）。
  * in-module 的 memory 由 libqzvm 导入，大小归 src/qzvm/CMakeLists.txt 的
  * --initial-memory 管，不经此处。
- * 布局：scratch [16,64) / bump arena [STR_BUMP, arenaEnd) / 字面量段 [arenaEnd, total)。
- * arenaEnd = 总内存的 40%（默认 40MiB → 16MiB = 现状不变），至少 1MiB，
- * 且至少给字面量段留 4MiB。字面量段用量是编译期常量，富余留给运行时 bump 堆。 */
+ *
+ * 布局（关键：arena 必须在**高地址**才能按需 grow）：
+ *   scratch [16,64) / 字面量段 [128, litEnd) / bump arena [arenaBase, ceil)
+ * arenaBase = align8(litEnd)（字面量段用量是编译期常量，第一趟发射后即知）；
+ * arena 上界不进编译期常量，存 global，越过时 memory.grow 抬高，
+ * 直到 memory 达到 maxPages —— arena 不再是硬天花板。 */
 function memLayout(opts) {
     const mib = (opts && opts.memMiB) || 40;
-    if (!(mib >= 8)) throw new RangeError(`memMiB 至少 8（arena + 字面量段下限），收到 ${mib}`);
+    if (!(mib >= 8)) throw new RangeError(`memMiB 至少 8（初值下限），收到 ${mib}`);
     const pages = Math.ceil(mib * 16);
-    const total = pages << 16;
-    const arenaEnd = Math.min(Math.max((total * 0.85) & ~0xfff, 1 << 20), total - (4 << 20));   // arena 占 85%（默认 40MiB → 34MiB），字面量段至少 4MiB
-    return { pages, arenaEnd };
+    // 上限 = 32 位地址空间能表达的最大页数（65536 页 = 4 GiB）。
+    // 不再是「初始 ×N」——数组按几何扩容时旧块不回收，峰值 ≈ 终值×2，
+    // 给死上限会在峰值处误杀；到 4 GiB 才是物理极限。
+    const maxPages = 65536;
+    return { pages, maxPages };
 }
 
 // 字符串 helper 函数（每模块一份，emitter call 调用）
@@ -2579,14 +2583,33 @@ function emitBumpSet(m, emitNewVal) {
 }
 // 基础内存 helper（qzs_ckmem / qzs_memcpy）：num 数组扩容与字符串路径共用，
 // 故无条件发射（--interp 全退时无字符串 helper，num 数组仍需此二者）。
-function emitMemHelpers(m, strBase) {
-    // qzs_ckmem(newBump:i32) -> i32：bump 越界守卫。arena = [SCRATCH, STR_BASE)，越过基址
-    // 调 qz.oom 让宿主抛 RangeError（可 catch），替代 unreachable trap（整实例死）。
-    // unreachable 作兜底：宿主若未抛（不应发生）仍 trap，杜绝静默覆盖字面量段。
+function emitMemHelpers(m, strBase, arenaCeilGlobal, maxPages) {
+    // qzs_ckmem(newBump:i32) -> i32：bump 越界守卫 + 自动扩容。
+    // 布局：字面量段固定在低地址 [.., strBase)，arena 在 [strBase, ceil) 向上长。
+    // arena 上界存在 global（arenaCeilGlobal）里，越界时 memory.grow 抬高上界，
+    // 直到 memory 达到 maxPages；仍不够才 qz.oom（宿主抛 RangeError，可 catch）。
+    // 这样 arena 不再是编译期硬上限，而是随需增长到 wasm 内存上限。
     m.declareFunc("qzs_ckmem", ["i32"], ["i32"]);
-    m.startBody("qzs_ckmem", [], []);
-    m.localGet(0); m.i32Const(strBase); m.i32GtU();
-    m.ifBlock("void"); m.call("qz.oom"); m.unreachable(); m.end();
+    m.startBody("qzs_ckmem", ["i32"], []);
+    if (arenaCeilGlobal === undefined) {          // 退路：无扩容（in-module 档，内存由 C 侧管）
+        m.localGet(0); m.i32Const(strBase); m.i32GtU();
+        m.ifBlock("void"); m.call("qz.oom"); m.unreachable(); m.end();
+    } else {
+        m.localGet(0); m.globalGet(arenaCeilGlobal); m.i32GtU();
+        m.ifBlock("void");
+        // 每次 grow 32 页（2 MiB）直到够用或达上限
+        m.block("void"); m.loop("void");
+        m.i32Const(maxPages); m.memorySize(); m.i32GtU();   // 还有增长空间?
+        m.i32Eqz(); m.brIf(1);                              // 到顶 → 退出循环
+        m.i32Const(32); m.memoryGrow(); m.drop();            // grow 32 页
+        m.memorySize(); m.i32Const(16); m.i32Shl(); m.globalSet(arenaCeilGlobal);   // ceil = pages*64KiB
+        m.globalGet(arenaCeilGlobal); m.localGet(0); m.i32GeU(); m.brIf(1);          // 够用 → 退出
+        m.br(0);
+        m.end(); m.end();
+        m.localGet(0); m.globalGet(arenaCeilGlobal); m.i32GtU();
+        m.ifBlock("void"); m.call("qz.oom"); m.unreachable(); m.end();
+        m.end();
+    }
     m.localGet(0);
     m.endBody();
     // qzs_memcpy(dest, src, n)：先 8 字节块（i64.load/store，wasm 允许非对齐），尾字节。
@@ -3264,7 +3287,8 @@ function compileTS(input, outWasm, opts = {}) {
      * 为什么必须两趟：import 索引要在 declareFunc 之前定妥（funcidx = codeIdx +
      * imports.length），无法边发射边补登记。见 brain [[aot-generic-compiler-target]]：
      * import 面 = 需求驱动的最小契约面，不是 qzjs 私有 ABI 全集。 */
-    const emitAll = (m, contract) => {
+    const emitAll = (m, contract, passOpts) => {
+        const _opts = passOpts || {};
         const em = new Emitter(m);
         em.sf = sf;
         em.hoistedFns = hoistedFns;   // 顶层函数声明（其余函数声明按闭包处理）
@@ -3307,21 +3331,23 @@ function compileTS(input, outWasm, opts = {}) {
              *   bump arena [INMOD_HOST_LIMIT, INMOD_STR_BASE)，字面量段起于 INMOD_STR_BASE。
              * 独立模式保留原布局：bump [128,16MiB) + 字面量 [16MiB,40MiB)。*/
             const layout = opts.inModuleLink ? null : memLayout(opts);
-            em._strBase = opts.inModuleLink ? INMOD_STR_BASE : layout.arenaEnd;
-            em._strBump = opts.inModuleLink ? (INMOD_STR_BUMP + 64) : STR_BUMP;   // +64：让出 scratch 区
+            // 独立档新布局：字面量段从 STR_BASE(128) 起向上，arena 接在其后。
+            // arenaBase 由第一趟发射的 _litCursor 得出（emitAll 的 opts.arenaBase 传入）；缺省 = STR_BASE。
+            em._strBase = opts.inModuleLink ? INMOD_STR_BASE : STR_BASE;
+            em._strBump = opts.inModuleLink ? (INMOD_STR_BUMP + 64)
+                : (_opts.arenaBase !== undefined ? _opts.arenaBase : STR_BASE);
             if (opts.inModuleLink) {
                 m.importMemory("qz", "memory", INMOD_PAGES, INMOD_PAGES);
                 m.exportMemory(0);   // re-export 链接到的 memory（导入 memory 索引恒 0），供宿主驱动读结果
-                /* funcref 表：与 libqzvm 共享（其表容量 TABLE_CAP 项）。产物从
-                 * TABLE_CAP 起追加自己的蹦床，C 侧 closure_call 按槽号 call_indirect。 */
-                /* 表容量必须一次声明够（import 段先于 code 段编码，蹦床数此时未知）：
-                 * TABLE_CAP（libqzvm 自身表项）+ 余量给产物闭包/类方法。 */
                 m.addTableImport(INMOD_TABLE_CAP, "__indirect_function_table", "qz");
             } else {
-                m.addMemory(layout.pages);    // 默认 40 MiB：bump arena [0,16MiB) + 字面量段 [16MiB,40MiB)
+                m.addMemory(layout.pages, layout.maxPages);   // 初 40MiB，上限 640MiB（qzs_ckmem 按需 grow）
             }
             m.addGlobal("i32", em._strBump);                 // global0 = bump 堆（字符串/对象）
             m.addGlobal("i64", 0);                           // global1 = __err（异常值；0 = 无错）
+            // global2 = arena 上界（字节）。初值 = 内存总字节；扩容时 qzs_ckmem 抬高它。
+            // in-module 档内存由 C 侧管、不可 grow，故给常量上界（等价原行为）。
+            em._arenaCeilGlobal = m.addGlobal("i32", opts.inModuleLink ? INMOD_STR_BASE : (layout.pages << 16));
             em.moduleGlobals = new Map();                    // 模块级变量名 → wasm 全局索引（i64 tagged，索引 2 起）
             em._modInitNames = new Set(modVars.map(v => v.name.text));
             for (const v of modVars) em.moduleGlobals.set(v.name.text, m.addGlobal("i64", 0));
@@ -3336,7 +3362,9 @@ function compileTS(input, outWasm, opts = {}) {
             m.startBody("qzs_getargs", []);
             m.globalGet(em._argGlobal);
             m.endBody();
-            emitMemHelpers(m, em._strBase || STR_BASE);
+            emitMemHelpers(m, em._strBase || STR_BASE,
+                opts.inModuleLink ? undefined : em._arenaCeilGlobal,   // in-module：不可 grow，走常量上界
+                opts.inModuleLink ? 0 : layout.maxPages);
             emitStringHelpers(m);
             emitNumArrHelpers(m);
         }
@@ -3400,12 +3428,16 @@ function compileTS(input, outWasm, opts = {}) {
 
     // 第一趟：采集实际用到的 qz.* 符号。总跑（非仅 tagged）——num 模式也可能
     // 调 qz.math_pow（** 运算）；不跑则 contract=null → registerQz 不执行 → import 未注册。
+    // 同时它给出字面量段末尾（_litCursor）→ 第二趟据此定 arena 基址。
     const mc = new Module({ collectImports: true });
-    emitAll(mc, null);
+    const em1 = emitAll(mc, null);
     let contract = mc.collected;
+    // 字面量段 [STR_BASE, litEnd) 是编译期常量；arena 接在其后（对齐到 8）。
+    const litEnd = Math.max((em1._litCursor || STR_BASE) | 0, STR_BASE);
+    const arenaBase = opts.inModuleLink ? undefined : ((litEnd + 7) & ~7);
     // 第二趟：按采集到的子集注册契约面，真发产物。
     const m = new Module({ debug: !!opts.debug, debugLine: !!opts.debug || !!opts.debugLine, srcFile: input });
-    const em = emitAll(m, contract);
+    const em = emitAll(m, contract, { arenaBase });
     em._trampSlots = em._trampSlots || new Map();
     /* 类方法蹦床：与闭包蹦床同模式（统一 5 参 (i64 self, i64×4)），供 C 侧类原语
      * 按 clsId+方法名 查表分派。每条 classMeta 项记录方法名→槽。 */
