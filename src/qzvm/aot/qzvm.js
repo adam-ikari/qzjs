@@ -696,7 +696,8 @@ function makeQzvm(strings, opts) {
     const size = Math.max(meta.size || 16, 16);
     const off = bumpAlloc(size);
     const dv = new DataView(mem.buffer);
-      dv.setInt32(off, clsId, true);
+    dv.setInt32(off, clsId, true);
+    dv.setInt32(off + 4, size, true);   // [4]=size（与 wasm 侧 _emitNewCall 一致；字段越界检查 + 内联读写都依赖此槽）
     for (let k = 8; k < size; k += 8) dv.setBigInt64(off + k, TAG, true);   // 字段槽 = undefined
     const self = (0x7ffen << 48n) | BigInt(off);
     const fnC = exportsRef && meta.ctor && exportsRef[meta.ctor];

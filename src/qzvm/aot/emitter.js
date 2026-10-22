@@ -821,12 +821,27 @@ class Emitter {
         const pname = ts.isPrivateIdentifier(left.name) && this._curClass
             ? "#" + this._curClass + "#" + left.name.text : left.name.text;
         M.localGet(recvLocal); M.localSet(t.v);             // 接收者
+        // POJO(0x7FF9|off) / 类实例(0x7FFE|off) 且字段在实例尺寸内 → 直接内存 store。
+        // 走宿主 qz.set_index 是每次 ~1µs 的跨界，`new C(); b.v = 1` 的热路径慢 300 倍的主因。
+        // 越界或别的 tag（宿主对象/数组/字符串）仍回落宿主，语义不变。
+        const foff = this._fieldIndex(pname);
+        M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
+        M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
+        M.i32Or();
+        M.localGet(t.v); M.i32WrapI64(); M.i32Const(8); M.i32GeU();
+        M.i32And();
+        M.localGet(t.v); M.i32WrapI64(); M.i32Load(2, 4); M.i32Const(foff + 8); M.i32GeU();
+        M.i32And();
+        M.ifBlock("void");
+        M.localGet(t.v); M.i32WrapI64(); M.localGet(t.w); M.i64Store(3, foff);
+        M.else_();
         M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffdn); M.i64Eq();
         M.ifBlock("void");
         M.localGet(t.v); M.i32Const(this._strId(pname)); M.localGet(t.w); M.call("qz.object_set");
         M.else_();
         M.localGet(t.v); this._emitStrLitHandle(pname); M.localGet(t.w); M.call("qz.set_index");
         this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
+        M.end();
         M.end();
         M.localGet(t.w);
         this._expLeave();
@@ -5622,12 +5637,12 @@ Emitter.prototype._emitStoreProp = function (left) {
     M.ifBlock("void");
     M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.object_set");
     M.else_();
-    // 闭包值(0x7FFF)/类实例(0x7FFE)/字符串(0x7FFA)/数组(0x7FFB) → 宿主 prop_set。
-    // 内存快路径只对 POJO 合法：把闭包偏移当 POJO 基址做 i64Store 会**静默写坏线性内存**
-    // （`ctor.prototype.m = f` 就是这种：ctor 是闭包值，prototype 无处安放）。
+    // 闭包值(0x7FFF)/字符串(0x7FFA)/数组(0x7FFB) → 宿主 prop_set。
+    // 内存快路径对 POJO(0x7FF9) 和类实例(0x7FFE) 都合法：二者布局一致
+    // （[off]=clsId [off+4]=size [off+8..]=fields），可直接 i64Store 字段槽。
+    // 闭包值偏移当基址做 i64Store 会**静默写坏线性内存**
+    // （`ctor.prototype.m = f` 即此：ctor 是闭包值，prototype 无处安放）。
     M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();
-    M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
-    M.i32Or();
     M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
     M.i32Or();
     M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
