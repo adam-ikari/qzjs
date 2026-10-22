@@ -593,6 +593,24 @@ async function runMultiFile() {
     catch (e) { extErr = e.message; }
     check("re-export.外部模块显式报错", extErr.includes("外部模块"), true);
 
+    // `export * from './m'`：不产生绑定，内联后无代码可发；消费方经 checker 穿透 star 链解析。
+    fs.writeFileSync(path.join(dir, "starbase.ts"),
+        "export function sb(x: number): number { return x * 3; }\n");
+    fs.writeFileSync(path.join(dir, "starmid.ts"), "export * from './starbase';\n");
+    fs.writeFileSync(path.join(dir, "usestar.ts"),
+        "import { sb } from './starmid';\nexport function runStar(x: number): number { return sb(x); }\n");
+    const wasmStar = path.join(dir, "star.wasm");
+    compileTS(path.join(dir, "usestar.ts"), wasmStar, {});
+    const { instance: instStar } = await WebAssembly.instantiate(fs.readFileSync(wasmStar), {});
+    check("export*.穿透 runStar(5)", instStar.exports.runStar(5), 15);
+
+    // `export *` 指向外部模块 → 显式报错
+    fs.writeFileSync(path.join(dir, "extstar.ts"), "export * from 'mathlib';\n");
+    let extStarErr = "";
+    try { compileTS(path.join(dir, "extstar.ts"), path.join(dir, "extstar.wasm"), {}); }
+    catch (e) { extStarErr = e.message; }
+    check("export*.外部模块显式报错", extStarErr.includes("外部模块"), true);
+
     // 默认导入：`import d from './m'`（d 为目标模块命名默认导出）
     fs.writeFileSync(path.join(dir, "dm.ts"), "function df(n: number): number { return n + 100; }\nexport default df;\n");
     fs.writeFileSync(path.join(dir, "usedef.ts"),
@@ -647,14 +665,31 @@ async function runMultiFile() {
     catch (e) { nsErr = e.message; }
     check("命名空间.外部模块显式报错", nsErr.includes("外部模块"), true);
 
-    // 匿名默认导出 → 无法折回顶层名，显式报错
-    fs.writeFileSync(path.join(dir, "anon.ts"), "export default function (n: number): number { return n; }\n");
+    // 匿名默认导出：`export default function(){}` / `export default class{}` 无顶层名，
+    // 由 compileTS 合成 `__default_N` 后正常内联（此前整条 import 链报错失败）。
+    fs.writeFileSync(path.join(dir, "anon.ts"), "export default function (n: number): any { const s = 'ab'; return n * 2 + s.length - 2; }\n");
     fs.writeFileSync(path.join(dir, "useanon.ts"),
-        "import a from './anon';\nexport function runA(x: number): number { return a(x); }\n");
-    let anonErr = "";
-    try { compileTS(path.join(dir, "useanon.ts"), path.join(dir, "anon.wasm"), {}); }
-    catch (e) { anonErr = e.message; }
-    check("匿名默认导出.显式报错", anonErr.includes("匿名默认导出"), true);
+        "import a from './anon';\nexport function runA(x: number): any { return a(x); }\n");
+    const wasmAnon = path.join(dir, "anon.wasm");
+    const rAnon = compileTS(path.join(dir, "useanon.ts"), wasmAnon, {});
+    const qzAnon = makeQzvm(rAnon.strings, { fields: rAnon.fields });
+    const { instance: instAnon } = await WebAssembly.instantiate(fs.readFileSync(wasmAnon), { qz: qzAnon });
+    qzAnon.bindMem(instAnon.exports.memory);
+    if (instAnon.exports.__bump) qzAnon.bindBump(instAnon.exports.__bump);
+    check("匿名默认导出.函数内联", qzAnon._toJS(instAnon.exports.runA(qzAnon._fromJS(21))), 42);
+
+    // 匿名默认导出类：`export default class { ... }`
+    fs.writeFileSync(path.join(dir, "anoncls.ts"),
+        "export default class { x: number; tag: string; constructor(x: number) { this.x = x; this.tag = 'p'; } twice(): any { return this.x * 2 + this.tag.length - 1; } }\n");
+    fs.writeFileSync(path.join(dir, "useanoncls.ts"),
+        "import C from './anoncls';\nexport function runAC(): any { const c = new C(7); return c.twice(); }\n");
+    const wasmAnonC = path.join(dir, "anoncls.wasm");
+    const rAnonC = compileTS(path.join(dir, "useanoncls.ts"), wasmAnonC, {});
+    const qzAnonC = makeQzvm(rAnonC.strings, { fields: rAnonC.fields });
+    const { instance: instAnonC } = await WebAssembly.instantiate(fs.readFileSync(wasmAnonC), { qz: qzAnonC });
+    qzAnonC.bindMem(instAnonC.exports.memory);
+    if (instAnonC.exports.__bump) qzAnonC.bindBump(instAnonC.exports.__bump);
+    check("匿名默认导出.类内联", qzAnonC._toJS(instAnonC.exports.runAC()), 14);
 
     // 导入类：`import { C } from './m'` + new C —— 多文件类签名只声明一次（不重复 declareFunc）
     fs.writeFileSync(path.join(dir, "cmod.ts"),

@@ -3066,6 +3066,7 @@ function compileTS(input, outWasm, opts = {}) {
     const clsExprMap = new Map();     // ClassExpression 节点 → 合成类名
     const clsExprSeqRef = { n: 0 };
     let clsExprSeq = 0;
+    let defaultSeq = 0;   // 匿名默认导出合成名序号（`__default_N`）
     const enumStmts = [];         // TS enum（值语义，非纯类型 → 编译期求值）
     // 递归收集：函数/类声明**任意深度**均提升到模块级（函数内定义的 class/function 亦可编译）。
     // 提升后不再深入其体（避免重复收集其内部声明）。
@@ -3121,6 +3122,15 @@ function compileTS(input, outWasm, opts = {}) {
             ts.forEachChild(n, (c) => walkCls(c, childBind));
         };
         for (const st of f.statements) {
+            /* 匿名默认导出 `export default function(){}` / `export default class{}`：TS 符号表里
+             * valueDeclaration.name 为空 → 无稳定顶层名可折回，此前整条 import 链失败（104/125）。
+             * 就地补合成名 `__default_N`（节点身份不变，checker 仍指向它；后续 emit/解析走 st.name.text）。
+             * 已有 `__clsExpr_N` 合成名先例，同机制。 */
+            if (!st.name && (ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st))) {
+                const mods = ts.canHaveModifiers(st) ? ts.getModifiers(st) : null;
+                if (mods && mods.some(m => m.kind === ts.SyntaxKind.DefaultKeyword))
+                    st.name = ts.factory.createIdentifier("__default_" + (++defaultSeq));
+            }
             if (ts.isFunctionDeclaration(st) && st.name) { fns.push(st); fnSf.set(st, f); hoistedFns.add(st); }
             if (ts.isVariableStatement(st)) {                       // 模块级 const/let → wasm 全局（模块初始化时赋值一次）
                 for (const d of st.declarationList.declarations) {
@@ -3259,7 +3269,15 @@ function compileTS(input, outWasm, opts = {}) {
                             throw new Error(`[inline] 外部模块 re-export 不支持内联: "${el.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
                     }
                 } else {
-                    throw new Error(`[inline] 不支持 export * re-export（${path.basename(f.fileName)}）`);
+                    /* `export * from './m'`：不产生新绑定（内联后模块边界已消失，目标文件的顶层
+                     * 声明本就在同一 wasm 模块里），故无需发射任何代码，只需确认目标在源码集合内。
+                     * 消费方 `import { x } from './external'` 经 checker 的 getAliasedSymbol
+                     * 自动穿透 star 链解析到真实声明 —— 与具名 re-export 同一路径。 */
+                    const modSym = checker.getSymbolAtLocation(st.moduleSpecifier);
+                    const modDecl = modSym && modSym.declarations && modSym.declarations[0];
+                    const modFile = modDecl && ts.getSourceFileOfNode(modDecl);
+                    if (!modFile || !sfNames.has(modFile.fileName))
+                        throw new Error(`[inline] export * 来自外部模块，不支持内联: "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
                 }
                 continue;
             }
@@ -3396,7 +3414,13 @@ function compileTS(input, outWasm, opts = {}) {
                             const target = checker.getAliasedSymbol(sym);
                             // 无条件换新节点：即便同名，也须脱离 tsc 的模块绑定，否则 after 阶段
                             // 的模块 transform 会把它改写成 `(0, mod_1.x)`（内联后无 require）。
-                            if (target && target.name) return ts.factory.createIdentifier(target.name);
+                            // 匿名默认导出：target.name 为 "default"，但 collectDecls 已就地补合成名
+                            // 到声明节点（`__default_N`），从 valueDeclaration 取真名。
+                            if (target) {
+                                const decl = target.valueDeclaration || (target.declarations && target.declarations[0]);
+                                const realName = (decl && decl.name && decl.name.text) || target.name;
+                                return ts.factory.createIdentifier(realName);
+                            }
                         }
                     }
                     return n;
