@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-10-09T06:07:42.113Z._
+_Auto-generated. Last updated 2026-10-18T02:48:24.808Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
@@ -56,6 +56,7 @@ _Auto-generated. Last updated 2026-10-09T06:07:42.113Z._
 - [strict-mode-sandbox](pages/strict-mode-sandbox.md) — category: decision | tags: [security, sandbox, P2] | ## 定位裁决
 - [test262-ctest-fix](pages/test262-ctest-fix.md) — category: decision | tags: [test262, ctest, cmake] | ## 现象
 - [tls-ca-trust-store](pages/tls-ca-trust-store.md) — category: decision | tags: [tls, security, api, mbedtls] | <!-- compiled_truth -->
+- [url-idl-string-coercion](pages/url-idl-string-coercion.md) — category: decision | tags: [url, polyfill, webidl, browser-parity] | ## URL 构造器与 `href=` 先按 WebIDL 转 USVString
 - [urlpattern-modifier-fix](pages/urlpattern-modifier-fix.md) — category: decision | tags: [urlpattern, wintertc, ecma429, polyfill] | ## 问题
 - [wamr-init-lazy](pages/wamr-init-lazy.md) — category: decision | tags: [wamr, startup, lazy-init] | ## 决策
 - [wasm-engine-integration](pages/wasm-engine-integration.md) — category: decision | tags: [wasm, wamr, threading] | # WAMR 线程环境（关键坑）

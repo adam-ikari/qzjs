@@ -65,6 +65,20 @@ TEST_F(PolyfillTest, Url) {
     EXPECT_NE(std::string::npos, v.find("\"path\":\"/path\""));
 }
 
+/* WebIDL:URL 构造器把参数当 USVString 转换 —— 不是字符串也能用。
+ * 浏览器里 `new URL(window.location)` 取的是 location.toString() → href。
+ * 此前非字符串直接抛 "URL must be a string",docs.python.org 的
+ * sphinx_highlight.js 在 highlightSearchWords 这一行整段中断(实测 warn)。 */
+TEST_F(PolyfillTest, UrlCoercesNonStringInput) {
+    std::string v;
+    ASSERT_TRUE(host_value(h,
+        "var loc = { toString: function() { return 'https://example.com/a/b?q=1'; } };\n"
+        "var u = new URL(loc);\n"
+        "JSON.stringify({p: u.pathname, q: u.searchParams.get('q')})", &v));
+    EXPECT_NE(std::string::npos, v.find("\"p\":\"/a/b\"")) << "got: " << v;
+    EXPECT_NE(std::string::npos, v.find("\"q\":\"1\"")) << "got: " << v;
+}
+
 TEST_F(PolyfillTest, UrlPatternBasic) {
     std::string v;
     /* named group :id matches one path segment */

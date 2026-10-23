@@ -975,6 +975,83 @@ static void ctl_inspect(qz_t *rt, JSContext *rcpt_ctx, JSValue cmd, char *correl
     ctl_send_receipt(rt, rcpt_ctx, r);
 }
 
+/* op:"context" —— 宿主可寻址的多 context 管理（每-document realm 用）。
+ *
+ * 为什么要有它：qzjs 的既有模型是「宿主只见主 context」，子 context 由 JS 侧
+ * qzContext.spawn 建立，且 qz_ctx_spawn 建完就把 active 切回主 —— 宿主拿不到
+ * 一个「可以持续把 op:eval/inspect 指向它」的 realm。浏览器语义里**一个文档
+ * = 一个全新全局环境**，宿主（tinybrowser）需要每文档建一个干净 realm 并把
+ * 后续所有求值都指向它；这组 op 就是那个入口。
+ *
+ * action：
+ *   new      → 建一个全新 context（走 qz_ctx_create：注入 qzjs polyfill，且在
+ *              config.per_context_bytecode 时也跑宿主 initial_bytecode），
+ *              **不改变 active**（保持「宿主只见主」，避免影响不带 ctx_id 的
+ *              命令），回执带新 context 的 id。
+ *   destroy  → 销毁指定 context（id 必填；active 不能销毁自己 → BUSY）。
+ *   select   → 把 active 切到指定 context（给不带 ctx_id 的旧路径用；可选）。
+ *   active   → 回执当前 active 的 id。
+ *
+ * 与 op:"eval"/"inspect" 的 ctx_id 组合使用：宿主建好文档 context 后，后续
+ * eval/inspect 带 ctx_id=<id> 即落在该 realm 上。 */
+static void ctl_context(qz_t *rt, JSContext *ctx, JSValue cmd, char *correl)
+{
+    JSValue av = JS_GetPropertyStr(ctx, cmd, "action");
+    const char *action = JS_ToCString(ctx, av);
+    JS_FreeValue(ctx, av);
+    if (!action) {
+        ctl_error_receipt(rt, ctx, correl, "action must be a string",
+                          "INVALID_ARG");
+        return;
+    }
+
+    if (strcmp(action, "new") == 0) {
+        int prev = rt->active_ctx_id;
+        qz_ctx_t *c = qz_ctx_create(rt, &rt->config);
+        /* qz_ctx_create 成功时会把 active 留在新 ctx 上；这里恢复，维持
+         * 「宿主只见主」——调用方靠回执里的 id + ctx_id 显式寻址。 */
+        rt->active_ctx_id = prev;
+        if (!c) {
+            ctl_error_receipt(rt, ctx, correl, "context create failed",
+                              "GENERIC");
+        } else {
+            JSValue r = ctl_receipt_obj(ctx, correl, 1);
+            JS_SetPropertyStr(ctx, r, "id", JS_NewInt32(ctx, c->context_id));
+            ctl_send_receipt(rt, ctx, r);
+        }
+    } else if (strcmp(action, "destroy") == 0 ||
+               strcmp(action, "select") == 0) {
+        JSValue idv = JS_GetPropertyStr(ctx, cmd, "id");
+        int id = -1;
+        if (JS_ToInt32(ctx, &id, idv) < 0) id = -1;
+        JS_FreeValue(ctx, idv);
+        if (strcmp(action, "destroy") == 0) {
+            int rc = qz_ctx_destroy_id(rt, id);
+            if (rc != QZ_OK) {
+                ctl_error_receipt(rt, ctx, correl, "context destroy failed",
+                                  rc == QZ_ERR_BUSY ? "BUSY" : "NOT_FOUND");
+            } else {
+                ctl_send_receipt(rt, ctx, ctl_receipt_obj(ctx, correl, 1));
+            }
+        } else {
+            if (!qz_get_ctx_by_id(rt, id)) {
+                ctl_error_receipt(rt, ctx, correl, "no such context",
+                                  "NOT_FOUND");
+            } else {
+                rt->active_ctx_id = id;
+                ctl_send_receipt(rt, ctx, ctl_receipt_obj(ctx, correl, 1));
+            }
+        }
+    } else if (strcmp(action, "active") == 0) {
+        JSValue r = ctl_receipt_obj(ctx, correl, 1);
+        JS_SetPropertyStr(ctx, r, "id", JS_NewInt32(ctx, rt->active_ctx_id));
+        ctl_send_receipt(rt, ctx, r);
+    } else {
+        ctl_error_receipt(rt, ctx, correl, "unknown action", "INVALID_ARG");
+    }
+    JS_FreeCString(ctx, action);
+}
+
 static void ctl_metrics(qz_t *rt, JSContext *ctx, char *correl)
 {
     /* 只读原子计数 + 引擎内存统计：即时返回，无安全点依赖（§3）。 */
@@ -1037,6 +1114,9 @@ void qz_control_dispatch(qz_t *rt, qz_msg_t *m)
         correl0 = NULL;
     } else if (op && strcmp(op, "metrics") == 0) {
         ctl_metrics(rt, ctx, correl0);
+        correl0 = NULL;
+    } else if (op && strcmp(op, "context") == 0) {
+        ctl_context(rt, ctx, cmd, correl0);
         correl0 = NULL;
     } else if (op && strcmp(op, "interrupt") == 0) {
         /* 标志已在 qz_control（生产者线程）置位并会在引擎指令边界触发；

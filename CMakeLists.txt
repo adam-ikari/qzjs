@@ -451,8 +451,12 @@ endif()
 find_program(NPM_EXECUTABLE npm)
 if(NPM_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/polyfill/node_modules/esbuild" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng/qjsc.c")
     set(_polyfill_rebuild_enabled TRUE)
-    # 源依赖：src/polyfill/src/** 变更必须触发 rebuild，否则旧字节码静默进产物
-    file(GLOB_RECURSE QZ_POLYFILL_SRC "${CMAKE_SOURCE_DIR}/src/polyfill/src/*.js")
+    # 源依赖：src/polyfill/src/** 变更必须触发 rebuild，否则旧字节码静默进产物。
+    # ⚠️ 必须用 CMAKE_CURRENT_SOURCE_DIR，不是 CMAKE_SOURCE_DIR：qzjs 作为子目录
+    # 被宿主 add_subdirectory 时，后者指向**宿主**源码树 —— 依赖表盯错文件，
+    # qzjs 自己的 polyfill 改动不触发重建（旧字节码静默进产物），宿主改 polyfill
+    # 反而触发 qzjs 重建。tinybrowser 集成实测踩到。
+    file(GLOB_RECURSE QZ_POLYFILL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/polyfill/src/*.js")
     # qjsc 必须由 CMake 决定：当前 build 目录自编译的 qjsc 与引擎版本
     # 必然一致（QJSC=$<TARGET_FILE:qjsc>）。否则 build.js 回落 fs 扫描，
     # readdir 顺序不确定，撞上残留旧版 qjsc（如 0.15.1 → BC_VERSION 26）

@@ -236,6 +236,27 @@ static qz_ctx_t *qz_ctx_create_at(qz_t *rt, int slot)
         return NULL;
     }
 
+    /* per_context_bytecode：让宿主的 initial_bytecode 也在**非主** context 里
+     * 跑一遍（主 context 由启动路径 thread.c / rt_main.c 求值，这里跳过，
+     * 否则同一段字节码会被求值两次）。active 此刻 == slot（本函数第 158 行置的），
+     * 故 qz_eval_bytecode_internal 落在本 context 上。失败按整体建 context 失败
+     * 处理——宁可拿不到 context，也不要一个缺引导程序的半成品 realm。 */
+    if (slot != 0 && rt->config.per_context_bytecode &&
+        rt->config.initial_bytecode && rt->config.initial_bytecode_len) {
+        char *err = NULL;
+        if (qz_eval_bytecode_internal(rt, rt->config.initial_bytecode,
+                                      rt->config.initial_bytecode_len, &err) != 0) {
+            free(err);
+            rt->active_ctx_id = prev_active;
+            rt->contexts[slot] = NULL;
+            rt->context_count--;
+            qz_ctx_cleanup_resources(rt, ctx);
+            JS_FreeContext(ctx->jsctx);
+            free(ctx);
+            return NULL;
+        }
+    }
+
     return ctx;
 }
 
