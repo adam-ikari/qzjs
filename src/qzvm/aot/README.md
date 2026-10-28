@@ -12,6 +12,19 @@ qzjs 的 AOT（完整 TS → wasm）实验。当前推荐路线是**自研 TS→
 | `ASSESSMENT.md`   | 全部实验数据消化：性能画像/限制/方法论教训/后续优先级                                                                                                                                                                                                                                                     | ✅ 评估权威                                                                                                        |
 | `build.js`        | 编译流水线：TS→wasm→wamrc AOT→自包含 glue.js（`--target` 支持 32 位交叉编译）                                                                                                                                                                                                                             | ✅ 一键                                                                                                            |
 
+`emitter.js` 已按职责拆到 `emit/`（薄入口只做转发，`require("./emitter.js")` 调用面不变）：
+
+| 文件                    | 职责                                      | 依赖 |
+| ----------------------- | ----------------------------------------- | ---- |
+| `emit/consts.js`        | qz.\* 契约面、名字编码、内建全局集、源码文本工具 | — |
+| `emit/layout.js`        | 堆/字符串/数组布局常量、mem 辅助发射      | consts |
+| `emit/emitter.js`       | Emitter 核心：AST → wasm 指令             | layout |
+| `emit/tagged-core.js`   | tagged 公共方法（属性名折叠、arena 释放、字符串 id），副作用挂 prototype | layout, emitter |
+| `emit/tagged.js`        | tagged 模式发射：动态值语句/表达式         | 以上全部 |
+| `emit/compile-ts.js`    | 多文件收集/契约分析/两趟发射主流程         | 以上全部 |
+
+依赖单向无环；`tagged.js` 以副作用挂 `Emitter.prototype`，故 `compile-ts.js` 顶部 require 它。
+
 ## 使用（编译流水线）
 
 ```bash
