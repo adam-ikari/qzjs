@@ -19,7 +19,7 @@
 // ---------- LEB128 ----------
 function uleb(n) { const out = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; out.push(b); } while (n); return out; }
 function sleb(n) { const out = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && !(b & 0x40)) || (n === -1 && (b & 0x40))) more = false; else b |= 0x80; out.push(b); } return out; }
-function vec(items) { const out = uleb(items.length); for (const i of items) out.push(...i); return out; }
+function vec(items) { const out = uleb(items.length); for (const i of items) for (const b of i) out.push(b); return out; }
 // 64 位 LEB（i64 常量、大偏移）：BigInt 版，`>>`/`|` 均为 32 位不可用
 function uleb64(n) { n = BigInt(n) & 0xffffffffffffffffn; const out = []; do { let b = Number(n & 0x7fn); n >>= 7n; if (n) b |= 0x80; out.push(b); } while (n); return out; }
 function sleb64(n) {
@@ -107,6 +107,10 @@ class Module {
         return idx;
     }
     declareFunc(name, params, results) {          // 两阶段：先登记签名（支持前向引用）
+        // 幂等：同名重复登记只保留首份。否则第二次的 _codeIdx 覆盖第一次，第一个 codes 槽
+        // 永远是 null → build() 误报「函数体未闭合」（collectClasses 逐文件调用的边界）。
+        this._codeIdx = this._codeIdx || {};
+        if (this._codeIdx[name] !== undefined) return this._funcIdx[name];
         const t = this.funcType(params, results);
         const codeIdx = this.funcs.length;                    // codes 数组索引（本地函数序号）
         const fidx = codeIdx + this._importFuncCount();        // call 指令用（函数区全局索引；memory import 不占 funcidx）
@@ -116,9 +120,17 @@ class Module {
         this._codeIdx = this._codeIdx || {};
         this._codeIdx[name] = codeIdx;
         this.codes.push(null);
+        (this._pending = this._pending || {})[codeIdx] = name;
         return fidx;
     }
-    startBody(name, locals, names, declLine) { this._cur = { idx: (this._codeIdx || {})[name], name, locals: locals || [], names: names || null, body: [], marks: [], declLine: declLine || 1 }; }
+    startBody(name, locals, names, declLine) {
+        // 嵌套开体 = 上一个函数体漏了 endBody（发射期抛错/提前 return）→ loud，勿静默覆盖，
+        // 否则错误表现为 build() 时「codes[i] 为 null」，丢失原始位置。
+        if (this._cur) throw new Error(`[wasm-encoder] 嵌套 startBody: "${name}" 覆盖未闭合的 "${this._cur.name}"`);
+        const idx = (this._codeIdx || {})[name];
+        if (idx === undefined) throw new Error(`[wasm-encoder] startBody 未知函数 "${name}"（未 declareFunc）`);
+        this._cur = { idx, name, locals: locals || [], names: names || null, body: [], marks: [], declLine: declLine || 1 };
+    }
     endBody() { if (this._cur) { this._cur.body.push(OP.end); this.codes[this._cur.idx] = { name: this._cur.name, locals: this._cur.locals, names: this._cur.names, body: this._cur.body, marks: this._cur.marks, declLine: this._cur.declLine }; this._cur = null; } }
     // 语句级行标记：记录「当前函数体内指令字节偏移 → 源码行」。DWARF 行表用。
     markLine(srcLine) { if (this.debugLine && this._cur) this._cur.marks.push([this._cur.body.length, srcLine]); }
@@ -355,6 +367,9 @@ class Module {
         }
         let dwarfPayload = null;   // { entries:[{c, low, size}], payloadLen }
         if (this.codes.length) {
+            const hole = this.codes.findIndex(c => !c);
+            if (hole >= 0) throw new Error(`[wasm-encoder] 函数体未闭合（codes[${hole}] = ${(this._pending || {})[hole]}）：startBody 后漏了 endBody`);
+            this._pending = null;
             const built = this.codes.map(c => {
                 const localGroups = [];
                 for (const l of c.locals) {
@@ -367,7 +382,10 @@ class Module {
                 return { c, header, code };
             });
             const body = vec(built.map(e => uleb(e.code.length).concat(e.code)));
-            out.push(10, ...uleb(body.length), ...body);
+            // 不用 spread：内联后的单文件可达数千函数，body 元素数远超引擎实参上限（RangeError）。
+            out.push(10);
+            for (const b of uleb(body.length)) out.push(b);
+            for (const b of body) out.push(b);
             if (this.debugLine) {
                 // payload 起点 = 本段长度 LEB 之后的 count 字节；低址约定 = code 段 payload 相对偏移
                 const countLeb = uleb(built.length).length;
