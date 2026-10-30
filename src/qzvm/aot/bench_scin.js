@@ -58,7 +58,9 @@ function parse(stdout) {
     const out = {};
     for (const line of (stdout || "").trim().split("\n")) {
         const m = line.match(/^(\w+) ms= ([\d.]+) val= (\S+)/);
-        if (m) out[m[1]] = { ms: parseFloat(m[2]), val: m[3] };
+        /* val 归一成数值：TS/V8 侧整数打 `17984`、C 侧 `17984.000000`、Python 侧可能两者之一。
+         * 文本比较会把这些当成差异，必须按数值比。 */
+        if (m) out[m[1]] = { ms: parseFloat(m[2]), val: m[3], num: parseFloat(m[3]) };
     }
     return out;
 }
@@ -148,6 +150,28 @@ function build() {
     if (r.status !== 0) throw new Error(`build 失败: ${(r.stderr || r.stdout || "").trim().slice(0, 600)}`);
 }
 
+/* CPython 对照：同算法同实参的 Python 参考实现（bench_scin.py），仅比语言实现，
+ * 不含任何 AOT 机制 —— 说明「AOT 相对脚本语言基线」的量级。 */
+function benchPython() {
+    const py = process.env.PYTHON || "python3";
+    const r = spawnSync(py, [path.join(__dirname, "bench_scin.py")], { encoding: "utf8", timeout: 1800000 });
+    if (r.error || r.status !== 0) return {};   // 无 python3 则跳过该列
+    return parse(r.stdout);
+}
+
+/* C 对照：gcc -O2 编译同算法实现（bench_scin.c）。取模写法已经对齐（floor 版，
+ * 与 wasm f64.rem / V8 % 同为内联指令，不用 libm fmod），故为严格同构对照。 */
+function benchC() {
+    const cc = process.env.CC || "cc";
+    const exe = path.join(os.tmpdir(), "bench_scin_c");
+    const src = path.join(__dirname, "bench_scin.c");
+    const c = spawnSync(cc, ["-O2", "-o", exe, src, "-lm"], { encoding: "utf8" });
+    if (c.error || c.status !== 0) return {};
+    const r = spawnSync(exe, [], { encoding: "utf8", timeout: 1800000 });
+    if (r.error || r.status !== 0) return {};
+    return parse(r.stdout);
+}
+
 const t0 = Date.now();
 if (process.argv.includes("--build")) { console.log("> 重建 AOT 产物…"); build(); }
 console.log(`> AOT  (${path.basename(QZJS)})…`);
@@ -156,28 +180,47 @@ console.log("> qzjs 解释器…");
 const interp = benchInterp();
 console.log("> V8 JIT (node)…");
 const v8 = benchV8();
+console.log("> CPython…");
+const py = benchPython();
+console.log("> C (gcc -O2)…");
+const cc = benchC();
 const modes = aotModes();
 const pad = (s, n) => String(s).padEnd(n);
 const padL = (s, n) => String(s).padStart(n);
+const hasPy = Object.keys(py).length > 0, hasCC = Object.keys(cc).length > 0;
 console.log("");
-console.log(pad("负载", 22) + padL("AOT ms", 10) + padL("解释器 ms", 12) + padL("V8 ms", 10)
-    + padL("AOT/解释", 11) + padL("AOT/V8", 9) + "  校验");
-console.log("-".repeat(88));
+console.log(pad("负载", 26) + padL("AOT ms", 9) + padL("解释 ms", 9) + padL("V8 ms", 8)
+    + (hasPy ? padL("CPy ms", 9) : "") + (hasCC ? padL("C ms", 8) : "")
+    + padL("AOT/解释", 10) + padL("AOT/V8", 8) + "  校验");
+console.log("-".repeat(hasPy && hasCC ? 108 : 92));
 let okAll = true;
+const diverged = [];
 for (const [n, a, desc] of CASES) {
-    const A = aot[n], I = interp[n], V = v8[n];
-    if (!A || !I || !V) { console.log(pad(n, 22) + "  缺失结果"); okAll = false; continue; }
-    const sameAI = A.val === I.val, sameAV = A.val === V.val;
-    const chk = sameAI && sameAV ? "OK" : `差异 AOT=${A.val} 解释=${I.val} V8=${V.val}`;
-    if (!sameAI || !sameAV) okAll = false;
+    const A = aot[n], I = interp[n], V = v8[n], P = py[n], CC = cc[n];
+    if (!A || !I || !V) { console.log(pad(n, 26) + "  缺失结果"); okAll = false; continue; }
+    /* 文本比较会把 `17984` 与 `17984.000000` 当成差异（C/Python 格式化不同），
+     * 故按数值判等；浮点留 1e-12 相对容差（fmod vs f64.rem 可能差 1ulp）。 */
+    const close = (x, y) => {
+        if (x.num === y.num) return true;
+        const scale = Math.max(Math.abs(x.num), Math.abs(y.num), 1e-300);
+        return Math.abs(x.num - y.num) / scale < 1e-12;
+    };
+    const parts = [{ v: A, n: "AOT" }, { v: I, n: "解释" }, { v: V, n: "V8" }];
+    if (P) parts.push({ v: P, n: "CPy" });
+    if (CC) parts.push({ v: CC, n: "C" });
+    const same = parts.every(p => close(p.v, A));
+    const chk = same ? "OK" : `差异 ${parts.map(p => p.n + "=" + p.v.val).join(" / ")}`;
+    if (!same) { okAll = false; diverged.push(n); }
     console.log(
-        pad(`${n} ${desc}${modes[n] ? " · " + modes[n] : ""}`, 30)
-        + padL(A.ms, 10) + padL(I.ms, 12) + padL(V.ms, 10)
-        + padL((I.ms / A.ms).toFixed(2) + "×", 11) + padL((V.ms / A.ms).toFixed(2) + "×", 9)
+        pad(`${n} ${desc}${modes[n] ? " · " + modes[n] : ""}`, 34)
+        + padL(A.ms, 9) + padL(I.ms, 9) + padL(V.ms, 8)
+        + (hasPy ? padL((P ? P.ms : "-"), 9) : "") + (hasCC ? padL((CC ? CC.ms : "-"), 8) : "")
+        + padL((I.ms / A.ms).toFixed(2) + "×", 10) + padL((V.ms / A.ms).toFixed(2) + "×", 8)
         + "  " + chk
     );
 }
 console.log("");
-console.log(okAll ? "数值校验：全部一致" : "数值校验：存在差异（见上行）");
+console.log(okAll ? "数值校验：全部一致" : `数值校验：存在差异（${diverged.join(", ")}）`);
+if (hasCC) console.log("注：四列同算法同实参；C 侧取模用 floor 形式（与 wasm f64.rem 同为内联指令），非 libm fmod。");
 console.log(`Wall time: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 if (!okAll) process.exitCode = 1;
