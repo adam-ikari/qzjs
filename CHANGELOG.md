@@ -5,16 +5,17 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
-### AOT: interp 多文件拼接 + async 自动回退 + 真实覆盖率口径（2026-10-30）
+### AOT: interp 多文件拼接 + async/generator 自动回退 + 真实覆盖率口径（2026-10-30）
 - **interp 多文件拼接**（`emit/compile-ts.js`）：`interpJs` 现在把**所有**被内联且含 interp 函数的文件拼进同一作用域，修复 tsc 把 `node_modules` 源文件当外部库、`program.emit` 返回空串导致的「未定义函数」。四条硬约束：① 复用 prog1 的 `SourceFile`（匿名默认导出已由 `collectDecls` 就地补合成名，重解析会 `Debug Failure`）；② emit 前清 `externalModuleIndicator`/`commonJsModuleIndicator`/`impliedNodeFormat`/`ContainsES2015Module`（否则产出 `exports.*` + `require`）；③ 各文件私有同名顶层声明按文件改名 `x$f<idx>`（zod：61 个 locale 各有一份 `const error`），导出名不动；④ 按 import 图 DFS 后序拼接（`const parse = _parse($ZodRealError)` 依赖 `errors.ts` 先出现，否则 TDZ）。
 - **`import type` 依赖剪枝**：tsc 的 program 会收进类型依赖，此前整棵类型依赖树被内联发射（zod `util.ts`：83 个 program 文件里运行时只依赖 2 个），无关 async 代码把模块整体拖进 interp。改为只沿运行时导入边（值导入/副作用导入/值 re-export）求闭包，re-export 校验同步跳过 `isTypeOnly`。效果：zod 函数总数 48639→21111，interp 占比 100%→71.4%，整模块 interp 115→38。
 - **async 自动退 interp**：顶层 async 函数（含任意深度嵌套 async 闭包）整体退 interp，`await` 由宿主原生 Promise 承载（不再 strip 成同步 + identity → 静默拿到 Promise 句柄）。类体/字段初值/模块级语句里的 async 无函数级 interp 通道 → 整模块退 interp（wasm 侧不发射函数/类，单域无双状态）。`__module_init` 例外保留在 wasm（模块级变量初始化的唯一执行点）。
+- **generator 自动退 interp**：挂起判据从 `async` 扩到 `asteriskToken`（同一「函数体内任意深度出现挂起语义」规则），`yield`/`.next()` 逐步消费由宿主原生生成器承载。删除 emitter 的「平坦 yield 降级成数组」旧降级——它让 `.next()` 消费语义错（一次性数组而非游标）。顶层 generator 及其调用者经传递闭包进 interp；类 generator 方法/模块级 generator 表达式 → 整模块 interp。`audit_corpus7/38` 的 generator/async `unsupported` 登记随之移除，差分审计新增 interp 执行路径（与 build.js glue 同路径求值，async 结果 await 后比对）。
 - **双域守卫**：interp 函数与 wasm 函数同时触碰同一**可变**模块级变量（含非原始值 `const`）→ 整模块退 interp，避免两侧各存一份副本的静默错值（wasm 加到 5、interp 读 0）。纯原始值 `const` 不触发。
 - **wasm-encoder 加固**：`declareFunc` 幂等（同名重复登记保留首份，修复第二份覆盖 `_codeIdx` 导致首个 code 槽永为 null）；嵌套 `startBody` / 未闭合函数体 loud 报错（不再静默丢原始位置）；`code` 段不用 spread 拼装（数千函数时超引擎实参上限 `RangeError`）。
 - **覆盖率口径**：`coverage_real.js` 默认排除 `tests/`、`benchmarks/`（其 vitest/benchmark 外部依赖失败不是编译器缺口，`--include-tests` 可恢复），并新增 wasm/interp 函数占比——「编译成功」不再等同于「AOT 覆盖」。
 - **科学计算基准扩到 5 运行时**：新增 `bench_scin.py`（CPython）与 `bench_scin.c`（gcc -O2，带 `KEEP_IMM` 常量折叠屏障），`bench_scin.js` 自动调用并输出 3 轮中位数。结论：vs 解释器 9-46×、vs CPython 9-65×、vs V8 几何 1.30×、vs C 几何 0.46×；SIMD 假设经 `-fno-tree-vectorize` 实测否决，差距来源是常量折叠/循环展开/f64→i32 下标截断（详见 `BENCH_SCIN.md`）。
-- 新增门禁：多文件跨文件函数进 interpJs、私有重名不撞车、依赖顺序 TDZ、类构造器调用 interp 函数、async.await 解包、嵌套 async 闭包、双域状态共享、type-only 依赖不进发射集、`import type` 模块全进 wasm。
-- 结果：zod 125/125 编译成功（wasm 6034 / interp 15077）；`audit_diff` 47/47、`glue_audit` 5/5、`test_aot` ALL PASS。
+- 新增门禁：多文件跨文件函数进 interpJs、私有重名不撞车、依赖顺序 TDZ、类构造器调用 interp 函数、async.await 解包、嵌套 async 闭包、双域状态共享、type-only 依赖不进发射集、`import type` 模块全进 wasm、generator 逐步消费/类 generator 整模块回退。
+- 结果：zod 125/125 编译成功（wasm 5945 / interp 15166）；`audit_diff` 47/47（corpus7 27/27、corpus38 18/18）、`glue_audit` 5/5、`test_aot` ALL PASS。
 
 ### >4 形参 ABI 统一 + 差分审计 unsupported 登记（2026-10-19）
 - **>4 形参 lambda body 签名封顶**：`_emitLambdaBody` 改为 `[env:i32, a0..a3:i64, $ovf:i64]`（仅 >4 形参时带 ovf 槽），形参 4.. 由 `_emitOvfParamUnpack` 从 `$ovf` 解包到预留 `$ovfArg*` local。此前 body 按 `params.length` 全量声明，与固定 5 参 `call_indirect` 不匹配 → `not enough arguments` / `local.set[0]` 验证失败。

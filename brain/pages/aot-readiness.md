@@ -5,17 +5,17 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-10-30T11:45:20"
+updated: "2026-10-30T11:56:01"
 ---
 
 <!-- compiled_truth -->
 ## 当前状态（2026-10-30）
 
-zod 125 个非测试 .ts：**编译成功 125/125**。函数 21111 个，其中 wasm **6034（28.6%）** /
-interp **15077（71.4%）**；含 interp 的文件 38 个，全部为整模块 interp。
+zod 125 个非测试 .ts：**编译成功 125/125**。函数 21111 个，其中 wasm **5945（28.2%）** /
+interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 interp。
 
-**口径**：编译成功 ≠ AOT 覆盖。async 等无 wasm 通道的代码按设计退 interp；指标必须同时看
-wasm 函数占比（`coverage_real.js` 已内置该输出）。
+**口径**：编译成功 ≠ AOT 覆盖。async/generator 等无 wasm 通道的代码按设计退 interp；指标必须
+同时看 wasm 函数占比（`coverage_real.js` 已内置该输出）。
 
 **已消解（累计）**：
 - 匿名默认导出 131、`export *` 145、TS 重载 115、跨文件同名私有 107、`new` 属性访问 86、
@@ -23,29 +23,36 @@ wasm 函数占比（`coverage_real.js` 已内置该输出）。
 - **async（原 87 例）**：顶层 async（含任意深度嵌套 async 闭包）按函数退 interp；
   类体/字段初值/模块级语句里的 async 无函数级通道 → 整模块退 interp（单域，无双状态）。
   设计裁决：不实现状态机（见 aot-wasm-tagged-backend）。
+- **generator（原 YieldExpression 报错）**：2026-10-30 用同一挂起判据（asteriskToken + 嵌套检测）
+  改走 interp，`.next()` 逐步消费由宿主原生生成器承载；删除旧的「平坦 yield 降级成数组」。
+  顶层 generator 及其调用者经传递闭包进 interp；类 generator 方法/模块级表达式 → 整模块 interp。
 - **`import type` 依赖被内联**（2026-10-30）：tsc program 含类型依赖，此前整树被发射，
   无关 async 把模块拖进 interp（zod util.ts：83 个 program 文件里运行时只依赖 2 个）。
-  改沿运行时导入边求闭包：zod 函数 48639→21111，interp 100%→71.4%，整模块 interp 115→38。
+  改沿运行时导入边求闭包：zod 函数 48639→21111，interp 100%→71.8%，整模块 interp 115→39。
 
 **剩余大项**：
-- generator（`YieldExpression`）无任何通道（唯一「大」功能缺口）。
-- 真实 wasm 占比：async 密集库（zod 即典型）绝大部分函数仍是 interp。要拿 AOT 收益，
-  要么热点路径无 async，要么实现 async 状态机。
+- 真实 wasm 占比：挂起语义密集库（zod 即典型）绝大部分函数仍是 interp。要拿 AOT 收益，
+  要么热点路径无 async/generator，要么实现状态机（大工程，当前明确不做）。
 - re-export 聚合同名值（历史 19 例）已随跨文件改名/整模块回退消失，保留观察。
 
 ## 结构性事实
 
 功能缺口沿 import 图传播（历史主因）。**类型边与运行时边必须分开**：类型依赖不产生运行时
 语义，不得进入发射集。interp 多文件拼接的约束见 [[aot-interp-multifile-splicing]]。
+挂起语义（async/generator）只有一条通道：函数体任意深度出现即整函数退 interp；无函数级
+通道的位置（类体/字段初值/模块级语句）→ 整模块退 interp。
 
 ## 验证
 
-`test_aot` ALL PASS；`audit_diff` 47/47；`glue_audit` 5/5；scin 11/11 数值一致。
+`test_aot` ALL PASS（含 generator 5 项门禁）；`audit_diff` 47/47、corpus7 27/27、corpus38 18/18；
+`glue_audit` 5/5；scin 11/11 数值一致。
 
 ## 教训
 
 - 编译成功不等于 AOT 覆盖（2026-10-29 的 125/125 实为 99.99% 函数走 interp）。
 - 测试路径与产物路径必须一致：`glue_audit` 是唯一能捕获装配层缺陷的测试。
+- 「unsupported 登记」是临时口径：一旦有 interp 通道，必须移除登记并让用例真正对拍，
+  否则 grep 式覆盖率会掩盖回归。
 
 
 ## Timeline
@@ -204,3 +211,15 @@ wasm 函数占比（`coverage_real.js` 已内置该输出）。
   summary: "2026-10-30：zod 125/125 编译成功，wasm 函数仅 28.6%；async 改走 interp，剩余大项 generator"
   source: "coverage_real.js + test_aot/audit_diff/glue_audit"
   affects: [aot-readiness]
+
+- time: 2026-10-30T11:56:01
+  kind: decision
+  summary: "generator 改走 interp 回退；zod 125/125，wasm 5945/21111 (28.2%)"
+  source: "test_aot ALL PASS; audit_diff c7/c38 移除 unsupported 后全绿; coverage_real zod"
+  affects: [aot-readiness]
+
+- time: 2026-10-30T11:56:01
+  kind: evidence
+  summary: "generator 改走 interp：删除平坦 yield 降级；audit corpus7/38 移除 unsupported 后全绿；zod wasm 占比 28.2%"
+  source: test_aot / audit_diff / coverage_real
+  affects: [aot-readiness, aot-interp-multifile-splicing]
