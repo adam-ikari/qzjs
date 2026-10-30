@@ -2086,6 +2086,99 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     M.localGet(te.v);                                       // 表达式值 = 实例
     this._expLeave();
 };
+/* 解构赋值（赋值式）：left = ArrayLiteralExpression / ObjectLiteralExpression，值在 local rhsLocal。
+ * 覆盖绑定解构的全部形状：嵌套模式、默认值（= 仅 undefined 触发）、数组 rest（slice）、
+ * 对象 rest（object_rest + 静态键排除）、计算键名；目标可为标识符 / 成员访问 / 嵌套模式。 */
+Emitter.prototype._emitDestructuringAssign = function (left, rhsLocal) {
+    const M = this.m;
+    if (ts.isArrayLiteralExpression(left)) {
+        {   // 非 wasm 数组/字符串 → 迭代协议收集（同绑定解构，否则可迭代源按下标读得 undefined）
+            M.localGet(rhsLocal); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
+            M.localGet(rhsLocal); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffan); M.i64Eq();
+            M.i32Or(); M.i32Eqz();
+            M.ifBlock("void");
+            M.localGet(rhsLocal); M.call("qz.iter_array"); M.localSet(rhsLocal);
+            M.end();
+        }
+        let i = 0;
+        for (const el of left.elements) {
+            if (ts.isOmittedExpression(el)) { i++; continue; }
+            if (ts.isSpreadElement(el)) {                     // [...rest] → arr.slice(i)
+                M.localGet(rhsLocal); M.i32Const(this._strId("slice"));
+                M.i64ConstBits(...f64Bits(i)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                this._emitUndefined();                        // ovf
+                M.call("qz.method_call");
+                this._emitAssignTargetFromStack(el.expression);
+                i++; continue;
+            }
+            let target = el, dflt = null;
+            if (ts.isBinaryExpression(el) && el.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+                target = el.left; dflt = el.right;
+            }
+            this._emitElemOf(rhsLocal, ts.factory.createNumericLiteral(i));
+            if (dflt) this._emitDefaultIfUndef(dflt);
+            this._emitAssignTargetFromStack(target);
+            i++;
+        }
+        return;
+    }
+    const props = left.properties;
+    const hasRest = props.some(p => ts.isSpreadAssignment(p));
+    const restExcl = [];
+    if (hasRest) {
+        for (const p of props) {
+            if (ts.isSpreadAssignment(p)) continue;
+            const nm = ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) ? p.name : null;
+            const k = nm && (ts.isIdentifier(nm) || ts.isStringLiteral(nm) || ts.isNumericLiteral(nm)) ? nm.text : null;
+            if (k === null) throw new Error("[tagged] {...rest} 与计算属性名解构混用暂不支持");
+            restExcl.push(k);
+        }
+    }
+    for (const p of props) {
+        if (ts.isSpreadAssignment(p)) {                       // {...rest} → 宿主 object_rest
+            if (restExcl.length > 8) throw new Error("[tagged] 对象 rest 解构最多排除 8 个键");
+            M.localGet(rhsLocal);
+            for (let k = 0; k < 8; k++) M.i32Const(k < restExcl.length ? this._strId(restExcl[k]) : -1);
+            M.call("qz.object_rest");
+            this._emitAssignTargetFromStack(p.expression);
+            continue;
+        }
+        let target, dflt = null, key = null, keyExpr = null;
+        if (ts.isShorthandPropertyAssignment(p)) {
+            target = p.name;
+            key = p.name.text;                              // 简写：键名 = 变量名
+            dflt = p.objectAssignmentInitializer || null;
+        } else if (ts.isPropertyAssignment(p)) {
+            target = p.initializer;
+            if (ts.isBinaryExpression(target) && target.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+                dflt = target.right; target = target.left;
+            }
+            if (ts.isComputedPropertyName(p.name)) keyExpr = p.name.expression;
+            else if (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) || ts.isNumericLiteral(p.name)) key = p.name.text;
+            else throw new Error("[tagged] 解构赋值不支持的属性名形式: " + ts.SyntaxKind[p.name.kind]);
+        } else throw new Error("[tagged] 解构赋值不支持的对象成员: " + ts.SyntaxKind[p.kind]);
+        if (keyExpr !== null) this._emitElemOf(rhsLocal, keyExpr);
+        else this._emitPropReadFromLocal(rhsLocal, key);
+        if (dflt) this._emitDefaultIfUndef(dflt);
+        this._emitAssignTargetFromStack(target);
+    }
+};
+// 栈顶值 → 赋值目标（标识符/属性/元素/嵌套模式）；写入后丢弃 store 保留值（结果 = 整个 RHS）。
+Emitter.prototype._emitAssignTargetFromStack = function (target) {
+    const M = this.m;
+    while (ts.isParenthesizedExpression(target)) target = target.expression;
+    if (ts.isIdentifier(target)) { this._emitVarStore(target.text, this.scratchB); M.drop(); return; }
+    if (ts.isPropertyAccessExpression(target)) { this._emitStoreProp(target); M.drop(); return; }
+    if (ts.isElementAccessExpression(target)) { this._emitStoreElem(target); M.drop(); return; }
+    if (ts.isArrayLiteralExpression(target) || ts.isObjectLiteralExpression(target)) {
+        const t = this._expEnter();
+        M.localSet(t.v);
+        this._emitDestructuringAssign(target, t.v);
+        this._expLeave();
+        return;
+    }
+    throw new Error("[tagged] 解构赋值目标不支持: " + ts.SyntaxKind[target.kind]);
+};
 // super(...)：在构造器内，self=local0。调父 ctor 后回写本类字段默认值（JS 派生字段初始化序）。
 Emitter.prototype._emitSuperCall = function (c, args) {
     const M = this.m;
@@ -2169,6 +2262,14 @@ Emitter.prototype._emitSuperCallForward = function (c) {
         M.i32Const(c.id);
         for (let i = 0; i <= 4; i++) M.localGet(i);
         M.call("qz.super_ctor");
+        this._emitFieldDefaults(c);
+        return;
+    }
+    if (c.parent && !this.classes.has(c.parent)) {           // 内建父（Error 族…）：无 wasm ctor 可调，同显式 super() 写法
+        M.localGet(0); M.i32WrapI64(); M.localGet(1);
+        M.i64Store(3, this._fieldIndex("message"));
+        M.localGet(0); M.i32WrapI64(); this._emitStrLitHandle(c.parent);
+        M.i64Store(3, this._fieldIndex("name"));
         this._emitFieldDefaults(c);
         return;
     }
@@ -2357,25 +2458,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         if (ts.isArrayLiteralExpression(e.left) || ts.isObjectLiteralExpression(e.left)) {
             const M = this.m, t = this._expEnter();
             this.emitTaggedExpr(e.right); M.localSet(t.x);
-            if (ts.isArrayLiteralExpression(e.left)) {
-                let i = 0;
-                for (const el of e.left.elements) {
-                    if (ts.isOmittedExpression(el)) { i++; continue; }
-                    if (!ts.isIdentifier(el)) throw new Error("[tagged] 解构赋值目标仅支持标识符");
-                    this._emitElemOf(t.x, ts.factory.createNumericLiteral(i));
-                    this._emitVarStore(el.text, this.scratchB); M.drop();
-                    i++;
-                }
-            } else {
-                for (const p of e.left.properties) {
-                    if (!ts.isPropertyAssignment(p)) throw new Error("[tagged] 解构赋值仅支持 {key: target} 形式");
-                    const key = ts.isIdentifier(p.name) ? p.name.text : (ts.isStringLiteral(p.name) || ts.isNumericLiteral(p.name) ? p.name.text : null);
-                    const target = ts.isIdentifier(p.initializer) ? p.initializer.text : null;
-                    if (key === null || target === null) throw new Error("[tagged] 解构赋值仅支持标识符目标");
-                    this._emitPropReadFromLocal(t.x, key);
-                    this._emitVarStore(target, this.scratchB); M.drop();
-                }
-            }
+            this._emitDestructuringAssign(e.left, t.x);
             M.localGet(t.x);                      // 赋值表达式结果 = RHS
             this._expLeave();
             return;

@@ -247,17 +247,13 @@ class Emitter {
             }
         }
     }
-    // 栈顶值 → 绑定目标。仅支持 Identifier（单层解构）；嵌套 pattern 明确报错（避免静默错值）。
+    // 栈顶值 → 绑定目标。Identifier 直落 local；嵌套 pattern 入临时槽后递归析构。
     _emitBindingTarget(name) {
-        if (!ts.isIdentifier(name)) {                    // 嵌套模式（[[a],[b]] / {a:{b}}）：值入槽后递归析构
-            const t = this._expEnter();
-            this.m.localSet(t.v);
-            this._emitDestructurePattern(name, t.v);
-            this._expLeave();
-            return;
-        }
         if (ts.isIdentifier(name)) { this.m.localSet(this._local(name.text)); return; }
-        throw new Error("[tagged] 嵌套解构未实现（`const [[a],[b]] = …` / `const {a:{b}} = …`）；请用中间变量展开");
+        const t = this._expEnter();
+        this.m.localSet(t.v);
+        this._emitDestructurePattern(name, t.v);
+        this._expLeave();
     }
 
     // 收集函数体内所有箭头函数/函数表达式（含嵌套），按源序。返回节点列表。

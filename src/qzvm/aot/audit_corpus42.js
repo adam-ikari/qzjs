@@ -1,61 +1,70 @@
-// 重载签名（无实现体）不得进入方法表。
-//
-// 背景：类方法收集曾不过滤 `mem.body`，重载签名（`write(fn: F): void;`）被当成方法，
-// emitAll 取 `mth.node.body` 得 undefined → 编译期崩溃
-// "Cannot read properties of undefined (reading 'index')" / "'kind'"。
-// 重载在 TS 里只是类型信息，运行时只有实现体（最后那个同名带 body 的声明）存在。
-//
-// 用 audit_diff.js 跑（pure-wasm 解释执行，对拍 V8）。本语料同时覆盖两个独立缺陷：
-//   1) 重载签名进方法表 → 编译期崩
-//   2) void 方法返回值未归一 → pure-wasm 运行时崩 Cannot convert undefined to a BigInt
+// 差分审计语料（第四十二批）：解构**赋值式**（[a,b]=、{x:…}=）全覆盖——嵌套模式、默认值、
+// 数组/对象 rest、成员/元素目标、计算键、可迭代源、表达式结果值。旧实现仅支持
+// 「标识符 + {key: 标识符}」，其余形状 loud 报错；现由 _emitDestructuringAssign 统一发射。
 module.exports = [
-  { name: "method-overload-sigs", fn: "f", ts: `export function f(): any {
-    const d = new Doc();
-    d.write("line one");
-    d.write((doc: any) => { doc.write("from fn"); });
-    return d.content.join("|");
-  }
-  class Doc {
-    content: string[] = [];
-    write(fn: (d: any) => void): void;
-    write(line: string): void;
-    write(arg: any): void {
-      if (typeof arg === "function") { arg(this); return; }
-      this.content.push(arg);
-    }
-  }` },
-  { name: "method-overload-many", fn: "f", ts: `export function f(): any {
-    const c = new C();
-    return c.m(1, 2) + "|" + c.m("x") + "|" + c.m();
-  }
-  class C {
-    m(a: number, b: number): number;
-    m(s: string): string;
-    m(): string;
-    m(a?: any, b?: any): any {
-      if (typeof a === "number") return a + b;
-      if (typeof a === "string") return a;
-      return "none";
-    }
-  }` },
-  { name: "ctor-overload-sig", fn: "f", ts: `export function f(): any {
-    return new D(5).v;
-  }
-  class D {
-    v: number;
-    constructor(n: number);
-    constructor(n: number) { this.v = n; }
-  }` },
-  { name: "accessor-overload-sig", fn: "f", ts: `export function f(): any {
-    const a = new E();
-    a.x = 3;
-    return String(a.x);
-  }
-  class E {
-    private _x = 0;
-    get x(): number;
-    get x(): number { return this._x; }
-    set x(v: number);
-    set x(v: number) { this._x = v; }
-  }` },
+  { name: "assign-basic-swap", fn: "f", ts: `export function f(): any {
+  let a = 1, b = 2;
+  [a, b] = [b, a];
+  return a + "," + b;
+}` },
+  { name: "assign-holes-indices", fn: "f", ts: `export function f(): any {
+  let a = 0, c = 0;
+  [a, , c] = [10, 20, 30];
+  return a + "," + c;
+}` },
+  { name: "assign-array-defaults", fn: "f", ts: `export function f(): any {
+  let a = 9, b = 9;
+  [a = 5, b = 6] = [undefined, 1];
+  return a + "," + b;
+}` },
+  { name: "assign-array-rest", fn: "f", ts: `export function f(): any {
+  let d = 0; let rest: any = [];
+  [d, ...rest] = [1, 2, 3];
+  return d + "|" + rest.join(",");
+}` },
+  { name: "assign-object-rename", fn: "f", ts: `export function f(): any {
+  let e = 0, g = 0;
+  ({ x: e, y: g } = { x: 7, y: 8 });
+  return e + "," + g;
+}` },
+  { name: "assign-object-shorthand-default", fn: "f", ts: `export function f(): any {
+  let h = 0, i = 0;
+  ({ h = 9 } = {});
+  ({ i } = { i: 3 });
+  return h + "," + i;
+}` },
+  { name: "assign-member-target", fn: "f", ts: `export function f(): any {
+  const o: any = { p: 1 };
+  ({ p: o.q } = { p: 42 });
+  [o.r] = [7];
+  return o.q + "," + o.r;
+}` },
+  { name: "assign-element-target", fn: "f", ts: `export function f(): any {
+  const arr: any = [];
+  ([arr[0], arr[1]] = [15, 16]);
+  return arr.join("-");
+}` },
+  { name: "assign-nested-patterns", fn: "f", ts: `export function f(): any {
+  let a = 0, b = 0;
+  [[a], { z: b }] = [[11], { z: 12 }];
+  const { deep: { k } } = { deep: { k: 0 } };
+  ({ deep: [{ v: b }] } = { deep: [{ v: 99 }] });
+  return a + "," + b;
+}` },
+  { name: "assign-computed-key", fn: "f", ts: `export function f(): any {
+  let c = 0; const kk = "k";
+  ({ [kk]: c } = { k: 13 });
+  return c;
+}` },
+  { name: "assign-iterable-source", fn: "f", ts: `export function f(): any {
+  let a = 0, b = 0;
+  [a, b] = new Set([1, 2]);
+  return a + "," + b;
+}` },
+  { name: "assign-expression-value", fn: "f", ts: `export function f(): any {
+  let a = 0;
+  const z: any = ([a] = [77]);
+  const w: any = ({ a } = { a: 88 });
+  return a + "|" + z[0] + "|" + w.a;
+}` },
 ];
