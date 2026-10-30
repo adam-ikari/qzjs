@@ -72,18 +72,27 @@ async function runCase(c, dir, seq) {
     qz.bindClosures(instance.exports, r.lamMeta);
     qz.bindClasses(instance.exports, r.classMeta);
     const m = (r.funcMeta || []).find(f => f.name === c.fn);
-    // wasm 导出为固定元数：补足到形参个数（num 模式无 undefined → 补 NaN，与 JS 少传算术一致）
-    const raw = (c.args || []).slice();
-    const nPar = m ? m.params : raw.length;
-    while (raw.length < nPar) raw.push(m && m.mode === "num" ? NaN : undefined);
-    const args = raw.slice(0, nPar).map(x => qz._fromJS(x));
-    const res = instance.exports[c.fn](...args);
-    if (qz.take_err) qz.take_err();          // 跨函数 throw 的宿主出口（glue 约定）
-    got = m && m.mode === "num" ? res : qz._toJS(res);
+    if (m && m.mode === "interp") {
+      // async/generator 等挂起语义走宿主 JS 副本（同 build.js glue 路径）
+      const rec = new Function(r.interpJs + `\nreturn typeof ${c.fn} === "function" ? ${c.fn} : undefined;`)();
+      if (typeof rec !== "function") throw new Error("interp 函数缺失: " + c.fn);
+      const res = rec(...(c.args || []));
+      got = res && typeof res.then === "function" ? await res : res;
+    } else {
+      // wasm 导出为固定元数：补足到形参个数（num 模式无 undefined → 补 NaN，与 JS 少传算术一致）
+      const raw = (c.args || []).slice();
+      const nPar = m ? m.params : raw.length;
+      while (raw.length < nPar) raw.push(m && m.mode === "num" ? NaN : undefined);
+      const args = raw.slice(0, nPar).map(x => qz._fromJS(x));
+      const res = instance.exports[c.fn](...args);
+      if (qz.take_err) qz.take_err();          // 跨函数 throw 的宿主出口（glue 约定）
+      got = m && m.mode === "num" ? res : qz._toJS(res);
+    }
     fs.unlinkSync(wasm);
   } catch (e) { aotErr = "AOT:" + String(e && e.message || e).split("\n")[0].slice(0, 70); }
   try {                                        /* oracle 无条件跑：两侧同抛视为一致（判据同 audit_diff）*/
-    const res = jsFn(c.ts, c.fn)(...(c.args || []));
+    let res = jsFn(c.ts, c.fn)(...(c.args || []));
+    if (res && typeof res.then === "function") res = await res;   // async oracle 与 AOT 同 await
     exp = res && typeof res === "object" ? JSON.parse(JSON.stringify(res)) : res;
   } catch (e) { jsErr = "JS:" + String(e && e.message || e).split("\n")[0].slice(0, 40); }
   const j = (v) => (typeof v === "number" ? (Number.isNaN(v) ? "NaN" : !isFinite(v) ? (v > 0 ? "Infinity" : "-Infinity") : (Object.is(v, -0) ? "-0" : String(v))) : JSON.stringify(v));

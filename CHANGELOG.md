@@ -5,6 +5,13 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 解构赋值全覆盖 + 内建父类合成 ctor + stress 走 interp（2026-10-30）
+- **解构赋值式（`[a,b]=…` / `({x:…}=…`）全形状**（`emit/tagged.js` 新增 `_emitDestructuringAssign`）：旧实现只吃「标识符 + `{key: 标识符}`」，其余（嵌套模式、默认值、数组 rest、对象 rest、成员/元素目标、计算键、可迭代源）全部 loud 报错。现在按 JS 语义统一发射：RHS 求值一次 → 逐目标读取（数组走迭代协议归一，对象读字段/计算键）→ 默认值仅 undefined 触发 → 目标写（标识符/属性/元素/嵌套递归），表达式结果 = RHS。新增 `audit_corpus42.js`（12 例，与 V8 对拍 12/12；实测修出 1 个简写键名 bug：`({i} = {i:3})` 曾读 undefined）。
+- **内建父类的合成 ctor**（`emit/tagged.js` `_emitSuperCallForward`）：`class E extends Error { code = 3 }` 无显式 constructor 时，合成 ctor 曾 `call` 不存在的 `__m_Error$ctor` → 编译失败。内建父（Error 族）改走与显式 `super(…)` 相同的路径：写 `message`（转发首实参）/`name` 字段 + 子类字段默认值。真实触发源：`@cloudflare/workers-types`（`class DOMException extends Error` 等 134 个类）。
+- **stress_aot 走 interp**：`audit_diff` 已有的 interp 执行路径补进压力脚本（async/generator 用例不再报 `instance.exports[f] is not a function`），oracle 同步 await Promise。stress 全语料 42 批 915 例 1 轮 0 diff。
+- **清理**：`_emitBindingTarget` 里「嵌套解构未实现」的不可达报错删除（嵌套绑定解构早已递归支持，误导性注释一并修正）。
+- 结果：`test_aot` ALL PASS（新增 类.合成 ctor 转发用户父类 / 内建父(Error) 两门禁）；`audit_diff` 47/47、corpus42 12/12；`glue_audit` 5/5；`stress_aot` 915/915。
+
 ### AOT: interp 多文件拼接 + async/generator 自动回退 + 真实覆盖率口径（2026-10-30）
 - **interp 多文件拼接**（`emit/compile-ts.js`）：`interpJs` 现在把**所有**被内联且含 interp 函数的文件拼进同一作用域，修复 tsc 把 `node_modules` 源文件当外部库、`program.emit` 返回空串导致的「未定义函数」。四条硬约束：① 复用 prog1 的 `SourceFile`（匿名默认导出已由 `collectDecls` 就地补合成名，重解析会 `Debug Failure`）；② emit 前清 `externalModuleIndicator`/`commonJsModuleIndicator`/`impliedNodeFormat`/`ContainsES2015Module`（否则产出 `exports.*` + `require`）；③ 各文件私有同名顶层声明按文件改名 `x$f<idx>`（zod：61 个 locale 各有一份 `const error`），导出名不动；④ 按 import 图 DFS 后序拼接（`const parse = _parse($ZodRealError)` 依赖 `errors.ts` 先出现，否则 TDZ）。
 - **`import type` 依赖剪枝**：tsc 的 program 会收进类型依赖，此前整棵类型依赖树被内联发射（zod `util.ts`：83 个 program 文件里运行时只依赖 2 个），无关 async 代码把模块整体拖进 interp。改为只沿运行时导入边（值导入/副作用导入/值 re-export）求闭包，re-export 校验同步跳过 `isTypeOnly`。效果：zod 函数总数 48639→21111，interp 占比 100%→71.4%，整模块 interp 115→38。

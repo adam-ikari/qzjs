@@ -891,6 +891,11 @@ async function runSemantics() {
       + "export function nsFlat(): any { return util.join2(\"a\", \"b\") + \"|\" + util.sep; }\n"
       + "export function implOnly(): any { interface Iface { b: number; } class Impl implements Iface { b = 2; } const i: any = new Impl(); return i.b; }\n"
       + "export function staticArrowField(): any { class C { static make = (x: any): any => ({ v: x }); } return C.make(7).v; }\n"
+      + "class Base2 { v: number; constructor(x: number) { this.v = x; } }\n"
+      + "class Sub2 extends Base2 { w: number = 2; }\n"
+      + "export function synthSuper(): any { const s: any = new Sub2(7); return s.v + \",\" + s.w; }\n"
+      + "class MyErr extends Error { code: number = 3; }\n"
+      + "export function builtinSuper(): any { const e: any = new MyErr(\"boom\"); return e.message + e.code; }\n"
       + "export function proxyTrap(): any { let t: any; return new Proxy({}, { get(_: any, p: any) { t = t || { a: 5 }; const g: any = Reflect.get; return g(t, p); } }); }\n"
       + "export function proxyUse(): any { const p: any = proxyTrap(); return p.a; }\n"
       + "export async function asG(x: number): Promise<any> { const a = await Promise.resolve(2); return a + x; }\n");
@@ -917,6 +922,10 @@ async function runSemantics() {
     check("命名空间.展平", call("nsFlat"), "a-b|-");
     check("类.implements 不算父类", call("implOnly"), 2);
     check("类.静态箭头字段作方法", call("staticArrowField"), 7);
+    // 无显式 ctor 的派生类：合成 ctor 须转发父 ctor；内建父（Error）无 wasm ctor，
+    // 走与显式 super() 相同的 message/name 字段路径（曾 call 未定义: __m_Error$ctor）。
+    check("类.合成 ctor 转发用户父类", call("synthSuper"), "7,2");
+    check("类.合成 ctor 内建父(Error)", call("builtinSuper"), "boom3");
     check("Proxy.内建构造+trap 派发", call("proxyUse"), 5);
     // async 函数不能编 wasm（await 需挂起/恢复）→ 自动走 interp，产物保留原生 async/await。
     // 曾 strip 成同步 + await 作 identity：`await p` 返回 Promise 句柄（静默错值）。
