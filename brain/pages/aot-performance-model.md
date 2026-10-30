@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, aot, performance, f64, wasm, numeric]
 created: "2026-10-13T06:22:46"
-updated: "2026-10-18T09:03:34"
+updated: "2026-10-29T21:00:22"
 ---
 
 <!-- compiled_truth -->
@@ -183,3 +183,8 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
   summary: "noop AOT 跨界微基准修正: qzjs ext_wamr noop=133.8ns/次, V8=17.7ns/次。证明 raw-native 蹦床已生效(非'glue 不走 raw native')。qz.add 3.55µs = 蹦床 133.8ns + JS shim 工作 ~3.4µs(BigInt 解 tag+add)。旧'glue 路径不走 raw native, 派发税 3.55µs'推断修正: 派发已最小(133.8ns), 瓶颈是 JS shim 工作非派发。"
   source: "noop_imp.wat(wat2wasm)+wamrc AOT+qzjs/V8 对照"
   affects: [aot-performance-model, aot-roadmap]
+
+- time: 2026-10-29T21:00:22
+  kind: decision
+  summary: "科学计算基准扩到 5 运行时（AOT/解释器/V8/CPython/C -O2）：vs 解释器 9-46x、vs CPython 9-65x、vs V8 几何 1.3x、vs C 中位 2.2x；SIMD 假设被 -fno-tree-vectorize 实测否决，真实差距是常量折叠+循环展开+f64→i32 下标截断"
+  affects: [aot-performance-model]

@@ -5,45 +5,47 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-10-23T00:12:56"
+updated: "2026-10-30T11:45:20"
 ---
 
 <!-- compiled_truth -->
-## 当前状态（2026-10-23）
+## 当前状态（2026-10-30）
 
-AOT 编译覆盖率实测（zod，332 个 .ts 含测试）：成功 11（3.3%）。
+zod 125 个非测试 .ts：**编译成功 125/125**。函数 21111 个，其中 wasm **6034（28.6%）** /
+interp **15077（71.4%）**；含 interp 的文件 38 个，全部为整模块 interp。
 
-**六轮修复累计消解九类阻塞**（原合计 584 例 → 87 例）：
-- 匿名默认导出（131→0）：collectDecls 就地补合成名 `__default_N`。
-- `export *` re-export（145→0）：不产生绑定，只校验目标在源码内。
-- TS 重载签名（115→0）：collectDecls + 4 处嵌套收集统一加 `n.body` 过滤。
-- 跨文件同名私有函数（107→19）：非导出函数按文件前缀改名 `__m_<stem>_<name>`。
-- `new` 属性访问目标（86→0）：运行时求值类对象 → `qz.new_dynamic`。
-- 类成员 `PropertyDeclaration` / rest 解构（8→0、5→0）。
-- **`Proxy`（75→0）**：两端 ctor 白名单加 `Proxy`/TypedArray/Web API 类；
-  宿主侧 `Reflect.construct` 已通用，`Reflect.get/has/ownKeys/...`
-  走 `builtin` 的 `globalThis` 逐级回退，无需逐个登记。
-- **`instanceof` 内建族（75→0）**：emitter 白名单扩到 TypedArray/File/Blob/URL 族；
-  宿主 `instanceof_builtin` 加 `default: globalThis[name]` 通用原型链回退。
-- **`export namespace X` 声明（7→0）**：TS 命名空间是编译期构造，内联后模块边界消失。
-  collectDecls 把值成员就地改名 `X$<member>` 展平为普通顶层声明，登记 `nsAlias`；
-  成员体内对同命名空间成员的裸名引用按 checker 符号身份改写（只写 `escapedText`，
-  `IdentifierObject.text` 是只读 getter）。
-- 顺带：`implements` 子句不再被当成 `extends`（只认 `ExtendsKeyword`）；
-  静态箭头函数字段可作方法调用；模块级无初值 `let` 分配全局且初值为 undefined
-  （`0x7ff9000000000000n`，需 `sleb64` 编码 i64 全局初值）。
+**口径**：编译成功 ≠ AOT 覆盖。async 等无 wasm 通道的代码按设计退 interp；指标必须同时看
+wasm 函数占比（`coverage_real.js` 已内置该输出）。
 
-**当前头号阻塞**：`[tagged] async 函数未实现`（87 例 = 26%）。需 Promise 状态机，
-是唯一剩下的「大」工作量级项。
+**已消解（累计）**：
+- 匿名默认导出 131、`export *` 145、TS 重载 115、跨文件同名私有 107、`new` 属性访问 86、
+  `Proxy` 75、`instanceof` 内建族 75、命名空间声明 7、类成员/rest 解构 8/5 → 全部 0。
+- **async（原 87 例）**：顶层 async（含任意深度嵌套 async 闭包）按函数退 interp；
+  类体/字段初值/模块级语句里的 async 无函数级通道 → 整模块退 interp（单域，无双状态）。
+  设计裁决：不实现状态机（见 aot-wasm-tagged-backend）。
+- **`import type` 依赖被内联**（2026-10-30）：tsc program 含类型依赖，此前整树被发射，
+  无关 async 把模块拖进 interp（zod util.ts：83 个 program 文件里运行时只依赖 2 个）。
+  改沿运行时导入边求闭包：zod 函数 48639→21111，interp 100%→71.4%，整模块 interp 115→38。
 
-**次级**：re-export 聚合同名值 19（`index.ts` 同时从 util.ts/schemas.ts 导出 `nullish`）、
-`AwaitExpression` 8（v3 遗留 async 用法）。
+**剩余大项**：
+- generator（`YieldExpression`）无任何通道（唯一「大」功能缺口）。
+- 真实 wasm 占比：async 密集库（zod 即典型）绝大部分函数仍是 interp。要拿 AOT 收益，
+  要么热点路径无 async，要么实现 async 状态机。
+- re-export 聚合同名值（历史 19 例）已随跨文件改名/整模块回退消失，保留观察。
 
 ## 结构性事实
 
-功能缺口沿 import 图传播：一个阻塞点连带其整个传递依赖树失败。
-zod 单文件编译会拉入整棵 import 树，故每修一类阻塞，失败类别数量会重新洗牌
-（修完 `Proxy` 后 async 从 12 涨到 87，因为原先被 Proxy 挡住）。
+功能缺口沿 import 图传播（历史主因）。**类型边与运行时边必须分开**：类型依赖不产生运行时
+语义，不得进入发射集。interp 多文件拼接的约束见 [[aot-interp-multifile-splicing]]。
+
+## 验证
+
+`test_aot` ALL PASS；`audit_diff` 47/47；`glue_audit` 5/5；scin 11/11 数值一致。
+
+## 教训
+
+- 编译成功不等于 AOT 覆盖（2026-10-29 的 125/125 实为 99.99% 函数走 interp）。
+- 测试路径与产物路径必须一致：`glue_audit` 是唯一能捕获装配层缺陷的测试。
 
 
 ## Timeline
@@ -183,4 +185,22 @@ zod 单文件编译会拉入整棵 import 树，故每修一类阻塞，失败�
 - time: 2026-10-23T00:12:56
   kind: decision
   summary: "语言特性补齐：Proxy+instanceof 内建族+namespace 展平+implements+静态箭头字段；cookie 级细节见 compiled_truth"
+  affects: [aot-readiness]
+
+- time: 2026-10-28T14:45:43
+  kind: evidence
+  summary: "度量口径修正：zod 覆盖率必须排除 tests/benchmarks（其 import vitest/benchmark/node:buffer 的失败是缺依赖，非编译器缺口）。排除后实测 117/125=93.6%；v4 107/107=100%；v3 5/13，8 例失败全是类方法内 async 闭包。旧口径 332 文件含约 207 个测试文件，把真实缺口 8 例放大到 214 例，并导出『async 87 例=唯一大项』的优先级误判。"
+  source: investigation 2026-10-20
+  affects: [aot-readiness]
+
+- time: 2026-10-30T11:45:11
+  kind: evidence
+  summary: "真实覆盖率口径（2026-10-30）：zod 125/125 编译成功，但函数 21111 个里 wasm 仅 6034 (28.6%)、interp 15077 (71.4%)，含 interp 文件 38 个全为整模块 interp。sync 时代的「100% 编译」实为 99.99% 函数走 interp。两项修复推动：① import type 依赖剪枝（只沿运行时导入边求闭包，zod 函数 48639→21111，整模块 interp 115→38）；② async 自动退 interp（顶层含嵌套 async 函数级回退；类体/模块级 async 整模块回退，单域无双状态）。剩余大项：generator 无通道；async 密集库要拿 AOT 收益须热点路径无 async 或实现状态机。"
+  source: "coverage_real.js 实测 + test_aot/audit_diff/glue_audit 全绿"
+  affects: [aot-readiness, aot-roadmap]
+
+- time: 2026-10-30T11:45:20
+  kind: decision
+  summary: "2026-10-30：zod 125/125 编译成功，wasm 函数仅 28.6%；async 改走 interp，剩余大项 generator"
+  source: "coverage_real.js + test_aot/audit_diff/glue_audit"
   affects: [aot-readiness]
