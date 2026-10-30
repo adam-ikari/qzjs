@@ -552,16 +552,19 @@ async function runMultiFile() {
     // 无 tagged ⇒ 契约面应为空（内联后全自洽）
     check("多文件.import 面为空", WebAssembly.Module.imports(await WebAssembly.compile(buf)).length, 0);
 
-    // 同名冲突：两模块都导出 dup → 必须显式报错，不静默覆盖
+    // 同名导出：内联后共享一个 wasm 名字域，但两个文件的 `dup` 是不同函数
+    // （zod 自身即如此：util.`nullish(any): boolean` 与 classic/schemas.`nullish(T): ZodOptional`）。
+    // 契约：非入口文件的重名函数按文件前缀改名，各自调用解析到自己那份。
     fs.writeFileSync(path.join(dir, "a.ts"), "export function dup(x: number): number { return x + 1; }\n");
     fs.writeFileSync(path.join(dir, "b.ts"), "export function dup(x: number): number { return x + 100; }\n");
     fs.writeFileSync(path.join(dir, "m.ts"),
         "import { dup as dupA } from './a';\nimport { dup as dupB } from './b';\n" +
-        "export function m(): number { return dupA(1); }\n");
-    let threw = "";
-    try { compileTS(path.join(dir, "m.ts"), path.join(dir, "m.wasm"), {}); }
-    catch (e) { threw = e.message; }
-    check("多文件.同名冲突显式报错", threw.includes("导出函数名冲突"), true);
+        "export function m(): number { return dupA(1); }\nexport function m2(): number { return dupB(1); }\n");
+    const wasmDup = path.join(dir, "m.wasm");
+    compileTS(path.join(dir, "m.ts"), wasmDup, {});
+    const { instance: instDup } = await WebAssembly.instantiate(fs.readFileSync(wasmDup), {});
+    check("多文件.同名导出各自解析 m()", instDup.exports.m(), 2);
+    check("多文件.同名导出各自解析 m2()", instDup.exports.m2(), 101);
 
     // 同名私有函数：两模块各有一份非导出 helper → 自动按文件前缀改名，互不干扰。
     fs.writeFileSync(path.join(dir, "pa.ts"), "function helper(x: number): number { return x * 2; }\nexport function pa(y: number): number { return helper(y); }\n");
@@ -811,6 +814,56 @@ async function runInterp() {
     check("interp.多文件执行 run(5)", fnRun(5), 106);
     const fnR2 = new Function(ri.interpJs + "\nreturn r2;")();
     check("interp.多文件同名导入执行 r2(5)", fnR2(5), 7);
+    // 多文件 interp 拼接（zod compile.ts 的真实形态）：被 inline 的文件也可能含 interp 函数，
+    // interpJs 必须把它们**全部**拼进来（tsc 把 node_modules 下的源文件当外部库 → emit 跳过）。
+    // 同时：各文件私有的同名顶层声明须按文件改名，且拼接顺序满足依赖在前（否则 const 初值 TDZ）。
+    const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), "qz_aot_interp3_"));
+    fs.writeFileSync(path.join(dir3, "dep.ts"),
+        "export const BASE: number = 100;\n" +
+        "export function baseAdd(n: number): number { return n + BASE; }\n");
+    fs.writeFileSync(path.join(dir3, "dup1.ts"),
+        "const error = (): string => { return 'e1'; };\n" +
+        "export function d1(): string { return error(); }\n");
+    fs.writeFileSync(path.join(dir3, "dup2.ts"),
+        "const error = (): string => { return 'e2'; };\n" +
+        "export function d2(): string { return error(); }\n");
+    const i3 = path.join(dir3, "i3.ts");
+    fs.writeFileSync(i3,
+        "import { baseAdd } from './dep';\nimport { d1 } from './dup1';\nimport { d2 } from './dup2';\n" +
+        "export async function slow(n: number): Promise<number> { return baseAdd(n); }\n" +
+        "export function runI3(): string { return d1() + d2(); }\n");
+    const r3 = compileTS(i3, path.join(dir3, "i3.wasm"), { interp: ["slow"] });
+    check("interp.多文件跨文件函数进 interpJs", /function baseAdd\s*\(/.test(r3.interpJs), true);
+    check("interp.多文件私有重名不撞车", new Function(r3.interpJs + "\nreturn runI3;")()(), "e1e2");
+    // 类方法/构造器调用**已被拉进 interp** 的顶层函数 → 整模块退 interp（classMeta 为空），
+    // 且产出 JS 仍可执行。此前该形态下 interpJs 缺这些文件 → 运行期「未定义函数」。
+    const dir4 = fs.mkdtempSync(path.join(os.tmpdir(), "qz_aot_interp4_"));
+    fs.writeFileSync(path.join(dir4, "u.ts"),
+        "export async function asyncDep(): Promise<number> { return 1; }\n" +
+        "export function helper(x: number): number { void asyncDep(); return x + 1; }\n");
+    const i4 = path.join(dir4, "i4.ts");
+    fs.writeFileSync(i4,
+        "import { helper } from './u';\n" +
+        "class Box { n: number; constructor() { this.n = helper(1); } }\n" +
+        "export function runBox(): number { return new Box().n; }\n");
+    const r4 = compileTS(i4, path.join(dir4, "i4.wasm"), {});
+    check("interp.类调用被拉走的函数 → 整模块退 interp", r4.classMeta.length, 0);
+    check("interp.类构造器调用 interp 函数可执行", new Function(r4.interpJs + "\nreturn runBox;")()(), 2);
+    // `import type` 的模块在运行时被完全擦除：其实现（尤其 async）不得被内联。
+    // 此前 tsc 的 program 把类型依赖也纳入发射集 → 无关文件里的 async 污染 interp 判定，
+    // 整模块被迫退 interp（zod util.ts 实测：83 个 program 文件里运行时只依赖 2 个）。
+    const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), "qz_aot_interp5_"));
+    fs.writeFileSync(path.join(dir5, "typedep.ts"),
+        "export async function asyncDep(): Promise<number> { return 1; }\nexport type T = number;\n");
+    const i5 = path.join(dir5, "i5.ts");
+    fs.writeFileSync(i5,
+        "import type { T } from './typedep';\n" +
+        "export function pick(n: number): number { const x: T = n; return x + 1; }\n");
+    const r5 = compileTS(i5, path.join(dir5, "i5.wasm"), {});
+    check("type-only.类型依赖不进发射集", /asyncDep/.test(r5.interpJs), false);
+    check("type-only.入口函数全进 wasm", r5.funcMeta.every(m => m.mode !== "interp"), true);
+    const { instance: inst5 } = await WebAssembly.instantiate(fs.readFileSync(path.join(dir5, "i5.wasm")), {});
+    check("type-only.可执行", inst5.exports.pick(41), 42);
 }
 
 
@@ -839,7 +892,8 @@ async function runSemantics() {
       + "export function implOnly(): any { interface Iface { b: number; } class Impl implements Iface { b = 2; } const i: any = new Impl(); return i.b; }\n"
       + "export function staticArrowField(): any { class C { static make = (x: any): any => ({ v: x }); } return C.make(7).v; }\n"
       + "export function proxyTrap(): any { let t: any; return new Proxy({}, { get(_: any, p: any) { t = t || { a: 5 }; const g: any = Reflect.get; return g(t, p); } }); }\n"
-      + "export function proxyUse(): any { const p: any = proxyTrap(); return p.a; }\n");
+      + "export function proxyUse(): any { const p: any = proxyTrap(); return p.a; }\n"
+      + "export async function asG(x: number): Promise<any> { const a = await Promise.resolve(2); return a + x; }\n");
     const wasm = path.join(os.tmpdir(), "qz_aot_sem.wasm");
     const r = compileTS(src, wasm, {});
     const qz = makeQzvm(r.strings, { fields: r.fields });
@@ -864,6 +918,27 @@ async function runSemantics() {
     check("类.implements 不算父类", call("implOnly"), 2);
     check("类.静态箭头字段作方法", call("staticArrowField"), 7);
     check("Proxy.内建构造+trap 派发", call("proxyUse"), 5);
+    // async 函数不能编 wasm（await 需挂起/恢复）→ 自动走 interp，产物保留原生 async/await。
+    // 曾 strip 成同步 + await 作 identity：`await p` 返回 Promise 句柄（静默错值）。
+    const asFn = r.funcMeta.find(m => m.name === "asG");
+    check("async.自动走 interp", asFn && asFn.mode, "interp");
+    check("async.await 解包", await new Function(r.interpJs + "; return asG;")()(5), 7);
+    // 嵌套 async（函数体内的 async 闭包）无 wasm 通道 → 整个顶层函数退 interp，闭包作为
+    // 原生 JS async 箭头存活，await 后拿到真值。双域安全由下方用例保证。
+    const nestedSrc = path.join(os.tmpdir(), "qz_aot_nested_async.ts");
+    fs.writeFileSync(nestedSrc, "export function nestedAsync(): any { const g = async () => 41; return g; }\n");
+    const nestedR = compileTS(nestedSrc, path.join(os.tmpdir(), "qz_aot_nested_async.wasm"), {});
+    check("async.嵌套闭包走 interp", nestedR.funcMeta.find(m => m.name === "nestedAsync").mode, "interp");
+    check("async.嵌套闭包 await 解包", await new Function(nestedR.interpJs + "; return nestedAsync;")()()(), 41);
+    // interp 与 wasm 双侧触碰同一可变模块级变量：曾各存一份 → 静默错值（wasm 加到 5，interp 读 0）。
+    // 现在自动整模块退 interp（单域），跨侧读到同一个值。
+    const dualSrc = path.join(os.tmpdir(), "qz_aot_dual_domain.ts");
+    fs.writeFileSync(dualSrc, "let total: any = 0;\nexport function addWasm(): any { total = total + 5; return total; }\nexport async function readAsync(): Promise<any> { return total; }\n");
+    const dualR = compileTS(dualSrc, path.join(os.tmpdir(), "qz_aot_dual_domain.wasm"), {});
+    check("interp/wasm.双域退整模块 interp", dualR.funcMeta.every(m => m.mode === "interp"), true);
+    const dualF = new Function(dualR.interpJs + "; return { addWasm, readAsync };")();
+    check("interp/wasm.双域状态共享", dualF.addWasm(), 5);
+    check("interp/wasm.双域跨侧读到同值", await dualF.readAsync(), 5);
 }
 
 (async () => {

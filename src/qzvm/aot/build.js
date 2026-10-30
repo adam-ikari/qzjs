@@ -138,7 +138,7 @@ ${load}
       // **不做自动 GC**：宿主侧任意 i64 局部（含 __main 里直接经 __ex.f() 拿到的句柄）不可枚举，
       // 自动触发必然漏根 → 存活对象被复写（实测：闭包经 churn 后返回 undefined）。
       // 回收须由调用者显式 qz.gc(__ex, roots)，并保证 roots 覆盖所有存活句柄。
-      return m.mode === "num" ? r : qz._toJS(r);
+      return m.async ? Promise.resolve(m.mode === "num" ? r : qz._toJS(r)) : (m.mode === "num" ? r : qz._toJS(r));
     };
     // ── 主逻辑（--main）──
     ${mainBody}

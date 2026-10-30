@@ -17,8 +17,57 @@ function compileTS(input, outWasm, opts = {}) {
     // 引用经 tsc 解析后是同模块内的普通 call（名字域 = wasm 函数索引）。
     // module: None —— interp 回退要直接 emit 出可内联的 JS（见下方 interpJs），不希望 tsc 生成
     // require/exports 包装；wasm 路径只用 AST，不受影响。
-    const program = ts.createProgram([input], { strict: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None, moduleResolution: ts.ModuleResolutionKind.NodeJs });
-    const sfs = program.getSourceFiles().filter(f => !f.isDeclarationFile && f.fileName.endsWith(".ts"));
+    const compilerOpts = { strict: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None, moduleResolution: ts.ModuleResolutionKind.NodeJs };
+    const program = ts.createProgram([input], compilerOpts);
+    /* tsc 的 program 会把 `import type` 的传递依赖也收进来（类型检查需要），但这些文件在
+     * 运行时被完全擦除：内联它们会污染名字域，并把无关 async 代码拖进 interp 判定
+     * （实测 zod util.ts：83 个 program 源文件里运行时只依赖 2 个，却因类型依赖链上的
+     *  async 整棵退 interp）。故只沿**运行时导入边**（值导入 / 副作用导入 / 值 re-export）
+     * 求闭包；类型导入/导出不产生运行时语义，直接剪掉。
+     * 依赖在前（DFS 后序）：模块级 `const` 初值按此顺序执行。 */
+    const sfs = (() => {
+        const byPath = new Map(program.getSourceFiles().map(f => [path.resolve(f.fileName), f]));
+        const state = new Map();   // path → 1 访问中（环）/ 2 完成
+        const out = [];
+        const runtimeEdge = (st) => {
+            if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier)) {
+                if (!st.importClause) return st.moduleSpecifier.text;              // 副作用导入
+                if (st.importClause.isTypeOnly) return null;
+                if (st.importClause.name) return st.moduleSpecifier.text;          // 默认绑定
+                const nb = st.importClause.namedBindings;
+                if (nb && ts.isNamespaceImport(nb)) return st.moduleSpecifier.text;
+                if (nb && ts.isNamedImports(nb) && nb.elements.some(el => !el.isTypeOnly)) return st.moduleSpecifier.text;
+                return null;
+            }
+            if (ts.isExportDeclaration(st) && st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) && !st.isTypeOnly) {
+                if (!st.exportClause) return st.moduleSpecifier.text;              // export * from
+                if (ts.isNamespaceExport(st.exportClause)) return st.moduleSpecifier.text;
+                if (ts.isNamedExports(st.exportClause) && st.exportClause.elements.some(el => !el.isTypeOnly))
+                    return st.moduleSpecifier.text;
+            }
+            if (ts.isImportEqualsDeclaration(st) && !st.isTypeOnly
+                && ts.isExternalModuleReference(st.moduleReference) && ts.isStringLiteral(st.moduleReference.expression))
+                return st.moduleReference.expression.text;
+            return null;
+        };
+        const visit = (f) => {
+            const key = path.resolve(f.fileName);
+            if (state.has(key)) return;             // 已完成或环：环保持相对顺序
+            state.set(key, 1);
+            for (const st of f.statements) {
+                const spec = runtimeEdge(st);
+                if (!spec) continue;
+                const r = ts.resolveModuleName(spec, f.fileName, compilerOpts, ts.sys).resolvedModule;
+                const dep = r && byPath.get(path.resolve(r.resolvedFileName));
+                if (dep) visit(dep);
+            }
+            state.set(key, 2);
+            if (!f.isDeclarationFile && f.fileName.endsWith(".ts")) out.push(f);
+        };
+        const entry = program.getSourceFile(input);
+        if (entry) visit(entry);
+        return out;
+    })();
     // 语法错误的源码必须 loud 拒绝：TS 照常产出（残缺）AST，编译「成功」但语义错值。
     // oracle（V8 跑 tsc 转译产物）则直接抛 —— 静默错值比报错更糟。逐文件查解析诊断。
     for (const f of sfs) {
@@ -244,7 +293,33 @@ function compileTS(input, outWasm, opts = {}) {
         };
         for (const f of sfs) walkNames(f);
     }
-    const hasClasses = clsStmts.length > 0;
+    /* **没有函数级 interp 通道**的位置里的 async：类方法/字段初值（方法体由 wasm 发射器直接
+     * 编译，无法像顶层函数那样整体换成 JS 副本；类还会被整树提升，嵌套在函数体内的类同样发射）
+     * 与模块级语句（`const fn = async () => …` 是 __module_init 里的 lambda，而 __module_init
+     * 必须留在 wasm 侧初始化全局）。任一命中即整个模块退 interp：wasm 侧不发射函数/类，
+     * async 由 interp 的 JS 副本承载，原生语义。顶层函数体内的 async（任意深度）不在此列——
+     * containsAsync 会把该顶层函数整体退 interp。故必须在 hasClasses 之前算出来。 */
+    let hasAsyncOutsideFn = false;
+    const isAsyncFnLike = (n) => ts.isFunctionLike(n) && !!n.modifiers
+        && n.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
+    {
+        const scanClass = (n) => {
+            if (hasAsyncOutsideFn) return;
+            if (isAsyncFnLike(n)) { hasAsyncOutsideFn = true; return; }
+            ts.forEachChild(n, scanClass);
+        };
+        for (const c of clsStmts) scanClass(c);          // 含嵌套/类表达式（均会被提升发射）
+        for (const c of clsExprMap.keys()) scanClass(c);
+        const walk = (n) => {
+            if (hasAsyncOutsideFn) return;
+            if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;   // 已由 clsStmts 覆盖
+            if (ts.isFunctionDeclaration(n) && hoistedFns.has(n)) return;      // 顶层函数：containsAsync 负责
+            if (isAsyncFnLike(n)) { hasAsyncOutsideFn = true; return; }
+            ts.forEachChild(n, walk);
+        };
+        for (const f of sfs) walk(f);
+    }
+    const hasClasses = clsStmts.length > 0 && !hasAsyncOutsideFn;
     // TS enum 编译期求值：{ 名字 → {fwd: 成员→值, rev: 值→成员名} }。字符串枚举无反向映射（与 TS 一致）。
     const enums = new Map();
     for (const st of enumStmts) {
@@ -285,8 +360,12 @@ function compileTS(input, outWasm, opts = {}) {
     for (const f of sfs) {
         for (const st of f.statements) {
             if (ts.isExportDeclaration(st) && st.moduleSpecifier) {
+                // `export type { X } from './m'` 是纯类型 re-export：目标文件不在运行时闭包里，
+                // 不产生绑定，与类型导入同待遇（否则会误报「外部模块 re-export 不支持内联」）。
+                if (st.isTypeOnly) continue;
                 if (st.exportClause && ts.isNamedExports(st.exportClause)) {
                     for (const el of st.exportClause.elements) {
+                        if (el.isTypeOnly) continue;
                         const sym = checker.getSymbolAtLocation(el.name);
                         if (!sym || !(sym.flags & ts.SymbolFlags.Alias))
                             throw new Error(`[inline] 外部模块 re-export 不支持内联: "${el.name.text}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
@@ -456,10 +535,32 @@ function compileTS(input, outWasm, opts = {}) {
     // async 函数无法在 wasm 里表达暂停/恢复（await 需 CPS 或状态机）→ 自动走 interp：
     //   interp 产物是剥类型的原生 JS，`async`/`await` 语义由宿主 Promise 直接提供（零自研状态机）。
     //   此前把 async strip 成同步函数、await 作 identity：`await p` 不解包 → 拿到 Promise 句柄。
+    // 嵌套 async（函数体内的 `async () => {}` / 方法内 async）同样无 wasm 通道，判据是
+    // 「函数体内任意深度出现 async」→ 整个顶层函数退 interp，闭包作为原生 JS 闭包存活。
+    // 安全性由下方双域守卫保证：一旦它与 wasm 侧共享可变模块级变量，会**整模块退 interp**（单域），
+    // 绝不会出现两侧各存一份的静默错值。
     const interpSet = new Set(opts.interp || []);
+    const containsAsync = (root) => {
+        let hit = false;
+        const walk = (n) => {
+            if (hit) return;
+            if (ts.isFunctionLike(n) && n.modifiers && n.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)) { hit = true; return; }
+            ts.forEachChild(n, walk);
+        };
+        walk(root);
+        return hit;
+    };
+    // `__module_init` 不参与判据：它的体是**所有模块级语句**，形状上必然「含有 async 调用」，
+    // 但那些调用只是普通调用，不需要它自己变成 async。若把它推进 interp，wasm 侧模块级变量的
+    // 初始化就永不执行（实测 zod：`未定义函数: initializeContext`，因为持有它的模块级 const 从未赋值）。
     for (const f of fns) {
-        if (f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)) interpSet.add(f.name.text);
+        if (f.name.text === "__module_init") continue;
+        const isAsync = !!f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
+        if (isAsync || (f.body && containsAsync(f.body))) interpSet.add(f.name.text);
     }
+    // 类体/模块级语句里有 async → 整模块退 interp（无函数级 interp 通道，见 hasClasses 判定）。
+    // 声明侧已算出 hasAsyncOutsideFn（含被 inline 的所有源文件），这里直接复用。
+    if (hasAsyncOutsideFn) for (const f of fns) if (f.name) interpSet.add(f.name.text);
     if (interpSet.size > 0) {
         // 调用图：顶层函数 → 它调用的顶层函数集
         const calls = new Map();
@@ -475,17 +576,107 @@ function compileTS(input, outWasm, opts = {}) {
             if (f.body) walk(f.body);
             calls.set(f.name.text, callees);
         }
+        /* 类方法体也属 wasm 侧发射单元，且**没有**函数级 interp 通道：方法里调用了一个已退 interp 的
+         * 顶层函数，wasm 侧就找不到它（实测 zod：构造器调 initializeContext → 「未定义函数」，
+         * 因为该名字所在的 util 函数被 async 的传递闭包整体拉走了）。故类方法体也必须参与判据，
+         * 一旦命中 interp 侧，只能整模块退 interp（见下方）。 */
+        const classCalls = new Set();
+        {
+            const grab = (n) => {
+                if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+                    || ts.isConstructorDeclaration(n)) {
+                    const walk = (x) => {
+                        if (ts.isCallExpression(x) && x.expression && ts.isIdentifier(x.expression)) {
+                            const resolved = importAlias.get(x.expression.text) || x.expression.text;
+                            if (allFnNames.has(resolved)) classCalls.add(resolved);
+                        }
+                        ts.forEachChild(x, walk);
+                    };
+                    if (n.body) walk(n.body);
+                }
+                ts.forEachChild(n, grab);
+            };
+            for (const f of sfs) grab(f);
+        }
         // 传递闭包
+        // `__module_init` 例外：它是模块级变量**初始化**的唯一执行点，必须留在 wasm 侧。
+        // 若它被拉进 interp（模块级语句调用了 async 函数就会发生），wasm 全局的初值永不赋值
+        // → 所有 wasm 函数读模块级变量得到 0/undefined（实测 zod compile.ts：interpSet 含
+        // __module_init，wasm 侧不再导出它）。它不被任何 wasm 函数「调用」（由宿主 start 段触发），
+        // 拉进来没有意义，只会丢初始化。
+        const NON_INTERP = new Set(["__module_init"]);
         let changed = true;
         while (changed) {
             changed = false;
             for (const [fn, callees] of calls) {
-                if (interpSet.has(fn)) continue;
+                if (interpSet.has(fn) || NON_INTERP.has(fn)) continue;
                 for (const callee of callees) {
                     if (interpSet.has(callee)) { interpSet.add(fn); changed = true; break; }
                 }
             }
         }
+        // 类方法调用了 interp 侧函数 → 无法局部修补（方法不参与 interp 转移）→ 整模块退 interp。
+        for (const callee of classCalls) {
+            if (interpSet.has(callee)) { for (const f of fns) if (f.name) interpSet.add(f.name.text); break; }
+        }
+    }
+    // 整模块退 interp 后 wasm 侧不承载任何函数 → 也不能发射类（类方法体属 wasm 侧发射单元）。
+    // 否则构造器里调用已退 interp 的顶层函数会报「未定义函数」。hasClasses 是 const，用独立标记。
+    const emitClassesToWasm = hasClasses && !fns.every(f => interpSet.has(f.name.text));
+    // interp 函数的产物是 `new Function(interpJs)` 里的独立 JS 副本，模块级 `let x` 在那里另有一份
+    // （stripModuleSyntax 保留变量语句）。wasm 侧同名变量是 wasm 全局。两侧各自读写、互不可见：
+    // **同一变量被两侧都触碰 = 静默错值**（实测：wasm 侧把 total 加到 5，interp 侧仍读 0）。
+    // 只对**可变**变量处理：`const` 两侧初值相同且不可变 → 副本等价，无害（zod 的 `compile.ts`
+    // 等 107 个文件正是这种形态，若一律报错会把已可编译的代码全判死）。
+    // 冲突时**不报错**，而是整模块退 interp（单域，无双状态）：把所有顶层函数（含 __module_init）
+    // 纳入 interpSet，wasm 侧不再承载任何函数，模块级变量只有 interp 那唯一一份 → 语义自洽。
+    // 代价是该模块失去 AOT 加速（它本来也因 async 编不出 wasm），换来正确性。
+    const tryWholeModuleInterp = () => {
+        for (const f of fns) if (f.name) interpSet.add(f.name.text);
+    };
+    const mutableModNames = (() => {
+        const out = new Set();
+        for (const v of modVars) {
+            const list = v.parent;                       // VariableDeclarationList（v.parent.parent 是语句）
+            const isConst = !!list && !!(list.flags & ts.NodeFlags.Const);
+            // `const` 只在**原始值**上无害：`const cache = {}` / `const arr = []` 两侧各有一份对象，
+            // 一侧写字段另一侧读不到 → 同样是错值。故只有「const 且初值为原始字面量」才排除。
+            const init = v.initializer;
+            const prim = !!init && (ts.isStringLiteral(init) || ts.isNumericLiteral(init)
+                || init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword
+                || init.kind === ts.SyntaxKind.NullKeyword
+                || ts.isPrefixUnaryExpression(init) && ts.isNumericLiteral(init.operand));
+            if (!isConst || !prim) out.add(v.name.text);
+        }
+        return out;
+    })();
+    if (interpSet.size > 0 && mutableModNames.size > 0) {
+        const modVarNames = mutableModNames;
+        const touched = (root) => {                  // 该语法树里引用到的模块级变量名
+            const hit = new Set();
+            const walk = (n) => {
+                if (ts.isIdentifier(n) && modVarNames.has(n.text)) hit.add(n.text);
+                ts.forEachChild(n, walk);
+            };
+            walk(root);
+            return hit;
+        };
+        const interpSide = new Map();                // 变量名 → 首个触碰它的 interp 函数名
+        for (const f of fns) {
+            if (!interpSet.has(f.name.text) || !f.body) continue;
+            for (const name of touched(f.body)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
+        }
+        const clash = [];
+        for (const f of fns) {
+            if (interpSet.has(f.name.text) || !f.body) continue;
+            for (const name of touched(f.body)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / ${f.name.text} wasm）`);
+        }
+        for (const st of modStmts) {                 // __module_init 属 wasm 侧
+            for (const name of touched(st)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / __module_init wasm）`);
+        }
+        // 有冲突 → 整模块退 interp。mutating interpSet 后**必须重算**：此时无 wasm 侧函数，
+        // 冲突自然消失（模块级变量只剩 interp 一份）。
+        if (clash.length) tryWholeModuleInterp();
     }
     // TS→JS（去类型）供 glue 内联 interp 函数。
     // 内联后是**单一作用域**（模块边界已由 inlining 消除），故须剥掉模块语法：
@@ -494,8 +685,85 @@ function compileTS(input, outWasm, opts = {}) {
     //     transform 本来会把引用改写成 `str2_1.pad`（依赖 require），内联后没有它，必须自己重写；
     //  ③ 剥 export/default 修饰符（否则 emit 出 `exports.X = X`，glue 里没有 exports）。
     // 用 checker（上方已创建）精确定位 import 绑定（而非按名字猜），program.emit 复用同一 AST。
+    //
+    // 坑：`program.emit` 会**跳过 external library 文件**（`node_modules` 下的源文件被 tsc 当作
+    // 外部库，实测 `program.emit(sf)` 对它们返回空串）。而 interp 函数可能来自任意被 inline 的
+    // 文件（zod：`initializeContext` 在 to-json-schema.ts）→ 漏掉就得到「未定义函数」。
+    //  修法：再建一个 program，把这些文件全部列为 root（root 不受 external 判定影响）。
+    //  但**必须复用 prog1 的 SourceFile 对象**：collectDecls 给匿名 `export default function(){}`
+    //  就地补过合成名 `__default_N`（写在节点上），重新解析会得到无名的声明 → tsc transform
+    //  直接 `Debug Failure`；且 strip 里的 import 改名依赖同一符号表。故用自定义 host 返回旧节点。
     let interpJs = "";
     if (interpSet.size > 0) {
+        const sfByFile = new Map(sfs.map(f => [path.resolve(f.fileName), f]));
+        const baseHost = ts.createCompilerHost({ strict: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None, moduleResolution: ts.ModuleResolutionKind.NodeJs });
+        const host = {
+            ...baseHost,
+            getSourceFile: (fileName, langVersion) => sfByFile.get(path.resolve(fileName)) || baseHost.getSourceFile(fileName, langVersion),
+            fileExists: (f) => sfByFile.has(path.resolve(f)) || baseHost.fileExists(f),
+            readFile: (f) => { const s = sfByFile.get(path.resolve(f)); return s ? s.text : baseHost.readFile(f); },
+        };
+        const prog2 = ts.createProgram(sfs.map(f => f.fileName), {
+            strict: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None,
+            moduleResolution: ts.ModuleResolutionKind.NodeJs,
+        }, host);
+        const checker2 = prog2.getTypeChecker();
+        /* 清掉「这是模块」的标记再 emit：`module: None` 仍会因 SourceFile 上的
+         * impliedNodeFormat / externalModuleIndicator 走 CommonJS transform，产出
+         * `exports.X = …` + `require("./x.js")`（实测 zod parse.ts：189 处 exports.*）。
+         * 清掉后 emit 出干净 ESM（import 声明留给 strip transform 删）。 */
+        for (const f of prog2.getSourceFiles()) {
+            f.externalModuleIndicator = undefined;
+            f.commonJsModuleIndicator = undefined;
+            f.impliedNodeFormat = undefined;
+            if (typeof f.transformFlags === "number") f.transformFlags &= ~ts.TransformFlags.ContainsES2015Module;
+        }
+        /* 内联把多个文件拼进**同一作用域**，各文件私有的同名顶层声明会互相撞车
+         * （实测 zod：61 个 locale 各有一份 `const error`，拼起来 `Identifier 'error' has already
+         * been declared`）。这些名字在 TS 语义里是文件私有的，不存在跨文件引用 → 按文件加后缀
+         * 改名即可。导出名不能改（宿主按原名取 interp 函数），故只处理未导出的重复名。 */
+        const symRename = new Map();   // symbol → 新名
+        const fileRename = new Map();  // fileName → Map(旧名 → 新名)；兜底按文件查（见 identifier 分支）
+        /* prog2 的 getSourceFiles() 仍含类型依赖（见 sfs 的注释）：重名判定与拼接都必须
+         * 只看**运行时文件**，否则类型文件里的同名声明会把真正的运行时声明无谓改名，
+         * 类型文件自身也会被拼进 interpJs（运行时不该存在）。 */
+        const runtimeKeys = new Set(sfs.map(f => path.resolve(f.fileName)));
+        {
+            const byName = new Map();  // name → [{ sym, sfIdx, exported }]
+            prog2.getSourceFiles().forEach((f, sfIdx) => {
+                if (f.isDeclarationFile || !f.fileName.endsWith(".ts") || !runtimeKeys.has(path.resolve(f.fileName))) return;
+                for (const st of f.statements) {
+                    /* TS 7 里 `const error = () => …` 的 kind 是 FirstStatement（非 VariableStatement），
+                     * `ts.isVariableStatement` 判不出，故按「有声明名」通用收集。 */
+                    const decls = st.declarationList ? st.declarationList.declarations
+                        : (st.name || st.body) && !ts.isImportDeclaration(st) ? [st] : [];
+                    const mods = ts.canHaveModifiers(st) ? ts.getModifiers(st) : null;
+                    const exported = !!(mods && mods.some(m => m.kind === ts.SyntaxKind.ExportKeyword || m.kind === ts.SyntaxKind.DefaultKeyword));
+                    for (const d of decls) {
+                        const nm = d.name && ts.isIdentifier(d.name) ? d.name.text : null;
+                        if (!nm) continue;
+                        const sym = checker2.getSymbolAtLocation(d.name);
+                        if (!sym) continue;
+                        if (!byName.has(nm)) byName.set(nm, []);
+                        byName.get(nm).push({ sym, sfIdx, exported });
+                    }
+                }
+            });
+            for (const [nm, list] of byName) {
+                if (list.length < 2) continue;
+                /* 只改**未导出**的那些：导出名是宿主取 interp 函数的键，不能动。
+                 * 同名的导出 + 私有并存（zod：api.ts 导出 `_emoji`，regexes.ts 私有 `_emoji`）
+                 * 时，只给私有那份加后缀，两者仍是不同符号 → 引用点各自解析，语义不变。 */
+                for (const { sym, sfIdx, exported } of list) {
+                    if (exported) continue;
+                    const newName = `${nm}$f${sfIdx}`;
+                    symRename.set(sym, newName);
+                    const key = prog2.getSourceFiles()[sfIdx].fileName;
+                    if (!fileRename.has(key)) fileRename.set(key, new Map());
+                    fileRename.get(key).set(nm, newName);
+                }
+            }
+        }
         const stripModuleSyntax = (ctx) => (sf2) => {
             const visit = (n) => {
                 if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) return undefined;
@@ -513,20 +781,44 @@ function compileTS(input, outWasm, opts = {}) {
                     return ts.visitEachChild(n, visit, ctx);
                 }
                 if (ts.isIdentifier(n)) {
-                    const sym = checker.getSymbolAtLocation(n);          // import 绑定 = alias symbol
+                    /* checker2 对**已被访问/替换过**的引用点返回 undefined（声明点正常）。
+                     * 节点是 prog1 的原对象 → 回退 prog1 的 checker 拿同一符号。 */
+                    const sym = checker2.getSymbolAtLocation(n) || checker.getSymbolAtLocation(n);
+                    /* 文件私有重名（见 symRename）：声明与所有引用点同符号 → 一起改名，语义不变。
+                     * import 绑定是 alias 符号，先解析到目标再查（`import { validateURL }`）。 */
+                    const direct = sym && symRename.get(sym);
+                    if (direct !== undefined) return ts.factory.createIdentifier(direct);
+                    /* 兜底：tsc 对某些引用点（`return error();` 的调用位）不建符号绑定，
+                     * 两个 checker 都返回 undefined。此时按「文件名 + 名字」查改名表——
+                     * 内联后的引用只可能指向**本文件**的私有声明（跨文件引用走 import，已被
+                     * 上面的 alias 分支处理），故文件级匹配安全。 */
+                    if (!sym) {
+                        /* 排除**非引用**位置：属性名 `a.error`、字符串键、声明名本身（声明名有
+                         * sym，走不到这里）、`{ error: 1 }` 的键。 */
+                        const p = n.parent;
+                        const isPropName = p && ((ts.isPropertyAccessExpression(p) && p.name === n)
+                            || (ts.isPropertyAssignment(p) && p.name === n)
+                            || (ts.isMethodDeclaration(p) && p.name === n));
+                        if (!isPropName) {
+                            const byFileRename = fileRename.get(sf2.fileName);
+                            const hit = byFileRename && byFileRename.get(n.text);
+                            if (hit !== undefined) return ts.factory.createIdentifier(hit);
+                        }
+                    }
                     if (sym && (sym.flags & ts.SymbolFlags.Alias) && sym.declarations) {
                         const d0 = sym.declarations[0];
                         if (ts.isImportSpecifier(d0) || ts.isImportClause(d0)) {   // 具名 / 默认导入
-                            const target = checker.getAliasedSymbol(sym);
+                            const target = checker2.getAliasedSymbol(sym);
+                            if (!target) return n;
+                            const renamed = symRename.get(target);
+                            if (renamed !== undefined) return ts.factory.createIdentifier(renamed);
                             // 无条件换新节点：即便同名，也须脱离 tsc 的模块绑定，否则 after 阶段
                             // 的模块 transform 会把它改写成 `(0, mod_1.x)`（内联后无 require）。
                             // 匿名默认导出：target.name 为 "default"，但 collectDecls 已就地补合成名
                             // 到声明节点（`__default_N`），从 valueDeclaration 取真名。
-                            if (target) {
-                                const decl = target.valueDeclaration || (target.declarations && target.declarations[0]);
-                                const realName = (decl && decl.name && decl.name.text) || target.name;
-                                return ts.factory.createIdentifier(realName);
-                            }
+                            const decl = target.valueDeclaration || (target.declarations && target.declarations[0]);
+                            const realName = (decl && decl.name && decl.name.text) || target.name;
+                            return ts.factory.createIdentifier(realName);
                         }
                     }
                     return n;
@@ -546,16 +838,46 @@ function compileTS(input, outWasm, opts = {}) {
             }
             return out;
         };
+        /* 拼接顺序必须满足**依赖在前**：`const` 的初值在拼接后按出现顺序求值，
+         * 若 A 的模块级 `const` 引用了 B 的（`parse.ts` 里 `const parse = _parse($ZodRealError)`，
+         * `$ZodRealError` 在 `errors.ts`），B 必须先出现，否则 TDZ 报
+         * 「Cannot access '$ZodRealError' before initialization」。
+         * 按 import 图做 DFS 后序得到拓扑序；有环时退回原序（只能靠函数调用，不在初始化期求值）。 */
+        const interpFiles = prog2.getSourceFiles().filter(f => !f.isDeclarationFile && f.fileName.endsWith(".ts")
+            && runtimeKeys.has(path.resolve(f.fileName)));
+        const byName = new Map(interpFiles.map(f => [path.resolve(f.fileName), f]));
+        const order = [];
+        const state = new Map();   // path → 1 访问中 / 2 完成
+        const visitFile = (f) => {
+            const key = path.resolve(f.fileName);
+            if (state.get(key) === 2) return;
+            if (state.get(key) === 1) return;   // 环：跳过，保持原相对顺序
+            state.set(key, 1);
+            for (const st of f.statements) {
+                if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+                const spec = st.moduleSpecifier.text;
+                if (!spec.startsWith(".")) continue;
+                const resolved = path.resolve(path.dirname(f.fileName), spec.replace(/\.js$/, ".ts"));
+                const dep = byName.get(resolved);
+                if (dep) visitFile(dep);
+            }
+            state.set(key, 2);
+            order.push(f);
+        };
+        for (const f of interpFiles) visitFile(f);
+        /* 只 emit **运行时文件**（prog2 的 roots 全部是 root，不会被 external 判定跳过）：
+         * 整 program emit 会把类型依赖也转成 JS 拼进来，等于撤销上面的剪枝。
+         * strip transform 用 checker2（prog2 的符号表）解析 import 绑定 → 引用点改名正确。 */
         const emitted = new Map();
-        program.emit(undefined, (fname, text) => { emitted.set(fname, text); }, undefined, false, { before: [stripModuleSyntax] });
-        for (const sf2 of sfs) {
+        for (const sf2 of order) {
+            prog2.emit(sf2, (fname, text) => { emitted.set(fname, text); }, undefined, false, { before: [stripModuleSyntax] });
             const text = emitted.get(sf2.fileName.replace(/\.ts$/, ".js"));
             if (text) interpJs += text + "\n";
         }
     }
     // interp 函数不占 wasm，故不参与「是否需要 tagged 运行时」的判定。
     const hasNumArr = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "num" && numArrNames(f).size > 0);
-    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "tagged") || hasClasses || hasNumArr;
+    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "tagged") || emitClassesToWasm || hasNumArr;
     // 顶层函数名 → {mode, void}：跨模式调用点据此插入 f64↔i64 按位重解释。
     // interp 函数不进 wasm（其调用者经传递闭包一并退），故不在表内 —— 表内即 wasm 内可直调者。
     const fnMode = new Map();
@@ -674,7 +996,7 @@ function compileTS(input, outWasm, opts = {}) {
             m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
         }
         // 阶段1.5：收集类（登记方法/构造器签名）——须在发射体前
-        if (hasClasses) em.collectClasses(clsStmts);
+        if (emitClassesToWasm) em.collectClasses(clsStmts);
         // 阶段1.5b：扫描 lambda（顶层函数体 + 类方法/构造器体 + 字段初值），登记 __lam_N 签名
         let lamSeq = 0;
         for (const st of fns) {
@@ -691,7 +1013,7 @@ function compileTS(input, outWasm, opts = {}) {
         // 阶段2：逐个发射 body（顶层函数 + lambda + 类方法/构造器）
         for (const st of fns) { if (interpSet.has(st.name.text)) continue; em.sf = fnSf.get(st) || sf; em.emitFunc(st); }
         em.emitLambdaBodies();
-        if (hasClasses) em.emitClassBodies();
+        if (emitClassesToWasm) em.emitClassBodies();
         em.emitLambdaBodies();   // 类体发射期间惰性登记的闭包（对象字面量访问器/方法）
         for (const cname of em._classList) {
             const c = em.classes.get(cname);
