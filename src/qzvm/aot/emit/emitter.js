@@ -263,15 +263,15 @@ class Emitter {
     // 收集函数体内所有箭头函数/函数表达式（含嵌套），按源序。返回节点列表。
     _collectLambdas(node, out = []) {
         const walk = (n) => {
-            if (ts.isArrowFunction(n)) { this._markGenerator(n); out.push(n); }
+            if (ts.isArrowFunction(n)) { out.push(n); }
             else if (ts.isFunctionExpression(n)) {
                 // 对象属性值位置且体内用 `this`（`parse: function _parse(){ …this… }`）：
                 // 运行时 this = receiver，须走合成 self 形参的闭包，否则无 `this` 槽位。
                 const isPropVal = ts.isPropertyAssignment(n.parent) && n.parent.initializer === n;
                 if (isPropVal && this._usesThis(n.body)) out.push(this._synthSelfFn(n));
-                else { this._markGenerator(n); out.push(n); }
+                else { out.push(n); }
             }
-            else if (ts.isFunctionDeclaration(n) && n.name && n.body && !(this.hoistedFns && this.hoistedFns.has(n))) { this._markGenerator(n); out.push(n); }   // 无 body = 重载签名，不是 lambda
+            else if (ts.isFunctionDeclaration(n) && n.name && n.body && !(this.hoistedFns && this.hoistedFns.has(n))) { out.push(n); }   // 无 body = 重载签名，不是 lambda
             else if ((ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n))
                      && ts.isObjectLiteralExpression(n.parent)) out.push(this._memberLambda(n));
             ts.forEachChild(n, walk);
@@ -302,29 +302,6 @@ class Emitter {
         if (fe.name) f._qzSelfName = fe.name.text;    // 具名：体内自递归可直调
         this._synthLambdas.set(fe, f);
         return f;
-    }
-    // generator 降级：`function* () { yield a; yield b; }` → 返回 `[a, b]` 的普通函数。
-    // JS 生成器的可观察语义（`...gen()`、`for..of` 立即穷尽）在「顺序 yield 后即返回」时
-    // 等价于「返回元素数组」。不做 AST 重建（TS 7 无 ts.factory），改为打标：
-    // _genYields: 节点 → yield 表达式列表；emitFunc/emitLambda 据此发射 `return [..]` 收尾。
-    // 不可降级形态（yield 在条件/循环里、yield*、裸 yield、被 .next() 逐步消费）保持原样 loud 报错。
-    _markGenerator(fn) {
-        if (!fn.asteriskToken || !fn.body || !ts.isBlock(fn.body)) return;
-        this._genYields = this._genYields || new Map();
-        if (this._genYields.has(fn)) return;
-        const yields = [];
-        for (const st of fn.body.statements) {
-            if (!ts.isExpressionStatement(st) || !ts.isYieldExpression(st.expression)) continue;
-            const y = st.expression;
-            if (y.asteriskToken || y.expression === undefined) return;   // yield* / 裸 yield → 不降级
-            yields.push(y.expression);
-        }
-        // 体内每一处 yield 都必须在上述语句列表里（不能在表达式/条件内）
-        let count = 0;
-        const w = (x) => { if (ts.isYieldExpression(x)) { count++; return; } ts.forEachChild(x, w); };
-        w(fn.body);
-        if (!yields.length || count !== yields.length) return;
-        this._genYields.set(fn, yields);
     }
     // 闭包捕获分析：找 lambda 体内的自由标识符（非其参数/局部、非字符串/数字/对象属性名）。
     // 捕获的变量来自创建处（外层函数局部）。返回有序捕获名列表。
@@ -1625,19 +1602,11 @@ class Emitter {
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
         this._staticVars = this._computeStaticVars(lam.body, params);
         // 箭头表达式体：表达式即返回值；块体：语句
-        const genY = this._genYields && this._genYields.get(lam);
-        if (genY) {
-            // generator 降级：body 里的 `yield x` 语句不发射（值已在 genY），直接返回数组
-            const arr = { kind: ts.SyntaxKind.ArrayLiteralExpression, elements: genY, expressions: genY,
-                          pos: lam.body.pos, end: lam.body.end };
-            ts.setTextRange(arr, lam.body);
-            this.emitTaggedExpr(arr);
-            M.return_();
-        } else if (ts.isExpression(lam.body)) { this.emitTaggedExpr(lam.body); M.return_(); }
+        if (ts.isExpression(lam.body)) { this.emitTaggedExpr(lam.body); M.return_(); }
         else { this._emitFnDeclClosures(lam.body); this.emitTaggedBlock(lam.body); }
         const last = ts.isBlock(lam.body) ? lam.body.statements[lam.body.statements.length - 1] : null;
         this._fnVars = savedFnVars2;
-        if (!genY && !(last && ts.isReturnStatement(last))) this._emitUndefined();   // 无显式 return → undefined（JS 语义；不是 unreachable）
+        if (!(last && ts.isReturnStatement(last))) this._emitUndefined();   // 无显式 return → undefined（JS 语义；不是 unreachable）
         M.endBody();
         this._curClassObj = savedCCO3;
         this._curClass = savedCC3;

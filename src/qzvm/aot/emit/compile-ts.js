@@ -293,33 +293,34 @@ function compileTS(input, outWasm, opts = {}) {
         };
         for (const f of sfs) walkNames(f);
     }
-    /* **没有函数级 interp 通道**的位置里的 async：类方法/字段初值（方法体由 wasm 发射器直接
-     * 编译，无法像顶层函数那样整体换成 JS 副本；类还会被整树提升，嵌套在函数体内的类同样发射）
-     * 与模块级语句（`const fn = async () => …` 是 __module_init 里的 lambda，而 __module_init
-     * 必须留在 wasm 侧初始化全局）。任一命中即整个模块退 interp：wasm 侧不发射函数/类，
-     * async 由 interp 的 JS 副本承载，原生语义。顶层函数体内的 async（任意深度）不在此列——
-     * containsAsync 会把该顶层函数整体退 interp。故必须在 hasClasses 之前算出来。 */
-    let hasAsyncOutsideFn = false;
-    const isAsyncFnLike = (n) => ts.isFunctionLike(n) && !!n.modifiers
-        && n.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
+    /* **没有函数级 interp 通道**的位置里的 async/generator：类方法/字段初值（方法体由 wasm
+     * 发射器直接编译，无法像顶层函数那样整体换成 JS 副本；类还会被整树提升，嵌套在函数体内的类
+     * 同样发射）与模块级语句（`const fn = async () => …` / `const g = function* (){}` 是
+     * __module_init 里的 lambda，而 __module_init 必须留在 wasm 侧初始化全局）。任一命中即
+     * 整个模块退 interp：wasm 侧不发射函数/类，挂起语义由 interp 的 JS 副本承载。
+     * 顶层函数体内的 async/generator（任意深度）不在此列——containsSuspend 会把该顶层函数
+     * 整体退 interp。故必须在 hasClasses 之前算出来。 */
+    let hasSuspendOutsideFn = false;
+    const isSuspendFnLike = (n) => ts.isFunctionLike(n)
+        && ((!!n.modifiers && n.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)) || !!n.asteriskToken);
     {
         const scanClass = (n) => {
-            if (hasAsyncOutsideFn) return;
-            if (isAsyncFnLike(n)) { hasAsyncOutsideFn = true; return; }
+            if (hasSuspendOutsideFn) return;
+            if (isSuspendFnLike(n)) { hasSuspendOutsideFn = true; return; }
             ts.forEachChild(n, scanClass);
         };
         for (const c of clsStmts) scanClass(c);          // 含嵌套/类表达式（均会被提升发射）
         for (const c of clsExprMap.keys()) scanClass(c);
         const walk = (n) => {
-            if (hasAsyncOutsideFn) return;
+            if (hasSuspendOutsideFn) return;
             if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;   // 已由 clsStmts 覆盖
-            if (ts.isFunctionDeclaration(n) && hoistedFns.has(n)) return;      // 顶层函数：containsAsync 负责
-            if (isAsyncFnLike(n)) { hasAsyncOutsideFn = true; return; }
+            if (ts.isFunctionDeclaration(n) && hoistedFns.has(n)) return;      // 顶层函数：containsSuspend 负责
+            if (isSuspendFnLike(n)) { hasSuspendOutsideFn = true; return; }
             ts.forEachChild(n, walk);
         };
         for (const f of sfs) walk(f);
     }
-    const hasClasses = clsStmts.length > 0 && !hasAsyncOutsideFn;
+    const hasClasses = clsStmts.length > 0 && !hasSuspendOutsideFn;
     // TS enum 编译期求值：{ 名字 → {fwd: 成员→值, rev: 值→成员名} }。字符串枚举无反向映射（与 TS 一致）。
     const enums = new Map();
     for (const st of enumStmts) {
@@ -532,19 +533,21 @@ function compileTS(input, outWasm, opts = {}) {
     // 理由：字符串操作在 wasm 里每轮循环都跨 qz.add 调宿主 → 跨界开销吃掉 AOT 收益。
     // 传递闭包：wasm 函数调 interp 函数 = 该函数也须 interp（wasm 内无该函数索引）。
     const allFnNames = new Set(fns.map(f => f.name.text));
-    // async 函数无法在 wasm 里表达暂停/恢复（await 需 CPS 或状态机）→ 自动走 interp：
-    //   interp 产物是剥类型的原生 JS，`async`/`await` 语义由宿主 Promise 直接提供（零自研状态机）。
-    //   此前把 async strip 成同步函数、await 作 identity：`await p` 不解包 → 拿到 Promise 句柄。
-    // 嵌套 async（函数体内的 `async () => {}` / 方法内 async）同样无 wasm 通道，判据是
-    // 「函数体内任意深度出现 async」→ 整个顶层函数退 interp，闭包作为原生 JS 闭包存活。
+    // async / generator 函数无法在 wasm 里表达暂停/恢复（await/yield 需 CPS 或状态机）→ 自动走
+    //   interp：产物是剥类型的原生 JS，`async`/`await`/`function*` 语义由宿主直接提供
+    //   （零自研状态机）。此前把 async strip 成同步、await 作 identity（`await p` 拿到 Promise
+    //   句柄）；generator 只降级「平坦 yield」为数组（`.next()` 被逐步消费时语义错）。
+    // 嵌套 async/generator（函数体内的 `async () => {}` / `function* g(){}`）同样无 wasm 通道，
+    //   判据是「函数体内任意深度出现挂起语义」→ 整个顶层函数退 interp，闭包作为原生 JS 闭包存活。
     // 安全性由下方双域守卫保证：一旦它与 wasm 侧共享可变模块级变量，会**整模块退 interp**（单域），
     // 绝不会出现两侧各存一份的静默错值。
     const interpSet = new Set(opts.interp || []);
-    const containsAsync = (root) => {
+    const containsSuspend = (root) => {
         let hit = false;
         const walk = (n) => {
             if (hit) return;
-            if (ts.isFunctionLike(n) && n.modifiers && n.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)) { hit = true; return; }
+            if (ts.isFunctionLike(n)
+                && ((n.modifiers && n.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)) || n.asteriskToken)) { hit = true; return; }
             ts.forEachChild(n, walk);
         };
         walk(root);
@@ -556,11 +559,11 @@ function compileTS(input, outWasm, opts = {}) {
     for (const f of fns) {
         if (f.name.text === "__module_init") continue;
         const isAsync = !!f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
-        if (isAsync || (f.body && containsAsync(f.body))) interpSet.add(f.name.text);
+        if (isAsync || f.asteriskToken || (f.body && containsSuspend(f.body))) interpSet.add(f.name.text);
     }
-    // 类体/模块级语句里有 async → 整模块退 interp（无函数级 interp 通道，见 hasClasses 判定）。
-    // 声明侧已算出 hasAsyncOutsideFn（含被 inline 的所有源文件），这里直接复用。
-    if (hasAsyncOutsideFn) for (const f of fns) if (f.name) interpSet.add(f.name.text);
+    // 类体/模块级语句里有 async/generator → 整模块退 interp（无函数级 interp 通道，见 hasClasses 判定）。
+    // 声明侧已算出 hasSuspendOutsideFn（含被 inline 的所有源文件），这里直接复用。
+    if (hasSuspendOutsideFn) for (const f of fns) if (f.name) interpSet.add(f.name.text);
     if (interpSet.size > 0) {
         // 调用图：顶层函数 → 它调用的顶层函数集
         const calls = new Map();

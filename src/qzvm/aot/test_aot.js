@@ -939,6 +939,24 @@ async function runSemantics() {
     const dualF = new Function(dualR.interpJs + "; return { addWasm, readAsync };")();
     check("interp/wasm.双域状态共享", dualF.addWasm(), 5);
     check("interp/wasm.双域跨侧读到同值", await dualF.readAsync(), 5);
+    // generator 与 async 同属挂起/恢复语义：走 interp，由宿主原生生成器承载。
+    // 旧实现只把「平坦 yield」降级成返回数组——`.next()` 逐步消费时语义错。
+    const genSrc = path.join(os.tmpdir(), "qz_aot_gen.ts");
+    fs.writeFileSync(genSrc,
+        "export function* gen(): any { yield 1; yield 2; return 3; }\n" +
+        "export function stepGen(): string { const g: any = gen(); const a: any = g.next(); const b: any = g.next(); const c: any = g.next(); return a.value + ',' + b.value + ',' + c.value + ',' + c.done; }\n");
+    const genR = compileTS(genSrc, path.join(os.tmpdir(), "qz_aot_gen.wasm"), {});
+    check("generator.自动走 interp", genR.funcMeta.find(m => m.name === "gen").mode, "interp");
+    check("generator.调用者经传递闭包一并退 interp", genR.funcMeta.find(m => m.name === "stepGen").mode, "interp");
+    check("generator.逐步消费语义", new Function(genR.interpJs + "; return stepGen;")()(), "1,2,3,true");
+    // 类里的 generator 方法无函数级通道 → 整模块退 interp（与 async 方法同判据）。
+    const genClsSrc = path.join(os.tmpdir(), "qz_aot_gencls.ts");
+    fs.writeFileSync(genClsSrc,
+        "class Bag { *items(): any { yield 1; yield 2; } }\n" +
+        "export function useBag(): string { const b = new Bag(); return [...b.items()].join('-'); }\n");
+    const genClsR = compileTS(genClsSrc, path.join(os.tmpdir(), "qz_aot_gencls.wasm"), {});
+    check("generator.类方法 → 整模块退 interp", genClsR.classMeta.length, 0);
+    check("generator.类方法可执行", new Function(genClsR.interpJs + "; return useBag;")()(), "1-2");
 }
 
 (async () => {

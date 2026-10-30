@@ -38,13 +38,13 @@ module.exports = [
   function g([a, b]: any, { c }: any) { return a + b + c; }
   return g([1, 2], { c: 3 });
 }` },
-  { name: "generator-function", unsupported: "generator (yield→状态机) 未实现", fn: "f", ts: `export function f(): any {
+  { name: "generator-function", fn: "f", ts: `export function f(): any {
   function* gen() { yield 1; yield 2; }
   const out: any = [];
   for (const v of gen()) out.push(v);
   return out.join(",");
 }` },
-  { name: "async-function", unsupported: "async 函数（需 Promise/微任务）未实现", fn: "f", ts: `export async function f(): Promise<any> {
+  { name: "async-function", fn: "f", ts: `export async function f(): Promise<any> {
   return 1;
 }` },
   // ---------- BigInt / 数字边界 ----------

@@ -33,19 +33,29 @@ function jsFn(src, fn) {
       qz.bindClosures(instance.exports, r.lamMeta);
       qz.bindClasses(instance.exports, r.classMeta);
       const m = (r.funcMeta || []).find(f => f.name === c.fn);
-      // wasm 导出为固定元数：调用方（glue/测试）须补足到形参个数（JS 少传 = undefined；
-      // num 模式无法表示 undefined → 补 NaN，与 JS 少传后的算术行为一致）。
-      const raw = (c.args || []).slice();
-      const nPar = m ? m.params : raw.length;
-      while (raw.length < nPar) raw.push(m && m.mode === "num" ? NaN : undefined);
-      const args = raw.slice(0, nPar).map(x => qz._fromJS(x));
-      const res = instance.exports[c.fn](...args);
-      if (qz.take_err) qz.take_err();          // 跨函数 throw 的宿主出口（glue 约定）
-      got = m && m.mode === "num" ? res : qz._toJS(res);
+      if (m && m.mode === "interp") {
+        // interp 函数不在 wasm 里（async/generator 等挂起语义走宿主 JS 副本）：
+        // 与 build.js glue 同一路径求值，参数/返回都是裸 JS 值。
+        const rec = new Function(r.interpJs + `\nreturn typeof ${c.fn} === "function" ? ${c.fn} : undefined;`)();
+        if (typeof rec !== "function") throw new Error("interp 函数缺失: " + c.fn);
+        const res = rec(...(c.args || []));
+        got = res && typeof res.then === "function" ? await res : res;
+      } else {
+        // wasm 导出为固定元数：调用方（glue/测试）须补足到形参个数（JS 少传 = undefined；
+        // num 模式无法表示 undefined → 补 NaN，与 JS 少传后的算术行为一致）。
+        const raw = (c.args || []).slice();
+        const nPar = m ? m.params : raw.length;
+        while (raw.length < nPar) raw.push(m && m.mode === "num" ? NaN : undefined);
+        const args = raw.slice(0, nPar).map(x => qz._fromJS(x));
+        const res = instance.exports[c.fn](...args);
+        if (qz.take_err) qz.take_err();          // 跨函数 throw 的宿主出口（glue 约定）
+        got = m && m.mode === "num" ? res : qz._toJS(res);
+      }
     } catch (e) { aotErr = "AOT:" + String(e.message).split("\n")[0].slice(0, 70); }
     try {
       const fn = jsFn(c.ts, c.fn);
-      const res = fn(...(c.args || []));
+      let res = fn(...(c.args || []));
+      if (res && typeof res.then === "function") res = await res;   // async oracle：与 AOT 同 await
       exp = res && typeof res === "object" ? JSON.parse(JSON.stringify(res)) : res;
     } catch (e) { jsErr = "JS:" + String(e.message).split("\n")[0].slice(0, 40); }
     const j = (v) => (typeof v === "number" ? (Number.isNaN(v) ? "NaN" : !isFinite(v) ? (v > 0 ? "Infinity" : "-Infinity") : (Object.is(v, -0) ? "-0" : String(v))) : JSON.stringify(v));
