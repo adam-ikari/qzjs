@@ -5,10 +5,9 @@ category: decision
 status: active
 tags: [platform, linux, scope]
 created: "2026-10-04T03:41:49"
-updated: "2026-10-06T03:16:07"
+updated: "2026-10-13T08:35:24"
 ---
 
-<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 结论
 
@@ -78,4 +77,10 @@ Linux-only 是既定范围，不是未完成项。成熟度的剩余门槛只有
   kind: decision
   summary: "补记：交叉构建出口 QZ_QJSC_HOST/QZ_LZ4_HOST 曾被合入又撤除——Linux-only 范围优先于构建灵活性"
   source: "2026-10 PR#8：撤掉交叉构建出口，CMakeLists 还原"
+  affects: [platform-support]
+
+- time: 2026-10-13T08:35:24
+  kind: decision
+  summary: "规范化存储标记：compiled_truth 区块开头重复的 <!-- compiled_truth --> 标记（CLI extractSection 会把它当正文首行）已去掉；正文无实质改动。"
+  source: "brain CLI 重复 marker 自愈"
   affects: [platform-support]

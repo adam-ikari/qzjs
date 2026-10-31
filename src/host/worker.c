@@ -177,7 +177,7 @@ static void qz_worker_thread_main(void *arg)
         uv_run(&rt->loop, UV_RUN_ONCE);  /* 阻塞等事件；wake_cb 派发消息 */
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE) ||
             __atomic_load_n(&w->shutting_down, __ATOMIC_ACQUIRE)) break;
-        qz_flush_microtasks(rt);
+        qz_tick(rt);
         /* 发布「本 worker 仍有在途异步工作」给父的 idle 判定。
          * 在本线程上算（qz_loop_idle 对 w->self 是安全的），父只读这个位。 */
         int busy_now = qz_loop_idle(rt) ? 0 : 1;
@@ -317,6 +317,22 @@ qz_worker_t *qz_worker_create(qz_t *parent, const char *script, int *out_err)
     /* lock-free MPSC: self's inbound queue head == tail == sentinel (calloc zeroed) */
     self->msg_head = &self->msg_stub;
     self->msg_tail = &self->msg_stub;
+
+    /* 确定性随机（约束③）：worker 是独立 qz_t（config 被 calloc 清零），不继承
+     * 父的种子就会退回时钟播种 —— 同一程序里 worker 的 Math.random()/Map 序
+     * 不可复现、而主RT 可复现，属静默的**部分**确定。按槽位派生：既确定
+     * （slot 由父确定分配）又让各 worker 的随机流互异（全用父种子会让所有
+     * worker 产生同一条序列）。父未设种子（0）时保持时钟播种。 */
+    if (parent->config.random_seed)
+        self->config.random_seed = parent->config.random_seed + (uint64_t)(slot + 1);
+
+    /* 堆硬上限（约束③）：worker 同上——config 被 calloc 清零，不继承就退回
+     * 「不限」。父声明 memory_limit 的动机通常是**资源约束**（strict 沙箱下
+     * 防止不可信 JS 撑爆进程）或确定性回放的内存包络，这两者都要求 worker
+     * 同样受限；不继承 = 上限在 worker 里静默失效，症状（worker 把进程撑死）
+     * 与真因（上限没传过来）毫无关联。取**同一绝对值**（语义：每个 runtime
+     * 各自的上限，非全进程总量预算）。 */
+    self->config.memory_limit = parent->config.memory_limit;
 
     /* 继承父 runtime 的 CA 信任库。
      *

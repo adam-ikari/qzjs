@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [dap, vscode, debugger]
 created: "2026-09-28T01:38:49"
-updated: "2026-09-29T02:27:42"
+updated: "2026-10-13T08:07:03"
 ---
 
 <!-- compiled_truth -->
@@ -85,4 +85,10 @@ updated: "2026-09-29T02:27:42"
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
+  affects: [dap-feature-completion]
+
+- time: 2026-10-13T08:07:03
+  kind: note
+  summary: "归档自 host-bytecode-api（原误置）：DAP CI 连败根因（2026-09-26 已修）——8ac7ed7c 项目改名（am_→qz_）漏改引擎侧守卫宏 QWRT_DEBUG_SUPPORT；CMake 向 qjs target 传 QZ_DEBUG_SUPPORT → 宏不匹配 → quickjs.c 的 DEBUGGER_CHECK 编译为空 → 断点/暂停永不触发，test_dap_gtest 双败 + 30s 超时，CI debugger(DAP) job 连续 12+ 次失败（含纯文档提交，极易误判为近期改动引入）。修复：patch 3 处改名（commit 3853868a）。教训：改名类提交必须 grep patch 内旧名（patch 是 working-tree-only 应用）；CMake verify 锚点检查函数存在性而非宏生效，无法捕获此类失配。"
+  source: "原 host-bytecode-api 正文（2026-09-26）+ CHANGELOG"
   affects: [dap-feature-completion]

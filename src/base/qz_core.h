@@ -12,24 +12,27 @@ extern "C" {
 
 
 
-/* Per-context state — holds JSContext*, handle tables, timer data,
- * extensions, and polyfill config for reset re-injection. */
+/* Per-context state. 内核字段 = realm（JSContext + 槽位 id + 扩展机制表）；
+ * 宿主字段（timer 句柄表 / polyfill 缓存）= 边界接线，guest 编译期不可达
+ * （M2：见 IN_MODULE_DESIGN.md §5.1）。 */
 struct qz_ctx_s {
     JSContext *jsctx;
     int context_id;
-    int suspended;       /* vestigial：G1 后 suspend 即销毁 ctx（槽位 NULL 即挂起态），字段保留 ABI 兼容，恒为 0 */
 
+    const qz_ext_t * const *extensions;  /* compile-time table (QZ_EXTENSIONS), read-only */
+    int extensions_count;                    /* table length; iterate by count, skip NULL slots */
+
+#ifndef QZ_VM_GUEST
     void *handles[QZ_MAX_HANDLES];
     JSValue timer_resolves[QZ_MAX_HANDLES];
     void *timer_cbds[QZ_MAX_HANDLES];  /* qz_cb_data_t* for cleanup on timerStop */
     int handle_count;
 
-    const qz_ext_t * const *extensions;  /* compile-time table (QZ_EXTENSIONS), read-only */
-    int extensions_count;                    /* table length; iterate by count, skip NULL slots */
-
-    /* Polyfill config saved for reset re-injection */
+    /* Polyfill 字节码缓存（边界：内容属宿主，§3.1）；宿主接线时装载并暂存，
+     * 供 polyfill 注入使用。 */
     const uint8_t *polyfill;
     size_t polyfill_len;
+#endif
 };
 
 /* Callback data shared between bridge.c and qzjs.c for async operations.
@@ -80,13 +83,19 @@ struct qz_t {
     uint32_t magic;      /* QZ_MAGIC — set in qz_create, validates opaque ptr */
     JSRuntime *jsrt;
 
+    /* ── 以下全部宿主专属：uv 线程/loop + 消息队列 + 进程/控制面。guest 内核
+     * 无这些能力（M1：uv 类型在 guest 编译期不可达）。见 IN_MODULE_DESIGN.md
+     * §5.1。核心字段（magic/jsrt/config/contexts）在块外。 */
+#ifndef QZ_VM_GUEST
     /* thread + loop (execution model A: qzjs owns a thread running the libuv
      * loop)。ISOLATED 宿主 rt 同样自带线程与 loop——该线程即库宿主侧线程
      * （M-P7 主权裁决：库自管一切线程/loop，宿主零注入零回调）。 */
     uv_loop_t loop;
     uv_thread_t thread;
     uv_async_t wake;         /* host post_message wakeup; data = rt */
+#endif
 
+#ifndef QZ_VM_GUEST
     /* inbound FIFO (lock-free MPSC: many producers push, the qzjs thread
      * exclusively consumes). msg_tail is the atomic tail (producers exchange),
      * msg_head is consumer-only. msg_stub is the resident sentinel: after
@@ -117,6 +126,7 @@ struct qz_t {
     int thread_ready;    /* atomic: ready handshake: thread init complete */
     int ready_err;       /* init failure code (0 ok; non-zero -> qz_create returns NULL) */
     int thread_joined;   /* atomic: 拆除已完成（线程后端 = uv_thread_join 已做，双 join 是 UB；ISOLATED 宿主 = 库宿主侧线程已收尸，幂等门） */
+#endif
 
     /* config copy (initial_script strdup'd by qz_create, freed by destroy) */
     qz_config_t config;
@@ -167,17 +177,36 @@ struct qz_t {
     int context_count;
     int active_ctx_id;   /* -1 if no active context */
 
-    /* Polyfill bytecode cache: loaded once (lazily at first context creation),
-     * shared by all contexts, unloaded at runtime teardown. polyfill_owner is
-     * the opaque handle to free (NULL in mode C; heap ptr in modes A/B). */
+    /* ── GC 观测（约束③ ⑤，仅宿主侧）──
+     * 显式驱动点（qz_gc() 落到主RT 的 wake 安全点 / 控制面 "gc" op）的累计
+     * 次数与耗时，经 qz_gc_drive() 统一记账（唯一实现，见 qzjs.c）。
+     * gc_runs **只计显式驱动**：引擎自发的隐式 GC（gc_threshold > 0 的阈值
+     * 路径、OOM 路径）不经此处。所以它**不能**用来判断「引擎有没有偷偷 GC」
+     * ——那需要引擎侧的 GC hook（未做）。它的真实用处是跨进程核对：宿主驱动
+     * N 次 → RT 实际执行几次（驱动在途丢失/被 shutdown 丢弃会露出来）。
+     * gc_last_us/gc_total_us 是 wall-clock 诊断量，**不**参与复现性断言
+     * （同输入同驱动序列下暂停时长本来就不可能逐位相同）。 */
+#ifndef QZ_VM_GUEST
+    uint64_t gc_runs;
+    uint64_t gc_last_us;     /* 最近一次 JS_RunGC 耗时（微秒） */
+    uint64_t gc_total_us;    /* 累计 JS_RunGC 耗时（微秒） */
+#endif
+
+    /* Polyfill bytecode cache（边界：内容属宿主，§3.1）：loaded once (lazily
+     * at first context creation), shared by all contexts, unloaded at runtime
+     * teardown. polyfill_owner is the opaque handle to free (NULL in mode C;
+     * heap ptr in modes A/B). */
+#ifndef QZ_VM_GUEST
     const uint8_t *polyfill;
     size_t polyfill_len;
     void *polyfill_owner;
+#endif
 
     /* Web Worker (Task 4): worker_self is set on a worker's own qz_t (points
      * back to its qz_worker_t, non-NULL → this runtime is a worker); the
      * parent runtime keeps its workers table (worker id = slot index). Both
      * are only touched by the owning qzjs thread. */
+#ifndef QZ_VM_GUEST
     void *worker_self;
     qz_worker_t *workers[QZ_MAX_WORKERS];
 
@@ -243,6 +272,7 @@ struct qz_t {
     JSClassID wamr_module_class_id;
     JSClassID wamr_instance_class_id;
     JSClassID wamr_global_class_id;
+    JSClassID wamr_memory_class_id;
 #endif
 #if QZ_WITH_COMPRESS
     JSClassID compress_deflate_class_id;
@@ -308,6 +338,7 @@ struct qz_t {
     struct qz_ctl_conn_s *ctl_conns;
     char     *ctl_pipe_path;
 #endif
+#endif /* !QZ_VM_GUEST */
 };
 
 /* Monotonic clock in milliseconds. Ignores clock_gettime failure (same
@@ -321,6 +352,7 @@ static inline int64_t qz_now_ms(void)
 }
 /* ── Cross-file small helpers (shared, header-inline in C99) ── */
 
+#ifndef QZ_VM_GUEST
 /* 关 loop，并把返回值说出来。uv_loop_close 非 0 = EBUSY，还有 handle 没关
  * （stop 过但没 close、或 close 回调没跑完）——此时 loop 内部结构仍被这些
  * handle 引用，绝不能 free 回收，泄漏是唯一安全选择。静默忽略返回值等于把
@@ -352,6 +384,7 @@ static inline int qz_close_loop(uv_loop_t *loop)
     }
     return rc;
 }
+#endif /* !QZ_VM_GUEST */
 
 /* Little-endian accessors live in le_bytes.h (dependency-free; ipc_envelope.c
  * must stay buildable without libuv/quickjs), pulled in below. */

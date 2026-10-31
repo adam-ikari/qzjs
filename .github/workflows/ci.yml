@@ -1238,6 +1238,19 @@ jobs:
         run: |
           bash test/test_host_contract_e2e.sh ./build/qzjs
 
+      # 确定性随机源（约束③）：--seed 穿 ISOLATED 宿主→主RT 进程边界生效。
+      # ISOLATED 下 qz_config_t 只能靠 argv 传，这段断了是「静默失效」。
+      - name: e2e — deterministic RNG seed across the ISOLATED boundary
+        run: |
+          bash test/test_seed_determinism_e2e.sh ./build/qzjs
+
+      # 堆硬上限（约束③）：qz_config_t.memory_limit 穿 ISOLATED 边界生效。
+      # 静态门只验字段名出现在 argv 两侧，验不了「拼了但没解析/没写进 config」
+      # ——本 e2e 在真进程边界做值级断言 + 负控（不设上限时同一分配必须成功）。
+      - name: e2e — heap memory limit across the ISOLATED boundary
+        run: |
+          bash test/test_mem_limit_e2e.sh ./build/qzjs
+
       # 控制面 CTL-1/CTL-2（本地端点 + 信封 CONTROL 树路由到 worker）。
       - name: e2e — control plane (CTL-1 tree routing / CTL-2 endpoint + qzjs-ctl)
         run: |
@@ -1297,6 +1310,81 @@ jobs:
         run: |
           node test/grpc_server_tls_e2e.mjs --qzjs-bin ./build/qzjs
           node test/grpc_server_harness.mjs
+
+  # ============================================================================
+  # in-module guest: qzvm 编到 wasm32-wasi（IN_MODULE_DESIGN.md）。M4/M5 的
+  # 运行验证此前只是 /tmp 一次性脚本，从不入仓也不被 CI 跑——guest 的导入面
+  # （qz_host.*）或回流协议一改，没人会发现。此 job 把它固化成可复跑的宿主
+  # harness：构建 qzvm-guest → node WASI shim 实例化 → 跑异步回流断言
+  # （成功/拒绝/并发）。需 clang(-target wasm32-wasi) + wasi-libc + lld。
+  # ============================================================================
+  in-module:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    name: in-module guest (wasm32 reactor + async reflow)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/ccache-setup
+
+      - name: Install wasm32 tools (clang + wasi-libc + lld)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld wasi-libc
+
+      - name: Install Node (WASI host shim)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: e2e — in-module guest async reflow (§10.4)
+        run: bash test/test_inmodule_guest_e2e.sh
+
+  # ============================================================================
+  # WAMR debug-interp（GDB RSP）+ DWARF 地址约定。源码级调试通道此前仅 /tmp 手验，
+  # 不入仓也不被 CI 跑：ext_wamr.c 接线 / RSP 帧 / DWARF 地址约定一改无人发现。此
+  # job 固化全链：debug 构建 → 编译 strw(--debug) → 纯 .wasm 加载(--no-aot) →
+  # 从 DWARF 行表取行地址 → 裸 RSP 断点 → 断言 reason:breakpoint 命中。需
+  # llvm-dwarfdump + python3。
+  # ============================================================================
+  wamr-debug-rsp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    name: WAMR debug RSP (DWARF line-address breakpoint)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/ccache-setup
+
+      - name: Install tools (build + llvm-dwarfdump + python3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build python3
+          # llvm-dwarfdump 来自 llvm 包（低版本发行版为 llvm-N-tools；无则各试）
+          sudo apt-get install -y llvm || sudo apt-get install -y llvm-18-tools
+          llvm-dwarfdump --version \
+            || command -v llvm-dwarfdump-18 \
+            || { echo "no llvm-dwarfdump available"; exit 1; }
+
+      - name: Install Node (aot 编译器工具链)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # build.js(compile) 需要 typescript（emitter.js require）；qzjs 构建期
+      # polyfill add_custom_command 亦需 src/polyfill 依赖。CI 无 node_modules。
+      - name: Install npm deps (aot emitter + polyfill build)
+        run: |
+          npm ci --prefix src/qzvm/aot
+          npm ci --prefix src/polyfill
+
+      - name: e2e — WAMR debug RSP + DWARF breakpoint
+        run: bash test/test_wamr_debug_rsp.sh
+
   # ============================================================================
   # Coverage: gcov with WAMR default engine.
   # ============================================================================

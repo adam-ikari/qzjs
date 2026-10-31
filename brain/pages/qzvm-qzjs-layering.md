@@ -1,0 +1,144 @@
+---
+id: qzvm-qzjs-layering
+title: "qzvm / qzjs 分层：宿主定义、qzvm 两条硬约束、in-module 定位"
+category: decision
+status: active
+tags: [decision, architecture, qzvm, in-module, boundary]
+created: "2026-10-14T06:35:48"
+updated: "2026-10-15T12:08:36"
+---
+
+<!-- compiled_truth -->
+## 结论
+
+qzjs 分三层，**依赖单向**：宿主 → qzjs 运行时 → qzvm。
+
+| 层 | 定义 | 不含 |
+| --- | --- | --- |
+| **宿主** | qzjs 的**使用者**：用户 C 程序 / node / 固件 | libuv、WAMR/wasm3、QuickJS（那些是 qzjs 的责任） |
+| **qzjs 运行时** | qzjs 交付的**全部**实现：IO 原语(uv_io_*)、libuv 事件循环、进程/控制面、polyfill、wasm 引擎后端 | 应用业务逻辑 |
+| **qzvm** | qzjs 内的 **VM 库**（独立可用）：QuickJS-ng 引擎 + `qz.*` 原语 + realm 生命周期 + DAP 调试器 + 扩展注册机制 + 引擎 patches | libuv、宿主 IO 编排、Web API 扩展内容 |
+
+## qzvm 三条硬约束
+
+1. **零 libuv**：`uv_*` 在 qzvm 编译期不可达（非 stub）。唯一实质残留 = `debugger_dap.c` 的 `uv_timer_t dap_timer`（10 处）→ 须改**注入式定时源**。根因：`qz_t`（`qz_core.h:82`）值内嵌 `uv_loop_t/thread/wake` + `qz_types.h:26-30` 无条件 `#include <uv.h>`。
+2. **可独立使用**：脱离 qzjs 被第三方 C 直接使用。现状缺口：qzvm **非独立构建单元**（`QZVM_SOURCES` 并入 `libqzjs`，避循环链接），无独立 target/公开头。需补 `libqzvm` target + 独立 VM 头。
+
+3. **GC 确定性（硬约束 ③，用户裁决 2026-10-15）**：相同输入 + 相同显式驱动序列 → GC 行为（何时触发/回收什么）可复现。**已落地**：默认 `qz_config_t.gc_threshold == 0` 关掉引擎阈值隐式 GC（`JS_SetGCThreshold(rt, (size_t)-1)`），环只在两个确定点回收——C API `qz_gc(rt)` 或控制面 `{"op":"gc"}`，两者都落事件循环 WAKE_SAFEPOINT 就地 `JS_RunGC`（`rt_main.c` child_wake_cb / `thread.c` qz_wake_cb 的 `QZ_MSG_FLAG_GC_RUN` 分支）。 **随机源种子（2026-10-15 补齐）**：新增引擎 patch `src/qzvm/patches/engine-seed.patch` 导出 `JS_SetRandomSeed(rt, uint64_t)`（quickjs-ng 公有面无此 API）+ `struct JSRuntime.random_seed` 字段；`qz_config_t` 尾追加 `random_seed`（0 = 时钟播种，兼容旧行为）+ **`QZ_ABI_VERSION` 1→2**。`qz_runtime_init` 在建 context **之前**注入（晚于建 context 无效——`hash_seed` 已派生）。ISOLATED 下经 `rt_host.c` `--seed` argv 过进程边界；worker（独立 qz_t、config 清零）按槽位派生 `parent_seed + slot + 1`。CLI `qzjs --seed=<u64>`。**跨进程缺口与 gc/debug 同型**：不走 argv 就静默失效——e2e `test/test_seed_determinism_e2e.sh` 专守这条链（含负控）。
+
+**硬上限（2026-10-15 补齐，约束③ ⑤）**：新增 `qz_config_t.memory_limit`（0 = 不限）+ **`QZ_ABI_VERSION` 2→3**，透传引擎公有 API `JS_SetMemoryLimit`（无需 patch）。与 `gc_threshold` 正交：前者是**惰性触发点**（超阈值即 RunGC、阈值 ×1.5），后者是**分配直接失败**（`js_malloc_rt`/`js_calloc_rt`/`js_realloc_rt` 检查 `rt->malloc_state`）。ISOLATED 经 `rt_host.c` 的 `--memory-limit` argv 过边界；worker（config 清零）按**同一绝对值**继承（父声明上限的动机是资源约束，worker 不受限 = 上限静默失效）。
+
+⚠ **实测发现（未修）**：引擎的 OOM 是 quickjs-ng 的 **uncatchable error**（`quickjs.c:1147` `is_uncatchable_error`，与栈溢出同类）——纯引擎实证 `try{new ArrayBuffer(256MiB)}catch(e){}` 异常照样穿出（`JS_IsException` 为真），脚本**根本捕不到**；而 qzjs 的入站派发 `qz_js_call_cleanup`（`bridge.c:136`）`JS_GetException` + `JS_FreeValue` **静默吞掉** `__qz_dispatch__` 抛出的异常→ 经 `qz_post_message` 触发的 eval 超限时**邮箱无任何回执**，宿主只见超时。故 `memory_limit` 今天只能当「有兜底超时的资源上限」用，不能当「会给脚本一个可捕获错误」的机制。**入站派发不再静默吞（2026-10-15 修）**：`qz_dispatch_message` 在 `JS_Call` 后检测 `JS_IsException` → 取异常 `toString()`（Error 的 message/stack 非可枚举，`JSON.stringify(err) → "{}"`，须先 toString）→ 投递 `{"type":"error","error":"dispatch-failed","detail":"..."}` 错误帧到宿主邮箱（bad-json 先例）；OOM 双重失败（envelope 对象建不起来）退静态 `{"type":"error","error":"out-of-memory"}` 帧。行为契约变更：此前静默 → 现有 error 帧；消费方须识别 `{"type":"error"}` 帧（与 bad-json / mailbox-alloc-failed 同族）。测试断言已从「没有成功」升级为「收到 error 帧」。
+
+**GC 驱动计数/暂停时长（2026-10-15 补齐，约束③ ⑥，全部落地收口）**：所有显式驱动点收口到唯一入口 `qz_gc_drive()`（`qzjs.c`，JS_RunGC + `uv_hrtime` 计时 + 记账），三个调用点——`rt_main.c child_wake_cb`（`qz_gc()` msgq GC_RUN 落点）/ `thread.c qz_wake_cb` / 控制面 `ctl_gc`——都走它（漏一个 = 计数偏小且无门变红，故收口）。计数挂 `rt->gc_runs/gc_last_us/gc_total_us`（host-only）；`"gc"` op 回执与 `metrics` op 都带。**语义边界（刻意不踩坑）**：`gc_runs` 只计**显式驱动**——引擎自发的隐式 GC（`gc_threshold>0` 阈值路径、OOM 路径）不经 `qz_gc_drive`，故它**不是**「引擎有没有偷偷 GC」的检测器（那要引擎侧 GC hook，未做）；真实用处是**跨进程核对**：宿主驱动 N 次 → RT 实际执行几次（在途丢失/被 shutdown 丢弃露出来）。暂停时长是 wall-clock 诊断量，不参与复现性断言。至此约束③ 六个子项（随机种子① / 显式驱动点② / 阈值 API③ / 可观测④ / 硬上限⑤ / 计数⑥）全部落地。ISOLATED 下驱动形式为 CONTROL `{"qzjs":1,"gc":1}`，**刻意不经控制面路由**（`qz_control_route` 受 `control_plane` 档位门控，OFF 档静默丢）——GC 驱动是内存管理与「暴露不暴露控制面」正交，OFF 档下仍生效。`gc_threshold > 0` = 显式选择阈值安全网（接受非确定触发点），ISOLATED 下由 `rt_host.c` 经 `--gc-threshold` 透传主RT 子进程（否则宿主 config 设的值静默失效）。可观测：控制面 `"gc"` op 回执带 `reclaimed_bytes`/`heap_bytes`；`qz_gc()` 只保证「已入队到确定点」（返回 0）。**实测**：造 3000 自引用环 → heap 809KB→13.67MB → `{"op":"gc"}` 回 `reclaimed_bytes:12864088` → 回落 809KB；`qz_gc(rt)` 后主RT 子进程 RSS 26084→5448 kB；默认档无宿主驱动时堆不回落。**未做**：① 种子注入（quickjs-ng 无公有 `JS_SetRandomSeed`，`random_state = js__gettimeofday_us()` @quickjs.c:2942，`hash_seed` 派生 :2946 → `Math.random()` 与 Map/Set 迭代序仍不确定；须打引擎 patch `src/qzvm/patches/*` + `qz_config_t` 种子字段 + `QZ_ABI_VERSION` 递增）；② GC 触发次数/暂停时长计数；③ `JS_SetMemoryLimit` 透传。
+
+## 边界归属
+
+- **属 qzvm**：引擎、realm/eval/compile/tick（context.c/vm_core.c/ext_lifecycle.c）、`qz.*`（`src/qzvm/aot/qzvm.js`）、DAP（debugger.c/debugger_dap.c）、扩展注册**机制**、引擎 patches（`src/qzvm/patches/*`）、wasm 引擎绑定（ext_wamr/ext_wasm3，**仅 native 形态**）。
+- **属 qzjs**：pal 接线（bridge.c 43 个 `js_pal_*`）、polyfill 注入、Web API 扩展**内容**（`src/ext/ext_compress|crypto|textcodec`）、IO 原语（uv_io.c）、进程编排、控制面、libuv 循环。
+
+## in-module 正确定性
+
+**in-module = 把 qzvm 编成 wasm32 模块（`libqzvm.wasm`）的 qzjs 构建形态**，是 **qzjs 内部两半**的分层（wasm 外 qzjs-native IO 层 ↔ wasm 内 qzvm），**不是** qzjs 与外部分层。
+
+- qzjs **永远持有 JS 运行时**（即 libqzvm.wasm 内引擎），永不"没有 JS"。"宿主不再链 QuickJS"是初版措辞错误。
+- **in-module 下 qzvm 不含 wasm 引擎绑定**（`ext_wamr/ext_wasm3` 不进 guest；`CMakeLists.txt:43-48` 已落 `QZ_WITH_WAMR=WASM3=OFF`）——qzvm 自身即 wasm，无法再嵌引擎。
+
+
+## Timeline
+
+- time: 2026-10-14T06:35:48
+  kind: decision
+  summary: "Created this page: qzvm / qzjs 分层：宿主定义、qzvm 两条硬约束、in-module 定位"
+  source: docs/architecture/qzvm-qzjs-layering.md
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-14T06:36:16
+  kind: decision
+  summary: "立 qzvm/qzjs 边界 SSOT：术语 + 两硬约束 + in-module 正确定性"
+  source: docs/architecture/qzvm-qzjs-layering.md
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-14T06:46:20
+  kind: decision
+  summary: "二次收窄：timer 是 OS 依赖，qzvm 一律不得持有。DAP（debug 编译形态）属 qzvm 但只用非阻塞 qz_dap_service()；周期轮询 timer 归宿主 host/thread.c 驱动；qz_t.dap_timer/dap_timer_active 移出 qzvm 核心。原则：qzvm 只持 CPU/内存，一切 OS 能力（timer/文件/网络/线程/进程）由宿主注入或驱动，debug 形态不豁免。"
+  source: "用户裁定 2026-10-14"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T02:02:50
+  kind: decision
+  summary: "增硬约束③ qzvm GC 确定性（用户裁决 2026-10-15）+ 回改约束①旧表述：'确定性护城河=宿主主导权/C 可脱离 JS'已废，确定性落在引擎自身。核实 quickjs-ng @c359cac 三处 nondeterminism（random_state 时钟播种 :2942/hash_seed :2946、malloc_gc_threshold 分配压力驱动 :2343/:1689、qz_config_t 无种子字段且引擎无公有种入 API）"
+  source: "用户裁定 2026-10-15 + docs/architecture/qzvm-qzjs-layering.md §2 约束③"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T02:03:53
+  kind: decision
+  summary: "修正约束③的种子注入路径：quickjs-ng 公有面无 seed API（无 JS_SetRandomSeed），种子注入须走引擎 patch（src/qzvm/patches/*）；补接线 JS_SetGCThreshold/JS_SetMemoryLimit 待办"
+  source: "docs/architecture/qzvm-qzjs-layering.md §2 约束③（用户裁定 2026-10-15）"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T03:26:46
+  kind: decision
+  summary: "GC 确定性约束③落地状态：显式驱动点/阈值接线/可观测已完成（qz_gc + 控制面 gc op；默认关隐式 GC），种子注入仍未做"
+  source: "实现 2026-10-15（src/control/control.c ctl_gc / src/host/qzjs.c qz_gc / rt_main.c+thread.c GC_RUN 分割点 / rt_host.c --gc-threshold）"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T03:27:29
+  kind: decision
+  summary: "恢复并扩写 compiled_truth：补回'三条硬约束'全量正文（零 libuv/可独立使用/GC 确定性③）+ 边界归属 + in-module 定位，GC 约束③追加落地状态与未做项"
+  source: "实现 2026-10-15"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T07:53:58
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T07:54:08
+  kind: decision
+  summary: "种子注入落地（约束③ ①）：引擎 patch engine-seed.patch 导出 JS_SetRandomSeed(rt,uint64_t) + JSRuntime.random_seed 字段（quickjs-ng 公有面无 seed API → 必须走 patch）；JS_NewContextRaw 里 seed!=0 用作 ctx->random_state（hash_seed 随之派生），0 维持时钟播种。qz_config_t 尾追加 random_seed + QZ_ABI_VERSION 1→2。宿主链：qz_runtime_init 在建 context 前注入（晚则无效）；ISOLATED 经 rt_host --seed argv 过进程边界（不走 argv = 静默失效，与 gc/debug 同型缺口）；worker（独立 qz_t、config 清零）按槽位派生 parent_seed+slot+1（不继承 = 部分确定；全用父种子 = 各 worker 同序列）。CLI --seed=<u64>。实测 build-dbg ISOLATED：同种子两跑 Math.random 序列逐位相同、异种子不同、无种子两次不同。守门：gtest qz_config.random_seed_makes_math_random_reproducible + 新 e2e test/test_seed_determinism_e2e.sh（跨 ISOLATED 边界，含负控——断开 argv 透传后立刻红）。"
+  source: "用户指示：收尾 GC 约束③（种子注入）；handoff Next Steps #3"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T09:13:50
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T09:13:55
+  kind: decision
+  summary: "堆硬上限落地（约束③ ⑤）：qz_config_t.memory_limit 尾追加 + QZ_ABI_VERSION 2→3，透传引擎公有 API JS_SetMemoryLimit（quickjs.h:515，无需 patch；对比 JS_SetRandomSeed 必须 patch——判据就是公有面有没有）。与 gc_threshold 正交：阈值是惰性触发点（超阈值 RunGC，阈值×1.5），硬上限是分配直接失败（js_malloc_rt/js_calloc_rt/js_realloc_rt 检查 rt->malloc_state；非 per-context，故首次分配前设置即可）。ISOLATED 经 rt_host.c --memory-limit argv 过边界（argv[24] 计数更新为 6+16≤24）；worker（独立 qz_t、config 清零）按同一绝对值继承——父声明上限的动机是资源约束/确定性内存包络，worker 不受限即上限静默失效。守门：gtest qz_config.memory_limit_fails_oversized_allocation + 新 e2e test/test_mem_limit_e2e.sh（跨 ISOLATED 值级断言 + 负控：断掉 argv 透传立刻红）。"
+  source: "用户指示：继续执行 handoff Next Steps（约束③ ⑥ → ⑤）"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T09:40:40
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T09:41:39
+  kind: decision
+  summary: "GC 驱动计数/暂停时长落地（约束③ ⑥，最后一项收口）。收口设计：所有显式 JS_RunGC 调用点都改走唯一入口 qz_gc_drive()（qzjs.c：JS_RunGC + uv_hrtime 计时 + 记账 rt->gc_runs/gc_last_us/gc_total_us），三个调用点 rt_main child_wake_cb（qz_gc() 的 msgq GC_RUN 落点）/thread qz_wake_cb/控制面 ctl_gc。关键判断：gc_runs 只计显式驱动——引擎自发隐式 GC（gc_threshold>0/OOM）不经此入口，故它不是「引擎有没有偷偷 GC」的检测器（那要引擎侧 GC hook，未做，刻意不做以免误判），真实用处是跨进程核对（宿主驱动 N 次→RT 执行几次）。暂停时长是诊断量，不参与复现断言。无 ABI 变化（qz_config_t 不动，struct qz_t 加三个 host-only 字段）。守门 gtest control_.gc_counters_track_explicit_drives（三路径都过账：gc op×2 + qz_gc C API + metrics 同源），负控：注释掉 gc_runs++ 立刻红。"
+  source: "用户指示：继续执行 handoff Next Steps（约束③ ⑥ 之后最后一项）"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T11:46:59
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: brain update-truth
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T11:47:12
+  kind: decision
+  summary: "入站派发异常不再静默吞（fix bridge.c qz_dispatch_message）。此前 qz_js_call_cleanup 静默丢弃所有未处理分发异常——经 qz_post_message 触发的 eval 里 __qz_dispatch__ 抛异常时宿主只见超时。根因：qz_js_call_cleanup = JS_Call + JS_GetException + JS_FreeValue（异常取出即释放，不上报）。触发场景：引擎 OOM 是 uncatchable error（is_uncatchable_error，与栈溢出同类），脚本 try/catch 捕不到，异常径直穿到 JS_Call——memory_limit 超限时正是此路径。修法：qz_dispatch_message 的 JS_Call 后显式检测 JS_IsException → JS_GetException → JS_ToCStringLen（toString，因 Error 的 message/stack 非可枚举，JSON.stringify(err)='{}' 须先 toString）→ 建 envelope 对象 {type:error,error:dispatch-failed,detail:字符串} → JS_JSONStringify → qz_post_to_host。OOM 双重失败（envelope 对象建不起来 / stringify 失败）退静态 {type:error,error:out-of-memory} 帧。关键判断：这是行为契约变更（此前静默→现有 error 帧），消费方须识别 type:error 帧（与 bad-json/mailbox-alloc-failed 同族已有先例），用户已确认做。Error 属性非可枚举是 JS 标准行为，JSON.stringify(new Error('x'))='{}' 在所有引擎成立，不是 quickjs 特有。"
+  source: "用户指示：oom（做超限 OOM 的静默吞修）"
+  affects: [qzvm-qzjs-layering]
+
+- time: 2026-10-15T12:08:36
+  kind: decision
+  summary: "约束③ 子项编号 ⑤/⑥ 裁定：⑤=memory_limit（config 字段，与①④同类）、⑥=GC计数/暂停时长（可观测项，与④同类）。旧 handoff 原文是 ⑤=GC计数/⑥=memory_limit，本轮按 coherence 重排后全线自洽（brain truth+timeline、docs 架构文档落地状态+待办#9、CHANGELOG、commit 信息）。用户确认保持现状，不回退。"
+  source: "用户裁决"
+  affects: [qzvm-qzjs-layering]
