@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-10-30T11:56:01"
+updated: "2026-10-31T16:59:19"
 ---
 
 <!-- compiled_truth -->
@@ -223,3 +223,9 @@ interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 i
   summary: "generator 改走 interp：删除平坦 yield 降级；audit corpus7/38 移除 unsupported 后全绿；zod wasm 占比 28.2%"
   source: test_aot / audit_diff / coverage_real
   affects: [aot-readiness, aot-interp-multifile-splicing]
+
+- time: 2026-10-31T16:59:19
+  kind: evidence
+  summary: "类/对象方法作用域边界修复 + 类捕获 loud 化后的回归基线（2026-10-31）：test_aot ALL PASS（新增 4 门禁：工厂类捕获、对象方法 let 不顶参数槽、类型注解不作捕获、函数内 class 捕获 loud）；audit_diff 43 批 949/949（新增 corpus43 20 例）；glue_audit c41/c42/c43 5/5、26/26、20/20；stress_aot 3 轮 2847 例 0 diff（577s，峰值 rss 453MiB）；zod 125/125，wasm 5945/21111 (28.2%) 与基线完全一致——作用域/捕获分析改动无覆盖回归。"
+  source: "test_aot / audit_diff / glue_audit / stress_aot / coverage_real 实测"
+  affects: [aot-readiness]

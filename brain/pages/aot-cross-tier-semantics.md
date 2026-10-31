@@ -4,7 +4,7 @@ title: "AOT 跨档语义一致性：闭包/数组/动态类的两档对齐"
 category: decision
 status: active
 created: "2026-10-19T18:41:21"
-updated: "2026-10-21T01:45:51"
+updated: "2026-10-31T16:59:15"
 ---
 
 <!-- compiled_truth -->
@@ -54,4 +54,10 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
 - time: 2026-10-21T01:45:51
   kind: note
   summary: "补齐 C 侧可捕获异常通道：新增 qz.take_err（C 侧 g_throw_val 槽 → handle 表 → 产物 __err）。reduce 空数组无初值、冻结对象写入改抛真 TypeError（此前静默返回 undefined），emitter _emitErrCheck 在 in-module 档先轮询 take_err（仅 __err==0 时，避免覆盖用户 throw）。已验：a.reduce(fn) 空数组、throw new TypeError 均被 catch 捕获且 name/message 正确；两档回归 13 项全 PASS。遗留：POJO（wasm 内存布局对象）在 C 侧 qz_tojs 无映射 → Object.keys(freeze 对象) 返回空、冻结写入对 POJO 无效，属既有架构边界，非本轮引入。"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-10-31T16:59:15
+  kind: reversal
+  summary: "推翻 2026-10-19 note：类表达式捕获外层局部变量的静默 undefined 缺口已消除。工厂返回的 class 表达式每次求值经 class_expr_value 克隆类元并各建一份 env（class_env_get 按实例 clsId 取），字段初值/方法/构造器共享该 env；方法自有同名局部/形参遮蔽时建子 env（类 env 作 __parent），种子写入用 env_def 落本层，写回不污染共享类 env。剩余形状改为编译期 loud 并给出改法：函数/块内 class 声明（提升到模块级）、const C = class 别名（类值不物化）、静态字段初值/静态块引用非模块级局部（首次静态访问才执行）。附带修 _collectLocals/_collectScopeFnDecls 下探进类体/对象方法体致外层参数槽被同名 let 顶掉（静默读 0）、_capturesOf 类型注解误捕获与嵌套作用域缺失。验证：test_aot ALL PASS、audit_diff 43 批 949/949、glue_audit c43 20/20、stress 3 轮 2847 例 0 diff（峰值 rss 453MiB）、zod 125/125 wasm 5945/21111 基线不变。"
+  source: "src/qzvm/aot/audit_corpus43.js + emit/emitter.js collectClasses/_mEnter + emit/compile-ts.js declaredNames"
   affects: [aot-cross-tier-semantics]
