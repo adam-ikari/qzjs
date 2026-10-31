@@ -73,9 +73,9 @@ for (const c of corpus) {
   let want = null;
   try { want = jsRun(c.ts, c.fn, c.args); } catch (e) { want = "JS:" + String(e.message).slice(0, 60); }
 
-  const ok = err === null && got === want;
+  const ok = c.unsupported ? !!err : (err === null && got === want);   // 已知缺口：build/运行必须 loud（同 audit_diff 判据）
   if (ok) pass++; else fail++;
-  rows.push({ name: c.name, ok, got: err ? "ERR:" + err.slice(0, 60) : got, want });
+  rows.push({ name: c.name, ok, got: err ? "ERR:" + err.slice(0, 60) : got, want: c.unsupported ? "unsupported: " + c.unsupported : want });
 }
 
 const w = Math.max(...rows.map(r => r.name.length), 4);

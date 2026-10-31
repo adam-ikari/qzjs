@@ -85,6 +85,26 @@ function compileTS(input, outWasm, opts = {}) {
     const fnSf = new Map();          // 函数节点 → 源文件（逐函数设 em.sf，供行号/DWARF）
     const clsStmts = [];
     const clsExprMap = new Map();     // ClassExpression 节点 → 合成类名
+    const clsExprSynthDecls = new WeakSet();   // 类表达式合成的 ClassDeclaration（值仍在创建点克隆，不做提升捕获检查）
+    const nestedClsDecls = new WeakSet();      // 非模块顶层的 class 声明：提升后读不到外层局部 → collectClasses 校验
+    const aliasClsExprDecls = new WeakSet();   // `const C = class {…}` 初值位置的类表达式：C 只作类名别名（类值不物化）
+    const declaredNames = new Set();           // 全部文件内声明过的名字（判定「外层绑定」vs「宿主全局」）
+    const noteDeclared = (pat) => {
+        if (!pat) return;
+        if (ts.isIdentifier(pat)) { declaredNames.add(pat.text); return; }
+        if (ts.isObjectBindingPattern(pat) || ts.isArrayBindingPattern(pat))
+            for (const el of pat.elements) if (ts.isBindingElement(el)) noteDeclared(el.name);
+    };
+    const scanDeclaredNames = (root) => {
+        const visit = (n) => {
+            if (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) noteDeclared(n.name);
+            else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n) || ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n))
+                && n.name && ts.isIdentifier(n.name)) declaredNames.add(n.name.text);
+            else if (ts.isCatchClause(n) && n.variableDeclaration) noteDeclared(n.variableDeclaration.name);
+            ts.forEachChild(n, visit);
+        };
+        visit(root);
+    };
     const clsExprSeqRef = { n: 0 };
     let clsExprSeq = 0;
     let defaultSeq = 0;   // 匿名默认导出合成名序号（`__default_N`）
@@ -127,8 +147,14 @@ function compileTS(input, outWasm, opts = {}) {
     const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)；收集阶段就要写（see `export namespace`）
     const nsAliasByFile = {};        // 文件名 → (命名空间本地名 → 成员表)：跨文件同名导入隔离
     const collectDecls = (f) => {
-        const walkCls = (n, bind) => {          // class 仍整树提升（含函数内 class）；bind = 最近绑定名（class 表达式名推断用，勿依赖 n.parent：collectDecls 阶段尚未类型绑定）
-            if (ts.isClassDeclaration(n)) clsStmts.push(n);
+        scanDeclaredNames(f);
+        // nested：不在模块顶层语句位置（函数/块/循环内）——类被提升后其外层绑定不可见；
+        // aliasInit：当前节点是 `const C = class {…}` 的初值（该形式只把 C 当类名别名，类值不物化）。
+        const walkCls = (n, bind, nested, aliasInit) => {   // class 仍整树提升（含函数内 class）；bind = 最近绑定名（class 表达式名推断用，勿依赖 n.parent：collectDecls 阶段尚未类型绑定）
+            if (ts.isClassDeclaration(n)) {
+                clsStmts.push(n);
+                if (nested) nestedClsDecls.add(n);
+            }
             if (ts.isEnumDeclaration(n)) enumStmts.push(n);
             if (ts.isClassExpression(n) && !clsExprMap.has(n)) {   // 类表达式：合成类名（用于 new / instanceof）
                 let synth = n.name ? n.name.text : (bind || null);   // JS 名推断：`const C = class {}` → C.name === "C"
@@ -138,12 +164,16 @@ function compileTS(input, outWasm, opts = {}) {
                 clsExprMap.set(n, synth);
                 const decl = ts.factory.createClassDeclaration(n.modifiers, ts.factory.createIdentifier(synth), n.typeParameters, n.heritageClauses, n.members);
                 decl.pos = n.pos; decl.end = n.end;
+                clsExprSynthDecls.add(decl);
+                if (aliasInit) aliasClsExprDecls.add(decl);
                 clsStmts.push(decl);
             }
             let childBind = bind;
             if ((ts.isVariableDeclaration(n) || ts.isPropertyAssignment(n) || ts.isBindingElement(n))
                 && n.name && ts.isIdentifier(n.name)) childBind = n.name.text;
-            ts.forEachChild(n, (c) => walkCls(c, childBind));
+            ts.forEachChild(n, (c) => walkCls(
+                c, childBind, !ts.isSourceFile(n),
+                ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer === c));
         };
         /* `export namespace X { export const f = …, export function g(){} }`：TS 命名空间是
          * 编译期构造，内联后模块边界消失 → 把**有值**的成员就地改名为 `X$<member>` 并按
@@ -911,6 +941,10 @@ function compileTS(input, outWasm, opts = {}) {
         em.fnMode = fnMode;              // 顶层函数名 → {mode, void}（跨模式调用 ABI 转换用）
         em.usesFreeze = usesFreeze;
         em.clsExprMap = clsExprMap;      // 类表达式节点 → 合成类名（声明处跳过初值求值）
+        em.clsExprSynthDecls = clsExprSynthDecls;
+        em.nestedClsDecls = nestedClsDecls;       // 函数/块内 class 声明（提升后外层绑定不可见）
+        em.aliasClsExprDecls = aliasClsExprDecls; // `const C = class {…}` 初值位置（类值不物化）
+        em.declaredNames = declaredNames;         // 全程序声明名（外层绑定 vs 宿主全局）
         em.usesKeyOrder = usesKeyOrder;
         em.usesDynAcc = usesDynAcc;
         em.usesProto = usesProto;

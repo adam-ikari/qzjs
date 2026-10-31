@@ -113,6 +113,9 @@ class Emitter {
             }
         };
         const walk = (n) => {
+            if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;   // 类体（方法/访问器/字段/静态块）是独立作用域：其 let/const 不属外层函数（否则同名会顶掉外层参数槽）
+            if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+                || ts.isConstructorDeclaration(n)) return;                     // 对象字面量方法/访问器同理（各自编译为独立闭包）
             if (ts.isVariableDeclaration(n)) bindName(n.name);
             else if (ts.isFunctionDeclaration(n) && n.name && n.body && !(this.hoistedFns && this.hoistedFns.has(n))) { names.push(n.name.text); return; }   // 嵌套函数名是本层局部，但其体属另一作用域；无 body = 重载签名，不引入绑定
             else if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) return;   // 不深入嵌套函数体
@@ -126,6 +129,9 @@ class Emitter {
             this._shadowBlocks = this._shadowBlocks || new WeakMap();
             const base = new Set(names);
             const scan = (n, visible) => {
+                if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;   // 类体不属本函数语句流
+                if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+                    || ts.isConstructorDeclaration(n)) return;                    // 对象字面量方法体同理
                 if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n)) return;
                 if (ts.isBlock(n)) {
                     const inner = new Set(visible);
@@ -328,14 +334,30 @@ class Emitter {
     // 捕获的变量来自创建处（外层函数局部）。返回有序捕获名列表。
     _capturesOf(lam) {
         const lambdaIsArrow = ts.isArrowFunction(lam);   // 箭头继承 this；function 表达式有自己的 this
+        const fnLike = (n) => ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n)
+            || ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+            || ts.isConstructorDeclaration(n) || ts.isClassStaticBlockDeclaration(n);
         const local = new Set();
         for (const p of lam.parameters) for (const n of this._patternNames(p.name)) local.add(n);
         this._collectLocals(lam.body).forEach(n => local.add(n));
+        const scopes = [local];                          // 嵌套函数/方法各自的参数+局部：它们不是外层自由变量
+        const isLocal = (name) => { for (let i = scopes.length - 1; i >= 0; i--) if (scopes[i].has(name)) return true; return false; };
         const out = [];
         const seen = new Set();
         const walk = (n) => {
+            if (ts.isTypeNode(n)) return;   // 类型注解里的标识符（interface 名/类型参数）不是运行期引用
+            if (fnLike(n)) {                 // 嵌套函数/方法体：压入其作用域，继续收集其自由引用
+                const s = new Set();
+                for (const p of n.parameters || []) for (const pn of this._patternNames(p.name)) s.add(pn);
+                if (n.body) this._collectLocals(n.body).forEach(x => s.add(x));
+                scopes.push(s);
+                for (const p of n.parameters || []) { walk(p.name); if (p.initializer) walk(p.initializer); }
+                if (n.body) walk(n.body);
+                scopes.pop();
+                return;
+            }
             if (n.kind === ts.SyntaxKind.SuperKeyword) {   // super 引用需要 receiver（home object 的 this）→ 箭头视作捕获 "this"
-                if (!local.has("this") && lambdaIsArrow && !seen.has("this")) { seen.add("this"); out.push("this"); }
+                if (!isLocal("this") && lambdaIsArrow && !seen.has("this")) { seen.add("this"); out.push("this"); }
                 ts.forEachChild(n, walk); return;
             }
             // 不能用 ts.isThis：它对 Identifier 会读 n.parent.kind，而合成箭头（对象字面量方法）
@@ -345,7 +367,7 @@ class Emitter {
                     && (!n.parent || n.parent.kind === ts.SyntaxKind.Parameter));
             if (thisRef) {   // 箭头函数继承 this → 视作捕获 "this"
                 // 合成的访问器/方法闭包把 self 作为名为 "this" 的**形参** → 不作捕获
-                if (!local.has("this") && (lambdaIsArrow && !seen.has("this"))) { seen.add("this"); out.push("this"); }
+                if (!isLocal("this") && (lambdaIsArrow && !seen.has("this"))) { seen.add("this"); out.push("this"); }
                 ts.forEachChild(n, walk); return;
             }
             if (ts.isIdentifier(n)) {
@@ -354,7 +376,7 @@ class Emitter {
                 if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
                 if (n.parent && ts.isBindingElement(n.parent) && n.parent.propertyName === n) return;   // 解构属性名不是变量
                 const name = n.text;
-                if (!local.has(name) && !seen.has(name) && !this.fnNames.has(name)
+                if (!isLocal(name) && !seen.has(name) && !this.fnNames.has(name)
                     && !(this.classes.has(this._className(name) || name))   // 类名不是自由变量（闭包内须走类对象路径）
                     && !(this.moduleGlobals && this.moduleGlobals.has(name))   // 模块级全局：闭包内改为调用时读全局（否则按创建时值捕获 → 自递归箭头 const 拿到 undefined）
                     && !/^(undefined|null|NaN|Infinity)$/.test(name)) { seen.add(name); out.push(name); }
@@ -370,6 +392,10 @@ class Emitter {
         }
         walk(lam.body);
         return out;
+    }
+    // 把非函数节点（字段初值/静态块）包成合成箭头，复用 _capturesOf 的自由变量分析。
+    _synthCaptureArrow(body) {
+        return ts.factory.createArrowFunction(undefined, undefined, [], undefined, undefined, body);
     }
     // 静态接收者分析：返回 Map(变量名 → 类名)，仅收录静态类精确可判的变量——
     // `let/const x = new C(...)` 且 x 在全函数体内从未被写、也未被任何嵌套闭包引用（保守）。
@@ -1288,7 +1314,9 @@ class Emitter {
     _collectScopeFnDecls(body, out = []) {
         const walk = (n) => {
             if (ts.isFunctionDeclaration(n)) { if (n.name && n.body && !(this.hoistedFns && this.hoistedFns.has(n))) out.push(n); return; }   // 无 body = TS 重载签名，无闭包可建
-            if (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isClassDeclaration(n)) return;
+            if (ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;
+            if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
+                || ts.isConstructorDeclaration(n)) return;                    // 对象字面量方法体是独立作用域：其函数声明归该闭包，不属本函数
             ts.forEachChild(n, walk);
         };
         walk(body);
@@ -1877,24 +1905,58 @@ class Emitter {
                 };
                 for (const sm of staticMethods) { sm.usesThis = usesThis(sm.node && sm.node.body); sm.thisNames = thisNames(sm.node && sm.node.body); }
             }
-            const capSetC = new Set();                      // 类方法外围自由变量（**单一来源**，两处共用）
-            for (const mth of methods.concat(staticMethods)) {
-                if (!mth || !mth.node || !mth.node.body) continue;
-                const nestedParams = new Set();             // 嵌套函数（含箭头）的形参：不是外层自由变量（_collectLocals 不下探）
-                { const walkN = (n2) => {
-                    if (ts.isArrowFunction(n2) || ts.isFunctionExpression(n2) || ts.isFunctionDeclaration(n2)
-                        || ts.isMethodDeclaration(n2) || ts.isGetAccessorDeclaration(n2) || ts.isSetAccessorDeclaration(n2))
-                      for (const p2 of n2.parameters) for (const np2 of this._patternNames(p2.name)) nestedParams.add(np2);
-                    ts.forEachChild(n2, walkN); };
-                  if (mth.node.body) for (const st2 of (mth.node.body.statements || [])) walkN(st2); }
-                for (const nm2 of this._capturesOf(mth.node)) {
-                    if (nestedParams.has(nm2)) continue;
-                    if (BUILTIN_GLOBALS.has(nm2)) continue;
-                    if (/^(undefined|null|NaN|Infinity)$/.test(nm2)) continue;
-                    if (this.classes.has(this._className(nm2))) continue;
-                    if (allClsNames.has(this._className(nm2)) || allClsNames.has(nm2)) continue;   // 类名（含尚未登记的本类/后续类）不是捕获
-                    if (this.fnNames && this.fnNames.has(nm2)) continue;
-                    capSetC.add(nm2);
+            const capSetC = new Set();                      // 方法/构造器/实例字段初值的外围引用 → 类 env 捕获（**单一来源**，两处共用）
+            const staticRefsC = new Set();                  // 静态字段初值/静态块的外围引用：首次访问才执行 → 仅用于 loud 校验
+            {
+                const addRefs = (set, node) => {
+                    if (!node) return;
+                    const nestedParams = new Set();         // 嵌套函数（含箭头）的形参：不是外层自由变量（_collectLocals 不下探）
+                    const walkN = (n2) => {
+                        if (ts.isArrowFunction(n2) || ts.isFunctionExpression(n2) || ts.isFunctionDeclaration(n2)
+                            || ts.isMethodDeclaration(n2) || ts.isGetAccessorDeclaration(n2) || ts.isSetAccessorDeclaration(n2)
+                            || ts.isConstructorDeclaration(n2))
+                          for (const p2 of n2.parameters) for (const np2 of this._patternNames(p2.name)) nestedParams.add(np2);
+                        ts.forEachChild(n2, walkN);
+                    };
+                    walkN(node);
+                    for (const nm2 of this._capturesOf(node)) {
+                        if (nm2 === "this" || nm2 === "arguments") continue;   // 蹦床/宿主补，不是类 env 捕获
+                        if (nestedParams.has(nm2)) continue;
+                        if (BUILTIN_GLOBALS.has(nm2)) continue;
+                        if (/^(undefined|null|NaN|Infinity)$/.test(nm2)) continue;
+                        if (this.classes.has(this._className(nm2))) continue;
+                        if (allClsNames.has(this._className(nm2)) || allClsNames.has(nm2)) continue;   // 类名（含尚未登记的本类/后续类）不是捕获
+                        if (this.fnNames && this.fnNames.has(nm2)) continue;
+                        set.add(nm2);
+                    }
+                };
+                for (const mth of methods.concat(staticMethods)) if (mth && mth.node && mth.node.body) addRefs(capSetC, mth.node);
+                if (ctor) addRefs(capSetC, ctor);
+                for (const f of fields) if (f.init) addRefs(capSetC, this._synthCaptureArrow(f.init));
+                for (const f of staticFields) if (f.init) addRefs(staticRefsC, this._synthCaptureArrow(f.init));
+                for (const blk of staticBlocks) addRefs(staticRefsC, this._synthCaptureArrow(blk));
+            }
+            /* 提升后的类读不到定义点外层绑定：函数/块内 class 声明、以及 `const C = class` 形式的
+             * 类表达式（该形式只把 C 当类名别名、类值不物化），若其实现体引用了非模块级局部名，
+             * 运行时没有 env 槽 → 此前静默 undefined，改为 loud。 */
+            if (this.declaredNames) {
+                const isAlias = !!(this.aliasClsExprDecls && this.aliasClsExprDecls.has(st));
+                const lostDecl = isAlias || !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
+                if (lostDecl) {
+                    const lost = [];
+                    for (const nm2 of capSetC) if (this.declaredNames.has(nm2)) lost.push(nm2);
+                    if (lost.length) {
+                        const form = isAlias
+                            ? "const " + st.name.text + " = class 形式（只作类名别名，类值不物化）"
+                            : "函数/块内 class 声明（类被提升到模块级）";
+                        throw new Error("[tagged] " + form + "捕获了外层局部变量（" + lost.join(", ") + "），方法/构造器/字段初值运行时读不到该绑定；请把变量提升到模块级，或改用工厂函数返回类表达式");
+                    }
+                }
+                /* 静态初始化在**首次静态访问点**执行（lazy statics guard）→ 定义点外层局部同样不可见。 */
+                const lostStatic = [];
+                for (const nm2 of staticRefsC) if (this.declaredNames.has(nm2)) lostStatic.push(nm2);
+                if (lostStatic.length) {
+                    throw new Error("[tagged] class " + cname + " 的静态初始化捕获了非模块级变量（" + lostStatic.join(", ") + "）：静态初始化在首次静态访问点执行，读不到 class 定义点的局部绑定；请把变量提升到模块级，或改用实例字段/构造器参数");
                 }
             }
             this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
@@ -2090,9 +2152,10 @@ class Emitter {
         this.cloSlotsLen = cloSlots.length;
         // 方法体内被（嵌套）lambda 捕获的 this/参数/局部 → 共享环境（同 emitFunc）
         const capNames = this._probeCaptured(extraNodes ? [body].concat(extraNodes) : body, params, locals);
-        const probeLenC = capNames.length;
         { const ciC = this.classes.get(cname);
-          if (probeLenC === 0 && ciC && ciC.captured) for (const n0 of ciC.captured) if (!capNames.includes(n0)) capNames.push(n0); }
+          /* 类捕获名一律并入 capMap：方法体内裸引用外层捕获也须走 env（而非 undefined 兜底），
+           * 嵌套 lambda 才能沿环境链看到它们。 */
+          if (ciC && ciC.captured) for (const n0 of ciC.captured) if (!capNames.includes(n0)) capNames.push(n0); }
         const envDecls = capNames.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
             .concat(sT).concat(objPool).concat(restKeyPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(mthLoopSaveDecls).concat(envDecls);
@@ -2106,17 +2169,35 @@ class Emitter {
         if (capNames.length) {
             const M = this.m;
             { const ciE = this.classes.get(cname);
-              if (ciE && ciE.captured && ciE.captured.length
-                  && capNames.every(n0 => ciE.captured.includes(n0))) {   // 方法捕获 ⊆ 类捕获 → 直接用类 env
+              const capArr = (ciE && ciE.captured) || [];
+              /* 直接用类 env 的前提：本方法没有同名形参/局部遮蔽（否则写回会污染共享类 env，
+               * 或读到外层值而非局部值）。 */
+              const covered = capNames.every(n0 => capArr.includes(n0)) && capNames.every(n0 => this._local(n0) === undefined);
+              if (covered) {                                     // 方法捕获 ⊆ 类捕获 → 直接用类 env
                 /* 按实例的**运行时 clsId** 取 env：class_expr_value 克隆出的每个类
                  * 各持一份捕获副本，按类名查会撞车（A/B 共读同一 label）。*/
                 M.localGet(0); M.i32Const(this._strId("@@qzEnv")); M.call("qz.class_env_get");
                 M.i32WrapI64(); M.i32Const(1); M.i32Sub();   /* env 已 +1（0=无捕获哨兵）→ 还原 */
                 M.localSet(this.envLocal);
+              } else if (capArr.some(n0 => capNames.includes(n0))) {
+                /* 方法自身还要捕获形参/局部，同时引用类外层捕获 → 建子环境挂到类 env 下：
+                 * 只写方法自身的名字，类捕获名沿 __parent 链读（否则空环境遮蔽类 env → 静默 undefined）。 */
+                M.localGet(0); M.i32Const(this._strId("@@qzEnv")); M.call("qz.class_env_get");
+                M.i32WrapI64(); M.i32Const(1); M.i32Sub();   /* 父 env 索引（-1 = 无） */
+                M.call("qz.env_new");
+                M.i32WrapI64(); M.localSet(this.envLocal);
               } else { M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal); } }
+            /* 种子写入一律落在**本层**（env_def）：形参写当前值；与类捕获同名的局部先占位
+             * undefined（否则后续 env_set 沿 __parent 链写进共享类 env，污染其它方法）。
+             * 与类捕获同名的形参同理不能 env_set，否则覆盖类 env 的捕获副本。 */
             for (const n of capNames) {
-                if (n === "this") { M.localGet(this.envLocal); M.i32Const(this._strId("this")); M.localGet(0); M.call("qz.env_set"); }
-                else { const li = this._local(n); if (li !== undefined && li < 1 + params.length) { M.localGet(this.envLocal); M.i32Const(this._strId(n)); M.localGet(li); M.call("qz.env_set"); } }
+                const li = this._local(n);
+                if (n === "this") { M.localGet(this.envLocal); M.i32Const(this._strId("this")); M.localGet(0); M.call("qz.env_def"); }
+                else if (li !== undefined) {
+                    M.localGet(this.envLocal); M.i32Const(this._strId(n));
+                    if (li < 1 + params.length) M.localGet(li); else this._emitUndefined();
+                    M.call("qz.env_def");
+                }
             }
         }
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];

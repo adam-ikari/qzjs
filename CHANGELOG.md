@@ -5,6 +5,15 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 类/对象方法作用域边界 + 类捕获 loud 化（2026-10-31）
+- **修复：方法体的 `let/const` 顶掉外层函数参数槽**（`emit/emitter.js` `_collectLocals` 与块遮蔽扫描）：此前局部收集整树下探进 class/类表达式与对象字面量方法体，方法内同名 `let n` 被登记为**外层函数局部**，在形参之后占槽 → 参数映射被改指未初始化 local，闭包/类字段读到 0（静默错值：工厂返回 `class { x: any = n }` 读到 0，方法内 `let n` 让外层 `n` 变 0）。现在在 class/method/getter/setter/ctor 边界停止下探；`_collectScopeFnDecls` 同步不下探（对象方法里的嵌套 `function` 归属该闭包，不再被外层当函数声明提升）。
+- **修复：`_capturesOf` 把类型注解当捕获**：`interface Sh`、类型参数等 `TypeNode` 内的标识符不再计入自由变量（此前入闭包捕获表 → 运行时无源可读）。
+- **修复：`_capturesOf` 缺嵌套函数作用域**：嵌套函数/方法/静态块各自压入「形参+局部」作用域，其自由引用仍向上收集，但同名局部不再误判为外层捕获（zod `ZodError.create` 的 `const error` 曾被当成类捕获 → 静态初始化 loud 误报）。
+- **类捕获 env 一律并入方法 capMap**（`_mEnter`）：方法体内裸引用类捕获也走 env（此前仅在「方法无自身捕获」时才用类 env，裸引用静默 undefined，嵌套 lambda 才能沿环境链读到）；方法与类捕获有同名局部/形参遮蔽时改挂**子 env**（类 env 作 `__parent`），种子写入用 `env_def` 落本层，写回不污染共享类 env。
+- **提升后读不到的外层绑定改 loud**：函数/块内 `class` 声明（类被提升到模块级）、`const C = class {…}` 别名形式（类值不物化）、静态字段初值/静态块（首次静态访问点才执行）引用非模块级局部 → 编译期报错并指出改法（变量提升到模块级 / 改用工厂函数返回类表达式）。此前运行时静默 undefined。
+- 新增 `audit_corpus43.js` 20 例：工厂类捕获（字段/方法/实例独立/字段+闭包/混合闭包）、同名局部与形参遮蔽、对象方法/getter 遮蔽、类型注解、类类型参数、模块级 const 读取，及 5 例必须 loud 的形状；`glue_audit` 支持 `unsupported` 判据（build 必须失败才算通过）。
+- 结果：`test_aot` ALL PASS（新增 4 门禁）；`audit_diff` 43 批 949/949；`glue_audit` c41 5/5、c42 26/26、c43 20/20；`stress_aot` 3 轮 2847 例 0 diff（577s，峰值 rss 453MiB）；zod 125/125、wasm 5945/21111（与基线一致，无覆盖回归）。
+
 ### AOT: 对象 rest 与计算键混用（声明/形参/赋值式）+ 闭包捕获修复（2026-10-31）
 - **`{ [k]: v, ...rest }` 全形状**：`qz.object_rest` 只收静态字符串键，此前计算键与 `...rest` 混用直接 loud 报错。现在计算键在**源位置求值一次**存入按函数静态分配的 i64 键槽，属性读复用该槽，建出 rest 后再按保存的键值调 `qz.delete_index` 逐个删除。覆盖 `const/let` 声明、函数/方法/箭头形参、赋值式（`({ [k]: v, ...r } = o)`），含嵌套模式与默认值；静态排除键上限仍为 8。
 - **键槽分配**（`emit/emitter.js`）：`_countRestComputedKeysIn(params, body)` 静态数出函数内最大并发键数（含形参模式、赋值式目标、嵌套解构），`_reserveRestKeys/_releaseRestKeys` 按嵌套层借用归还；超预留 loud 报错而非静默复用槽位。`swIdx`/`cloHandle` 等尾部槽位偏移随之改为从 `this.swIdx` 推导，避免新增池后错位。
