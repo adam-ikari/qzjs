@@ -1,6 +1,7 @@
-// 差分审计语料（第四十二批）：解构**赋值式**（[a,b]=、{x:…}=）全覆盖——嵌套模式、默认值、
-// 数组/对象 rest、成员/元素目标、计算键、可迭代源、表达式结果值。旧实现仅支持
-// 「标识符 + {key: 标识符}」，其余形状 loud 报错；现由 _emitDestructuringAssign 统一发射。
+// 差分审计语料（第四十二批）：解构**赋值式**（[a,b]=、{x:…}=）与**形参式**全形状——嵌套模式、
+// 默认值、数组/对象 rest、成员/元素目标、计算键、可迭代源、表达式结果值。旧实现赋值式只吃
+// 「标识符 + {key: 标识符}」，形参计算键读错键名（`{ [k]: v }` 曾读成 undefined，静默错值）。
+// 现由 _emitDestructuringAssign + 统一键名分类发射。
 module.exports = [
   { name: "assign-basic-swap", fn: "f", ts: `export function f(): any {
   let a = 1, b = 2;
@@ -66,5 +67,71 @@ module.exports = [
   const z: any = ([a] = [77]);
   const w: any = ({ a } = { a: 88 });
   return a + "|" + z[0] + "|" + w.a;
+}` },
+  { name: "param-computed-key", fn: "f", ts: `const k = "a";
+function take({ [k]: v }: any): any { return v; }
+export function f(): any { return take({ a: 5 }); }` },
+  { name: "param-computed-key-decl", fn: "f", ts: `export function f(): any {
+  const k = "b";
+  const { [k]: v, ...rest } = { a: 1, b: 2 };
+  return v + "|" + Object.keys(rest).join(",");
+}` },
+  { name: "param-rest-static-keys", fn: "f", ts: `export function f(): any {
+  function take({ a, b, ...r }: any): any { return a + b + "|" + Object.keys(r).sort().join(","); }
+  return take({ a: 1, b: 2, c: 3, d: 4 });
+}` },
+  { name: "param-nested-defaults", fn: "f", ts: `export function f(): any {
+  function take([x, [y = 9, z]], { w: { v = 3 } }): any { return x + y + z + v; }
+  return take([1, [undefined, 2]], { w: {} });
+}` },
+  { name: "assign-rest-object-multi", fn: "f", ts: `export function f(): any {
+  let x = 0; let r: any = {};
+  ({ x, ...r } = { x: 5, y: 6, z: 7 });
+  return x + "|" + Object.keys(r).sort().join(",") + "|" + r.y + r.z;
+}` },
+  { name: "assign-computed-rest", fn: "f", ts: `export function f(): any {
+  const k = "b"; let v = 0; let r: any = {};
+  ({ [k]: v, ...r } = { a: 1, b: 2, c: 3 });
+  return v + "|" + Object.keys(r).sort().join(",");
+}` },
+  { name: "param-computed-rest-nested", fn: "f", ts: `export function f(): any {
+  const k = "a";
+  const { [k]: { x, ...r2 }, ...r1 } = { a: { x: 1, y: 2 }, b: 3 };
+  return x + "|" + Object.keys(r2).join(",") + "|" + Object.keys(r1).join(",");
+}` },
+  { name: "param-computed-key-eval-once", fn: "f", ts: `export function f(): any {
+  let n = 0;
+  const kk = () => { n++; return "a"; };
+  const { [kk()]: v, ...r } = { a: 1, b: 2 };
+  return v + "|" + n + "|" + Object.keys(r).join(",");
+}` },
+  { name: "param-computed-default-rest", fn: "f", ts: `export function f(): any {
+  const k = "a";
+  const { [k]: v = 9, ...r } = { b: 2 };
+  return v + "|" + Object.keys(r).join(",");
+}` },
+  { name: "param-numeric-computed-rest", fn: "f", ts: `export function f(): any {
+  const { [1]: v, ...r } = ["x", "y", "z"];
+  return v + "|" + Object.keys(r).sort().join(",");
+}` },
+  { name: "assign-computed-rest-nested", fn: "f", ts: `export function f(): any {
+  let x = 0; let r2: any = {}; let r1: any = {};
+  ({ a: { ["x"]: x, ...r2 }, ...r1 } = { a: { x: 1, y: 2 }, b: 3 });
+  return x + "|" + Object.keys(r2).join(",") + "|" + Object.keys(r1).join(",");
+}` },
+  { name: "param-computed-logical-key", fn: "f", ts: `export function f(): any {
+  const a = 1;
+  const { [a && "b"]: v, ...r } = { a: 1, b: 2, c: 3 };
+  return v + "|" + Object.keys(r).sort().join(",");
+}` },
+  { name: "param-computed-rest-method", fn: "f", ts: `class C {
+  m({ [this.k]: v, ...r }: any): any { return v + "|" + Object.keys(r).sort().join(","); }
+  k = "b";
+}
+export function f(): any { return new C().m({ a: 1, b: 2, c: 3 }); }` },
+  { name: "param-computed-rest-arrow", fn: "f", ts: `export function f(): any {
+  const k = "a";
+  const g = ({ [k]: v, ...r }: any) => v + "|" + Object.keys(r).sort().join(",");
+  return g({ a: 1, b: 2, c: 3 });
 }` },
 ];

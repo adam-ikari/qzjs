@@ -5,6 +5,16 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 对象 rest 与计算键混用（声明/形参/赋值式）+ 闭包捕获修复（2026-10-31）
+- **`{ [k]: v, ...rest }` 全形状**：`qz.object_rest` 只收静态字符串键，此前计算键与 `...rest` 混用直接 loud 报错。现在计算键在**源位置求值一次**存入按函数静态分配的 i64 键槽，属性读复用该槽，建出 rest 后再按保存的键值调 `qz.delete_index` 逐个删除。覆盖 `const/let` 声明、函数/方法/箭头形参、赋值式（`({ [k]: v, ...r } = o)`），含嵌套模式与默认值；静态排除键上限仍为 8。
+- **键槽分配**（`emit/emitter.js`）：`_countRestComputedKeysIn(params, body)` 静态数出函数内最大并发键数（含形参模式、赋值式目标、嵌套解构），`_reserveRestKeys/_releaseRestKeys` 按嵌套层借用归还；超预留 loud 报错而非静默复用槽位。`swIdx`/`cloHandle` 等尾部槽位偏移随之改为从 `this.swIdx` 推导，避免新增池后错位。
+- **修复：形参计算键未参与闭包捕获**：`_capturesOf` 原先只扫 body，箭头 `({ [k]: v, ...r }) => …` 里的外层 `k` 在闭包内读成 `undefined`（静默错值）。现在先遍历形参名与默认值；同时跳过 `BindingElement.propertyName`（属性名不是变量）。
+- **修复：`_capturesOf` 在合成箭头上抛 TypeError**：`ts.isThis` 对 Identifier 会读 `n.parent.kind`，而对象字面量方法合成的 `this` 形参名脱离 parent 链 → `Cannot read properties of undefined (reading 'kind')`。改为直接判 `ThisKeyword` / 名为 `this` 且 parent 缺失或为 Parameter 的 Identifier。
+- **修复：对象解构基值被键表达式覆盖**：`_emitBindingDecl` 对象分支原先拿 `this.scratch` 当基值，计算键写成 `a && b` 时 scratch 被临时值覆盖 → 后续属性从错误对象读。改为基值先存入 `_expEnter` 临时槽。
+- **修复：数字字面量属性名**（`{ [1]: v, ...r }`）在 rest 排除键汇总里被判为不支持；现按 `text` 收键。
+- 新增 `audit_corpus42.js` 14 例（声明/形参/方法/箭头/赋值式/嵌套/键求值一次/默认值/数字键/逻辑键表达式/多键 rest），语料从 12 例扩到 26 例。
+- 结果：`test_aot` ALL PASS；`audit_diff` 42 批全量 0 diff；`glue_audit` corpus42 26/26；`stress_aot` 10 轮 9250 例 0 diff（峰值 rss 525MiB）。
+
 ### AOT: 解构赋值全覆盖 + 内建父类合成 ctor + stress 走 interp（2026-10-30）
 - **解构赋值式（`[a,b]=…` / `({x:…}=…`）全形状**（`emit/tagged.js` 新增 `_emitDestructuringAssign`）：旧实现只吃「标识符 + `{key: 标识符}`」，其余（嵌套模式、默认值、数组 rest、对象 rest、成员/元素目标、计算键、可迭代源）全部 loud 报错。现在按 JS 语义统一发射：RHS 求值一次 → 逐目标读取（数组走迭代协议归一，对象读字段/计算键）→ 默认值仅 undefined 触发 → 目标写（标识符/属性/元素/嵌套递归），表达式结果 = RHS。新增 `audit_corpus42.js`（12 例，与 V8 对拍 12/12；实测修出 1 个简写键名 bug：`({i} = {i:3})` 曾读 undefined）。
 - **内建父类的合成 ctor**（`emit/tagged.js` `_emitSuperCallForward`）：`class E extends Error { code = 3 }` 无显式 constructor 时，合成 ctor 曾 `call` 不存在的 `__m_Error$ctor` → 编译失败。内建父（Error 族）改走与显式 `super(…)` 相同的路径：写 `message`（转发首实参）/`name` 字段 + 子类字段默认值。真实触发源：`@cloudflare/workers-types`（`class DOMException extends Error` 等 134 个类）。

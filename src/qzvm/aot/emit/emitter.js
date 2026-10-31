@@ -207,44 +207,69 @@ class Emitter {
                 i++;
             }
         } else {   // ObjectBindingPattern
-            // {...rest} 需排除「其余解构键」→ 先汇总（最多 4 个，超出报错）
+            // 基值另存可重入临时槽：计算键/默认值表达式内部可能用 this.scratch（如 a && b），
+            // 继续拿 scratch 当基值会被覆盖。
+            const b = this._expEnter();
+            M.localGet(this.scratch); M.localSet(b.v);
+            const hasRest = name.elements.some(el => ts.isBindingElement(el) && el.dotDotDotToken);
+            // {...rest} 的静态排除键；计算键不进 object_rest，建出 rest 后按保存的键值删除（最多 8 个静态键）。
             const restExcl = [];
-            if (name.elements.some(el => ts.isBindingElement(el) && el.dotDotDotToken)) {   // 仅含 {...rest} 时才需静态键名汇总（无 rest 时计算键名合法）
+            if (hasRest) {
                 for (const el of name.elements) {
                     if (!ts.isBindingElement(el) || el.dotDotDotToken) continue;
                     const k = el.propertyName
-                        ? (ts.isIdentifier(el.propertyName) || ts.isStringLiteral(el.propertyName) ? el.propertyName.text : null)
+                        ? ((ts.isIdentifier(el.propertyName) || ts.isStringLiteral(el.propertyName) || ts.isNumericLiteral(el.propertyName)) ? el.propertyName.text : null)
                         : (ts.isIdentifier(el.name) ? el.name.text : null);
-                    if (k === null) throw new Error("[tagged] {...rest} 与计算属性名解构混用暂不支持");
-                    restExcl.push(k);
+                    if (k !== null) restExcl.push(k);
                 }
             }
+            const nComputed = hasRest
+                ? name.elements.filter(el => ts.isBindingElement(el) && !el.dotDotDotToken && el.propertyName && ts.isComputedPropertyName(el.propertyName)).length
+                : 0;
+            const keyBase = hasRest ? this._reserveRestKeys(nComputed) : 0;
+            let ci = 0;
             for (const el of name.elements) {
                 if (!ts.isBindingElement(el)) continue;
+                if (el.dotDotDotToken) {                               // {...rest} → 宿主 object_rest + 删计算键
+                    if (restExcl.length > 8) throw new Error("[tagged] 对象 rest 解构最多排除 8 个键");
+                    const t = this._expEnter();
+                    M.localGet(b.v);
+                    for (let i = 0; i < 8; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
+                    M.call("qz.object_rest");
+                    M.localSet(t.v);
+                    for (let i = 0; i < ci; i++) {
+                        M.localGet(t.v); M.localGet(this._restKeyBase + keyBase + i);
+                        M.call("qz.delete_index"); M.drop();
+                    }
+                    M.localGet(t.v);
+                    this._emitBindingTarget(el.name);
+                    this._expLeave();
+                    continue;
+                }
                 const key = el.propertyName
-                    ? (ts.isIdentifier(el.propertyName) || ts.isStringLiteral(el.propertyName) ? el.propertyName.text : null)
+                    ? ((ts.isIdentifier(el.propertyName) || ts.isStringLiteral(el.propertyName) || ts.isNumericLiteral(el.propertyName)) ? el.propertyName.text : null)
                     : (ts.isIdentifier(el.name) ? el.name.text : null);
                 if (key === null) {
-                    if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {   // 计算键名：o[expr]（运行期键）
-                        this._emitElemOf(this.scratch, el.propertyName.expression);
+                    if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {   // 计算键名：o[expr]（运行期键；rest 需复用同一键值）
+                        if (hasRest) {
+                            const keyLocal = this._restKeyBase + keyBase + ci++;
+                            this.emitTaggedExpr(el.propertyName.expression); M.localSet(keyLocal);
+                            this._emitElemOf(b.v, null, keyLocal);
+                        } else {
+                            this._emitElemOf(b.v, el.propertyName.expression);
+                        }
                         if (el.initializer) this._emitDefaultIfUndef(el.initializer);
                         this._emitBindingTarget(el.name);
                         continue;
                     }
-                    throw new Error("[tagged] 暂不支持计算属性名的解构");
+                    throw new Error("[tagged] 暂不支持该形式的解构属性名: " + ts.SyntaxKind[el.propertyName ? el.propertyName.kind : el.name.kind]);
                 }
-                if (el.dotDotDotToken) {                               // {...rest} → 宿主 object_rest
-                    if (restExcl.length > 8) throw new Error("[tagged] 对象 rest 解构最多排除 8 个键");
-                    M.localGet(this.scratch);
-                    for (let i = 0; i < 8; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
-                    M.call("qz.object_rest");
-                    this._emitBindingTarget(el.name);
-                    continue;
-                }
-                this._emitPropReadFromLocal(this.scratch, key);        // 越界 → undefined（不再裸读内存）
+                this._emitPropReadFromLocal(b.v, key);        // 越界 → undefined（不再裸读内存）
                 if (el.initializer) this._emitDefaultIfUndef(el.initializer);
                 this._emitBindingTarget(el.name);
             }
+            if (hasRest) this._releaseRestKeys(keyBase);
+            this._expLeave();
         }
     }
     // 栈顶值 → 绑定目标。Identifier 直落 local；嵌套 pattern 入临时槽后递归析构。
@@ -313,7 +338,12 @@ class Emitter {
                 if (!local.has("this") && lambdaIsArrow && !seen.has("this")) { seen.add("this"); out.push("this"); }
                 ts.forEachChild(n, walk); return;
             }
-            if (ts.isThis(n)) {   // 箭头函数继承 this → 视作捕获 "this"
+            // 不能用 ts.isThis：它对 Identifier 会读 n.parent.kind，而合成箭头（对象字面量方法）
+            // 的 "this" 形参名是脱离 parent 链的新节点 → TypeError。
+            const thisRef = n.kind === ts.SyntaxKind.ThisKeyword
+                || (ts.isIdentifier(n) && n.text === "this"
+                    && (!n.parent || n.parent.kind === ts.SyntaxKind.Parameter));
+            if (thisRef) {   // 箭头函数继承 this → 视作捕获 "this"
                 // 合成的访问器/方法闭包把 self 作为名为 "this" 的**形参** → 不作捕获
                 if (!local.has("this") && (lambdaIsArrow && !seen.has("this"))) { seen.add("this"); out.push("this"); }
                 ts.forEachChild(n, walk); return;
@@ -322,6 +352,7 @@ class Emitter {
                 // 跳过成员表达式右侧（obj.prop 的 prop 不是变量）
                 if (n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) return;
                 if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
+                if (n.parent && ts.isBindingElement(n.parent) && n.parent.propertyName === n) return;   // 解构属性名不是变量
                 const name = n.text;
                 if (!local.has(name) && !seen.has(name) && !this.fnNames.has(name)
                     && !(this.classes.has(this._className(name) || name))   // 类名不是自由变量（闭包内须走类对象路径）
@@ -331,6 +362,12 @@ class Emitter {
             }
             ts.forEachChild(n, walk);
         };
+        // 形参解构的计算键/默认值也在闭包体内求值，须按自由变量捕获（此前只扫 body，
+        // 箭头 `({ [k]: v, ...r }) => …` 里的外层 k 会读成 undefined）。
+        for (const p of lam.parameters) {
+            walk(p.name);
+            if (p.initializer) walk(p.initializer);
+        }
         walk(lam.body);
         return out;
     }
@@ -528,9 +565,10 @@ class Emitter {
     }
     // 下标读 base[i]（base 句柄在 local `base`）：字符串键或非 wasm 数组 → 宿主 qz.get_index；
     // wasm 数组(0x7FFB) + 数值键 → 内存 dataOff + i*8（快路径）。
-    _emitElemOf(base, idxExpr) {
+    _emitElemOf(base, idxExpr, keyLocal) {
         const M = this.m, t = this._expEnter();
-        this.emitTaggedExpr(idxExpr); M.localSet(t.w);              // 键
+        if (keyLocal !== undefined) { M.localGet(keyLocal); M.localSet(t.w); }   // 键已求值（rest 排除需复用同一值）
+        else { this.emitTaggedExpr(idxExpr); M.localSet(t.w); }                 // 键
         M.localGet(t.w); this._emitIsStr();
         M.ifBlock("i64");
         M.localGet(base); M.localGet(t.w); M.call("qz.get_index");  // 字符串键 → 宿主
@@ -647,6 +685,51 @@ class Emitter {
         walk(node);
         return n;
     }
+    /* 对象 rest + 计算键需要跨「读属性」与「建 rest」保存键值（键表达式只能求值一次）。
+     * 这里按函数体静态数出最多需要多少个 i64 槽；发射期用 _reserveRestKeys 按嵌套层分配。 */
+    _countRestComputedKeys(node) {
+        if (!node) return 0;
+        let n = 0;
+        // 赋值式解构目标：`= 左侧`，或嵌套在另一个解构目标的属性值里。
+        const isAssignTarget = (x) => {
+            const p = x.parent;
+            if (!p) return false;
+            if (ts.isBinaryExpression(p) && p.left === x && p.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true;
+            if (ts.isPropertyAssignment(p) && p.initializer === x) return isAssignTarget(p.parent);
+            if (ts.isArrayLiteralExpression(p) && p.elements.includes(x)) return isAssignTarget(p);
+            if (ts.isParenthesizedExpression(p) && p.expression === x) return isAssignTarget(p);
+            return false;
+        };
+        const walk = (x) => {
+            if (ts.isObjectBindingPattern(x) && x.elements.some(e => ts.isBindingElement(e) && e.dotDotDotToken)) {
+                for (const e of x.elements) {
+                    if (ts.isBindingElement(e) && !e.dotDotDotToken && e.propertyName && ts.isComputedPropertyName(e.propertyName)) n++;
+                }
+            }
+            if (ts.isObjectLiteralExpression(x) && x.properties.some(p => ts.isSpreadAssignment(p)) && isAssignTarget(x)) {
+                for (const p of x.properties) if (ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)) n++;
+            }
+            ts.forEachChild(x, walk);
+        };
+        walk(node);
+        return n;
+    }
+    // 形参解构也在函数体内发射，但节点不在 body 上；一并统计。
+    _countRestComputedKeysIn(params, body) {
+        let n = this._countRestComputedKeys(body);
+        for (const p of (params || [])) if (p && p.name) n += this._countRestComputedKeys(p.name);
+        return n;
+    }
+    _reserveRestKeys(n) {
+        if (!n) return 0;
+        const base = this._restKeyNext || 0;
+        if (base + n > (this._restKeyCount || 0)) {
+            throw new Error(`[tagged] 解构计算键嵌套超过预留槽（需要 ${base + n}，预留 ${this._restKeyCount || 0}）`);
+        }
+        this._restKeyNext = base + n;
+        return base;
+    }
+    _releaseRestKeys(base) { this._restKeyNext = base; }
 
 
     // ++obj.a / obj.a-- / this.#v++：接收者求值一次 → 属性读 ±1 → 属性写回（宿主/POJO/访问器统一分派）。
@@ -1067,37 +1150,64 @@ class Emitter {
             return;
         }
         if (ts.isObjectBindingPattern(pat)) {
+            const hasRest = pat.elements.some(el => ts.isBindingElement(el) && el.dotDotDotToken);
             const restExcl = [];
-            for (const el of pat.elements) {
-                if (!ts.isBindingElement(el) || el.dotDotDotToken) continue;
-                const k = el.propertyName ? el.propertyName.text : (ts.isIdentifier(el.name) ? el.name.text : null);
-                if (k === null) throw new Error("[tagged] 暂不支持计算属性名的解构");
-                restExcl.push(k);
+            if (hasRest) {   // 仅含 rest 时需静态键名；计算键在 rest 建出后按保存的键值删除
+                for (const el of pat.elements) {
+                    if (!ts.isBindingElement(el) || el.dotDotDotToken) continue;
+                    const nm = el.propertyName;
+                    const k = nm
+                        ? ((ts.isIdentifier(nm) || ts.isStringLiteral(nm) || ts.isNumericLiteral(nm)) ? nm.text : null)
+                        : (ts.isIdentifier(el.name) ? el.name.text : null);
+                    if (k !== null) restExcl.push(k);
+                }
             }
+            const nComputed = hasRest
+                ? pat.elements.filter(el => ts.isBindingElement(el) && !el.dotDotDotToken && el.propertyName && ts.isComputedPropertyName(el.propertyName)).length
+                : 0;
+            const keyBase = hasRest ? this._reserveRestKeys(nComputed) : 0;
+            let ci = 0;
             for (const el of pat.elements) {
                 if (!ts.isBindingElement(el)) continue;
                 if (el.dotDotDotToken) {
                     if (restExcl.length > 8) throw new Error("[tagged] 对象 rest 解构最多排除 8 个键");
+                    const t = this._expEnter();
                     M.localGet(valLocal);
                     for (let i = 0; i < 8; i++) M.i32Const(i < restExcl.length ? this._strId(restExcl[i]) : -1);
                     M.call("qz.object_rest");
+                    M.localSet(t.v);
+                    for (let i = 0; i < ci; i++) {
+                        M.localGet(t.v); M.localGet(this._restKeyBase + keyBase + i);
+                        M.call("qz.delete_index"); M.drop();
+                    }
+                    M.localGet(t.v);
                     this._emitBindingTarget(el.name);
+                    this._expLeave();
                     continue;
                 }
-                const key = el.propertyName ? el.propertyName.text : (ts.isIdentifier(el.name) ? el.name.text : null);
+                const key = el.propertyName
+                    ? ((ts.isIdentifier(el.propertyName) || ts.isStringLiteral(el.propertyName) || ts.isNumericLiteral(el.propertyName)) ? el.propertyName.text : null)
+                    : (ts.isIdentifier(el.name) ? el.name.text : null);
                 if (key === null) {
                     if (el.propertyName && ts.isComputedPropertyName(el.propertyName)) {   // 计算键名：o[expr]（运行期键）
-                        this._emitElemOf(valLocal, el.propertyName.expression);
+                        if (hasRest) {
+                            const keyLocal = this._restKeyBase + keyBase + ci++;
+                            this.emitTaggedExpr(el.propertyName.expression); M.localSet(keyLocal);
+                            this._emitElemOf(valLocal, null, keyLocal);
+                        } else {
+                            this._emitElemOf(valLocal, el.propertyName.expression);
+                        }
                         if (el.initializer) this._emitDefaultIfUndef(el.initializer);
                         this._emitBindingTarget(el.name);
                         continue;
                     }
-                    throw new Error("[tagged] 暂不支持计算属性名的解构");
+                    throw new Error("[tagged] 暂不支持该形式的解构属性名: " + ts.SyntaxKind[el.propertyName ? el.propertyName.kind : el.name.kind]);
                 }
                 this._emitPropReadFromLocal(valLocal, key);
                 if (el.initializer) this._emitDefaultIfUndef(el.initializer);
                 this._emitBindingTarget(el.name);
             }
+            if (hasRest) this._releaseRestKeys(keyBase);
             return;
         }
         throw new Error("[tagged] 不支持的绑定模式");
@@ -1270,8 +1380,14 @@ class Emitter {
         const objPool = this.mode === "tagged" ? Array.from({ length: 48 }, () => "i64") : [];
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
+        // 对象 rest + 计算键的键值槽（i64，仅 tagged）：按函数体内最大并发数静态分配。
+        const nRestKeys = this.mode === "tagged" ? this._countRestComputedKeysIn(f.parameters, f.body) : 0;
+        const restKeyPool = Array.from({ length: nRestKeys }, () => "i64");
+        this._restKeyBase = this.objBase + objPool.length;
+        this._restKeyCount = nRestKeys;
+        this._restKeyNext = 0;
         // 尾部追加：sT(8×i32，tagged) + swIdx(i32) + forOf 对×(vt,i32)（每嵌套层独立）。
-        this.swIdx = this.objBase + objPool.length;
+        this.swIdx = this.objBase + objPool.length + nRestKeys;
         const nForOf = this._countForOf(f.body);
         this.forOfBase = this.swIdx + 1;
         this.forOfCount = 0;
@@ -1279,7 +1395,7 @@ class Emitter {
         for (let i = 0; i < nForOf; i++) forOfLocals.push(vt, "i32", "i32");
         // 闭包保留槽（仅 tagged）：cloHandle(i64 存闭包句柄) + cloOff/cloBlk/cloFn(3×i32)。
         const cloSlots = this.mode === "tagged" ? ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"] : [];
-        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 3;
+        this.cloHandle = this.swIdx + 1 + nForOf * 3;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;                 // ++/-- 成员接收者句柄临时（i64）
@@ -1305,7 +1421,7 @@ class Emitter {
             ? this._probeCaptured(f.body, f.parameters.map(p => p.name.text), locals) : [];
         const envDecls = capNames.length ? ["i32"] : [];
         const needsArgs0 = this.mode === "tagged" && !!(this._fnArgs && f.name && this._fnArgs.has(f.name.text));
-        const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool)
+        const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(restKeyPool)
             .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(loopSaveDecls).concat(fnArenaDecls).concat(needsArgs0 ? ["i64"] : []).concat(envDecls).concat(numArrDecls);
         // num 数组的 base/len local 索引（一对 i32/名字）
         {
@@ -1553,14 +1669,19 @@ class Emitter {
         const objPool = Array.from({ length: 48 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
-        this.swIdx = this.objBase + objPool.length;
+        const nRestKeys = this._countRestComputedKeysIn(lam.parameters, lam.body);
+        const restKeyPool = Array.from({ length: nRestKeys }, () => "i64");
+        this._restKeyBase = this.objBase + objPool.length;
+        this._restKeyCount = nRestKeys;
+        this._restKeyNext = 0;
+        this.swIdx = this.objBase + objPool.length + nRestKeys;
         const nForOf = this._countForOf(lam.body);
         this.forOfBase = this.swIdx + 1;
         this.forOfCount = 0;
         const forOfLocals = [];
         for (let i = 0; i < nForOf; i++) forOfLocals.push("i64", "i32", "i32");
         const cloSlots = ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"];
-        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 3;
+        this.cloHandle = this.swIdx + 1 + nForOf * 3;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
@@ -1572,7 +1693,7 @@ class Emitter {
         const envDecls = ownCap.length ? ["i32"] : [];
         const lamNeedsArgs = usesArguments(lam.body);
         lam._qzNeedsArgs = lamNeedsArgs;
-        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool)
+        const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool).concat(restKeyPool)
             .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(lamLoopSaveDecls).concat(lamNeedsArgs ? ["i64"] : []).concat(envDecls);
         this._argsLocal = lamNeedsArgs ? (1 + params.length) + bodyLocals.length - 1 - envDecls.length : undefined;
         const localNames = this.m.debug ? ["blk"].concat(params).concat(locals) : null;
@@ -1947,14 +2068,19 @@ class Emitter {
         const objPool = Array.from({ length: 48 }, () => "i64");
         this.objBase = nLoc + 3 + extra.length + sT.length;
         this._objDepth = 0;
-        this.swIdx = this.objBase + objPool.length;
+        const nRestKeys = this._countRestComputedKeysIn(astParams, body);
+        const restKeyPool = Array.from({ length: nRestKeys }, () => "i64");
+        this._restKeyBase = this.objBase + objPool.length;
+        this._restKeyCount = nRestKeys;
+        this._restKeyNext = 0;
+        this.swIdx = this.objBase + objPool.length + nRestKeys;
         const nForOf = this._countForOf(body);
         this.forOfBase = this.swIdx + 1;
         this.forOfCount = 0;
         const forOfLocals = [];
         for (let i = 0; i < nForOf; i++) forOfLocals.push("i64", "i32", "i32");
         const cloSlots = ["i64", "i32", "i32", "i32", "i64", "i64", "i64", "i64"];
-        this.cloHandle = nLoc + 3 + extra.length + sT.length + objPool.length + 1 + nForOf * 3;
+        this.cloHandle = this.swIdx + 1 + nForOf * 3;
         this.cloOff = this.cloHandle + 1; this.cloBlk = this.cloHandle + 2; this.cloFn = this.cloHandle + 3;
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
@@ -1969,7 +2095,7 @@ class Emitter {
           if (probeLenC === 0 && ciC && ciC.captured) for (const n0 of ciC.captured) if (!capNames.includes(n0)) capNames.push(n0); }
         const envDecls = capNames.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
-            .concat(sT).concat(objPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(mthLoopSaveDecls).concat(envDecls);
+            .concat(sT).concat(objPool).concat(restKeyPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(mthLoopSaveDecls).concat(envDecls);
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
         this.m.i64Const(0n); this.m.globalSet(1);           // 入口清 __err

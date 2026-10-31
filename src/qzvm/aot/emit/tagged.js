@@ -2125,22 +2125,34 @@ Emitter.prototype._emitDestructuringAssign = function (left, rhsLocal) {
     const props = left.properties;
     const hasRest = props.some(p => ts.isSpreadAssignment(p));
     const restExcl = [];
-    if (hasRest) {
+    if (hasRest) {                                            // 计算键不进 object_rest，建出 rest 后按保存的键值删除
         for (const p of props) {
             if (ts.isSpreadAssignment(p)) continue;
             const nm = ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) ? p.name : null;
             const k = nm && (ts.isIdentifier(nm) || ts.isStringLiteral(nm) || ts.isNumericLiteral(nm)) ? nm.text : null;
-            if (k === null) throw new Error("[tagged] {...rest} 与计算属性名解构混用暂不支持");
-            restExcl.push(k);
+            if (k !== null) restExcl.push(k);
         }
     }
+    const nComputed = hasRest
+        ? props.filter(p => ts.isPropertyAssignment(p) && ts.isComputedPropertyName(p.name)).length
+        : 0;
+    const keyBase = hasRest ? this._reserveRestKeys(nComputed) : 0;
+    let ci = 0;
     for (const p of props) {
-        if (ts.isSpreadAssignment(p)) {                       // {...rest} → 宿主 object_rest
+        if (ts.isSpreadAssignment(p)) {                       // {...rest} → 宿主 object_rest + 删计算键
             if (restExcl.length > 8) throw new Error("[tagged] 对象 rest 解构最多排除 8 个键");
+            const t = this._expEnter();
             M.localGet(rhsLocal);
             for (let k = 0; k < 8; k++) M.i32Const(k < restExcl.length ? this._strId(restExcl[k]) : -1);
             M.call("qz.object_rest");
+            M.localSet(t.v);
+            for (let k = 0; k < ci; k++) {
+                M.localGet(t.v); M.localGet(this._restKeyBase + keyBase + k);
+                M.call("qz.delete_index"); M.drop();
+            }
+            M.localGet(t.v);
             this._emitAssignTargetFromStack(p.expression);
+            this._expLeave();
             continue;
         }
         let target, dflt = null, key = null, keyExpr = null;
@@ -2157,11 +2169,19 @@ Emitter.prototype._emitDestructuringAssign = function (left, rhsLocal) {
             else if (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) || ts.isNumericLiteral(p.name)) key = p.name.text;
             else throw new Error("[tagged] 解构赋值不支持的属性名形式: " + ts.SyntaxKind[p.name.kind]);
         } else throw new Error("[tagged] 解构赋值不支持的对象成员: " + ts.SyntaxKind[p.kind]);
-        if (keyExpr !== null) this._emitElemOf(rhsLocal, keyExpr);
-        else this._emitPropReadFromLocal(rhsLocal, key);
+        if (keyExpr !== null) {
+            if (hasRest) {
+                const keyLocal = this._restKeyBase + keyBase + ci++;
+                this.emitTaggedExpr(keyExpr); M.localSet(keyLocal);
+                this._emitElemOf(rhsLocal, null, keyLocal);
+            } else {
+                this._emitElemOf(rhsLocal, keyExpr);
+            }
+        } else this._emitPropReadFromLocal(rhsLocal, key);
         if (dflt) this._emitDefaultIfUndef(dflt);
         this._emitAssignTargetFromStack(target);
     }
+    if (hasRest) this._releaseRestKeys(keyBase);
 };
 // 栈顶值 → 赋值目标（标识符/属性/元素/嵌套模式）；写入后丢弃 store 保留值（结果 = 整个 RHS）。
 Emitter.prototype._emitAssignTargetFromStack = function (target) {
