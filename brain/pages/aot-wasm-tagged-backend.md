@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, wasm, emitter, qzvm, perf]
 created: "2026-10-12T15:51:52"
-updated: "2026-10-21T03:44:38"
+updated: "2026-10-31T09:48:39"
 ---
 
 <!-- compiled_truth -->
@@ -622,4 +622,10 @@ updated: "2026-10-21T03:44:38"
   kind: decision
   summary: "内存上限可配置（2026-10-20）：emitter.js 新增 memLayout(opts)（opts.memMiB，默认 40，最小 8），独立档线性内存页数与 bump arena 上界由它统一推导——arenaEnd = total*0.4 按 4KiB 对齐（默认 40MiB→16MiB，与旧行为一致），下限 1MiB、至少给字面量段留 4MiB；emitter 产物 memory 段可带 max（wasm-encoder addMemory(pages,max)），compileTS 返回 arenaEnd，build.js 写 .meta.json 的 arena 并由 glue 传给 makeQzvm({arenaEnd})，宿主 ARENA_END 随之对齐。in-module 档不经此项（memory 由 CMake --initial-memory 决定）。实测：--mem 8 与 64 的 arena 分别 3.35MiB/26.8MiB，撑爆阈值 209655 vs 1677559 次拼接，均抛 RangeError 且实例存活；test_aot ALL PASS、audit_diff 47/47。"
   source: "emitter.js:2360-2373, qzvm.js:383-385, build.js:45,104,158,160"
+  affects: [aot-wasm-tagged-backend]
+
+- time: 2026-10-31T09:48:39
+  kind: decision
+  summary: "对象 rest + 计算键混用（2026-10-31）：qz.object_rest 只接受静态字符串键（上限 8），计算键在源位置求值一次存入按函数静态分配的 i64 键槽，读属性复用该槽，rest 建出后按保存键值 qz.delete_index 删除。覆盖声明/形参/方法/箭头/赋值式与嵌套模式。键槽由 _countRestComputedKeysIn 静态计数、_reserveRestKeys 按嵌套层借用，超预留 loud 报错。同时修三处静默错/崩溃：形参计算键未参与闭包捕获（外层 k 读成 undefined）、ts.isThis 对无 parent 的合成 this 形参抛 TypeError、对象解构基值被键表达式覆盖。验证：test_aot ALL PASS，audit_diff 42 批 0 diff，glue_audit corpus42 26/26。"
+  source: "src/qzvm/aot/emit/emitter.js, src/qzvm/aot/emit/tagged.js, src/qzvm/aot/audit_corpus42.js, CHANGELOG.md"
   affects: [aot-wasm-tagged-backend]
