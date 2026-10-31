@@ -3563,7 +3563,20 @@ int64_t qz_guest_static_get_dyn(int64_t clsVal, int32_t nameStrId)
 {
     uint64_t u = (uint64_t)clsVal;
     if ((uint16_t)(u >> 48) != 0x7FFE) return 0;
-    return qz_guest_static_get((int32_t)(u & 0xFFFFFFFFu), nameStrId);
+    int32_t cid = (int32_t)(u & 0xFFFFFFFFu);
+    /* 沿 classMeta 父链查（与独立档 static_get_dyn 一致）：静态方法/访问器内 this 可能是
+     * 派生类，父类静态字段应可见；派生类同名字段优先。此前只查接收者自身 →
+     * `class B extends A {}; B.m()` 里 this.x 静默 0。 */
+    for (int32_t depth = 0; cid >= 0 && depth < 64; depth++) {
+        int32_t k = qz_static_find(cid, nameStrId);
+        if (k >= 0) return g_statics[k].val;
+        uint32_t off = qz_clsmeta_item_off(cid);
+        if (!off) break;
+        int32_t parent; memcpy(&parent, (const unsigned char *)(uintptr_t)(off + 4), 4);
+        if (parent == cid) break;
+        cid = parent;
+    }
+    return 0;
 }
 
 __attribute__((export_name("static_set")))
@@ -3577,6 +3590,16 @@ void qz_guest_static_set(int32_t clsId, int32_t nameStrId, int64_t val)
         g_statics[k].nameId = nameStrId;
     }
     g_statics[k].val = val;
+}
+
+/* static_set_dyn(clsVal, nameStrId, val)：静态方法内 this.x = v —— JS 写到接收者类
+ * **自有**静态属性（不沿父链），故直接按 clsId 落表。 */
+__attribute__((export_name("static_set_dyn")))
+void qz_guest_static_set_dyn(int64_t clsVal, int32_t nameStrId, int64_t val)
+{
+    uint64_t u = (uint64_t)clsVal;
+    if ((uint16_t)(u >> 48) != 0x7FFE) return;
+    qz_guest_static_set((int32_t)(u & 0xFFFFFFFFu), nameStrId, val);
 }
 
 __attribute__((export_name("statics_ready")))

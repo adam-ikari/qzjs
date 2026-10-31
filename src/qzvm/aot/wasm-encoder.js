@@ -123,6 +123,12 @@ class Module {
         (this._pending = this._pending || {})[codeIdx] = name;
         return fidx;
     }
+    // 已登记函数的返回元数（蹦床/包装器据实决定是否需要补 undefined 占位）。
+    funcResults(name) {
+        const ci = (this._codeIdx || {})[name];
+        if (ci === undefined) return null;
+        return this.types[this.funcs[ci]].results;
+    }
     startBody(name, locals, names, declLine) {
         // 嵌套开体 = 上一个函数体漏了 endBody（发射期抛错/提前 return）→ loud，勿静默覆盖，
         // 否则错误表现为 build() 时「codes[i] 为 null」，丢失原始位置。

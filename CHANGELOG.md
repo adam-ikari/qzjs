@@ -5,6 +5,15 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 静态字段类键 + 静态 this 接收者语义（2026-10-31）
+- **静态字段类键两档统一**（`emit/tagged-core.js` 新增 `_staticClassKey`）：C 档静态表以 **clsId** 为键（与 `static_get_dyn`/classMeta 同空间），独立档以**类名 strId** 为键；此前所有写入点一律用 strId → in-module 档在 strId(类名)≠clsId 时 `this.x`/`C.x` 静默读 0。现 static_get/static_set/statics_ready/statics_mark/statics_has 全部按档取键。
+- **静态方法内 `this` = 运行期接收者类**（`emit/tagged.js` + `qzvm.js` + `guest_entry.c`）：`B.getX()` 调继承自 A 的静态方法时 `this === B`。新增 `static_set_dyn` 把 `this.x = v` 写到**接收者自有**静态（此前落到定义类 A，A/B 双错）；C 档 `static_get_dyn` 沿 classMeta 父链查找（此前派生类读父类静态字段静默 0）；`this.x++/--`、复合赋值与 `this.#n`（私有静态按 `#定义类#名`）均走 dyn 路径。静态 getter/setter 直调 self 由 undefined 改为接收者类值；静态调用/访问器的惰性守卫覆盖整条父链（`_emitStaticsChainGuard`，此前只初始化接收者自身，父链字段读到 undefined）。
+- **void 方法调用点/蹦床按实际签名处理**（`emit/tagged.js`、`emit/compile-ts.js`、`wasm-encoder.js` 新增 `funcResults`）：`: void` 静态方法无 wasm 返回值，直调点曾按有返回值发射 `local.set` → 产物校验失败；类方法蹦床此前按名字猜 void（只认 `$ctor/$set`）→ `: void` 静态/实例方法同样栈失衡。现按登记签名判定；蹦床保持 `→ i64`（C 侧 call_indirect ABI），无返回值时补 undefined 占位。
+- **类表达式/嵌套类声明的静态字段改 loud**（`emit/emitter.js`）：静态表按类名共享且只初始化一次，而类表达式每次求值、嵌套 class 每次进入定义点都应重建独立静态状态（此前静默串味/读不到初值）。仅模块顶层 `const/let C = class {…}`（求值一次、类名稳定）受支持；其余编译期报错并给出改法。corpus30 `static-init-order` 的嵌套类 D 移到模块级（新增 `static-init-order-local-class` unsupported 例），test_aot `staticArrowField` 同步改为模块级类。
+- 新增 `audit_corpus45.js` 23 例（16 支持 + 7 loud）：静态 this 读写/自增/复合、继承静态字段/getter/setter、私有静态 this、两档类键、顶层类表达式静态；`e2e_statics` 增 7 项 C 档类键回归。
+- 结果：`test_aot` ALL PASS；`audit_diff` 45 批全量 0 diff（c30 21/21、c45 23/23）；`glue_audit` c41–c45 全绿（c45 23/23）；in-module e2e 14 套全 PASS（含 concat；statics 增 7 项 C 档类键回归）；`stress_aot` 45 批 1014 例 2 轮 2028 例 0 diff（445s，峰值 rss 499MiB）。
+- 顺带发现（既有基线，非本批回归）：对 c1–c40 跑全量 `glue_audit` 暴露一批老语料的 glue 装配路径差异（如 str-template/switch/recursion 等用例），这些语料历史上只由 `audit_diff` 把关。已在 HEAD 建立基线逐批比对：44 批中仅 corpus30 因本批新增 unsupported 例而变化（17/20 → 18/21），其余失败集合完全一致。留作后续 P4 目标。
+
 ### AOT: super 数据属性语义 + arguments 继承 + 工厂类静态成员（2026-10-31）
 - **`super.v` 按原型语义取值**（`emit/tagged.js`）：父类数据字段只存在实例上、不在原型上 → `super.v` 现为 `undefined`（此前按字段偏移直读实例，静默错值，字段初值 `w = super.v` 同病）；父 getter 仍照常调用；父**方法作值**（`const g = super.m`）无法物化 → loud；动态父类下的 `super.v` 读/写 → loud 并提示改用 `this.v`。删除了重复的 super 属性分支（后者不可达）。
 - **动态父 `super.m()` 派发**（`emit/tagged.js` + `qzvm.js` + `guest_entry.c` 新增 `super_method_dyn`）：类表达式 `class extends B` 的父在运行期才解析，此前编译期父链查不到直接报错。现按 home 类的运行时父链在宿主/C 两侧查实例方法并调用（≤4 参；静态方法内仍 loud）。
@@ -14,7 +23,7 @@ All notable changes to qzjs.
 - **in-module 档动态类值成员访问 loud 化**（`guest_entry.c`）：克隆类值低 32 位是 clsId 而非实例内存 offset，此前落进实例路径读垃圾。`prop_get`/`prop_set`/`get_index`/`set_index`/`method_call` 现对 `g_dyncls[]` 中的动态 clsId 统一抛 TypeError；静态类值的静态发射路径不受影响。
 - **glue_audit 修复 `undefined` 归一**：`JSON.stringify(undefined)` 返回 `undefined` 而非字符串，与 CLI 打印的 `run() = undefined` 不同型 → 曾把正确结果误判为 diff。
 - 新增 `audit_corpus44.js` 41 例：finally 控制流（break/continue/labeled/return 覆盖/throw）、arguments 继承、方法形参默认值、super 数据属性、动态父 super.m、工厂类静态成员、class 表达式克隆/instanceof/getter-setter 共享 cell、defineProperty 访问器等 32 例，及 9 例必须 loud 的形状（内建子类 Array/Map、计算方法名、静态块闭包、super 方法作值、动态父 super 属性、类方法 arguments、`const K = class` 别名）。
-- 结果：`test_aot` ALL PASS；`audit_diff` corpus44 41/41；`glue_audit` corpus44 41/41（C 档 9 例 loud 全部按预期报错）；in-module e2e 全通过（builtin/class/closure/clsload/cross_tier/mixload/pojo/prims/prop_get/real_program/statics/strload/throw + concat）；`stress_aot` 44 批 990 例 2 轮 1980 例 0 diff（429s，峰值 rss 497MiB）。
+- 结果：`test_aot` ALL PASS；`audit_diff` corpus44 41/41；`glue_audit` corpus44 41/41（glue 装配路径 9 例 loud 全部按预期报错）；in-module e2e 全通过（builtin/class/closure/clsload/cross_tier/mixload/pojo/prims/prop_get/real_program/statics/strload/throw + concat）；`stress_aot` 44 批 990 例 2 轮 1980 例 0 diff（429s，峰值 rss 497MiB）。
 
 ### AOT: 覆盖率工具 interp 归因（2026-10-31）
 - **编译期归因标记**（`emit/compile-ts.js`）：`QZDBG_INTERP=1` 时每个进 interp 的函数记录首个原因——`async-self` / `generator-self` / `suspend-nested` / `module-suspend` / `calls:<callee>` / `class-calls:<callee>` / `shared-state`，随编译结果返回 `dbgInterp`；默认关闭，不改变编译行为。

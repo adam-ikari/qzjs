@@ -73,14 +73,18 @@ export function f(): any {
   return out.join("|");
 }` },
   { name: "static-init-order", fn: "f", ts: `class C { static a: any = 1; static b: any = C.a + 1; static { C.c = C.b + 1; } static d: any = C.c * 2; }
+class D { static s: any = []; static { D.s.push("block1"); } static x: any = D.s.push("field") && D.s.length; static { D.s.push("block2"); } }
 export function f(): any {
   const out: any = [];
   out.push(C.a, C.b, C.c, C.d);
   out.push(C.a + C.b + C.c + C.d);
-  class D { static s: any = []; static { D.s.push("block1"); } static x: any = D.s.push("field") && D.s.length; static { D.s.push("block2"); } }
   out.push(D.s.join(","), D.x);
   return out.join("|");
 }` },
+  { name: "static-init-order-local-class", fn: "f", ts: `export function f(): any {
+  class D { static s: any = []; static x: any = 1; }
+  return D.s.length + D.x;
+}`, unsupported: "函数/块内 class 声明的静态字段（静态表按类名共享、只初始化一次，重新进入定义点应重新初始化）" },
   { name: "error-subclass-instanceof", fn: "f", ts: `class AppError extends Error { constructor(msg: any, public code: any) { super(msg); this.name = "AppError"; } }
 class NotFound extends AppError { constructor(msg: any) { super(msg, 404); this.name = "NotFound"; } }
 export function f(): any {

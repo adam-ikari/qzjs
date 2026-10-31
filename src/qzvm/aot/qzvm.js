@@ -2553,13 +2553,25 @@ function makeQzvm(strings, opts) {
     const key = strings[id];
     let cur = handles[idxOf(selfH)];
     while (cur && typeof cur === "function") {
-      const nm = cur.name;
-      const cid = nm ? strings.indexOf(String(nm)) : -1;   // statics_has/static_get 收字符串 id
-      if (cid >= 0 && !/^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(String(nm))
-          && api.statics_has(cid, id)) return api.static_get(cid, id);
+      const nm = String(cur.name || "");
+      // statics 以类名文本为键；直接按名查（不再依赖名字是否已登记进 strings，
+      // 否则 static_set_dyn 新建的派生类槽位会因 cid<0 读不到）。
+      const o = nm ? statics.get(nm) : undefined;
+      if (o && !/^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(nm)
+          && key in o) { const v = o[key]; return v === undefined ? TAG : v; }
       cur = Object.getPrototypeOf(cur);
     }
     return TAG;
+  };
+  // 静态方法内 this.x = v：JS 写接收者类**自有**静态属性（不沿父链）
+  api.static_set_dyn = (selfH, id, v) => {
+    const cur = handles[idxOf(selfH)];
+    if (typeof cur !== "function") return;
+    const nm = String(cur.name || "");
+    if (!nm) return;
+    let o = statics.get(nm);
+    if (!o) { o = {}; statics.set(nm, o); }
+    o[strings[id]] = v;
   };
   // 展开实参传给动态接收者方法：obj.m(...args)（实参数组已在 wasm 侧构造成 qz 数组）
   api.method_spread = (recv, mid, arr) => {

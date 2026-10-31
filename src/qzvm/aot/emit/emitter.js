@@ -1977,6 +1977,22 @@ class Emitter {
                     throw new Error("[tagged] class " + cname + " 的静态初始化捕获了非模块级变量（" + lostStatic.join(", ") + "）：静态初始化在首次静态访问点执行，读不到 class 定义点的局部绑定；请把变量提升到模块级，或改用实例字段/构造器参数");
                 }
             }
+            /* 静态字段/静态块的静态表按类名共享，lazy 守卫只初始化一次；但类表达式每次
+             * 求值、嵌套 class 声明每次进入定义点，JS 都会产生独立静态状态。模块顶层
+             * `const C = class {…}` 只求值一次、类名稳定，是唯一可支持的类表达式形式。
+             * 其余形状此前静默错值（动态读 undefined / 多次求值串味 / 静态方法 this.x
+             * 读 0）→ 编译期 loud。 */
+            if (staticFields.length || staticBlocks.length) {
+                const isClsExpr = !!(this.clsExprSynthDecls && this.clsExprSynthDecls.has(st));
+                const isTopAlias = !!(this.topAliasClsExprDecls && this.topAliasClsExprDecls.has(st));
+                const isNestedDecl = !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
+                if ((isClsExpr && !isTopAlias) || isNestedDecl) {
+                    const form = isClsExpr
+                        ? "class 表达式（非模块顶层 `const C = class` 形式）"
+                        : "函数/块内 class 声明（每次进入定义点应重新初始化静态）";
+                    throw new Error("[tagged] " + form + "的静态字段/静态块暂不支持（静态表按类名共享、只初始化一次，多次求值会串味/读不到初值）：" + cname + "；请改用模块顶层类声明，或把静态状态放到模块级变量/实例字段");
+                }
+            }
             this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }

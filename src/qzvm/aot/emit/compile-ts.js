@@ -88,6 +88,7 @@ function compileTS(input, outWasm, opts = {}) {
     const clsExprSynthDecls = new WeakSet();   // 类表达式合成的 ClassDeclaration（值仍在创建点克隆，不做提升捕获检查）
     const nestedClsDecls = new WeakSet();      // 非模块顶层的 class 声明：提升后读不到外层局部 → collectClasses 校验
     const aliasClsExprDecls = new WeakSet();   // `const C = class {…}` 初值位置的类表达式：C 只作类名别名（类值不物化）
+    const topAliasClsExprDecls = new WeakSet();   // 其中的**模块顶层**形式：只求值一次、类名稳定 → 静态字段可支持
     const declaredNames = new Set();           // 全部文件内声明过的名字（判定「外层绑定」vs「宿主全局」）
     const noteDeclared = (pat) => {
         if (!pat) return;
@@ -149,8 +150,9 @@ function compileTS(input, outWasm, opts = {}) {
     const collectDecls = (f) => {
         scanDeclaredNames(f);
         // nested：不在模块顶层语句位置（函数/块/循环内）——类被提升后其外层绑定不可见；
-        // aliasInit：当前节点是 `const C = class {…}` 的初值（该形式只把 C 当类名别名，类值不物化）。
-        const walkCls = (n, bind, nested, aliasInit) => {   // class 仍整树提升（含函数内 class）；bind = 最近绑定名（class 表达式名推断用，勿依赖 n.parent：collectDecls 阶段尚未类型绑定）
+        // aliasInit：当前节点是 `const C = class {…}` 的初值（该形式只把 C 当类名别名，类值不物化）；
+        // stmtTop：沿 VariableStatement→DeclarationList→Declaration 链仍处于模块顶层语句（用于识别模块顶层别名）。
+        const walkCls = (n, bind, nested, aliasInit, aliasTop, stmtTop) => {   // class 仍整树提升（含函数内 class）；bind = 最近绑定名（class 表达式名推断用，勿依赖 n.parent：collectDecls 阶段尚未类型绑定）
             if (ts.isClassDeclaration(n)) {
                 clsStmts.push(n);
                 if (nested) nestedClsDecls.add(n);
@@ -166,14 +168,18 @@ function compileTS(input, outWasm, opts = {}) {
                 decl.pos = n.pos; decl.end = n.end;
                 clsExprSynthDecls.add(decl);
                 if (aliasInit) aliasClsExprDecls.add(decl);
+                if (aliasInit && aliasTop) topAliasClsExprDecls.add(decl);
                 clsStmts.push(decl);
             }
             let childBind = bind;
             if ((ts.isVariableDeclaration(n) || ts.isPropertyAssignment(n) || ts.isBindingElement(n))
                 && n.name && ts.isIdentifier(n.name)) childBind = n.name.text;
-            ts.forEachChild(n, (c) => walkCls(
-                c, childBind, !ts.isSourceFile(n),
-                ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer === c));
+            const childStmtTop = stmtTop && (ts.isVariableStatement(n) || ts.isVariableDeclarationList(n) || ts.isVariableDeclaration(n));
+            ts.forEachChild(n, (c) => {
+                const childAlias = ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer === c;
+                walkCls(c, childBind, !ts.isSourceFile(n), childAlias, childAlias && childStmtTop,
+                        ts.isSourceFile(n) || childStmtTop);
+            });
         };
         /* `export namespace X { export const f = …, export function g(){} }`：TS 命名空间是
          * 编译期构造，内联后模块边界消失 → 把**有值**的成员就地改名为 `X$<member>` 并按
@@ -257,7 +263,7 @@ function compileTS(input, outWasm, opts = {}) {
                 && st.kind !== ts.SyntaxKind.ExportAssignment) {
                 modStmts.push(st);   // 模块级其它语句（表达式副作用、if/for/try 等）→ 纳入 __module_init（此前被**静默丢弃**）
             }
-            walkCls(st);
+            walkCls(st, null, false, false, false, true);
         }
     };
     for (const f of sfs) collectDecls(f);
@@ -946,6 +952,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.clsExprSynthDecls = clsExprSynthDecls;
         em.nestedClsDecls = nestedClsDecls;       // 函数/块内 class 声明（提升后外层绑定不可见）
         em.aliasClsExprDecls = aliasClsExprDecls; // `const C = class {…}` 初值位置（类值不物化）
+        em.topAliasClsExprDecls = topAliasClsExprDecls;   // 其中模块顶层形式（静态字段支持的稳定类名）
         em.declaredNames = declaredNames;         // 全程序声明名（外层绑定 vs 宿主全局）
         em.usesKeyOrder = usesKeyOrder;
         em.usesDynAcc = usesDynAcc;
@@ -1141,16 +1148,15 @@ function compileTS(input, outWasm, opts = {}) {
             if (!em._inModuleLink) return undefined;
             if (!em._clsTrampSlots.has(mthName)) {
                 const tn = mthName + "$t";
+                /* 蹦床恒为 (self, a0..a3) → i64：C 侧 call_indirect 统一按此 ABI 分派。
+                 * 但被调可能是 void（ctor/$set/`: void` 方法）→ 没有返回值可转发，
+                 * 必须按**实际签名**补 undefined 占位（此前按名字猜，漏了 `: void` 静态方法）。*/
+                const rets = m.funcResults(mthName) || [];
                 m.declareFunc(tn, ["i64", "i64", "i64", "i64", "i64"], ["i64"]);
                 m.startBody(tn, []);
-                /* 蹦床统一 5 参 (self, a0..a3)；类方法签名也是 5 参 (self, a0..a3) →
-                 * 直接转发 5 个 locals，多余/不足由 wasm 严格校验。
-                 * 但部分方法签名含第 6 槽（>4 形参）→ 这种蹦床用 6 参版。 */
-                const isLong = mthName.includes("$set") ? false : false;  // 简化：当前都 5 参
                 for (let k = 0; k < 5; k++) m.localGet(k);
                 m.call(mthName);
-                /* void 方法（ctor/$set）→ 补 undefined 句柄作返回值 */
-                if (mthName.includes("$ctor") || mthName.includes("$set")) em._emitUndefined();
+                if (!rets.length) em._emitUndefined();
                 m.return_();
                 m.endBody();
                 const base = em._inModuleLink ? INMOD_TABLE_CAP : 1;

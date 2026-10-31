@@ -970,6 +970,14 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     // 类静态字段 C.x（C 为已收集类名）→ 确保静态已初始化 + 宿主 static_get
+    // 静态方法内 this.#n（私有静态字段）：键 = #定义类#名（与 A.#n 写路径 _staticKey 一致），
+    // 接收者可能是派生类 → 经类值沿父链查（JS：私有静态按定义类词法归属）。
+    if (ts.isPropertyAccessExpression(e) && ts.isPrivateIdentifier(e.name) && this._inStaticMethod && !this._inStaticInit && ts.isThis(e.expression) && this._curClass) {
+        this._emitThisReceiver();
+        this.m.i32Const(this._strId("#" + this._curClass + "#" + e.name.text));
+        this.m.call("qz.static_get_dyn");
+        return;
+    }
     // 私有成员访问 this.#v / obj.#m()：名字按「当前类」限定（JS 私有名仅同类可访问）
     if (ts.isPropertyAccessExpression(e) && ts.isPrivateIdentifier(e.name) && this._curClass && !this._isClassName(e.expression)) {   // 类名接收者（P.#s）→ 走静态路径
         const pn = "#" + this._curClass + "#" + e.name.text;
@@ -996,7 +1004,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const got = this._findStaticAccessor(cn, e.name.text, "get");
         if (got && got.acc) this._checkStaticThis(got.cname, cn, got.acc, e.name.text);
         if (got) {                                            // 静态 getter（含继承）→ 直调 __sm_<owner>$<name>
-            this._emitStaticsGuard(got.cname);
+            this._emitStaticsChainGuard(cn);              // getter 体内 this.x 的字段可能来自任一层父类
             this._emitClassValue(this.classes.get(cn));   // self = 接收者类（子类调用父 getter 时 this = 子类）
             for (let i = 0; i < 4; i++) this._emitUndefined();
             this.m.call(staticMethName(got.cname, got.acc.name));
@@ -1014,9 +1022,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const M3 = this.m, ts2 = this._expEnter();
         M3.i32Const(this.classes.get(cn).id); M3.call("qz.class_value"); M3.i32Const(this._strId(e.name.text)); M3.call("qz.prop_get"); M3.localSet(ts2.v);   // 初值 = 类对象属性（.name/.toString/prototype…），静态字段叠加上覆
         for (const x of chain.slice().reverse()) {          // 父 → 子：越派生越后写（遮蔽父类同名字段）
-            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.statics_has");   // 私有静态字段需类名限定
+            M3.i32Const(this._staticClassKey(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.statics_has");   // 私有静态字段需类名限定
             M3.ifBlock("void");
-            M3.i32Const(this._strId(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.static_get");
+            M3.i32Const(this._staticClassKey(x)); M3.i32Const(this._strId(this._staticKey(x, e.name))); M3.call("qz.static_get");
             M3.localSet(ts2.v);
             M3.end();
         }
@@ -1379,14 +1387,26 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
             if (ts.isPropertyAccessExpression(e.operand)) {
                 // ++C.n / --C.n（类静态字段）：guard → static_get ± 1 → static_set；结果=新值
-                if (this._isClassName(e.operand.expression)) {
-                    const cn = e.operand.expression.text, Mc = this.m;
-                    this._emitStaticsGuard(cn);
-                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.call("qz.static_get");
+                if (ts.isThis(e.operand.expression) && this._inStaticMethod && !this._inStaticInit && !ts.isPrivateIdentifier(e.operand.name)) {
+                    // 静态方法内 this.n++：接收者是运行时代（B 继承 A.m 时 this = B）→ dyn 读 + 写到接收者自身
+                    const Mc = this.m, nm = e.operand.name.text;
+                    this._emitThisReceiver(); Mc.localSet(this.scratchObj);
+                    Mc.localGet(this.scratchObj); Mc.i32Const(this._strId(nm)); Mc.call("qz.static_get_dyn");
                     Mc.i64ConstBits(...f64Bits(1));
                     this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
                     Mc.localSet(this.scratch);
-                    Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.localGet(this.scratch); Mc.call("qz.static_set");
+                    Mc.localGet(this.scratchObj); Mc.i32Const(this._strId(nm)); Mc.localGet(this.scratch); Mc.call("qz.static_set_dyn");
+                    Mc.localGet(this.scratch);
+                    return;
+                }
+                if (this._isClassName(e.operand.expression)) {
+                    const cn = this._classOfExpr(e.operand.expression), Mc = this.m;
+                    this._emitStaticsGuard(cn);
+                    Mc.i32Const(this._staticClassKey(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.call("qz.static_get");
+                    Mc.i64ConstBits(...f64Bits(1));
+                    this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
+                    Mc.localSet(this.scratch);
+                    Mc.i32Const(this._staticClassKey(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.localGet(this.scratch); Mc.call("qz.static_set");
                     Mc.localGet(this.scratch);
                     return;
                 }
@@ -1460,15 +1480,28 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const inc = e.operator === ts.SyntaxKind.PlusPlusToken;
         if (ts.isPropertyAccessExpression(e.operand)) {
             // C.n++ / C.n--（类静态字段）：结果=旧值，静态槽写回 ±1
+            if (ts.isThis(e.operand.expression) && this._inStaticMethod && !this._inStaticInit && !ts.isPrivateIdentifier(e.operand.name)) {
+                // 静态方法内 this.n++：dyn 读旧值 + 写回接收者自身（this 可能是派生类）
+                const Mc = this.m, nm = e.operand.name.text;
+                this._emitThisReceiver(); Mc.localSet(this.scratchObj);
+                Mc.localGet(this.scratchObj); Mc.i32Const(this._strId(nm)); Mc.call("qz.static_get_dyn");
+                Mc.localSet(this.scratch);
+                Mc.localGet(this.scratch); Mc.i64ConstBits(...f64Bits(1));
+                this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
+                Mc.localSet(this.scratchB);
+                Mc.localGet(this.scratchObj); Mc.i32Const(this._strId(nm)); Mc.localGet(this.scratchB); Mc.call("qz.static_set_dyn");
+                Mc.localGet(this.scratch);
+                return;
+            }
             if (this._isClassName(e.operand.expression)) {
-                const cn = e.operand.expression.text, Mc = this.m;
+                const cn = this._classOfExpr(e.operand.expression), Mc = this.m;
                 this._emitStaticsGuard(cn);
-                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.call("qz.static_get");
+                Mc.i32Const(this._staticClassKey(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.call("qz.static_get");
                 Mc.localSet(this.scratch);            // scratch=旧值（表达式结果）
                 Mc.localGet(this.scratch); Mc.i64ConstBits(...f64Bits(1));
                 this.emitGuardedOp(inc ? "qz.add" : "qz.sub", inc ? Mc.f64Add : Mc.f64Sub);
                 Mc.localSet(this.scratchB);
-                Mc.i32Const(this._strId(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.localGet(this.scratchB); Mc.call("qz.static_set");
+                Mc.i32Const(this._staticClassKey(cn)); Mc.i32Const(this._strId(this._staticKey(cn, e.operand.name))); Mc.localGet(this.scratchB); Mc.call("qz.static_set");
                 Mc.localGet(this.scratch);
                 return;
             }
@@ -1746,7 +1779,7 @@ Emitter.prototype._emitStoreProp = function (left) {
         const cn = this._classOfExpr(left.expression);
         M.localSet(t.w);
         this._emitStaticsGuard(cn);
-        M.i32Const(this._strId(cn)); M.i32Const(this._strId(this._staticKey(cn, left.name))); M.localGet(t.w); M.call("qz.static_set");
+        M.i32Const(this._staticClassKey(cn)); M.i32Const(this._strId(this._staticKey(cn, left.name))); M.localGet(t.w); M.call("qz.static_set");
         M.localGet(t.w);
         this._expLeave();
         return;
@@ -1760,15 +1793,26 @@ Emitter.prototype._emitStoreProp = function (left) {
         this._expLeave();
         return;
     }
+    // 静态方法内 this.x = v：接收者是运行时代（B 继承 A.m 时 this = B），JS 写的是接收者
+    // 自有静态属性 → dyn 写接收者自身（此前落到定义类 A，A/B 双错）。
+    if (ts.isPropertyAccessExpression(left) && ts.isThis(left.expression) && this._inStaticMethod && !this._inStaticInit && !ts.isPrivateIdentifier(left.name)) {
+        const nm = left.name.text;
+        M.localSet(t.w);
+        this._emitThisReceiver(); M.localSet(t.v);
+        M.localGet(t.v); M.i32Const(this._strId(nm)); M.localGet(t.w); M.call("qz.static_set_dyn");
+        M.localGet(t.w);
+        this._expLeave();
+        return;
+    }
     // 类静态字段写 C.x = v → 宿主 qz.static_set
     if (this._isClassName(left.expression)) {
         const cn = this._classOfExpr(left.expression);
         const got = this._findStaticAccessor(cn, left.name.text, "set");
         if (got && got.acc) this._checkStaticThis(got.cname, cn, got.acc, left.name.text);
         M.localSet(t.w);                           // 值（i64）
-        this._emitStaticsGuard(cn);
+        this._emitStaticsChainGuard(cn);          // setter/字段读可能触达任一层父类静态
         if (got) {                                 // 静态 setter（含继承）→ 直调 __sm_<owner>$<name>$set
-            this._emitUndefined();
+            this._emitClassValue(this.classes.get(cn));   // self = 接收者类（setter 内 this = 接收者，与 getter 一致）
             M.localGet(t.w);
             for (let i = 0; i < 3; i++) this._emitUndefined();
             M.call(staticMethName(got.cname, got.acc.name + "$set"));
@@ -1776,8 +1820,7 @@ Emitter.prototype._emitStoreProp = function (left) {
             this._expLeave();
             return;
         }
-        this._emitStaticsGuard(cn);               // 写总是落在接收者类（JS：派生的静态属性是自有属性）
-        M.i32Const(this._strId(cn)); M.i32Const(this._strId(this._staticKey(cn, left.name))); M.localGet(t.w); M.call("qz.static_set");
+        M.i32Const(this._staticClassKey(cn)); M.i32Const(this._strId(this._staticKey(cn, left.name))); M.localGet(t.w); M.call("qz.static_set");
         M.localGet(t.w);                           // 赋值表达式返回所赋之值
         this._expLeave();
         return;
@@ -2386,11 +2429,15 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
             }
             throw new Error(`[tagged] 静态方法 ${cnS}.${method}() 未定义`);
         }
-        this._emitStaticsGuard(cnS);
+        this._emitStaticsChainGuard(cnS);             // 继承来的静态方法内 this.x 可能读任一层父类静态
         this._emitClassValue(this.classes.get(cnS));   // self = 接收者类（JS：B.describe() 内 this = B，含继承自 A 的方法）
-        this._emitMethodArgs(((this.classes.get(owner).staticMethods || []).find(s => s.name === method) || {}).node ? (this.classes.get(owner).staticMethods || []).find(s => s.name === method).node.parameters : null, args);
+        const smNode = (this.classes.get(owner).staticMethods || []).find(s => s.name === method);
+        this._emitMethodArgs(smNode && smNode.node ? smNode.node.parameters : null, args);
         M.call(staticMethName(owner, method));
-        this._emitErrCheck();   // 被调内 throw（跨函数 __err）→ 调用点转异常路径（此前静默吞掉）
+        if (smNode && smNode.node.type && smNode.node.type.kind === ts.SyntaxKind.VoidKeyword) {
+            this._emitErrCheck(false);                 // void 静态方法：不取返回，调用表达式值 = undefined
+            this._emitUndefined();
+        } else this._emitErrCheck();   // 被调内 throw（跨函数 __err）→ 调用点转异常路径（此前静默吞掉）
         return;
     }
     const cls = this._staticRecvClass(rx);

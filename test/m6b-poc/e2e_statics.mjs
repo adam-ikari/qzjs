@@ -40,6 +40,25 @@ class Acc {
 }
 export function accRead(): number { return new Acc().v; }
 export function accWriteThenRead(): number { const a = new Acc(); a.v = 5; return a.v; }
+class Keyed {
+  static x: number = 5;
+  static getX(): number { return this.x; }
+  static setX(v: number): void { this.x = v; }
+}
+class KeyedSub extends Keyed {}
+class Priv {
+  static #n: number = 5;
+  static get(): number { return this.#n; }
+  static set(v: number): void { this.#n = v; }
+}
+const KA = class { static x: number = 4; static get(): number { return this.x; } };
+export function keyedRead(): number { return Keyed.getX(); }
+export function keyedDerivedRead(): number { return KeyedSub.getX(); }
+export function keyedDerivedWrite(): number { Keyed.setX(3); KeyedSub.setX(9); return Keyed.x * 100 + KeyedSub.x; }
+export function keyedInc(): number { KeyedSub.setX(1); KeyedSub.x++; ++KeyedSub.x; return KeyedSub.x; }
+export function privRead(): number { return Priv.get(); }
+export function privWriteRead(): number { Priv.set(8); return Priv.get(); }
+export function aliasClassExprRead(): number { KA.x = 6; return KA.get(); }
 `);
 const info = compileTS(tsPath, wasmPath, { inModuleLink: true });
 {
@@ -71,6 +90,13 @@ chk('statRead() 静态字段初值', unbox(P.statRead()), 7);
 chk('statIncTwice() 静态字段写回', unbox(P.statIncTwice()), 9);
 chk('accRead() getter', unbox(P.accRead()), 30);
 chk('accWriteThenRead() setter+getter', unbox(P.accWriteThenRead()), 50);
+chk('keyedRead() 后置类静态 this.x（类键 = clsId）', unbox(P.keyedRead()), 5);
+chk('keyedDerivedRead() 派生类读父类静态', unbox(P.keyedDerivedRead()), 5);
+chk('keyedDerivedWrite() this.x 写接收者自有', unbox(P.keyedDerivedWrite()), 309);
+chk('keyedInc() 派生类静态 this.x++', unbox(P.keyedInc()), 3);
+chk('privRead() this.#n 私有静态', unbox(P.privRead()), 5);
+chk('privWriteRead() this.#n 写后再读', unbox(P.privWriteRead()), 8);
+chk('aliasClassExprRead() 模块顶层类表达式静态', unbox(P.aliasClassExprRead()), 6);
 
 L.qz_destroy(rt);
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }

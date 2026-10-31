@@ -66,6 +66,15 @@ Emitter.prototype._strId = function (text) {
     if (i < 0) { i = this.strings.length; this.strings.push(text); }
     return i;
 };
+/* 静态字段的「类键」：两档键空间不同，必须与各自的读取端一致。
+ * - in-module（C 侧）：clsId（与 static_get_dyn / class_env_get / classMeta 表索引同一空间）。
+ *   此前传类名 strId，只有 strId(cname)==clsId 时碰巧成立；一般情况 this.x 静默读 0。
+ * - 独立档（JS 宿主）：类名 strId（宿主 statics 表以类名为键，static_get_dyn 沿 ctor 名查找）。*/
+Emitter.prototype._staticClassKey = function (cname) {
+    const c = this.classes.get(cname);
+    if (this._inModuleLink && c) return c.id;
+    return this._strId(cname);
+};
 // 可重入表达式临时槽：v/w（i64 受保护值）+ a/b/c（i32）+ x/y（i64 附加），按嵌套深度分层，
 // 避免内层表达式（含 .length / 下标 / 拼接）覆盖外层正在使用的接收者/值。
 Emitter.prototype._expEnter = function () {
@@ -84,6 +93,13 @@ Emitter.prototype._emitStaticsGuard = function (cname) {
     this._inStaticsGuard = true;
     try { this._emitStaticsGuardBody(c); } finally { this._inStaticsGuard = false; }
 };
+/* 整条父链的静态守卫（基类在前）。静态方法/访问器内 `this.x` 的接收者可能是派生类，
+ * 读到的字段可能来自任一层父类 → 只初始化接收者本身会漏掉父类静态（静默 0/undefined）。 */
+Emitter.prototype._emitStaticsChainGuard = function (cname) {
+    const chain = [];
+    for (let x = cname; x && this.classes.has(x); x = this.classes.get(x).parent) chain.push(x);
+    for (let i = chain.length - 1; i >= 0; i--) this._emitStaticsGuard(chain[i]);
+};
 Emitter.prototype._emitStaticsGuardBody = function (c) {
     const cname = c.name;
     const M = this.m;
@@ -91,7 +107,7 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
     this._curClassObj = c; this._inStaticMethod = true; this._inStaticInit = true;   // static{} 内 this ≡ 定义类（非运行时代）   // static{} 内 this ≡ 定义类（_classOfExpr/_isClassName）
     { const dynN = this._dynParentExpr(c);              // 动态父（声明式类）：先链接运行时父链（宿主缓存，幂等）
       if (dynN) { this._emitClassValue(c); M.drop(); } }
-    M.i32Const(this._strId(cname)); M.call("qz.statics_ready");
+    M.i32Const(this._staticClassKey(cname)); M.call("qz.statics_ready");
     M.i32Eqz();
     M.ifBlock("void");
     /* 类方法捕获 env 在**首次类初始化**时建立（声明式类的 `new A()` 经 new_dynamic
@@ -101,7 +117,7 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
     // 静态初始化按**源码序**（字段与 static 块交错；JS 语义：类定义时按序求值一次）
     for (const it of (c.staticInits || c.staticFields.map(f2 => ({ kind: "field", ...f2 })))) {
         if (it.kind === "field") {
-            M.i32Const(this._strId(cname)); M.i32Const(this._strId(it.name));
+            M.i32Const(this._staticClassKey(cname)); M.i32Const(this._strId(it.name));
             if (it.init) this.emitTaggedExpr(it.init); else this._emitUndefined();
             M.call("qz.static_set");
         } else {
@@ -110,7 +126,7 @@ Emitter.prototype._emitStaticsGuardBody = function (c) {
             this._inStaticMethod = savedSM;
         }
     }
-    M.i32Const(this._strId(cname)); M.call("qz.statics_mark");
+    M.i32Const(this._staticClassKey(cname)); M.call("qz.statics_mark");
     M.end();
     this._curClassObj = savedCCO; this._inStaticMethod = savedSM2; this._inStaticInit = savedSI2;
 };

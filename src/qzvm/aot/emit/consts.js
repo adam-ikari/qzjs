@@ -125,6 +125,7 @@ const QZ = {
   static_get: { params: ["i32", "i32"], results: ["i64"] },    // (classId, fieldId) → tagged
   static_get_dyn: { params: ["i64", "i32"], results: ["i64"] },   // this.x 于静态方法内（运行时代）：(self句柄, fieldId) → tagged    // (classId, fieldId) → tagged
   static_set: { params: ["i32", "i32", "i64"], results: [] },
+  static_set_dyn: { params: ["i64", "i32", "i64"], results: [] },   // this.x = v 于静态方法内：(self类值, fieldId, v) → 写接收者类自有静态
   get_index: { params: ["i64", "i64"], results: ["i64"] },   // o[k]（动态键）：宿主按名/索引取值
   set_index: { params: ["i64", "i64", "i64"], results: [] }, // o[k] = v
   env_new: { params: ["i32"], results: ["i64"] },        // 闭包环境：parentIdx(-1=根) → 环境句柄
