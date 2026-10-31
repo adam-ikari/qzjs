@@ -572,6 +572,8 @@ function compileTS(input, outWasm, opts = {}) {
     // 安全性由下方双域守卫保证：一旦它与 wasm 侧共享可变模块级变量，会**整模块退 interp**（单域），
     // 绝不会出现两侧各存一份的静默错值。
     const interpSet = new Set(opts.interp || []);
+    const dbgInterp = process.env.QZDBG_INTERP ? new Map() : null;
+    const markI = (name, why) => { if (!interpSet.has(name)) interpSet.add(name); if (dbgInterp && !dbgInterp.has(name)) dbgInterp.set(name, why); };
     const containsSuspend = (root) => {
         let hit = false;
         const walk = (n) => {
@@ -589,11 +591,11 @@ function compileTS(input, outWasm, opts = {}) {
     for (const f of fns) {
         if (f.name.text === "__module_init") continue;
         const isAsync = !!f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
-        if (isAsync || f.asteriskToken || (f.body && containsSuspend(f.body))) interpSet.add(f.name.text);
+        if (isAsync || f.asteriskToken || (f.body && containsSuspend(f.body))) markI(f.name.text, isAsync ? "async-self" : (f.asteriskToken ? "generator-self" : "suspend-nested"));
     }
     // 类体/模块级语句里有 async/generator → 整模块退 interp（无函数级 interp 通道，见 hasClasses 判定）。
     // 声明侧已算出 hasSuspendOutsideFn（含被 inline 的所有源文件），这里直接复用。
-    if (hasSuspendOutsideFn) for (const f of fns) if (f.name) interpSet.add(f.name.text);
+    if (hasSuspendOutsideFn) for (const f of fns) if (f.name) markI(f.name.text, "module-suspend");
     if (interpSet.size > 0) {
         // 调用图：顶层函数 → 它调用的顶层函数集
         const calls = new Map();
@@ -644,13 +646,13 @@ function compileTS(input, outWasm, opts = {}) {
             for (const [fn, callees] of calls) {
                 if (interpSet.has(fn) || NON_INTERP.has(fn)) continue;
                 for (const callee of callees) {
-                    if (interpSet.has(callee)) { interpSet.add(fn); changed = true; break; }
+                    if (interpSet.has(callee)) { markI(fn, "calls:" + callee); changed = true; break; }
                 }
             }
         }
         // 类方法调用了 interp 侧函数 → 无法局部修补（方法不参与 interp 转移）→ 整模块退 interp。
         for (const callee of classCalls) {
-            if (interpSet.has(callee)) { for (const f of fns) if (f.name) interpSet.add(f.name.text); break; }
+            if (interpSet.has(callee)) { for (const f of fns) if (f.name) markI(f.name.text, "class-calls:" + callee); break; }
         }
     }
     // 整模块退 interp 后 wasm 侧不承载任何函数 → 也不能发射类（类方法体属 wasm 侧发射单元）。
@@ -665,7 +667,7 @@ function compileTS(input, outWasm, opts = {}) {
     // 纳入 interpSet，wasm 侧不再承载任何函数，模块级变量只有 interp 那唯一一份 → 语义自洽。
     // 代价是该模块失去 AOT 加速（它本来也因 async 编不出 wasm），换来正确性。
     const tryWholeModuleInterp = () => {
-        for (const f of fns) if (f.name) interpSet.add(f.name.text);
+        for (const f of fns) if (f.name) markI(f.name.text, "shared-state");
     };
     const mutableModNames = (() => {
         const out = new Set();
@@ -1208,7 +1210,7 @@ function compileTS(input, outWasm, opts = {}) {
         lamMeta[m._funcIdx[meta.fname]] = { name: meta.fname, n: meta.n, rest: !!meta.rest, synthThis: !!meta.synthThis, src, needsArgs: !!(lamNode && lamNode._qzNeedsArgs) };
     }
     const classMeta = em._clsMetaBuild || [];
-    return { module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs, trampSlots: em._trampSlots || new Map(),
+    return { dbgInterp, module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs, trampSlots: em._trampSlots || new Map(),
              arenaEnd: opts.inModuleLink ? null : memLayout(opts).arenaEnd };
 }
 

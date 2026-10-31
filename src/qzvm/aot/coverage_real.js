@@ -15,6 +15,9 @@ const os = require("os");
 const path = require("path");
 const E = require("./emitter.js");
 
+// 覆盖率工具的职责就是解释「为什么没进 wasm」，故默认开启 interp 归因追踪。
+process.env.QZDBG_INTERP = process.env.QZDBG_INTERP || "1";
+
 const argv = process.argv.slice(2);
 const target = argv[0];
 if (!target) { console.error("用法: coverage_real.js <ts目录|文件> [--limit N] [--top N] [--include-tests]"); process.exit(2); }
@@ -46,6 +49,9 @@ let ok = 0;
 let funcs = 0, interpFuncs = 0, filesWithInterp = 0, wholeInterp = 0;
 const failByKind = new Map();
 const samples = new Map();
+const reasonCounts = new Map();   // 归因类别 → 函数数
+const reasonDetails = new Map();  // 类别 → (callee/上下文 → 函数数)
+const reasonFiles = new Map();    // 类别 → 命中文件集合
 
 for (const f of list) {
   try {
@@ -59,6 +65,22 @@ for (const f of list) {
     interpFuncs += ni;
     if (ni > 0) filesWithInterp++;
     if (n > 0 && ni === n) wholeInterp++;
+    if (r.dbgInterp) {
+      const rel = path.relative(path.resolve(target), f);
+      for (const why of r.dbgInterp.values()) {
+        const i = why.indexOf(":");
+        const kind = i >= 0 ? why.slice(0, i) : why;
+        const detail = i >= 0 ? why.slice(i + 1) : "";
+        reasonCounts.set(kind, (reasonCounts.get(kind) || 0) + 1);
+        if (detail) {
+          if (!reasonDetails.has(kind)) reasonDetails.set(kind, new Map());
+          const d = reasonDetails.get(kind);
+          d.set(detail, (d.get(detail) || 0) + 1);
+        }
+        if (!reasonFiles.has(kind)) reasonFiles.set(kind, new Set());
+        reasonFiles.get(kind).add(rel);
+      }
+    }
   } catch (e) {
     const msg = String((e && e.message) || e).split("\n")[0].replace(/^[^:]+:\s*/, "").trim();
     // 归一化：去掉具体标识符/路径，聚合同类失败
@@ -83,6 +105,19 @@ console.log(`函数发射: ${funcs} 个，其中 wasm ${wasmFuncs} (${funcs ? ((
   + ` / interp ${interpFuncs} (${funcs ? ((interpFuncs / funcs) * 100).toFixed(1) : "0.0"}%)`);
 console.log(`含 interp 的文件: ${filesWithInterp}（整模块 interp: ${wholeInterp}）—— interp 是正确性回退，不是 AOT 覆盖`);
 console.log("");
+const reasonSorted = [...reasonCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, TOP);
+if (reasonSorted.length) {
+  console.log(`interp 归因 top ${reasonSorted.length}:`);
+  for (const [kind, n] of reasonSorted) {
+    console.log(`  ${String(n).padStart(5)}  ${kind}（${reasonFiles.get(kind).size} 个文件）`);
+    const d = reasonDetails.get(kind);
+    if (d) {
+      const top = [...d.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+      console.log(`         e.g. ${top.map(([k, v]) => `${k} ×${v}`).join(", ")}`);
+    }
+  }
+  console.log("");
+}
 const sorted = [...failByKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, TOP);
 console.log(`失败类别 top ${sorted.length}:`);
 for (const [kind, n] of sorted) {

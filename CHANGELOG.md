@@ -5,6 +5,10 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 覆盖率工具 interp 归因（2026-10-31）
+- **编译期归因标记**（`emit/compile-ts.js`）：`QZDBG_INTERP=1` 时每个进 interp 的函数记录首个原因——`async-self` / `generator-self` / `suspend-nested` / `module-suspend` / `calls:<callee>` / `class-calls:<callee>` / `shared-state`，随编译结果返回 `dbgInterp`；默认关闭，不改变编译行为。
+- **`coverage_real.js` 默认开启并汇总「interp 归因 top N」**：类别 → 函数数 / 命中文件数 / 典型 callee 明细，直接回答「为什么没进 wasm」。zod 125/125 实测 top：`module-suspend` 15133 函数、`async-self` 33，与人工分析一致。
+
 ### AOT: 类/对象方法作用域边界 + 类捕获 loud 化（2026-10-31）
 - **修复：方法体的 `let/const` 顶掉外层函数参数槽**（`emit/emitter.js` `_collectLocals` 与块遮蔽扫描）：此前局部收集整树下探进 class/类表达式与对象字面量方法体，方法内同名 `let n` 被登记为**外层函数局部**，在形参之后占槽 → 参数映射被改指未初始化 local，闭包/类字段读到 0（静默错值：工厂返回 `class { x: any = n }` 读到 0，方法内 `let n` 让外层 `n` 变 0）。现在在 class/method/getter/setter/ctor 边界停止下探；`_collectScopeFnDecls` 同步不下探（对象方法里的嵌套 `function` 归属该闭包，不再被外层当函数声明提升）。
 - **修复：`_capturesOf` 把类型注解当捕获**：`interface Sh`、类型参数等 `TypeNode` 内的标识符不再计入自由变量（此前入闭包捕获表 → 运行时无源可读）。
