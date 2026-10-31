@@ -502,6 +502,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (e.text === "arguments") {
             const ai = this._local("arguments");
             if (ai !== undefined) { this.m.localGet(ai); return; }   // 全量实参数组（调用点/宿主经 __args 写入）
+            if (this.capMap.has("arguments")) { this._emitCapturedRead("arguments"); return; }   // 箭头继承外层函数 arguments
             throw new Error("[tagged] `arguments` 仅支持顶层函数体与闭包体（类方法内为已知 loud——见 ASSESSMENT）");
         }
         if (this.capMap.has(e.text)) { this._emitCapturedRead(e.text); return; }   // 捕获名优先走 env（与本体共享）
@@ -1024,18 +1025,31 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         return;
     }
     if (ts.isPropertyAccessExpression(e) && ts.isSuperKeyword(e.expression)) {
-        // super.v：父类 getter → 调之；否则按字段偏移直读（父类字段与子类共用同一 fieldMap 偏移）
+        /* super.v：父类 getter → 调之；无 getter 时 JS 语义是 Get(父原型, v, this)——
+         * 类数据字段只存在于实例、不在原型上 → undefined。同名父类方法作值（原型上的
+         * 函数）本实现无法物化 → loud（此前按接收者字段直读 → 静默错值）。*/
         const parent = this._curClassObj && this._curClassObj.parent;
         if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
+        if (!this.classes.has(parent)) {
+            throw new Error("[tagged] 动态父类下的 super." + e.name.text + " 读取暂不支持（父类在运行期才能解析；仅支持 super." + e.name.text + "(...) 调用）");
+        }
         // 实例访问器：沿父链找 get
         let owner = parent, acc = null;
         while (owner && !acc) {
             const cl = this.classes.get(owner);
+            if (!cl) break;
             acc = (cl.methods || []).find(m => m.accessor === "get" && m.name === e.name.text) || null;
             if (!acc) owner = cl.parent;
         }
         if (acc) { this._emitThisReceiver(); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
-        this._emitThisReceiver(); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
+        for (let mc = parent; mc; mc = this.classes.get(mc) && this.classes.get(mc).parent) {
+            const cl = this.classes.get(mc);
+            if (!cl) break;
+            if ((cl.methods || []).some(m => m.name === e.name.text && !m.accessor)) {
+                throw new Error("[tagged] super." + e.name.text + " 作值引用父类方法暂不支持；请改为 super." + e.name.text + "(...) 调用");
+            }
+        }
+        this._emitUndefined();
         return;
     }
     if (ts.isPropertyAccessExpression(e) && e.name.text === "length") {
@@ -1118,22 +1132,6 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this._emitSuperCall(this._curClassObj, e.arguments || []); return;
     }
-    // super.m(args)：父类方法**静态**直调（继承链编译期已知 → 无虚派发，与 JS super 语义一致）
-    if (ts.isPropertyAccessExpression(e) && ts.isSuperKeyword(e.expression)) {
-        // super.v：父类 getter → 调之；否则按字段偏移直读（父类字段与子类共用同一 fieldMap 偏移）
-        const parent = this._curClassObj && this._curClassObj.parent;
-        if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
-        // 实例访问器：沿父链找 get
-        let owner = parent, acc = null;
-        while (owner && !acc) {
-            const cl = this.classes.get(owner);
-            acc = (cl.methods || []).find(m => m.accessor === "get" && m.name === e.name.text) || null;
-            if (!acc) owner = cl.parent;
-        }
-        if (acc) { this._emitThisReceiver(); for (let i = 0; i < 4; i++) this._emitUndefined(); this.m.call(methName(owner, acc.name)); return; }
-        this._emitThisReceiver(); this.m.i32WrapI64(); this.m.i64Load(3, this._fieldIndex(e.name.text));
-        return;
-    }
     if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression)
         && ts.isSuperKeyword(e.expression.expression)) {
         const owner = this._curClassObj && this._curClassObj.parent;
@@ -1151,8 +1149,23 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             return;
         }
         let c = owner, isStaticM = false;
+        const dynHome = this._curClassObj && this._dynParentExpr(this._curClassObj);
+        if (dynHome) {                                       // 动态父（运行时类的父链）：实例方法按 home 的运行时父链派发
+            if (this._inStaticMethod) throw new Error("[tagged] 静态方法内的 super." + method + "() 在动态父类下暂不支持");
+            if (e.arguments.length > 4) throw new Error("[tagged] super." + method + "() 最多 4 参");
+            this._emitThisReceiver();
+            this.m.i32Const(this._curClassObj.id);
+            this.m.i32Const(this._strId(method));
+            for (let i = 0; i < 4; i++) {
+                if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+            }
+            this.m.call("qz.super_method_dyn");
+            this._emitErrCheck();
+            return;
+        }
         while (c) {                                          // 父链上查实例方法，其次静态方法（static super.m()）
             const cl = this.classes.get(c);
+            if (!cl) throw new Error(`[tagged] super.${method}() 的父类链含无法静态解析的类（${c}；内建父类或运行期父类），该调用暂不支持`);
             if ((cl.methods || []).some(m => m.name === method)) { isStaticM = false; break; }
             if ((cl.staticMethods || []).some(m => m.name === method)) { isStaticM = true; break; }
             c = cl.parent;
@@ -1710,13 +1723,15 @@ Emitter.prototype._emitStoreProp = function (left) {
         this._expLeave();
         return;
     }
-    if (ts.isPropertyAccessExpression(left) && ts.isSuperKeyword(left.expression)) {   // super.v = x：父类 setter 优先，否则按父类字段槽直写
+    if (ts.isPropertyAccessExpression(left) && ts.isSuperKeyword(left.expression)) {   // super.v = x：父类 setter 优先，否则在接收者上建自有字段（JS 普通 [[Set]] 语义）
         const parent = this._curClassObj && this._curClassObj.parent;
         if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
+        if (!this.classes.has(parent)) throw new Error("[tagged] 动态父类下的 super." + left.name.text + " 赋值暂不支持；请改用 this." + left.name.text + "（等价于在接收者上建自有字段）");
         M.localSet(t.w);
         let owner = parent, acc = null;
         while (owner && !acc) {
             const cl = this.classes.get(owner);
+            if (!cl) break;
             acc = (cl.methods || []).find(m => m.accessor === "set" && m.name === left.name.text) || null;
             if (!acc) owner = cl.parent;
         }

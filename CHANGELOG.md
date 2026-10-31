@@ -5,6 +5,17 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: super 数据属性语义 + arguments 继承 + 工厂类静态成员（2026-10-31）
+- **`super.v` 按原型语义取值**（`emit/tagged.js`）：父类数据字段只存在实例上、不在原型上 → `super.v` 现为 `undefined`（此前按字段偏移直读实例，静默错值，字段初值 `w = super.v` 同病）；父 getter 仍照常调用；父**方法作值**（`const g = super.m`）无法物化 → loud；动态父类下的 `super.v` 读/写 → loud 并提示改用 `this.v`。删除了重复的 super 属性分支（后者不可达）。
+- **动态父 `super.m()` 派发**（`emit/tagged.js` + `qzvm.js` + `guest_entry.c` 新增 `super_method_dyn`）：类表达式 `class extends B` 的父在运行期才解析，此前编译期父链查不到直接报错。现按 home 类的运行时父链在宿主/C 两侧查实例方法并调用（≤4 参；静态方法内仍 loud）。
+- **嵌套箭头继承 `arguments`**（`emit/emitter.js`/`tagged.js`）：箭头不再自建 `arguments`；外层函数/函数表达式把全量实参数组种进闭包 env（`qz.env_set`），多层嵌套箭头沿 `__parent` 链读取（此前静默 undefined）。类方法内 `arguments` 仍 loud（无 provider）。
+- **对象字面量方法/访问器/函数表达式形参保真**（`_synthArrowWithParams`）：合成闭包此前只保留形参名 → 默认值/解构/rest 丢失。现沿用原始 `ParameterDeclaration` 节点：`m(x = this.v)`、`m({ a, b = this.v })`、`m(a, ...rest)` 均与 JS 一致。
+- **工厂类静态成员捕获与分析**：静态方法/getter/setter 的 self 是**类值**，新增原语 `class_env_get_static`（宿主档按 ctor `__qzClsId`，C 档类值低 32 位即 clsId）；`_inStaticMethod` 改为在 `_mEnter` **之前**置位/复位（env 取法依赖该标志）。`clsMetaBuild` 不再跳过静态访问器，宿主档把静态 getter/setter 装到类对象上——`const C = mk(); C.g` / `C.g = v` 动态访问与 JS 一致。
+- **in-module 档动态类值成员访问 loud 化**（`guest_entry.c`）：克隆类值低 32 位是 clsId 而非实例内存 offset，此前落进实例路径读垃圾。`prop_get`/`prop_set`/`get_index`/`set_index`/`method_call` 现对 `g_dyncls[]` 中的动态 clsId 统一抛 TypeError；静态类值的静态发射路径不受影响。
+- **glue_audit 修复 `undefined` 归一**：`JSON.stringify(undefined)` 返回 `undefined` 而非字符串，与 CLI 打印的 `run() = undefined` 不同型 → 曾把正确结果误判为 diff。
+- 新增 `audit_corpus44.js` 41 例：finally 控制流（break/continue/labeled/return 覆盖/throw）、arguments 继承、方法形参默认值、super 数据属性、动态父 super.m、工厂类静态成员、class 表达式克隆/instanceof/getter-setter 共享 cell、defineProperty 访问器等 32 例，及 9 例必须 loud 的形状（内建子类 Array/Map、计算方法名、静态块闭包、super 方法作值、动态父 super 属性、类方法 arguments、`const K = class` 别名）。
+- 结果：`test_aot` ALL PASS；`audit_diff` corpus44 41/41；`glue_audit` corpus44 41/41（C 档 9 例 loud 全部按预期报错）；in-module e2e 全通过（builtin/class/closure/clsload/cross_tier/mixload/pojo/prims/prop_get/real_program/statics/strload/throw + concat）；`stress_aot` 44 批 990 例 2 轮 1980 例 0 diff（429s，峰值 rss 497MiB）。
+
 ### AOT: 覆盖率工具 interp 归因（2026-10-31）
 - **编译期归因标记**（`emit/compile-ts.js`）：`QZDBG_INTERP=1` 时每个进 interp 的函数记录首个原因——`async-self` / `generator-self` / `suspend-nested` / `module-suspend` / `calls:<callee>` / `class-calls:<callee>` / `shared-state`，随编译结果返回 `dbgInterp`；默认关闭，不改变编译行为。
 - **`coverage_real.js` 默认开启并汇总「interp 归因 top N」**：类别 → 函数数 / 命中文件数 / 典型 callee 明细，直接回答「为什么没进 wasm」。zod 125/125 实测 top：`module-suspend` 15133 函数、`async-self` 33，与人工分析一致。

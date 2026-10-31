@@ -706,6 +706,12 @@ int64_t qz_guest_take_err(void)
     return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
 }
 
+/* 动态类值（class_expr_value 克隆的 clsId）判定：定义见 classMeta 节。
+ * 这些值的成员访问本层未实现（低 32 位是 clsId、不是实例内存 offset），
+ * 直接落进实例路径会读垃圾 → 返回 -1；命中返回 clsId。*/
+static int32_t qz_dyncls_cls(uint32_t low);
+static void qz_dyncls_loud(JSContext *ctx, const char *what);
+
 /* 把 JSValue 登记为**宿主对象**句柄（0x7FFD|idx）。与 qz_ret 的区别只在 tag：
  * emitter 对 0x7FFD 走 prop_get/prop_set（宿主属性），对 0x7FF9 走 POJO 内存
  * 内联快路径。普通函数 `new` 出来的实例是真正的 JS 对象，必须用前者，
@@ -1383,6 +1389,11 @@ void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
       } }
     /* 类实例 setter：classMeta.accessors → 表槽 → 蹦床(self, val) */
     if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFE) {
+        if (qz_dyncls_cls((uint32_t)((uint64_t)obj & 0xFFFFFFFFu)) >= 0) {
+            qz_dyncls_loud(ctx, "写属性");
+            JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+            return;
+        }
         int32_t clsId; memcpy(&clsId, (const unsigned char *)(uintptr_t)(uint32_t)(uint64_t)obj, 4);
         int32_t found = 0;
         int32_t slot = qz_clsmeta_accessor_chain(clsId, keyId, 1, &found);
@@ -1448,6 +1459,10 @@ int64_t qz_guest_get_index(int64_t obj, int64_t key)
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
+    if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFE && qz_dyncls_cls((uint32_t)((uint64_t)obj & 0xFFFFFFFFu)) >= 0) {
+        qz_dyncls_loud(ctx, "按索引读属性");
+        return 0;
+    }
     JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
     JSValue vr = qz_get_prop_key(ctx, o, k);
     int64_t r = qz_ret(ctx, vr);
@@ -1461,6 +1476,10 @@ void qz_guest_set_index(int64_t obj, int64_t key, int64_t val)
     if (!g_current_rt) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return;
+    if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFE && qz_dyncls_cls((uint32_t)((uint64_t)obj & 0xFFFFFFFFu)) >= 0) {
+        qz_dyncls_loud(ctx, "按索引写属性");
+        return;
+    }
     JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
     qz_set_prop_key(ctx, o, k, qz_tojs(ctx, val));
     JS_FreeValue(ctx, o); JS_FreeValue(ctx, k);
@@ -1811,6 +1830,11 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
       } }
     /* 类实例 getter：classMeta.accessors → 表槽 → 蹦床(self) */
     if ((uint16_t)((uint64_t)recv >> 48) == 0x7FFE) {
+        if (qz_dyncls_cls((uint32_t)((uint64_t)recv & 0xFFFFFFFFu)) >= 0) {
+            qz_dyncls_loud(ctx, "读取属性");
+            JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+            return (int64_t)((uint64_t)0x7FF9 << 48);
+        }
         int32_t clsId; memcpy(&clsId, (const unsigned char *)(uintptr_t)(uint32_t)(uint64_t)recv, 4);
         int32_t found = 0;
         int32_t slot = qz_clsmeta_accessor_chain(clsId, keyId, 0, &found);
@@ -2609,6 +2633,26 @@ static uint32_t qz_clsmeta_item_off(int32_t clsId)
     return off;
 }
 
+/* 动态类值判定（前向声明在 take_err 旁）：低 32 位是动态克隆 clsId。
+ * 静态类值（clsId < count）的成员访问由 emitter 静态发射，不能一律 loud；
+ * 这里只拦动态克隆——它们的 clsId 从静态 count 起递增。实例 offset 来自
+ * calloc（≥ __heap_base ≈698KB）或 emitter arena（≥12MiB），不会落进 id 值域。*/
+static int32_t qz_dyncls_cls(uint32_t low)
+{
+    for (int32_t i = 0; i < g_dyncls_n; i++)
+        if ((uint32_t)g_dyncls[i].clsId == low) return g_dyncls[i].clsId;
+    return -1;
+}
+
+/* 动态类值的成员访问本层未实现（低 32 位是 clsId 不是实例 offset，实例路径
+ * 会读垃圾并静默返回错值）→ 统一的 loud 出口。*/
+static void qz_dyncls_loud(JSContext *ctx, const char *what)
+{
+    qz_set_throw(ctx, JS_NewTypeError(ctx,
+        "in-module 档暂不支持动态类值（工厂类表达式）的成员访问：%s；"
+        "请改为通过静态可见的类名访问，或在独立档（JS 宿主）运行", what));
+}
+
 /* 克隆一个类项为新动态类：新 clsId 的 parent 指向原类（语义 = 派生），返回新 clsId。
  * 方法/静态/访问器项按字节复制，故表槽（蹦床）共享——这正是工厂语义所需。*/
 static int32_t qz_clsmeta_clone(int32_t srcClsId)
@@ -2735,6 +2779,10 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
      * 方法槽，调蹦床。emitter 静态分派的类方法已蹦床化进共享表。 */
     uint64_t ru = (uint64_t)recv;
     if ((uint16_t)(ru >> 48) == 0x7FFE) {
+        if (qz_dyncls_cls((uint32_t)(ru & 0xFFFFFFFFu)) >= 0) {
+            qz_dyncls_loud(ctx, "调用方法");
+            return 0;
+        }
         uint32_t ioff = (uint32_t)(ru & 0xFFFFFFFFu);
         int32_t clsId; memcpy(&clsId, (const unsigned char *)(uintptr_t)ioff, 4);
         /* mid 是 strId，classMeta 里 nameStrId 也是 strId（同表）→ 直接比对 */
@@ -3283,6 +3331,25 @@ int64_t qz_guest_super_method(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
     return f(recv, a0, a1, a2, a3);
 }
 
+/* super_method_dyn(recv, homeClsId, mid, a0..a3) → i64：动态父类的 super.m()。
+ * home 类是类表达式/动态 extends 的合成类；运行时父链由 class_value_dyn 就地改写
+ * （或 class_expr_value 克隆的 parent=原类）→ 从 home 的 parent 起沿 classMeta 查方法。*/
+__attribute__((export_name("super_method_dyn")))
+int64_t qz_guest_super_method_dyn(int64_t recv, int32_t homeClsId, int32_t mid,
+                                  int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+{
+    uint64_t u = (uint64_t)recv;
+    if ((uint16_t)(u >> 48) != 0x7FFE) return 0;
+    uint32_t off = qz_clsmeta_item_off(homeClsId);
+    if (!off) return 0;
+    int32_t parent; memcpy(&parent, (const unsigned char *)(uintptr_t)off + 4, 4);
+    if (parent < 0) return 0;
+    int32_t n; int32_t slot = qz_clsmeta_method_chain(parent, mid, &n, NULL);
+    if (!slot) return 0;
+    qz_cls_fn f = (qz_cls_fn)(uintptr_t)(uint32_t)slot;
+    return f(recv, a0, a1, a2, a3);
+}
+
 /* super_ctor(clsId, a0..a3, ovf) → i64：子类 ctor 调父类 ctor。*/
 __attribute__((export_name("super_ctor")))
 int64_t qz_guest_super_ctor(int32_t clsId, int64_t self, int64_t a0, int64_t a1,
@@ -3332,6 +3399,18 @@ int64_t qz_guest_class_env_get(int64_t self, int32_t keyId)
     if (!inst) return 0;
     int32_t clsId = 0;
     memcpy(&clsId, (const void *)(uintptr_t)inst, 4);
+    return qz_guest_static_get(clsId, keyId);
+}
+
+/* class_env_get_static(self, "@@qzEnv" strId) → 静态方法（self 是**类值** 0x7FFE|clsId）
+ * 捕获 env 的读取端。类值低 32 位即 clsId（无实例内存），直接查 statics[clsId|envKey]；
+ * 与 class_env_get（实例方法，clsId 存于实例内存首 4 字节）对称。*/
+__attribute__((export_name("class_env_get_static")))
+int64_t qz_guest_class_env_get_static(int64_t self, int32_t keyId)
+{
+    uint64_t u = (uint64_t)self;
+    if ((uint16_t)(u >> 48) != 0x7FFE) return 0;
+    int32_t clsId = (int32_t)(u & 0xFFFFFFFFu);
     return qz_guest_static_get(clsId, keyId);
 }
 

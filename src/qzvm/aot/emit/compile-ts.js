@@ -1160,7 +1160,7 @@ function compileTS(input, outWasm, opts = {}) {
             }
             return em._clsTrampSlots.get(mthName);
         };
-        const methods = {}, getters = {}, setters = {}, staticMethods = {};
+        const methods = {}, getters = {}, setters = {}, staticMethods = {}, staticGetters = {}, staticSetters = {};
         for (const mth of c.methods) {
             const en = methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name);
             const slot = mthToSlot(en);
@@ -1171,16 +1171,17 @@ function compileTS(input, outWasm, opts = {}) {
                                        rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken) };
         }
         for (const smth of (c.staticMethods || [])) {
-            if (smth.accessor) continue;
-            const en = staticMethName(cname, smth.name);
+            const en = staticMethName(cname, smth.name + (smth.accessor === "set" ? "$set" : ""));
             const slot = mthToSlot(en);
             const nameStrId = em._strId(smth.name);
-            staticMethods[smth.name] = { slot, nameStrId, name: en, n: smth.node.parameters.length };
+            if (smth.accessor === "set") staticSetters[smth.name] = { slot, nameStrId, name: en, n: smth.node.parameters.length };
+            else if (smth.accessor === "get") staticGetters[smth.name] = { slot, nameStrId, name: en, n: 0 };
+            else staticMethods[smth.name] = { slot, nameStrId, name: en, n: smth.node.parameters.length };
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
         const ctorSlot = em._inModuleLink ? mthToSlot(ctorName(cname)) : undefined;
         return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null,
-                 methods, getters, setters, staticMethods, ctorSlot,
+                 methods, getters, setters, staticMethods, staticGetters, staticSetters, ctorSlot,
                  ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };
     });
     em._clsMetaBuild = clsMetaBuild;

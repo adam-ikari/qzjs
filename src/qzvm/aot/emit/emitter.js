@@ -323,7 +323,7 @@ class Emitter {
         this._synthLambdas = this._synthLambdas || new WeakMap();
         let f = this._synthLambdas.get(fe);
         if (f) return f;
-        f = this._synthArrow(["this"].concat(fe.parameters.map(q => q.name.text)), fe.body);
+        f = this._synthArrowWithParams("this", fe.parameters, fe.body);
         const lp = fe.parameters[fe.parameters.length - 1];
         if (lp && lp.dotDotDotToken) f._qzRest = true;
         if (fe.name) f._qzSelfName = fe.name.text;    // 具名：体内自递归可直调
@@ -1276,13 +1276,13 @@ class Emitter {
         if (f) return f;
         const nm = member.name && member.name.text;
         if (ts.isMethodDeclaration(member)) {
-            f = this._synthArrow(["this"].concat(member.parameters.map(q => q.name.text)), member.body);   // 形参全留（此前 .slice(0,4) → 第 4+ 形参从 ABI 消失 → 实参静默 undefined）
-            // 合成的形参表只有名字（丢 rest 标记）→ 显式标出，供 lamMeta.rest 与 ABI 打包使用
+            f = this._synthArrowWithParams("this", member.parameters, member.body);
+            // 合成的形参表带原节点（默认值/解构/rest 均保留）；显式标出 rest 供 lamMeta.rest 与 ABI 打包使用
             const lp = member.parameters[member.parameters.length - 1];
             if (lp && lp.dotDotDotToken) f._qzRest = true;
         }
         else if (ts.isGetAccessorDeclaration(member)) f = this._synthArrow(["this"], member.body);
-        else f = this._synthArrow(["this", member.parameters[0] ? member.parameters[0].name.text : "v"], member.body);
+        else f = this._synthArrowWithParams("this", member.parameters, member.body);
         f._qzLitMethod = true;   // 对象字面量方法：super 指向字面量的 home object（运行时按 receiver 原型链解析）
         this._synthLambdas.set(member, f);
         return f;
@@ -1293,6 +1293,15 @@ class Emitter {
             ts.factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken), body);
         ar.pos = body.pos; ar.end = body.end;
         ar._qzSynthThis = paramNames.length > 0 && paramNames[0] === "this";   // 合成 self 形参（真实槽位）
+        return ar;
+    }
+    // 同 _synthArrow，但形参沿用**原始** ParameterDeclaration 节点（保留默认值/解构/rest）。
+    _synthArrowWithParams(selfName, params, body) {
+        const self = ts.factory.createParameterDeclaration(undefined, undefined, ts.factory.createIdentifier(selfName), undefined, undefined, undefined);
+        const ar = ts.factory.createArrowFunction(undefined, undefined, [self].concat(params), undefined,
+            ts.factory.createToken(ts.SyntaxKind.EqualsGreaterThanToken), body);
+        ar.pos = body.pos; ar.end = body.end;
+        ar._qzSynthThis = true;
         return ar;
     }
 
@@ -1445,10 +1454,12 @@ class Emitter {
             ? f.parameters.map(p => p.name.text).concat(locals)   // locals 是名字数组
             : null;
         // 闭包共享环境：本函数被（直接/嵌套）lambda 捕获的局部/参数 → 统一住宿主对象（env），闭包与本体共享。
-        const capNames = this.mode === "tagged"
-            ? this._probeCaptured(f.body, f.parameters.map(p => p.name.text), locals) : [];
-        const envDecls = capNames.length ? ["i32"] : [];
+        // `arguments`（本函数自有）也可能被嵌套箭头捕获 → 视作可捕获名（JS：箭头继承外层 arguments）。
         const needsArgs0 = this.mode === "tagged" && !!(this._fnArgs && f.name && this._fnArgs.has(f.name.text));
+        const ownCapNames = f.parameters.map(p => p.name.text).concat(needsArgs0 ? ["arguments"] : []);
+        const capNames = this.mode === "tagged"
+            ? this._probeCaptured(f.body, ownCapNames, locals) : [];
+        const envDecls = capNames.length ? ["i32"] : [];
         const decls = locals.map(() => vt).concat([vt, vt, vt]).concat(extra).concat(sT).concat(objPool).concat(restKeyPool)
             .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(loopSaveDecls).concat(fnArenaDecls).concat(needsArgs0 ? ["i64"] : []).concat(envDecls).concat(numArrDecls);
         // num 数组的 base/len local 索引（一对 i32/名字）
@@ -1478,6 +1489,9 @@ class Emitter {
                 if (idx !== undefined && idx < f.parameters.length) {
                     this.m.localGet(this.envLocal); this.m.i32Const(this._strId(pn)); this.m.localGet(idx); this.m.call("qz.env_set");
                 }
+            }
+            if (needsArgs0 && capNames.includes("arguments")) {   // 嵌套箭头读 arguments → 从本函数 env 取全量实参数组
+                this.m.localGet(this.envLocal); this.m.i32Const(this._strId("arguments")); this.m.localGet(this._argsLocal); this.m.call("qz.env_set");
             }
         }
         this.depth = 0; this.labels = [];
@@ -1717,10 +1731,11 @@ class Emitter {
         this._loopSaveBase = this.scratchObj + 1; this._loopSaveCount = this._countLoops(lam.body) + 1; this._loopSaveDepth = 0;
         const lamLoopSaveDecls = new Array(this._loopSaveCount).fill("i32");
         // 本 lambda 的局部若被（嵌套）lambda 捕获 → 建自身 env（__parent 链到 blk）
-        const ownCap = this._probeCaptured(lam.body, params, locals);
-        const envDecls = ownCap.length ? ["i32"] : [];
-        const lamNeedsArgs = usesArguments(lam.body);
+        // 箭头不自建 arguments（JS：继承外层函数的）；合成 self 形参的箭头源自方法/函数表达式 → 自有。
+        const lamNeedsArgs = (!ts.isArrowFunction(lam) || !!lam._qzSynthThis) && usesArguments(lam.body);
         lam._qzNeedsArgs = lamNeedsArgs;
+        const ownCap = this._probeCaptured(lam.body, lamNeedsArgs ? params.concat(["arguments"]) : params, locals);
+        const envDecls = ownCap.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra).concat(sT).concat(objPool).concat(restKeyPool)
             .concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(lamLoopSaveDecls).concat(lamNeedsArgs ? ["i64"] : []).concat(envDecls);
         this._argsLocal = lamNeedsArgs ? (1 + params.length) + bodyLocals.length - 1 - envDecls.length : undefined;
@@ -1742,6 +1757,9 @@ class Emitter {
             for (const n of ownCap) {                            // 仅形参（解构形参绑定名由序言析构后再写）
                 const idx = this._local(n);
                 if (idx !== undefined && idx < 1 + params.length) { M.localGet(this.envLocal); M.i32Const(this._strId(n)); M.localGet(idx); M.call("qz.env_set"); }
+            }
+            if (lamNeedsArgs && ownCap.includes("arguments")) {  // 本 lambda 自有 arguments → 供嵌套箭头捕获
+                M.localGet(this.envLocal); M.i32Const(this._strId("arguments")); M.localGet(this._argsLocal); M.call("qz.env_set");
             }
         }
         this.depth = 0; this.labels = []; this._tryStack = []; this._labelStack = [];
@@ -2010,8 +2028,9 @@ class Emitter {
         const realParams = sm.node.parameters.map(p => p.name.text);
         const params = realParams.slice(0, 4).concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)))
             .concat(realParams.length > 4 ? ["$ovf"] : []);
-        this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
+        // 先置位再 _mEnter：静态方法的类捕获 env 要按**类值** self 取（class_env_get_static）
         this._inStaticMethod = true;                       // 静态方法体内 this ≡ 类（_classOfExpr）
+        this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
         this._emitParamPrologue(sm.node.parameters, 1);    // 静态方法形参同上
         this._emitOvfParamUnpack(sm.node.parameters, params);
         this._curClassObj = this.classes.get(cname);
@@ -2054,9 +2073,9 @@ class Emitter {
         const realParams = ctor ? ctor.parameters.map(p => p.name.text) : [];
         const params = realParams.concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)));
         const body = ctor ? ctor.body : { statements: [] };
+        this._inStaticMethod = false;                      // 须在 _mEnter 前复位：实例 env 取法依赖此标志
         this._mEnter(ctorName(c.name), c.name, params, body, true, ctor ? ctor.parameters : [],
             c.fields.filter(f2 => f2.init).map(f2 => f2.init));   // 字段初值在 ctor 内联发射 → 其闭包（如 = () => this.x）须捕获 this
-        this._inStaticMethod = false;
         this._curClassObj = c;
         // 派生类：字段默认值须在 super(...) 之后写（同名遮蔽字段父写后子覆写）；
         // super 语句处 _emitSuperCall 负责调用父 ctor 后回写本类默认值。基类：此处直接写。
@@ -2088,8 +2107,8 @@ class Emitter {
         const realParams = mth.node.parameters.map(p => p.name.text);
         const params = realParams.slice(0, 4).concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)))
             .concat(realParams.length > 4 ? ["$ovf"] : []);            // 前 4 槽 + 可选 $ovf（实参 4.. 数组）
+        this._inStaticMethod = false;                      // 须在 _mEnter 前复位：实例 env 取法依赖此标志
         this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters);
-        this._inStaticMethod = false;
         this._emitParamPrologue(mth.node.parameters, 1);   // 方法形参：默认值/解构
         this._emitOvfParamUnpack(mth.node.parameters, params);   // >4 形参：从 $ovf 数组解包到各自 local
         this._emitFnDeclClosures(mth.node.body);
@@ -2173,16 +2192,19 @@ class Emitter {
               /* 直接用类 env 的前提：本方法没有同名形参/局部遮蔽（否则写回会污染共享类 env，
                * 或读到外层值而非局部值）。 */
               const covered = capNames.every(n0 => capArr.includes(n0)) && capNames.every(n0 => this._local(n0) === undefined);
+              /* 实例方法的 self 是实例句柄；静态方法的 self 是类值 → 取 env 的原语不同
+               * （前者按实例内存的运行时 clsId，后者按类值句柄的低 32 位/__qzClsId）。*/
+              const envGet = this._inStaticMethod ? "qz.class_env_get_static" : "qz.class_env_get";
               if (covered) {                                     // 方法捕获 ⊆ 类捕获 → 直接用类 env
                 /* 按实例的**运行时 clsId** 取 env：class_expr_value 克隆出的每个类
                  * 各持一份捕获副本，按类名查会撞车（A/B 共读同一 label）。*/
-                M.localGet(0); M.i32Const(this._strId("@@qzEnv")); M.call("qz.class_env_get");
+                M.localGet(0); M.i32Const(this._strId("@@qzEnv")); M.call(envGet);
                 M.i32WrapI64(); M.i32Const(1); M.i32Sub();   /* env 已 +1（0=无捕获哨兵）→ 还原 */
                 M.localSet(this.envLocal);
               } else if (capArr.some(n0 => capNames.includes(n0))) {
                 /* 方法自身还要捕获形参/局部，同时引用类外层捕获 → 建子环境挂到类 env 下：
                  * 只写方法自身的名字，类捕获名沿 __parent 链读（否则空环境遮蔽类 env → 静默 undefined）。 */
-                M.localGet(0); M.i32Const(this._strId("@@qzEnv")); M.call("qz.class_env_get");
+                M.localGet(0); M.i32Const(this._strId("@@qzEnv")); M.call(envGet);
                 M.i32WrapI64(); M.i32Const(1); M.i32Sub();   /* 父 env 索引（-1 = 无） */
                 M.call("qz.env_new");
                 M.i32WrapI64(); M.localSet(this.envLocal);

@@ -692,6 +692,20 @@ function makeQzvm(strings, opts) {
           writable: true, configurable: true, enumerable: false });
       } catch (_) {}
     }
+    // 静态访问器：类值作动态属性读（`const C = mk(); C.g`）时 JS 引擎触发本 getter/setter，
+    // self = 类值（与静态字段/方法同一接收者语义）
+    if (classHandles.size >= 0) {
+      const keyOf = (nm) => nm.indexOf("@@") === 0 ? (Symbol[nm.slice(2)] || nm) : nm;   // @@toStringTag → Symbol.toStringTag
+      for (const nm of Object.keys(meta.staticGetters || {})) {
+        const gg = meta.staticGetters[nm], ss = (meta.staticSetters || {})[nm];
+        try {
+          Object.defineProperty(ctor, keyOf(nm), {
+            get: gg && exportsRef && exportsRef[gg.name] ? function () { return toJS(exportsRef[gg.name](classValueImpl(clsId), TAG, TAG, TAG, TAG)); } : undefined,
+            set: ss && exportsRef && exportsRef[ss.name] ? function (v) { return toJS(exportsRef[ss.name](classValueImpl(clsId), bitsOf(v), TAG, TAG, TAG)); } : undefined,
+            configurable: true, enumerable: false });
+        } catch (_) {}
+      }
+    }
     if (classHandles.size >= 0) {   // 实例方法/访问器挂到 prototype（JS 语义：C.prototype.get / Object.getOwnPropertyNames(C.prototype)）
       const mkMeth = (exName) => function (...as) {
         const fn = exportsRef && exportsRef[exName];
@@ -1228,6 +1242,17 @@ function makeQzvm(strings, opts) {
       const u = BigInt.asUintN(64, self), hi = u >> 48n, off = Number(u & MASK32);
       if (hi !== INST_HI || !mem || !off) return 0n;
       const clsId = new DataView(mem.buffer).getInt32(off, true);
+      const v = statics.get(String(clsId) + "|" + strings[key]);
+      return v === undefined ? 0n : v;
+    },
+    // class_env_get_static(self, "@@qzEnv")：self 是**类值**（静态方法 this）——宿主档为 ctor 函数句柄
+    // （__qzClsId），in-module 档为 0x7FFE|clsId。静态度方法捕获的外层变量挂在 clsId|envKey 下。
+    class_env_get_static: (self, key) => {
+      const u = BigInt.asUintN(64, self), hi = u >> 48n, off = Number(u & MASK32);
+      let clsId;
+      if (hi === HOST_HI) { const f = handles[off]; clsId = f && f.__qzClsId; }
+      else if (hi === INST_HI) clsId = off;               // 类值：低 32 位即 clsId（无实例内存可读）
+      if (clsId === undefined || clsId === null) return 0n;
       const v = statics.get(String(clsId) + "|" + strings[key]);
       return v === undefined ? 0n : v;
     },
@@ -2273,6 +2298,28 @@ function makeQzvm(strings, opts) {
       if (typeof f3 !== "function") throwValue(new TypeError("super." + name + " 不是函数"));
       const all = as4.concat(ex); while (all.length && all[all.length - 1] === undefined) all.pop();
       return ret(f3.apply(o, all));
+    },
+    // 动态父 super.m(args)：home 类（动态 extends 的合成类）的**运行时父链**上查实例方法。
+    // home.parent 在 emit 期不可静态解析 → 宿主按 classRuntimeParent/classMeta.parent 走链。
+    super_method_dyn: (recv, homeId, mid, a0, a1, a2, a3) => {
+      const name = strings[mid];
+      const u = BigInt.asUintN(64, recv);
+      if ((u >> 48n) !== INST_HI) throw new Error("super_method_dyn: 接收者不是类实例");
+      const home = classMeta && classMeta[homeId];
+      if (!home) throw new Error("super_method_dyn: home 类不存在 " + homeId);
+      let c = chainNext(home);
+      while (c) {
+        const m = own(c.methods, name);
+        if (m) {
+          const fn = exportsRef && exportsRef[m.name];
+          if (typeof fn !== "function") throw new Error("super_method_dyn: 方法导出缺失 " + m.name);
+          const out = fn(recv, a0, a1, a2, a3);
+          return out === undefined ? TAG : out;   // void 方法 → undefined（与 callM 同归一）
+        }
+        c = chainNext(c);
+      }
+      throwValue(new TypeError("super." + name + " 不是函数"));
+      return TAG;
     },
     builtin_member: (id) => {
       const name = strings[id];

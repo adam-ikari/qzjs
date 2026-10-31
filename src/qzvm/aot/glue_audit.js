@@ -41,6 +41,7 @@ function jsRun(src, fn, args) {
   const exp = {};
   new Function("exports", js)(exp);
   const out = exp[fn](...(args || []));
+  if (out === undefined) return "undefined";   // JSON.stringify(undefined) === undefined，与 CLI 打印的 "undefined" 不同型
   return typeof out === "string" ? out : JSON.stringify(out);
 }
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qz-glue-"));
