@@ -9,7 +9,7 @@ export function f(): any {
   out.push(c.m.apply(c, []));
   const bound: any = c.m.bind(c);
   out.push(bound());
-  const o: any = { v: 7, m(c.m) };
+  const o: any = { v: 7, m: c.m };
   out.push(o.m());
   out.push(o.m.call({ v: 9 }));
   try { out.push("x:" + (c.m as any).call(null)); } catch (e: any) { out.push("threw:" + (e instanceof TypeError ? "T" : "?")); }

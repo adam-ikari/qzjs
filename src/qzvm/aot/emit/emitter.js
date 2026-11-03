@@ -521,9 +521,11 @@ class Emitter {
                 return;
             }
             if (BUILTIN_GLOBALS.has(name)) { M.i32Const(this._strId(name)); M.call("qz.builtin_member"); return; }   // 内建全局作值（Symbol/Math/JSON…）
-            // 未声明标识符（宿主侧的 lib 全局如 `URL`/`Object`，内联模块内无绑定）→ undefined。
-            // 抛错会中断发射并留下不平衡的栈（zod：`URL.canParse(x)` 等）。
-            this._emitUndefined();
+            // 未声明标识符：运行期查全局（lib 全局如 URL/console 有值 → 宿主句柄）；不存在 →
+            // ReferenceError（loud、可 catch）。此前静默 undefined 违背「静默错值 > loud」裁决；
+            // 不在此处编译期抛（旧注释顾虑：中断发射留不平衡栈）——ref_get 出错路径仍落栈一个 TAG。
+            M.i32Const(this._strId(name)); M.call("qz.ref_get");
+            this._emitErrCheck();
             return;
         }
         M.localGet(idx);
@@ -548,7 +550,8 @@ class Emitter {
                 return;
             }
             if (BUILTIN_GLOBALS.has(name)) { this.m.i32Const(this._strId(name)); this.m.call("qz.builtin_member"); return; }
-            this._emitUndefined(); return;   // 未声明（宿主 lib 全局）→ undefined，勿抛断栈
+            this.m.i32Const(this._strId(name)); this.m.call("qz.ref_get");   // 未声明名：运行期查全局，缺失 → ReferenceError（loud）
+            this._emitErrCheck(); return;
         }
         this.m.localGet(idx);
     }
@@ -2047,7 +2050,6 @@ class Emitter {
         // 先置位再 _mEnter：静态方法的类捕获 env 要按**类值** self 取（class_env_get_static）
         this._inStaticMethod = true;                       // 静态方法体内 this ≡ 类（_classOfExpr）
         this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
-        this._emitParamPrologue(sm.node.parameters, 1);    // 静态方法形参同上
         this._emitOvfParamUnpack(sm.node.parameters, params);
         this._curClassObj = this.classes.get(cname);
         this._emitFnDeclClosures(sm.node.body);
@@ -2125,7 +2127,6 @@ class Emitter {
             .concat(realParams.length > 4 ? ["$ovf"] : []);            // 前 4 槽 + 可选 $ovf（实参 4.. 数组）
         this._inStaticMethod = false;                      // 须在 _mEnter 前复位：实例 env 取法依赖此标志
         this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters);
-        this._emitParamPrologue(mth.node.parameters, 1);   // 方法形参：默认值/解构
         this._emitOvfParamUnpack(mth.node.parameters, params);   // >4 形参：从 $ovf 数组解包到各自 local
         this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);
@@ -2197,7 +2198,6 @@ class Emitter {
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
         this.m.i64Const(0n); this.m.globalSet(1);           // 入口清 __err
-        this._emitParamPrologue(astParams || [], 1);        // 默认值 / 解构形参（先于写 env）
         this.envLocal = capNames.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;
         this.capMap = new Map(capNames.map(n => [n, this.envLocal]));
         this.envRef = this.envLocal;
@@ -2225,6 +2225,10 @@ class Emitter {
                 M.call("qz.env_new");
                 M.i32WrapI64(); M.localSet(this.envLocal);
               } else { M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal); } }
+        }
+        this._emitParamPrologue(astParams || [], 1);        // 默认值/解构形参：capMap+env 就绪后、写 env 前发射（与 emitFunc 同序；早于 capMap 则默认式中的捕获名会落 ref_get 兜底误抛 ReferenceError）
+        if (capNames.length) {
+            const M = this.m;
             /* 种子写入一律落在**本层**（env_def）：形参写当前值；与类捕获同名的局部先占位
              * undefined（否则后续 env_set 沿 __parent 链写进共享类 env，污染其它方法）。
              * 与类捕获同名的形参同理不能 env_set，否则覆盖类 env 的捕获副本。 */

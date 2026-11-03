@@ -289,6 +289,7 @@ int qz_guest_result_len(void)
  * 句柄解 tag + handle table 是 M6b 完整落地工程。 */
 static int64_t qz_ret(JSContext *ctx, JSValue r);
 static JSValue qz_tojs(JSContext *ctx, int64_t b);
+static const char *qz_str_by_id(int32_t id, size_t *out_len);
 
 __attribute__((export_name("add")))
 int64_t qz_guest_add(int64_t a, int64_t b)
@@ -704,6 +705,38 @@ int64_t qz_guest_take_err(void)
     g_handle_count = idx + 1;
     g_handles[idx] = g_throw_val;   /* 转让所有权（不 dup） */
     return ((int64_t)0x7FF9 << 48) | (uint32_t)idx;
+}
+
+/* 未声明标识符读：查运行期全局（URL/console/process 等）。存在 → JS 值经 qz_ret 入句柄表；
+ * 不存在 → ReferenceError 入 g_throw_val（emitter _emitErrCheck 经 take_err 转入 catch）。
+ * 与宿主档 qzvm.ref_get 语义一致——此前两档均静默 undefined。 */
+__attribute__((export_name("ref_get")))
+int64_t qz_guest_ref_get(int32_t nameId)
+{
+    if (!g_current_rt) return ((int64_t)0x7FF9 << 48);
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return ((int64_t)0x7FF9 << 48);
+    size_t nlen = 0;
+    const char *s = qz_str_by_id(nameId, &nlen);
+    if (!s || nlen >= 64) return ((int64_t)0x7FF9 << 48);
+    char nm[64];
+    memcpy(nm, s, nlen); nm[nlen] = '\0';
+    JSValue g = JS_GetGlobalObject(ctx);
+    JSAtom at = JS_NewAtom(ctx, nm);
+    int has = JS_HasProperty(ctx, g, at);
+    JSValue v = has > 0 ? JS_GetProperty(ctx, g, at) : JS_UNDEFINED;
+    JS_FreeAtom(ctx, at);
+    JS_FreeValue(ctx, g);
+    if (has <= 0) {
+        JS_ThrowReferenceError(ctx, "%s is not defined", nm);
+        JSValue ex = JS_GetException(ctx);
+        if (!JS_IsException(ex)) qz_set_throw(ctx, ex);
+        else JS_FreeValue(ctx, ex);
+        return ((int64_t)0x7FF9 << 48);
+    }
+    int64_t out = qz_ret(ctx, v);
+    JS_FreeValue(ctx, v);
+    return out;
 }
 
 /* 动态类值（class_expr_value 克隆的 clsId）判定：定义见 classMeta 节。

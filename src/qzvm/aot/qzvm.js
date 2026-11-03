@@ -389,7 +389,16 @@ function makeQzvm(strings, opts) {
     if (typeof seal === "function") seal();
   };
   const takeErr = () => {
-    if (!exportsRef || !exportsRef.__err) return;
+    if (!exportsRef) return;
+    // 优先走 __take_err()：i64 **返回值**在 qzjs 的 WAMR 绑定里是 BigInt（精确）；
+    // 读 __err 全局则是 Number（ext_wamr.c JS_NewInt64 走双精度），tagged 句柄超 2^53
+    // 会被舍入成垃圾。旧产物没有该导出时退回全局读取（node WebAssembly 下 global 是 BigInt）。
+    if (typeof exportsRef.__take_err === "function") {
+      const v = exportsRef.__take_err();
+      if (v !== 0n) throw toJS(v);
+      return;
+    }
+    if (!exportsRef.__err) return;
     const v = exportsRef.__err.value;
     if (v !== 0n) { exportsRef.__err.value = 0n; throw toJS(v); }
   };
@@ -1051,6 +1060,14 @@ function makeQzvm(strings, opts) {
       }
       throw new Error("call_value: 被调值不是函数");
     },
+    // 未声明标识符读：查运行期全局（console/URL/process…）；不在 → ReferenceError（可 catch，同 JS）。
+    // 此前静默 undefined（zod 断栈顾虑）——违背「静默错值 > loud」裁决；发射本身不再中断。
+    ref_get: (id) => {
+      const nm = strings[id];
+      if (nm in globalThis) return tagHandle(globalThis[nm]);
+      throwValue(new ReferenceError(nm + " is not defined"));
+      return TAG;
+    },
     // 展开实参 + rest 收尾被调函数：实参数组即其唯一形参
     call_named_rest: (id, arr) => {
       const name = strings[id], fn = exportsRef && exportsRef[name];
@@ -1328,9 +1345,8 @@ function makeQzvm(strings, opts) {
           while (c2) {                                                    // 原型方法 → 绑定宿主函数
             const m2 = own(c2.methods, name);
             if (m2) {
-              const recv2 = recv;
-              return tagHandle(function (...args) {   // 提取的类方法：JS this 优先（.call/.apply 的 thisArg）；this 为 undefined/null 时回退原接收者
-                const selfH = (this === undefined || this === null) ? recv2 : bitsOf(this);
+              return tagHandle(function (...args) {   // 提取的类方法：类体恒 strict——this 即调用点 thisArg，undefined/null **不**回填原实例（否则 c.m.call(null) 静默读旧接收者，V8 会抛 TypeError）
+                const selfH = this === undefined ? TAG : this === null ? (TAG | 1n) : bitsOf(this);
                 const a2 = args.filter(x => x !== undefined && x !== null).map(bitsOf);
                 while (a2.length < 4) a2.push(TAG);
                 const ovf1 = a2.length > 4 ? arrWriteback(a2.slice(3).map(toJS)) : TAG;   // >4 实参：溢出数组（ovf[0] = 实参 3，与 callee 的 ovf[i-3] 约定一致；此前恒传 TAG → 第 4+ 实参静默丢失）
@@ -2154,13 +2170,24 @@ function makeQzvm(strings, opts) {
       }
       const off = Number(BigInt.asUintN(64, recv) & 0xffff_ffffn);
       // POJO/实例：字段持有闭包值（0x7FFF）→ 直接调用该闭包（对象字面量里的方法 / 模块模式）
+      // 字段持有宿主函数句柄（0x7FFD，如提取的类方法 `c.m` 存入字段）→ 以 recv 为 this 调用（c14 this-bind-matrix）。
       {
         const h = BigInt.asUintN(64, recv) >> 48n;
         if ((h === TAG_HI && off >= 8) || h === INST_HI) {
           const fe = fieldEntries.find(([n]) => n === name);
           if (fe && mem && new DataView(mem.buffer).getInt32(off + 4, true) >= fe[1] + 8) {
             const fv = new DataView(mem.buffer).getBigInt64(off + fe[1], true);
-            if (BigInt.asUintN(64, fv) >> 48n === CLO_HI) return closureCall(fv, a0, a1, a2, a3, ovf, recv);   // 方法位置的闭包值：receiver = recv，ovf 透传（rest/>4 形参）
+            const fh = BigInt.asUintN(64, fv) >> 48n;
+            if (fh === CLO_HI) return closureCall(fv, a0, a1, a2, a3, ovf, recv);   // 方法位置的闭包值：receiver = recv，ovf 透传（rest/>4 形参）
+            if (fh === HOST_HI) {
+              const f = handles[idxOf(fv)];
+              if (typeof f === "function") {
+                const exA = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
+                const as3 = [a0, a1, a2, a3].map(toJS);
+                while (as3.length && as3[as3.length - 1] === undefined) as3.pop();   // 未传实参必须省略
+                return ret(f.apply(toJS(recv), as3.concat(exA.slice(1))));
+              }
+            }
           }
         }
       }

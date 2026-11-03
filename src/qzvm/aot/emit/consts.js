@@ -110,6 +110,7 @@ const QZ = {
   class_env_get_by_id: { params: ["i32", "i32"], results: ["i64"] },   // (clsId, "@@qzEnv" strId) → statics[clsId|envKey]（按 clsId 直查，不经 self；供子类 env 链父类 env）
   class_env_parent_get: { params: ["i32", "i32"], results: ["i64"] },   // (clsId, "@@qzEnv" strId) → 沿继承链查父类 env（动态父 classRuntimeParent/classMeta.parent 改写后）；0=无
   builtin_value: { params: ["i32"], results: ["i64"] },
+  ref_get: { params: ["i32"], results: ["i64"] },                      // 未声明名读全局；缺失 → ReferenceError（loud）
   brand_check: { params: ["i64", "i32"], results: ["i64"] },   // 私有名 in o（品牌检查）：非对象 → TypeError（JS 语义）
   method_spread: { params: ["i64", "i32", "i64"], results: ["i64"] },   // obj.m(...args)：实参数组 → method_call 分派
   super_method: { params: ["i64", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 对象字面量 super.m()：按 receiver 原型链解析               // 内建全局作值（String/Number/Array/… → 宿主句柄，缓存保证 ===）                  // 类名作值：clsId → 宿主构造器对象句柄

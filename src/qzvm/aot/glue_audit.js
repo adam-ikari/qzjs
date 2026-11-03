@@ -18,7 +18,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..", "..", "..");
 const QZJS = process.env.QZJS || path.join(ROOT, "build", "qzjs");
@@ -40,11 +40,26 @@ function jsRun(src, fn, args) {
   }).outputText;
   const exp = {};
   new Function("exports", js)(exp);
-  const out = exp[fn](...(args || []));
+  const g = exp[fn];   // 裸调用（对齐 audit_diff）：exp[fn]() 会把 exports 泄进顶层函数的 this（strict 下应为 undefined）
+  const out = g(...(args || []));
   if (out === undefined) return "undefined";   // JSON.stringify(undefined) === undefined，与 CLI 打印的 "undefined" 不同型
   return typeof out === "string" ? out : JSON.stringify(out);
 }
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qz-glue-"));
+
+// 把 JS 参数值写成可嵌入 glue 源码的字面量（build.js 的 --main 只解析数字实参，
+// 这里直接改写生成后的 __call 实参数组，保持与 V8 参考值的同一份参数）。
+function lit(v) {
+  if (v === undefined) return "void 0";
+  if (v === null) return "null";
+  if (typeof v === "number") return Number.isNaN(v) ? "NaN" : !isFinite(v) ? (v > 0 ? "Infinity" : "-Infinity") : String(v);
+  if (typeof v === "bigint") return `${v}n`;
+  if (typeof v === "string" || typeof v === "boolean") return JSON.stringify(v);
+  if (typeof v === "function") return `(${v.toString()})`;   // 实参里带回调（opt-call 系列）：嵌入函数源文本
+  if (Array.isArray(v)) return "[" + v.map(lit).join(",") + "]";
+  if (typeof v === "object") return "{" + Object.keys(v).map(k => `${JSON.stringify(k)}:${lit(v[k])}`).join(",") + "}";
+  return "void 0";
+}
 
 
 let pass = 0, fail = 0;
@@ -56,27 +71,56 @@ for (const c of corpus) {
   const prefix = path.join(OUT_DIR, base);
   fs.writeFileSync(srcPath, c.ts + "\n");
 
-  let got = null, err = null;
+  // kind: "value"（取到结果行）/ "throw"（运行期抛出）/ "error"（构建或装配失败）
+  let kind = "value", got = null, err = null;
   try {
     execFileSync(process.execPath, [BUILD, "build", srcPath, base, "--main", `${c.fn}()`], {
       stdio: "pipe", env: { ...process.env, WAMRC },
     });
-    const out = execFileSync(QZJS, [base + ".glue.js"], { cwd: OUT_DIR, stdio: "pipe", encoding: "utf8", timeout: 60000 });
+    // 注入实参：把 --main 生成的 `__call("<fn>", [])` 换成带参数的调用。
+    const gluePath = path.join(OUT_DIR, base + ".glue.js");
+    const callSrc = `__call(${JSON.stringify(c.fn)}, [])`;
+    if (c.args && c.args.length) {
+      const glue = fs.readFileSync(gluePath, "utf8");
+      const patched = glue.replace(callSrc, `__call(${JSON.stringify(c.fn)}, [${c.args.map(lit).join(",")}])`);
+      if (patched === glue) throw new Error("glue 里找不到 " + callSrc);
+      fs.writeFileSync(gluePath, patched);
+    }
+    const r = spawnSync(QZJS, [base + ".glue.js"], { cwd: OUT_DIR, encoding: "utf8", timeout: 60000 });
     // build.js 的 --main 直接产出 `<fn>() = <值>` 行；取出右侧原文（不重新 JSON 解析，
-    // 保持与 V8 参考值同形态的字符串比较）
-    const m = new RegExp("^" + c.fn.replace(/\$/g, "\\$") + "\\(\\) = (.*)$", "m").exec(out);
-    got = m ? m[1] : null;
-    if (got === null) err = "no <fn>() line";
+    // 保持与 V8 参考值同形态的字符串比较）。值里可能含换行（JSON 字符串/模板串），
+    // 所以取标记之后到输出末尾，不能只匹配「本行」。
+    const marker = `${c.fn}() = `;
+    const at = (r.stdout || "").indexOf(marker);
+    if (at >= 0) { got = (r.stdout || "").slice(at + marker.length).replace(/\n$/, ""); }
+    else {
+      // 运行期异常被 glue 尾部 .catch 打成 "AOT load failed: <msg>"（退出码仍为 0）；
+      // 与 V8 参考侧同为抛错时按 audit_diff 的判据算一致。
+      const em = /AOT load failed: (.*)$/m.exec(r.stderr || "");
+      if (em) { kind = "throw"; err = em[1].trim(); }
+      else { kind = "error"; err = ("no <fn>() line: " + (r.stderr || "")).trim().slice(0, 120) || "no <fn>() line"; }
+    }
   } catch (e) {
+    kind = "error";
     err = String((e.stderr || e.message || e)).split("\n").filter(Boolean).slice(-1)[0] || "error";
   }
 
-  let want = null;
-  try { want = jsRun(c.ts, c.fn, c.args); } catch (e) { want = "JS:" + String(e.message).slice(0, 60); }
+  let wantKind = "value", want = null;
+  try { want = jsRun(c.ts, c.fn, c.args); } catch (e) { wantKind = "throw"; want = String(e.message).slice(0, 60); }
 
-  const ok = c.unsupported ? !!err : (err === null && got === want);   // 已知缺口：build/运行必须 loud（同 audit_diff 判据）
+  // 已知缺口（unsupported）：build/运行必须 loud；否则值须相等，或两侧都抛错（同 audit_diff 判据）。
+  // unsupported：必须 loud（构建失败或运行期抛错）。
+  // 其余：值相等即通过；JS 侧抛错时要求产物也 loud（同 audit_diff：两侧都报错算一致，
+  // 静默错值/静默 undefined 算失败）。
+  const ok = c.unsupported
+    ? kind !== "value"
+    : (wantKind === "throw" ? kind !== "value" : (kind === "value" && got === want));
   if (ok) pass++; else fail++;
-  rows.push({ name: c.name, ok, got: err ? "ERR:" + err.slice(0, 60) : got, want: c.unsupported ? "unsupported: " + c.unsupported : want });
+  rows.push({
+    name: c.name, ok,
+    got: kind === "value" ? got : kind.toUpperCase() + ":" + String(err).slice(0, 80),
+    want: c.unsupported ? "unsupported: " + c.unsupported : (wantKind === "throw" ? "THROW:" + want : want),
+  });
 }
 
 const w = Math.max(...rows.map(r => r.name.length), 4);

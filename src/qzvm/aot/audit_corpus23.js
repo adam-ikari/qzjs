@@ -207,7 +207,7 @@ export function f(x: any): any {
   for (var j = 0; j < 3; j++) hf.push(() => j);
   out.push(hf.map((h: any) => h()).join(","));
   let sum = 0;
-  for (let a2 of [1, 2], [3, 4]) { for (const b2 of a2) sum += b2; }
+  for (const a2 of [[1, 2], [3, 4]]) { for (const b2 of a2) sum += b2; }
   out.push(sum);
   const fs2: any = [];
   for (const v of [5, 6]) { fs2.push(() => v + 1); }

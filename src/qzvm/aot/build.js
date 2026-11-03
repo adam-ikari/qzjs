@@ -131,10 +131,20 @@ ${load}
         return fn(...args);
       }
       if (__ex.__bump_reset) __ex.__bump_reset();
-      const conv = m.mode === "num" ? args : args.map(a => qz._fromJS(a));
+      // wasm 导出是固定元数：少传的实参 JS 语义是 undefined（num 模式用 NaN，与
+      // 「少传后参与算术」一致），必须补足到形参个数——否则 wasm 把缺参当 0，
+      // 默认参数/typeof 判断全部走偏（audit_diff 早已按此约定补参）。
+      const nPar = m.params === undefined ? args.length : m.params;
+      const raw = args.slice(0, nPar);
+      while (raw.length < nPar) raw.push(m.mode === "num" ? NaN : undefined);
+      const conv = m.mode === "num" ? raw : raw.map(a => qz._fromJS(a));
       qz.setInWasm(true);
       let r;
       try { r = __ex[name](...conv); } finally { qz.setInWasm(false); }
+      // 跨函数 throw 的宿主出口：被调函数把未捕获异常写进 __err 并正常返回。
+      // 这里必须轮询一次，否则异常被静默吞掉、调用方拿到 undefined（audit_diff 已按此约定
+      // 取错，glue 曾漏掉 → 同一份产物两条路径行为不同）。
+      qz.take_err();
       // **不做自动 GC**：宿主侧任意 i64 局部（含 __main 里直接经 __ex.f() 拿到的句柄）不可枚举，
       // 自动触发必然漏根 → 存活对象被复写（实测：闭包经 churn 后返回 undefined）。
       // 回收须由调用者显式 qz.gc(__ex, roots)，并保证 roots 覆盖所有存活句柄。

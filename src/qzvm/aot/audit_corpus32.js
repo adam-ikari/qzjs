@@ -174,7 +174,7 @@ export function f(): any {
   const withNulls: any = { a: null, b: undefined, c: [null, undefined], d: { e: null } };
   out.push(JSON.stringify(withNulls));
   out.push(JSON.parse(JSON.stringify(withNulls)).c.length, JSON.parse(JSON.stringify(withNulls)).c[1] === null);
-  out.push(JSON.stringify("quote\\"here"), JSON.stringify({ "k\"q": 1 }));
+  out.push(JSON.stringify("quote\\"here"), JSON.stringify({ "k\\"q": 1 }));
   const nums: any = [0, -0, 1.5, 1e21, 1e-7, NaN, Infinity];
   out.push(JSON.stringify(nums));
   return out.join("|");

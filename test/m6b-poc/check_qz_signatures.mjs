@@ -16,7 +16,7 @@ const li = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(libPath)
 wasi.initialize(li);
 const L = li.exports;
 
-const src = readFileSync(new URL('../../src/qzvm/aot/emitter.js', import.meta.url), 'utf8');
+const src = readFileSync(new URL('../../src/qzvm/aot/emit/consts.js', import.meta.url), 'utf8');
 const qzBlock = src.match(/const QZ = \{[\s\S]*?\n\};/)[0];
 const errs = [];
 let n = 0;

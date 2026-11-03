@@ -73,7 +73,7 @@ export function f(): any {
   const re2: any = /x/i;
   out.push(re2.ignoreCase, re2.test("X"), re2.test("x"), re2.test("y"));
   const re3: any = /^a/m;
-  out.push("a\nb".match(re3).length, re3.multiline);
+  out.push("a\\nb".match(re3).length, re3.multiline);
   out.push("aaa".replace(/a/g, "b"), "aA".replace(/a/gi, "x"));
   out.push("2024-01".match(/(\\d+)-(\\d+)/).slice(1).join("-"));
   out.push("hello".split(/(?=[o])/).join("|"), "a1b2".match(/[a-z]\\d/g).join(","));

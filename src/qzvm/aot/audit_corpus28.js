@@ -105,7 +105,7 @@ module.exports = [
   out.push(JSON.stringify({ fn: () => 1, u: undefined, n: null }), JSON.stringify([undefined, function() {}]));
   const o2: any = { a: 1, b: { c: 2, d: 3 } };
   out.push(JSON.stringify(o2, ["a", "b", "c"]));
-  out.push(JSON.parse("[1,2,3]").join(","), JSON.parse('"str""), JSON.parse("42") + 1);
+  out.push(JSON.parse("[1,2,3]").join(","), JSON.parse('"str"'), JSON.parse("42") + 1);
   return out.join("|");
 }` },
   { name: "symbol-for-keyfor", fn: "f", ts: `export function f(): any {
@@ -131,9 +131,9 @@ module.exports = [
   try { undeclaredVar; } catch { out.push("referr"); }
   try { try { throw "inner"; } catch { out.push("inner-caught"); } throw "outer"; } catch { out.push("outer-caught"); }
   try { undefinedVar; } catch { out.push("ok1"); } finally { out.push("fin1"); }
-  try { throw new TypeError("te"); } catch (e: any) { out.push(e.constructor.name, e.message); } catch { out.push("fallback"); }
+  try { throw new TypeError("te"); } catch (e: any) { out.push(e.constructor.name, e.message); }
   let result = "";
-  try { throw "x"; } catch { result = "caught"; throw "rethrow"; } catch { result += "-recaught"; } finally { out.push(result); }
+  try { try { throw "x"; } catch { result = "caught"; throw "rethrow"; } } catch { result += "-recaught"; } finally { out.push(result); }
   return out.join(",");
 }` },
   { name: "array-reduceright-keys", fn: "f", ts: `export function f(): any {

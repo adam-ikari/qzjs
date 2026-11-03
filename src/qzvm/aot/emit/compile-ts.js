@@ -1095,6 +1095,17 @@ function compileTS(input, outWasm, opts = {}) {
             m.localGet(0); m.globalSet(1);
             m.endBody();
             m.exportFn("__set_err", "__set_err");
+            /* __take_err() → i64：取走 __err 并清零。
+             * 为什么不用读 __err 全局：qzjs 的 WAMR 绑定把 i64 global 读成 Number
+             * （ext_wamr.c JS_NewInt64 → 双精度），tagged 句柄超过 2^53 会被舍入，
+             * 取出来的错误值直接是垃圾；函数返回值路径用 JS_NewBigInt64，精确。 */
+            m.declareFunc("__take_err", [], ["i64"]);
+            m.startBody("__take_err", ["i64"]);
+            m.globalGet(1); m.localSet(0);
+            m.i64Const(0n); m.globalSet(1);
+            m.localGet(0);
+            m.endBody();
+            m.exportFn("__take_err", "__take_err");
             /* __bump_reset()：**空操作**（保留导出名以兼容既有 glue，行为改为无害）。
              * 历史实现把 bump 无条件重置到模块初始化水位 perm，其前提「模块级对象都分配在
              * perm 以下」**不成立**——`cache.slot = {...}` 恰分配在 perm 之上，下次调用即覆盖它，
