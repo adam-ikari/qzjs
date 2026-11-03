@@ -4,7 +4,7 @@ title: "AOT 跨档语义一致性：闭包/数组/动态类的两档对齐"
 category: decision
 status: active
 created: "2026-10-19T18:41:21"
-updated: "2026-10-31T20:15:45"
+updated: "2026-11-03T11:50:53"
 ---
 
 <!-- compiled_truth -->
@@ -30,6 +30,13 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
 - **静态方法/访问器内 `this` = 运行期接收者类**：`B.getX()` 调继承自 A 的静态方法时 `this === B`。读 `this.x` 沿运行期父链（C 档 classMeta parent 链 / 宿主 ctor `__proto__` 链）；写 `this.x` 写**接收者自有**静态（`static_set_dyn`），不是定义类；`this.x++/--`、复合赋值同理；私有静态 `this.#n` 的键 = `#定义类#名`（词法归属，不走接收者类）。惰性静态守卫必须覆盖接收者的整条父链（`_emitStaticsChainGuard`），只初始化接收者自身会让父链字段读到 undefined。
 - **void 方法没有 wasm 返回值**：直调点与类方法蹦床都按**登记签名**判定（`wasm-encoder.funcResults`），不得按名字猜（`$ctor/$set` 规则漏掉 `: void` 静态/实例方法 → 调用点 `local.set` 栈失衡、产物校验失败）。C 侧蹦床 ABI 恒为 `(self,a0..a3) → i64`，被调 void 时补 undefined 占位。
 - **类表达式/嵌套 class 声明的静态字段/静态块**：静态表按类名共享且只初始化一次，无法重放「每次求值重建静态状态」的 JS 语义 → 仅模块顶层 `const/let C = class {…}`（求值一次、类名稳定）受支持，其余编译期 loud 并给出改法。
+
+
+- **未声明标识符读一律经 `qz.ref_get`（strId）运行期查全局**：globalThis 有 → 宿主句柄；无 → ReferenceError（loud、可 catch）。发射期静默 undefined 兜底已废除（违「静默错值 > loud」裁决）；唯一例外是 `typeof x` 规范特例——未声明标识符仍编译期常量 "undefined"。该原语三处必须同步：consts.js QZ 签名表 + 两档宿主面（qzvm.js `ref_get` / guest_entry.c `qz_guest_ref_get`），且每个调用点后紧跟 `_emitErrCheck`。
+- **方法/构造器形参默认值与解构形参的 prologue 只在 `_mEnter` 内发射一次**，位置在 capMap/env 就绪之后、env 种子写入之前（与 emitFunc 同序）。提前发射（capMap 空）会让默认式中的捕获名落 ref_get 误抛 ReferenceError；发射两次则默认式重复执行、且 env 种子停留在形参原始值（被捕获的默认值进不了 env）。c44 即此双发射回归。
+- **提取的类方法 strict this 语义**：类体恒 strict，`C.prototype.m` 读出的 HOST_HI wrapper 以调用点 thisArg 为 `this`，undefined/null **不**回填原实例——`c.m.call(null)` 抛 TypeError（与 V8 一致）；`method_call` 的 POJO/实例字段派发同时接受 HOST_HI 可调用体。
+- **跨函数 throw 取回优先 `__take_err()`**：i64 **返回值**经 qzjs 的 WAMR 绑定是 BigInt（精确）；读 `__err` 全局则经 JS_NewInt64 落 Number，>2^53 的 tagged 句柄被舍成垃圾。旧产物无该导出时才退回全局读取。
+- **P4 装配路径结案**：build.js 实参补齐 + take_err 后，glue_audit 与 compileTS 直连档对齐；剩余 9 条差异（c2/c3/c7/c11/c20/c22/c28/c29/c33 各 1 条）全是**宿主引擎差异**——oracle=V8(node) vs 生产档=qzjs(quickjs-ng)：Math.cbrt 精度（4 条）、Intl 千分位/排序 collation（c2/c11）、非严格弱序 comparator 下 sort 实现细节（c22/c29）、WAMR/qzjs 栈深度（c7）。非编译器/glue 缺陷。glue_audit 基线对导出函数须**裸调用**（`g(...args)`）——`exp[fn](...)` 会把 exports 泄进顶层函数的 this。
 
 
 ## Timeline
@@ -90,4 +97,16 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
   kind: decision
   summary: "P4 第 45 批：静态字段类键按档统一（_staticClassKey：C=clsId / 宿主=类名strId），静态方法/访问器内 this=运行期接收者类（读沿父链、写接收者自有 static_set_dyn、私有静态#定义类#名、守卫整条父链），void 方法调用点/蹦床按登记签名（funcResults）补 undefined，类表达式/嵌套类静态 loud（仅模块顶层 const C=class 支持）。验证：test_aot ALL PASS；audit_diff 45 批 1014 例全量 0 diff（c45 23/23）；glue_audit c41–c45 全绿；in-module e2e 14 套+concat 全 PASS；stress_aot 45 批 1014 例 2 轮 2028 例 0 diff（445s，峰值 rss 499MiB）。附带发现：全量 glue_audit 扫 c1–c40 暴露既有 glue 装配路径差异（HEAD 抽样一致，非本批回归），留作后续 P4 目标。"
   source: "src/qzvm/aot/audit_corpus45.js + emit/tagged-core.js/emit/tagged.js + wasm-encoder.js funcResults + e2e_statics"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-03T11:50:47
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "P4 glue 装配对齐批次（c14/c28/c44 修复 + 环境差分类）"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-03T11:50:53
+  kind: note
+  summary: "旧注（2026-10-19）的类表达式方法捕获外层局部静默 undefined 缺口已变编译期 loud（[tagged] const K = class 捕获外层局部…），仍未实现、未登记 unsupported；c44 修复的是声明期默认值捕获（工厂/类 env 路径），两者不同机制"
+  source: "/tmp/labelgap 探针 + emitter 报错文案"
   affects: [aot-cross-tier-semantics]
