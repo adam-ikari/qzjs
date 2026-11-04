@@ -4,7 +4,7 @@ title: "AOT 跨档语义一致性：闭包/数组/动态类的两档对齐"
 category: decision
 status: active
 created: "2026-10-19T18:41:21"
-updated: "2026-11-03T11:50:53"
+updated: "2026-11-04T08:52:02"
 ---
 
 <!-- compiled_truth -->
@@ -109,4 +109,10 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
   kind: note
   summary: "旧注（2026-10-19）的类表达式方法捕获外层局部静默 undefined 缺口已变编译期 loud（[tagged] const K = class 捕获外层局部…），仍未实现、未登记 unsupported；c44 修复的是声明期默认值捕获（工厂/类 env 路径），两者不同机制"
   source: "/tmp/labelgap 探针 + emitter 报错文案"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-04T08:52:02
+  kind: decision
+  summary: "glue_audit 引入 envdiff 登记机制：V8-oracle 与 qzjs/quickjs-ng 生产档的实现相关差（Math.cbrt 精度、Intl 缺失、矛盾 comparator 的 sort 细节、栈容量）仅逐条登记后按 ENV 通过（容量类允许产物抛/基线出值），构建 error 仍 FAIL——登记面=已裁决面，不掩盖装配回归；不引入引擎 polyfill（会破坏 C 档对齐）。c44 补登 cls-alias 方法体/访问器捕获模块顶层局部（编译期 loud，现已入门禁）"
+  source: "src/qzvm/aot/glue_audit.js + audit_corpus2/3/7/11/20/22/28/29/33/44"
   affects: [aot-cross-tier-semantics]

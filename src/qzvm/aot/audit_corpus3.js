@@ -190,7 +190,7 @@ module.exports = [
   out.push(Math.expm1 ? Math.expm1(0) : -1);
   out.push(Math.clz32 ? Math.clz32(1) : -1);
   return out.join("|");
-}` },
+}`, envdiff: "Math.cbrt 精度是实现相关（ECMA 允许近似）：qzjs/quickjs-ng 给 3.0000000000000004，V8 oracle 给 3" },
   { name: "json-edges", fn: "f", ts: `export function f(): any {
   const out: any = [];
   out.push(JSON.stringify({ a: undefined, b: 1, c: null }));

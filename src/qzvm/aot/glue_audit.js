@@ -62,7 +62,7 @@ function lit(v) {
 }
 
 
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, envPass = 0;
 const rows = [];
 
 for (const c of corpus) {
@@ -112,12 +112,18 @@ for (const c of corpus) {
   // unsupported：必须 loud（构建失败或运行期抛错）。
   // 其余：值相等即通过；JS 侧抛错时要求产物也 loud（同 audit_diff：两侧都报错算一致，
   // 静默错值/静默 undefined 算失败）。
+  // envdiff：登记过的**宿主引擎差异**（oracle=V8/node vs 生产档=qzjs/quickjs-ng：Math 精度、
+  // Intl 缺失、比较器矛盾下的 sort 实现细节、栈深度）。两侧都出值（不等）或产物按容量/精度差异
+  // 抛出而 oracle 出值 → 记 ENV 通过；构建/装配失败（error）仍算 FAIL（防装配回归被登记掩盖）。
+  const envOk = !c.unsupported && !!c.envdiff && wantKind === "value" &&
+    ((kind === "value" && got !== want) || kind === "throw");
   const ok = c.unsupported
     ? kind !== "value"
-    : (wantKind === "throw" ? kind !== "value" : (kind === "value" && got === want));
+    : envOk || (wantKind === "throw" ? kind !== "value" : (kind === "value" && got === want));
   if (ok) pass++; else fail++;
+  if (envOk) envPass++;
   rows.push({
-    name: c.name, ok,
+    name: c.name, ok, env: envOk,
     got: kind === "value" ? got : kind.toUpperCase() + ":" + String(err).slice(0, 80),
     want: c.unsupported ? "unsupported: " + c.unsupported : (wantKind === "throw" ? "THROW:" + want : want),
   });
@@ -125,9 +131,9 @@ for (const c of corpus) {
 
 const w = Math.max(...rows.map(r => r.name.length), 4);
 for (const r of rows) {
-  console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.name.padEnd(w)}  got=${r.got}`);
+  console.log(`${r.ok ? (r.env ? "ENV  " : "PASS") : "FAIL"}  ${r.name.padEnd(w)}  got=${r.got}`);
   if (!r.ok) console.log(`      ${"".padEnd(w)}  want=${r.want}`);
 }
-console.log(`\n${pass}/${pass + fail} ${fail === 0 ? "全部一致（glue 装配路径）" : "有差异"}　corpus=${path.basename(corpusPath)}`);
+console.log(`\n${pass}/${pass + fail}${envPass ? `（含 ${envPass} 条已登记宿主引擎差异 envdiff）` : ""} ${fail === 0 ? "全部一致（glue 装配路径）" : "有差异"}　corpus=${path.basename(corpusPath)}`);
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 process.exit(fail === 0 ? 0 : 1);

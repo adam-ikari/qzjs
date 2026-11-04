@@ -142,4 +142,6 @@ export function run() { return new C().m(3); }`, args: [], unsupported: "类方�
 function mk(n: number) { const K = class { static get g() { return n; } }; return K; }
 const C = mk(9);
 export function run() { return C.g; }`, args: [], unsupported: "const K = class 别名形式（类值不物化），捕获工厂局部 → 编译期 loud" },
+  { name: "cls-expr-method-capture-modlocal", fn: "f", ts: `export function f(): any { let lab = "L"; const K: any = class { m(): any { return lab; } }; return new K().m(); }`, args: [], unsupported: "const K = class 别名形式（类值不物化），方法体捕获模块顶层局部 → 编译期 loud" },
+  { name: "cls-expr-getter-capture-modlocal", fn: "g", ts: `export function g(): any { let lab = "G"; const K: any = class { get label(): any { return lab; } }; return new K().label; }`, args: [], unsupported: "const K = class 别名形式（类值不物化），访问器捕获模块顶层局部 → 编译期 loud" },
 ];

@@ -168,7 +168,7 @@ export function f(): any {
   { name: "deep-recursion", fn: "f", ts: `export function f(): any {
   function go(n: any): any { return n === 0 ? 0 : 1 + go(n - 1); }
   return go(250);   // 宿主↔wasm 闭包递归每层耗 JS 栈 ~300 层上限（500 需 node --stack-size）
-}` },
+}`, envdiff: "250 层 wasm↔宿主闭包递归在 quickjs-ng 栈上限内不可达（node/V8 可）；容量差异，非语义差异" },
   { name: "many-locals", fn: "f", ts: `export function f(): any {
   let a1 = 1, a2 = 2, a3 = 3, a4 = 4, a5 = 5, a6 = 6, a7 = 7, a8 = 8, a9 = 9, a10 = 10;
   let b1 = 11, b2 = 12, b3 = 13, b4 = 14, b5 = 15, b6 = 16, b7 = 17, b8 = 18, b9 = 19, b10 = 20;

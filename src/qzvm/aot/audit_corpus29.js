@@ -48,7 +48,7 @@ export function f(): any {
   out.push([5, 3, 8, 1].sort((a: any, b: any) => b - a).join(","));
   out.push(["aa", "b", "ccc"].sort((x: any, y: any) => x.length - y.length).join("|"));
   return out.join("__");
-}` },
+}`, envdiff: "矛盾 comparator（恒 1/恒 -1）下排序结果实现相关（quickjs-ng vs V8 TimSort）" },
   { name: "float-accumulation", fn: "f", ts: `export function f(): any {
   const out: any = [];
   let sum = 0; for (let i = 0; i < 10; i++) sum += 0.1;

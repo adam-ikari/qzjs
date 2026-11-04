@@ -92,7 +92,7 @@ module.exports = [
   out.push(Math.sign(-5), Math.sign(0), Math.sign(5), Math.sign(-0) === -0 ? 1 : 0);
   out.push(Math.hypot(3, 4), Math.hypot(5, 12), Math.round(Math.atan2(1, 1) * 100) / 100);
   return out.join("|");
-}` },
+}`, envdiff: "Math.cbrt 精度是实现相关（ECMA 允许近似）：qzjs/quickjs-ng 给 3.0000000000000004，V8 oracle 给 3" },
   { name: "json-replacer-reviver", fn: "f", ts: `export function f(): any {
   const out: any = [];
   const o: any = { a: 1, b: 2, c: 3 };

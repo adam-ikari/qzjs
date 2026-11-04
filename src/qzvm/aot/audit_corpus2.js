@@ -120,7 +120,7 @@ export function f(): any { const c = new C(); C.n = 5; return C.s() + "|" + c.in
   out.push(String(NaN));
   out.push((1000000).toLocaleString("en-US"));
   return out.join("|");
-}` },
+}`, envdiff: "qzjs（quickjs-ng）无完整 ICU：toLocaleString 不做千分位分组；V8 oracle 分组" },
   { name: "math-edges", fn: "f", ts: `export function f(): any {
   const out: any = [];
   out.push(Math.floor(-1.5));

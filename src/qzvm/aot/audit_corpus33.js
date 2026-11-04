@@ -130,7 +130,7 @@ export function f(): any {
   out.push(3.7 | 0, -3.7 | 0, (1.005).toFixed(2), (1234.5678).toFixed(2));
   out.push(Number.MAX_SAFE_INTEGER > 0, Math.trunc(4.9), Math.sign(-3), Math.cbrt(27));
   return out.join("|");
-}` },
+}`, envdiff: "Math.cbrt 精度是实现相关（ECMA 允许近似）：qzjs/quickjs-ng 给 3.0000000000000004，V8 oracle 给 3" },
   { name: "math-rounding", fn: "f", ts: `export function f(): any {
   const out: any = [];
   out.push(Math.round(2.5), Math.round(-2.5), Math.floor(-2.5), Math.ceil(-2.5), Math.trunc(-2.5));

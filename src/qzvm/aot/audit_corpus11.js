@@ -256,7 +256,7 @@ export function f(): any {
   out.push(names.filter((n: any) => n.toLowerCase().startsWith("a")).join(","));
   out.push(names.findIndex((n: any) => n === "cherry"));
   return out.join("|");
-}` },
+}`, envdiff: "localeCompare 无 ICU（qzjs）按码元序；V8 按 ICU collation（大小写次序不同）" },
   { name: "closure-counter-methods", fn: "f", ts: `export function f(): any {
   function makeCounter(): any {
     let n = 0;

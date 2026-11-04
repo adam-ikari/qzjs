@@ -128,7 +128,7 @@ export function f(): any {
   const objs: any = [{ n: 3 }, { n: 1 }, { n: 2 }];
   out.push(objs.slice().sort((a: any, b: any) => a.n - b.n).map((o: any) => o.n).join(","));
   return out.join("|");
-}` },
+}`, envdiff: "comparator 对相等元素恒返 ±1（非严格弱序）→ 排序结果实现相关（V8 TimSort vs quickjs-ng）" },
   { name: "closures-module-pattern", fn: "f", ts: `const Mod: any = (function () {
   let secret = 0;
   const listeners: any = [];

@@ -46,7 +46,7 @@ export function f(): any {
   out.push(Math.pow(2, 10), 2 ** 10, Math.sqrt(16), Math.exp(0));
   out.push(Math.PI > 3.14 ? 1 : 0, Math.E > 2.7 ? 1 : 0, Math.sqrt(-1) !== Math.sqrt(-1) ? 1 : 0);
   return out.join("|");
-}` },
+}`, envdiff: "Math.cbrt 精度是实现相关（ECMA 允许近似）：qzjs/quickjs-ng 给 3.0000000000000004，V8 oracle 给 3" },
   { name: "string-slice-negatives", fn: "f", ts: `export function f(): any {
   const out: any = [];
   const s = "abcdef";
