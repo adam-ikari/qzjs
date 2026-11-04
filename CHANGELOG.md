@@ -5,6 +5,17 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 内建类宿主承载（construct/call 分道）+ require-new 协议（2026-11-04）
+- **新增 `qz.new_builtin(nameId, n, a0..a3, ovf)`（两档）**：`new 内建类` 从此不走 `qz.builtin` 的调用形状。此前 `Map()` 与 `new Map()` 在 ABI 上完全同形，规范里 Map/Set/WeakMap/WeakSet/Proxy **无 [[Call]]**（普通调用必须 TypeError）却无从区分；`emit/tagged.js` 的 `new` 分支现发射 `qz.new_builtin`，宿主档 `Reflect.construct`、C 档 `JS_CallConstructor`。
+- **`n`（语法实参个数）是必需的**：4 槽 ABI 的未用槽位与「显式传入 undefined」同为 undefined 句柄，只有 n 能分开——`new Array(undefined)` 长度 1 vs `new Array()` 长度 0、`new Date(undefined)` Invalid Date vs `new Date()` now。C 档 `qz_collect_args` 会压缩丢弃 undefined 槽，故 `new_builtin` 自行按 n 逐槽取舍，不经它。`n = -1` 表示展开实参（`new Date(...xs)`）。别名 new 的动态路径（`builtin_fn` + `new_dynamic`）无 n，只能近似（已登记偏差）。
+- **`qz.builtin` 普通调用严格照各内建自己的 [[Call]]**：`Date(x)` 产字符串（不是 Date 对象），`Error`/`TypeError`/`RegExp`/`Array` 的 [[Call]] 等价 construct；require-new 名单一律抛**真 TypeError 对象**（有 name/message/原型链，`catch(e)` 后 `e.message`、`e instanceof TypeError` 可用），文案对齐 oracle(V8) `Constructor X requires 'new'`。曾一度把构造器名单内的名字连普通调用也 construct（以「两档一致」为由），本批推翻：归一化让 `typeof Date(0)` 静默错。
+- **内建构造结果统一登记 0x7FFD 宿主对象句柄**（C 档 `qz_host_obj_handle` 取所有权，宿主档 `tagHandle`）：`builtin_value`/`builtin_member`/`builtin_fn` 同标，方法调用/属性读写/instanceof 全走真 JS 对象路径；否则 `const C = Map; new C()` 与内建作值在两档分叉（此前落 0x7FF9 POJO 副本，丢构造语义）。
+- **`instanceof 内建类` 改走 ES OrdinaryHasInstance**：`Symbol.hasInstance` 是 symbol 值、不可调（旧 C 实现当函数 `JS_Call` → 恒 0 静默错判）；quickjs-ng 公开头缺 `JS_ATOM_Symbol_hasInstance`/`JS_GetPrototypeOfVal`/`JS_StrictEqual`，改用 `JS_ValueToAtom` + `JS_Call(Object.getPrototypeOf)` + `JS_IsSameValue`；nan-boxing 下取 tag 用 `JS_VALUE_GET_NORM_TAG`。
+- **失败一律 loud 且可捕获**：`builtin_fn` 对非函数（如 `Math.PI`）、C 档动态 `extends` 宿主基类、别名 new 构造失败均抛可捕获错误（C 档 `qz_set_throw` → 产物 `take_err` → `_emitErrCheck`；宿主档 `throwValue`），不再静默 undefined 句柄。
+- 删除死代码：C 档 `qz_is_builtin_ctor_name`（承载被推翻的归一化决定）、宿主档内建子类镜像脚手架（`classHostInst`/`hostBuiltinOf`/镜像回退）——静态 `new UserClass()` 由产物内联 bump 分配、不经任何宿主原语，镜像无处挂钩，故 `class M extends Map` 的静态形式仍登记为已知缺口（见 [[aot-host-builtin-carrier]] 推迟段）。
+- 测试：QZ 契约面 125 项签名核对；`audit_corpus44.js` 补 10 例内建承载/require-new/arity 用例（59/59）；`e2e_builtin.mjs` 断言按规范改写（`Date(0)` → 字符串 0x7ffa，宿主承载断言改经 `new_builtin`）。
+- 结果：`test_aot` ALL PASS；`audit_diff` 45 批全量 0 diff；`glue_audit` 45 批全绿；in-module e2e 13 套 PASS；两档跨档 25 项 PASS。顺带发现：`audit_corpus.js` 的 `very-deep-call`（200 层 wasm↔宿主闭包递归）在 glue 路径溢出——实测上界 ~140–150 层，**在 HEAD 基线同样失败**（非本批引入），按既有先例（c7 `deep-recursion`）登记为宿主栈容量 envdiff。
+
 ### AOT: 静态字段类键 + 静态 this 接收者语义（2026-10-31）
 - **静态字段类键两档统一**（`emit/tagged-core.js` 新增 `_staticClassKey`）：C 档静态表以 **clsId** 为键（与 `static_get_dyn`/classMeta 同空间），独立档以**类名 strId** 为键；此前所有写入点一律用 strId → in-module 档在 strId(类名)≠clsId 时 `this.x`/`C.x` 静默读 0。现 static_get/static_set/statics_ready/statics_mark/statics_has 全部按档取键。
 - **静态方法内 `this` = 运行期接收者类**（`emit/tagged.js` + `qzvm.js` + `guest_entry.c`）：`B.getX()` 调继承自 A 的静态方法时 `this === B`。新增 `static_set_dyn` 把 `this.x = v` 写到**接收者自有**静态（此前落到定义类 A，A/B 双错）；C 档 `static_get_dyn` 沿 classMeta 父链查找（此前派生类读父类静态字段静默 0）；`this.x++/--`、复合赋值与 `this.#n`（私有静态按 `#定义类#名`）均走 dyn 路径。静态 getter/setter 直调 self 由 undefined 改为接收者类值；静态调用/访问器的惰性守卫覆盖整条父链（`_emitStaticsChainGuard`，此前只初始化接收者自身，父链字段读到 undefined）。

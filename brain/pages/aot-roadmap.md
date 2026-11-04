@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-10-20T12:59:50"
+updated: "2026-11-04T10:27:49"
 ---
 
 <!-- compiled_truth -->
@@ -265,4 +265,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "P3 验收达成（降级路径）：ad0f2d69 已把 qzs_ckmem 的 unreachable trap 改为先调 qz.oom 抛 RangeError（unreachable 仅作宿主未抛时的兜底）。实测：2M 次字符串拼接撑爆 16MiB arena → 宿主捕获 RangeError('qz arena exhausted: bump heap overflowed literal segment')，同实例随后调用 small() 返回 7，实例存活。已知限制：wasm 内 try/catch 捕不到宿主 throw（跨边界异常穿帧变 trap），故降级到宿主层；真正 GC（分代/引用计数）仍是 P2 级工程，不在本阶段。"
   source: "/tmp 探针: big() 抛 RangeError + small() 返回 7; emitter.js:2366-2373"
+  affects: [aot-roadmap]
+
+- time: 2026-11-04T10:27:49
+  kind: note
+  summary: "内建类宿主承载（Map/Set/Date/RegExp/Error 族）C 档 + JS 档对齐完成（c44 56/56 两档一致，test_aot ALL PASS，m6b 13 PASS，两档交叉 25 项 PASS）。剩余语义欠账：sort 稳定性自实现（两档）、类方法内 arguments provider、const K = class 别名捕获外层局部、内建子类承载（class M extends Map，静态路径不经宿主原语 → 需 classMeta builtinParent strId + 实例宿主承载）。"
+  source: "c44 内建宿主承载批次"
   affects: [aot-roadmap]
