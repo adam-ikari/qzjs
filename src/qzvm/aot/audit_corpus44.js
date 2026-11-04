@@ -144,4 +144,44 @@ const C = mk(9);
 export function run() { return C.g; }`, args: [], unsupported: "const K = class 别名形式（类值不物化），捕获工厂局部 → 编译期 loud" },
   { name: "cls-expr-method-capture-modlocal", fn: "f", ts: `export function f(): any { let lab = "L"; const K: any = class { m(): any { return lab; } }; return new K().m(); }`, args: [], unsupported: "const K = class 别名形式（类值不物化），方法体捕获模块顶层局部 → 编译期 loud" },
   { name: "cls-expr-getter-capture-modlocal", fn: "g", ts: `export function g(): any { let lab = "G"; const K: any = class { get label(): any { return lab; } }; return new K().label; }`, args: [], unsupported: "const K = class 别名形式（类值不物化），访问器捕获模块顶层局部 → 编译期 loud" },
+  // 内建宿主承载（两档一致）：构造器名连普通调用也构造；实例为宿主对象；
+  // instanceof 走 Symbol.hasInstance + 原型链（旧 C 实现把 symbol 当函数调 → 恒 false）。
+  { name: "host-map-ops", fn: "run", ts: `
+export function run(): any { const m = new Map(); m.set("a", 1); m.set("b", 2); return m.get("a") + ":" + m.size + ":" + (m instanceof Map); }`, args: [] },
+  { name: "host-set-iter", fn: "run", ts: `
+export function run(): any { const s = new Set([1, 2, 2]); let n = 0; for (const x of s) n += x; return n + ":" + s.has(3); }`, args: [] },
+  { name: "host-date", fn: "run", ts: `
+export function run(): any { const d = new Date(0); d.setUTCFullYear(2000); return d.getUTCFullYear() + ":" + (d instanceof Date); }`, args: [] },
+  { name: "host-regexp", fn: "run", ts: `
+export function run(): any { const r = new RegExp("a+"); return r.test("baaa") + ":" + r.source; }`, args: [] },
+  { name: "host-ctor-plain-call", fn: "run", ts: `
+export function run(): any { const m: any = Map(); return m.size + ":" + (m instanceof Map); }`, args: [] },
+  { name: "host-error-catch-instanceof", fn: "run", ts: `
+export function run(): any { try { JSON.parse("{"); return "no-throw"; } catch (e) { return "caught:" + (e instanceof SyntaxError) + ":" + (e instanceof Error) + ":" + e.name; } }`, args: [] },
+  // require-object-constructor：Map/Set/WeakMap/WeakSet/Proxy 无 [[Call]] → 普通调用一律
+  // 可捕获 TypeError；new 形态经 builtin_fn + new_dynamic（construct 与 call 在 ABI 上可分）。
+  { name: "host-ctor-plain-call-args", fn: "run", ts: `
+export function run(): any { const m: any = Map([["a", 1]]); return m.size; }`, args: [] },
+  { name: "host-ctor-plain-caught", fn: "run", ts: `
+export function run(): any { try { const s: any = Set(); return "no-throw:" + s; } catch (e: any) { return "caught:" + (e instanceof TypeError) + ":" + e.message; } }`, args: [] },
+  { name: "host-ctor-alias-plain", fn: "run", ts: `
+export function run(): any { const C: any = Map; return C(); }`, args: [] },
+  // 未用实参槽是 undefined 句柄，必须视为「未提供」：new Date() ≠ new Date(undefined)。
+  { name: "host-date-noarg", fn: "run", ts: `
+export function run(): any { const d: any = new Date(); return Number.isNaN(d.getTime()) + ":" + (d instanceof Date); }`, args: [] },
+  { name: "host-array-noarg", fn: "run", ts: `
+export function run(): any { const a: any = new Array(); return a.length + ":" + Array.isArray(a); }`, args: [] },
+  // 已知偏差（两档一致）：显式 undefined 实参与缺省实参在 4 槽 ABI 上不可分，
+  // 故 new Array(undefined) 得 length 0（真 JS 为 1）。登记以免两档再度分叉。
+  { name: "host-array-undef-slot", fn: "run", ts: `
+export function run(): any { const a: any = new Array(undefined); return a.length; }`, args: [] },
+  { name: "host-new-spread-empty", fn: "run", ts: `
+export function run(): any { const xs: any = []; const d: any = new Date(...xs); return Number.isNaN(d.getTime()) + ":" + (d instanceof Date); }`, args: [] },
+  // 普通调用按各内建自己的 [[Call]]：Date(x) 产字符串（规范），Error/RegExp 的 [[Call]] 等价 construct。
+  { name: "host-date-plain-call", fn: "run", ts: `
+export function run(): any { const s: any = Date(0); return typeof s + ":" + (s instanceof Date); }`, args: [] },
+  { name: "host-error-plain-call", fn: "run", ts: `
+export function run(): any { const e: any = Error("m"); return typeof e.message + ":" + (e instanceof Error) + ":" + String(e).slice(0, 8); }`, args: [] },
+  { name: "host-regexp-plain-call", fn: "run", ts: `
+export function run(): any { const r: any = RegExp("a+"); return r.test("baaa") + ":" + (r instanceof RegExp) + ":" + r.source; }`, args: [] },
 ];

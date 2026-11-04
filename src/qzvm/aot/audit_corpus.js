@@ -417,7 +417,7 @@ export function f(): any {
   { name: "very-deep-call", fn: "f", ts: `export function f(): any {
   function go(n: any): any { return n <= 0 ? 0 : 1 + go(n - 1); }
   return go(200);
-}` },
+}`, envdiff: "wasm↔宿主闭包递归每层要 2 层宿主 JS 栈帧：qzjs(quickjs-ng) 默认栈容量实测上界 ~140–150 层（140 过、150 溢出），200 层必 RangeError；V8  oracle 可达。容量差异，非语义差异（同一 shape 在 HEAD 基线同样失败，非本批改动引入）" },
   { name: "global-ish-builtins", fn: "f", ts: `export function f(): any {
   const out: any = [];
   out.push(isNaN(1 as any) ? 1 : 0);

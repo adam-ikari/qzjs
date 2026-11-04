@@ -2085,9 +2085,34 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
         return;
     }
     const cname = this._className(tgt.text);   // 导入类本地名 → 目标类名
-    // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.builtin（构造语义）；未登记者报错
+    // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.new_builtin（construct 语义）；未登记者报错
     if (!this.classes.has(cname)) {
-        if (EMITTER_BUILTIN_CTORS.has(tgt.text)) { this._emitBuiltinCall(tgt.text, e.arguments); return; }
+        if (EMITTER_BUILTIN_CTORS.has(tgt.text)) {
+            /* new 内建类：qz.new_builtin —— construct 语义在 ABI 上必须与普通调用可分
+             * （Map/Set/WeakMap/WeakSet/Proxy 无 [[Call]]，规范要 TypeError），且要带 n
+             * （new Array(undefined) 得 length 1，与 new Array() 不同；未用的槽位是
+             * undefined 句柄，宿主按 n 判定「已提供」）。
+             * n = -1：展开实参（new Date(...xs)）——实参数在运行期，未提供槽即 undefined 句柄。*/
+            const nargs = argSrc ? -1 : e.arguments.length;
+            const M2 = this.m;
+            M2.i32Const(this._strId(tgt.text)); M2.i32Const(nargs);
+            for (let i = 0; i < 4; i++) {
+                if (argSrc) argSrc(i);
+                else if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]);
+                else this._emitUndefined();
+            }
+            {   // ovf：实参 3..（>4 实参的 new）；未超出时为空数组（与 _emitBuiltinCall 同约定）
+                const ovfA = (!argSrc && e.arguments.length > 3) ? e.arguments.slice(3) : [];
+                if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] new 的溢出实参与展开混用暂不支持");
+                const lit = ts.factory.createArrayLiteralExpression(ovfA);
+                lit.pos = e.arguments.length ? e.arguments[0].pos : 0;
+                lit.end = e.arguments.length ? e.arguments[e.arguments.length - 1].end : 0;
+                this.emitTaggedExpr(lit);
+            }
+            M2.call("qz.new_builtin");
+            this._emitErrCheck();     // 宿主构造失败（new Map(1)：非可迭代）/ 无 [[Call]] → 可捕获 TypeError
+            return;
+        }
         {   // 动态类值（类表达式工厂 / 变量持有类）：运行时取类对象 → 宿主按 __qzClsId 建实例
             const resolvable = this._local(tgt.text) !== undefined || this.capMap.has(tgt.text)
                 || (this.moduleGlobals && this.moduleGlobals.has(tgt.text))

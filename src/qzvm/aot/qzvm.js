@@ -84,6 +84,9 @@ const BUILTIN_FNS = {
 const BUILTIN_CTORS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
   "EvalError", "URIError", "Map", "Set", "WeakMap", "WeakSet", "Date", "Array", "Object", "RegExp", "Promise", "Proxy",
   "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "ArrayBuffer", "DataView", "URL", "URLSearchParams", "File", "Blob"]);
+// ES 规范「无 [[Call]]」的内建构造器：普通调用必须 TypeError（Map()/Set()/WeakMap()/Proxy），
+// 与 V8/规范一致。其余（Date/RegExp/Array/TypedArray/Error 族…）无 new 也可调用。
+const BUILTIN_REQUIRE_NEW = new Set(["Map", "Set", "WeakMap", "WeakSet", "Proxy"]);
 
 const BUILTIN_CONSTS = {
   "Symbol.iterator": Symbol.iterator, "Symbol.asyncIterator": Symbol.asyncIterator, "Symbol.hasInstance": Symbol.hasInstance,
@@ -1102,10 +1105,35 @@ function makeQzvm(strings, opts) {
       else if (hN === INST_HI) f = classObjImpl(Number(uN & MASK32));
       else f = handles[idxOf(obj)];
       if (typeof f !== "function") throw new Error("new: 目标不是类（期望类对象）");
-      const as4 = [a0, a1, a2, a3].map(x => toJS(x));
-      if (typeof f.__qzClsId === "number") return f(...as4);
+      if (typeof f.__qzClsId === "number") return f(...[a0, a1, a2, a3].map(x => toJS(x)));
+      /* 宿主构造器（0x7FFD：内建类经 builtin_fn 取得）：未提供的实参槽是 undefined 句柄，
+       * 必须丢弃而非传 4 个 undefined —— new Date() / new Array() 与
+       * new Date(undefined) / new Array(undefined) 语义不同（C 档 qz_collect_args 同规则）。
+       * 构造失败按 C 档路由为可捕获异常（__err），不是宿主侧抛出。*/
+      const as4 = [a0, a1, a2, a3].filter(x => BigInt.asUintN(64, x) !== TAG).map(x => toJS(x));
+      if (hN === HOST_HI) {
+        try { const r0 = Reflect.construct(f, as4); return typeof r0 === "bigint" ? r0 : ret(r0); }
+        catch (e) { throwValue(e); return TAG; }
+      }
       const r0 = Reflect.construct(f, as4);
       return typeof r0 === "bigint" ? r0 : ret(r0);
+    },
+    new_builtin: (id, n, a0, a1, a2, a3, ovf) => {   // new 内建类：construct 语义 + 实参数 n
+      const name = strings[id];
+      let fn = BUILTIN_FNS[name] || (BUILTIN_CTORS.has(name) ? globalThis[name] : undefined);
+      if (fn === undefined && name.indexOf(".") > 0) {                 // 点号成员（如 Array.from 作类值）
+        let cur = globalThis;
+        for (const seg of name.split(".")) { cur = cur == null ? undefined : cur[seg]; if (cur === undefined) break; }
+        fn = cur;
+      }
+      if (typeof fn !== "function") { throwValue(new TypeError("Constructor " + name + " requires 'new'")); return TAG; }
+      let flat = [a0, a1, a2, a3];
+      if (ovf !== undefined && ovf !== TAG) flat = flat.concat((toJS(ovf) || []).slice(1).map(bitsOf));   // ovf[0]=实参 3（已在 a3）
+      /* n≥0：实参数已知，未用的槽位（undefined 句柄）仍算「已提供」当且仅当 < n
+       * → new Array(undefined) 得 length 1。n<0：展开实参，槽位越界即未提供 → 丢弃。 */
+      const list = (n >= 0 ? flat.slice(0, n) : flat.filter(x => BigInt.asUintN(64, x) !== TAG)).map(x => toJS(x));
+      try { const r = Reflect.construct(fn, list); return typeof r === "bigint" ? r : ret(r); }
+      catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }   // 与 C 档同：可捕获，不静默
     },
     class_value_dyn: (clsId, baseObj) => {          // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
       const baseCtor = handles[idxOf(baseObj)];
@@ -1329,7 +1357,7 @@ function makeQzvm(strings, opts) {
         while (c) {
           const g = own(c.getters, name);
           if (g) return exportsRef[g.name](recv, TAG, TAG, TAG, TAG);
-          c = c.parent != null ? classMeta[c.parent] : null;
+          c = chainNext(c);
         }
         const e = fieldEntries.find(([n]) => n === name);
         if (e && new DataView(mem.buffer).getInt32(off + 4, true) >= e[1] + 8) {
@@ -1990,7 +2018,14 @@ function makeQzvm(strings, opts) {
       let flat = [a0, a1, a2, a3];
       if (ovf !== undefined && ovf !== TAG) flat = flat.concat((toJS(ovf) || []).slice(1).map(bitsOf));   // ovf[0] = 实参 3（已在 a3）
       const args = flat.slice(0, arity || n).map(toJS);
-      return ret(BUILTIN_CTORS.has(name) ? Reflect.construct(fn, args) : fn.apply(null, args));
+      if (BUILTIN_REQUIRE_NEW.has(name)) {
+        // 规范：这些构造器无 [[Call]]。产物里 `qz.builtin(name, …)` 只对应普通调用
+        // （new 形态走 qz.new_builtin）→ 一律 TypeError，不得静默构造。
+        throw new TypeError("Constructor " + name + " requires 'new'");
+      }
+      // 普通调用按各自 [[Call]]：Date(x) 产字符串；Error/RegExp/Array 的 [[Call]] 等价 construct。
+      // 结果经 ret → 对象落宿主句柄表（两档同形，方法/属性走真 JS 对象路径）。
+      return ret(fn.apply(null, args));
       } catch (e) {
         const msg = e && e.message ? String(e.message) : "";
         if (!(e instanceof Error) || /^(qz\.|builtin_spread|未定义)/.test(msg)) throw e;

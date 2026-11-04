@@ -3243,7 +3243,20 @@ __attribute__((export_name("class_value_dyn")))
 int64_t qz_guest_class_value_dyn(int32_t clsId, int64_t baseObj)
 {
     uint64_t bu = (uint64_t)baseObj;
-    if ((uint16_t)(bu >> 48) != 0x7FFE) return 0;   /* 父类值不是类对象 */
+    uint16_t btag = (uint16_t)(bu >> 48);
+    if (btag == 0x7FFD || btag == 0x7FF9) {
+        /* extends 宿主内建（`class M extends 运行时值` 且值是 Map/Date/…）：
+         * 本档（in-module C）无宿主镜像承载 → 此前静默 0（实例成空壳、
+         * m.set 无声失败）。loud：设可捕获 TypeError，与「未实现必须报错」
+         * 的登记语义一致（宿主档 JS 镜像属另一工程项）。*/
+        JSContext *cx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+        if (cx) {
+            JSValue e = JS_NewTypeError(cx, "in-module: extends 宿主内建类未实现（需宿主镜像承载）");
+            qz_set_throw(cx, e);
+        }
+        return ((int64_t)0x7FF9 << 48);
+    }
+    if (btag != 0x7FFE) return 0;   /* 父类值不是类对象 */
     int32_t baseClsId = (int32_t)(bu & 0xFFFFFFFFu);
     /* 就地改写 parent 字段（parent 在 off+4）。**必须**就地：紧随其后的
      * super() 调用按 clsId 查 classMeta 找父构造器，返回克隆 id 会让
@@ -3287,6 +3300,27 @@ int64_t qz_guest_new_dynamic(int64_t clsVal, int64_t a0, int64_t a1, int64_t a2,
         JS_FreeValue(cx, obj); JS_FreeValue(cx, fn);
         return selfH;
     }
+    if (ctag == 0x7FFD) {   /* 宿主函数（内建类/宿主档返回的函数句柄）：Reflect.construct 语义 */
+        JSContext *cx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+        if (!cx) return 0;
+        JSValue fn = qz_tojs(cx, clsVal);
+        if (!JS_IsFunction(cx, fn)) { JS_FreeValue(cx, fn); return 0; }
+        JSValue argv[4];
+        int argc = qz_collect_args(cx, argv, 4, qz_tojs(cx, a0), qz_tojs(cx, a1),
+                                   qz_tojs(cx, a2), qz_tojs(cx, a3), JS_UNDEFINED);
+        JSValue res = JS_CallConstructor(cx, fn, argc, argv);
+        for (int i = 0; i < argc; i++) JS_FreeValue(cx, argv[i]);
+        JS_FreeValue(cx, fn);
+        if (JS_IsException(res)) {
+            JS_FreeValue(cx, res);
+            JSValue ex = JS_GetException(cx);
+            if (!JS_IsException(ex)) qz_set_throw(cx, ex);
+            else JS_FreeValue(cx, ex);
+            return ((int64_t)0x7FF9 << 48);
+        }
+        int64_t out = qz_host_obj_handle(cx, res);
+        return out;
+    }
     if (ctag != 0x7FFE) return 0;
     int32_t clsId = (int32_t)(cu & 0xFFFFFFFFu);
     uint32_t off = qz_clsmeta_item_off(clsId);
@@ -3317,6 +3351,61 @@ int64_t qz_guest_new_dynamic(int64_t clsVal, int64_t a0, int64_t a1, int64_t a2,
         f(selfH, a0, a1, a2, a3);      /* 返回值即 self（构造器语义） */
     }
     return selfH;
+}
+
+/* new_builtin(nameId, n, a0..a3, ovf) → i64：内建类构造（Reflect.construct 语义）。
+ * 与 builtin 分开的理由：① construct 与 call 必须在 ABI 上可分（Map/Set/WeakMap/
+ * WeakSet/Proxy 无 [[Call]]，普通调用要 TypeError）；② 需要 n —— 未用的槽位也是
+ * undefined 句柄，而 new Array(undefined) 与 new Array() 语义不同，只能按 n 判定
+ * 「已提供」。n<0：展开实参（new Date(...xs)），未提供槽即 undefined 句柄 → 丢弃。*/
+__attribute__((export_name("new_builtin")))
+int64_t qz_guest_new_builtin(int32_t id, int32_t n, int64_t a0, int64_t a1,
+                             int64_t a2, int64_t a3, int64_t ovf)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t nlen = 0;
+    const char *nm = qz_str_by_id(id, &nlen);
+    if (!nm || nlen >= 128) return 0;
+    char name[128];
+    memcpy(name, nm, nlen); name[nlen] = '\0';
+    JSValue fn = qz_builtin_lookup(ctx, name);
+    if (JS_IsException(fn)) { JS_FreeValue(ctx, fn); return ((int64_t)0x7FF9 << 48); }
+    if (!JS_IsFunction(ctx, fn)) {
+        JS_FreeValue(ctx, fn);
+        qz_set_throw(ctx, JS_NewTypeError(ctx, "Constructor %s requires 'new'", name));
+        return ((int64_t)0x7FF9 << 48);
+    }
+    JSValue sv[4] = { qz_tojs(ctx, a0), qz_tojs(ctx, a1), qz_tojs(ctx, a2), qz_tojs(ctx, a3) };
+    JSValue argv[16]; int argc = 0;
+    for (int i = 0; i < 4; i++) {
+        int keep = (n < 0) ? !JS_IsUndefined(sv[i]) : (n > i);
+        if (keep && argc < 16) argv[argc++] = sv[i];
+        else JS_FreeValue(ctx, sv[i]);
+    }
+    if (n > 4) {   /* 溢出实参：ovf[0] = 实参 3（已在 a3），故从 1 起 */
+        JSValue o = qz_tojs(ctx, ovf);
+        if (JS_IsArray(o)) {
+            JSValue lv = JS_GetPropertyStr(ctx, o, "length");
+            double f = 0; JS_ToFloat64(ctx, &f, lv); JS_FreeValue(ctx, lv);
+            uint32_t len = (uint32_t)f;
+            for (uint32_t i = 1; i < len && argc < 16 && argc < n; i++)
+                argv[argc++] = JS_GetPropertyUint32(ctx, o, i);
+        }
+        JS_FreeValue(ctx, o);
+    }
+    JSValue res = JS_CallConstructor(ctx, fn, argc, argv);
+    for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
+    JS_FreeValue(ctx, fn);
+    if (JS_IsException(res)) {
+        JS_FreeValue(ctx, res);
+        JSValue ex = JS_GetException(ctx);
+        if (!JS_IsException(ex)) qz_set_throw(ctx, ex);
+        else JS_FreeValue(ctx, ex);
+        return ((int64_t)0x7FF9 << 48);
+    }
+    return qz_host_obj_handle(ctx, res);   /* 取所有权，勿再 free */
 }
 
 /* super_method(recv, mid, a0..a3, ovf) → i64：调父类方法。*/
@@ -3781,6 +3870,18 @@ static JSValue qz_builtin_lookup(JSContext *ctx, const char *name)
     return v;
 }
 
+/* 内建值作 i64：函数/对象 → 宿主句柄 0x7FFD（与宿主档 tagHandle 同 tag——
+ * 否则 `const C = Map; new C()` 的 C 落 0x7FF9（POJO 物化副本，丢构造语义）；
+ * 数字/字符串/布尔等原始值 → qz_ret 保持原 tag）。 */
+static int64_t qz_builtin_val_handle(JSContext *ctx, JSValue v)
+{
+    int tag = JS_VALUE_GET_NORM_TAG(v);
+    if (tag == JS_TAG_OBJECT) return qz_host_obj_handle(ctx, v);   /* 取所有权 */
+    int64_t out = qz_ret(ctx, v);
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
 __attribute__((export_name("builtin_value")))
 int64_t qz_guest_builtin_value(int32_t id)
 {
@@ -3793,10 +3894,8 @@ int64_t qz_guest_builtin_value(int32_t id)
     char nm[128];
     memcpy(nm, name, len); nm[len] = '\0';
     JSValue v = qz_builtin_lookup(ctx, nm);
-    if (JS_IsUndefined(v) || JS_IsException(v)) { JS_FreeValue(ctx, v); return 0; }
-    int64_t out = qz_ret(ctx, v);
-    JS_FreeValue(ctx, v);
-    return out;
+    if (JS_IsUndefined(v) || JS_IsException(v)) { JS_FreeValue(ctx, v); return ((int64_t)0x7FF9 << 48); }   /* 与宿主档一致：缺失 → undefined 句柄 */
+    return qz_builtin_val_handle(ctx, v);
 }
 
 __attribute__((export_name("builtin_fn")))
@@ -3811,16 +3910,35 @@ int64_t qz_guest_builtin_fn(int32_t id)
     char nm[128];
     memcpy(nm, name, len); nm[len] = '\0';
     JSValue v = qz_builtin_lookup(ctx, nm);
-    if (!JS_IsFunction(ctx, v)) { JS_FreeValue(ctx, v); return 0; }
-    int64_t out = qz_ret(ctx, v);
-    JS_FreeValue(ctx, v);
-    return out;
+    if (!JS_IsFunction(ctx, v)) {
+        /* 宿主档：throw new Error("builtin_fn: 非函数 …") → loud，不静默 undefined */
+        JS_FreeValue(ctx, v);
+        JS_ThrowReferenceError(ctx, "builtin_fn: 非函数 %s", nm);
+        JSValue ex = JS_GetException(ctx);
+        if (!JS_IsException(ex)) qz_set_throw(ctx, ex);
+        else JS_FreeValue(ctx, ex);
+        return ((int64_t)0x7FF9 << 48);
+    }
+    return qz_builtin_val_handle(ctx, v);
 }
 
 __attribute__((export_name("builtin_member")))
 int64_t qz_guest_builtin_member(int32_t id)
 {
     return qz_guest_builtin_value(id);   /* 成员当作值读：同一查找路径 */
+}
+
+/* 规范「无 [[Call]]」的内建构造器：普通调用必须 TypeError（对齐 V8/oracle 文案
+ * 「Constructor X requires 'new'」）。new 形态由发射端走 qz.new_builtin，不经此判。*/
+
+/* ES 规范「无 [[Call]]」的构造器（Map/Set/WeakMap/WeakSet/Proxy）：普通调用必须
+ * TypeError，与 V8/宿主档一致。`new C()` 走 ctag==-1（发射期分派）不受此限。 */
+static int qz_is_require_new_name(const char *nm)
+{
+    static const char *const k[] = { "Map", "Set", "WeakMap", "WeakSet", "Proxy" };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+        if (!strcmp(nm, k[i])) return 1;
+    return 0;
 }
 
 __attribute__((export_name("builtin")))
@@ -3848,9 +3966,19 @@ int64_t qz_guest_builtin(int32_t id, int32_t n, int64_t a0, int64_t a1,
     if (JS_IsException(fn)) { JS_FreeValue(ctx, fn); return 0; }
     /* 非函数（常量 / 原型对象）：直接作为调用结果 */
     if (!JS_IsFunction(ctx, fn)) {
-        int64_t out = qz_ret(ctx, fn);
-        JS_FreeValue(ctx, fn);
+        int64_t out = qz_builtin_val_handle(ctx, fn);   /* 对象 → 0x7FFD（宿主承载），原始值 → 原 tag */
         return out;
+    }
+
+    /* Map/Set/WeakMap/WeakSet/Proxy 规范无 [[Call]] → 普通调用必须 TypeError。
+     * new 形态已改由发射端走 qz.builtin_fn + qz.new_dynamic，不经此分支，
+     * 故此名字到此即普通调用，一律 loud（不按实参形状猜形态，两档同规则）。 */
+    if (qz_is_require_new_name(nm)) {
+        /* 抛真 TypeError 对象（有 name/message/原型链），不是裸字符串：catch (e) →
+         * e.message / e instanceof TypeError 两档必须同形；文案对齐 oracle（V8）。 */
+        qz_set_throw(ctx, JS_NewTypeError(ctx, "Constructor %s requires 'new'", nm));
+        JS_FreeValue(ctx, fn);
+        return ((int64_t)0x7FF9 << 48);
     }
 
     JSValue argv[16];
@@ -3862,16 +3990,76 @@ int64_t qz_guest_builtin(int32_t id, int32_t n, int64_t a0, int64_t a1,
     if (arity >= 0 && arity < argc) argc = arity;
     if (n >= 0 && n < argc) argc = n;
 
+    /* 普通调用按各自 [[Call]] 语义（与规范一致）：Date(x) 产字符串而非 Date 对象；
+     * Error/RegExp/Array/TypedArray 的 [[Call]] 本就等价于 construct。
+     * new 形态的发射走 qz.new_builtin（construct 语义 + 实参数 n），不经此分支；
+     * 无 [[Call]] 的名字（Map/Set/WeakMap/WeakSet/Proxy）已在上面抛 TypeError。 */
     JSValue res = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
     for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
     JS_FreeValue(ctx, fn);
-    if (JS_IsException(res)) { JS_FreeValue(ctx, res); return 0; }
+    if (JS_IsException(res)) {
+        JS_FreeValue(ctx, res);
+        /* 宿主档：throwValue(e) 设 __err + 返回 undefined（loud、可 catch）。 */
+        JSValue ex = JS_GetException(ctx);
+        if (!JS_IsException(ex)) qz_set_throw(ctx, ex);
+        else JS_FreeValue(ctx, ex);
+        return ((int64_t)0x7FF9 << 48);
+    }
     int64_t out = qz_ret(ctx, res);
     JS_FreeValue(ctx, res);
     return out;
 }
 
-/* x instanceof 内建类：按名字走 JS instanceof（宿主值）/ 按原型链前缀判定 */
+/* x instanceof 内建类：ES OrdinaryHasInstance。
+ * Symbol.hasInstance 是 **symbol 值**（不可调）——旧实现把它当函数 JS_Call →
+ * 永远 0（静默错判）；且 quickjs-ng 公开头无 JS_ATOM_Symbol_hasInstance /
+ * JS_GetPrototypeOfVal，故：symbol 值经 JS_ValueToAtom 转内部 atom 查
+ * ctor[Symbol.hasInstance]，原型链回退用 Object.getPrototypeOf（公开导出）。*/
+static int32_t qz_instanceof_helper(JSContext *ctx, JSValue ctor, JSValue val)
+{
+    JSValue glob = JS_GetGlobalObject(ctx);
+    JSValue symObj = JS_GetPropertyStr(ctx, glob, "Symbol");
+    JS_FreeValue(ctx, glob);
+    if (JS_IsException(symObj) || !JS_IsObject(symObj)) { JS_FreeValue(ctx, symObj); return -1; }
+    JSValue hiSym = JS_GetPropertyStr(ctx, symObj, "hasInstance");
+    JS_FreeValue(ctx, symObj);
+    if (JS_IsException(hiSym) || !JS_IsSymbol(hiSym)) { JS_FreeValue(ctx, hiSym); return -1; }
+    JSAtom hi = JS_ValueToAtom(ctx, hiSym);
+    JS_FreeValue(ctx, hiSym);
+    JSValue m = JS_GetProperty(ctx, ctor, hi);
+    JS_FreeAtom(ctx, hi);
+    if (JS_IsException(m)) { JS_FreeValue(ctx, JS_GetException(ctx)); return -1; }
+    if (JS_IsFunction(ctx, m)) {
+        JSValue r = JS_Call(ctx, m, ctor, 1, &val);
+        JS_FreeValue(ctx, m);
+        if (JS_IsException(r)) { JS_FreeValue(ctx, r); return -1; }
+        int b = JS_ToBool(ctx, r);
+        JS_FreeValue(ctx, r);
+        return b;
+    }
+    JS_FreeValue(ctx, m);
+    JSValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
+    if (JS_IsException(proto) || !JS_IsObject(proto)) { JS_FreeValue(ctx, proto); return 0; }
+    glob = JS_GetGlobalObject(ctx);
+    JSValue gpo = JS_GetPropertyStr(ctx, glob, "Object");
+    JS_FreeValue(ctx, glob);
+    gpo = JS_GetPropertyStr(ctx, gpo, "getPrototypeOf");
+    if (JS_IsException(gpo) || !JS_IsFunction(ctx, gpo)) { JS_FreeValue(ctx, gpo); JS_FreeValue(ctx, proto); return 0; }
+    int32_t found = 0;
+    JSValue p = JS_IsObject(val) ? JS_DupValue(ctx, val) : JS_UNDEFINED;
+    for (int i = 0; i < 128 && JS_IsObject(p); i++) {
+        if (JS_IsSameValue(ctx, p, proto)) { found = 1; break; }
+        JSValue next = JS_Call(ctx, gpo, JS_UNDEFINED, 1, &p);
+        JS_FreeValue(ctx, p);
+        if (JS_IsException(next)) break;
+        p = next;
+    }
+    JS_FreeValue(ctx, p);
+    JS_FreeValue(ctx, gpo);
+    JS_FreeValue(ctx, proto);
+    return found;
+}
+
 __attribute__((export_name("instanceof_builtin")))
 int32_t qz_guest_instanceof_builtin(int64_t x, int32_t id)
 {
@@ -3888,22 +4076,9 @@ int32_t qz_guest_instanceof_builtin(int64_t x, int32_t id)
     if (JS_IsException(v) || !JS_IsFunction(ctx, v)) { JS_FreeValue(ctx, v); return 0; }
 
     JSValue val = qz_tojs(ctx, x);
-    JSValue glob = JS_GetGlobalObject(ctx);
-    JSValue instf = JS_GetPropertyStr(ctx, glob, "Symbol");
-    JS_FreeValue(ctx, glob);
-    JSValue ctor = JS_UNDEFINED;
-    if (!JS_IsException(instf) && !JS_IsUndefined(instf))
-        ctor = JS_GetPropertyStr(ctx, instf, "hasInstance");
-    JS_FreeValue(ctx, instf);
-    int result = 0;
-    if (JS_IsFunction(ctx, ctor)) {
-        JSValue arg = v, r = JS_Call(ctx, ctor, arg, 1, &val);
-        if (!JS_IsException(r)) {
-            result = JS_ToBool(ctx, r) > 0;
-            JS_FreeValue(ctx, r);
-        }
-    }
-    JS_FreeValue(ctx, ctor);
+    int32_t result = qz_instanceof_helper(ctx, v, val);
+    if (result < 0) result = 0;   /* helper 不可用（无 Symbol 等）：保持旧回退语义 */
+    JS_FreeValue(ctx, val);
     JS_FreeValue(ctx, v);
     return result;
 }
