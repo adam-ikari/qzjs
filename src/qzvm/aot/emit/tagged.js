@@ -1456,6 +1456,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     const M2 = this.m, t2 = this._expEnter();
                     M2.localGet(this.scratchObj); M2.localSet(t2.v);
                     M2.localGet(t2.v); M2.i64Const(48n); M2.i64ShrU(); M2.i64Const(0x7ffdn); M2.i64Eq();
+                    if (this._emitNotMemBase(t2.v)) M2.i32Or();   // 动态类值与实例同 tag：写它的静态属性，不可当基址
                     M2.ifBlock("void");
                     M2.localGet(t2.v); M2.i32Const(this._strId(e.operand.name.text)); M2.localGet(this.scratch); M2.call("qz.prop_set");
                     this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
@@ -1553,6 +1554,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 const M2 = this.m, t2 = this._expEnter();
                 M2.localGet(this.scratchObj); M2.localSet(t2.v);
                 M2.localGet(t2.v); M2.i64Const(48n); M2.i64ShrU(); M2.i64Const(0x7ffdn); M2.i64Eq();
+                if (this._emitNotMemBase(t2.v)) M2.i32Or();   // 动态类值与实例同 tag：写它的静态属性，不可当基址
                 M2.ifBlock("void");
                 M2.localGet(t2.v); M2.i32Const(this._strId(e.operand.name.text)); M2.localGet(this.scratchB); M2.call("qz.prop_set");
                 this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
@@ -1898,6 +1900,7 @@ Emitter.prototype._emitStoreProp = function (left) {
     M.i32Or();
     M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffbn); M.i64Eq();
     M.i32Or();
+    if (this._emitNotMemBase(t.v)) M.i32Or();   // 动态类值与实例同 tag(0x7FFE)，低 32 位是 clsId 不是 offset → 交宿主写静态属性
     M.ifBlock("void");
     M.localGet(t.v); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.prop_set");
     M.else_();

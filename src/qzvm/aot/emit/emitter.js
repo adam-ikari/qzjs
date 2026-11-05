@@ -3,7 +3,7 @@
 "use strict";
 const ts = require("typescript");
 const { BUILTIN_GLOBALS, usesArguments, ctorName, symbolNameOf, methName, staticMethName } = require("./consts.js");
-const { INMOD_TABLE_CAP, emitBumpAlloc, numArrNames, funcMode, f64Bits } = require("./layout.js");
+const { INMOD_TABLE_CAP, INMOD_HOST_LIMIT, emitBumpAlloc, numArrNames, funcMode, f64Bits } = require("./layout.js");
 
 class Emitter {
     constructor(mod) { this.m = mod; this.varMap = new Map(); this.depth = 0; this.labels = []; this._labelStack = []; this._tryStack = []; this.strings = []; this._litOff = new Map(); this._strVars = new Set();
@@ -645,11 +645,27 @@ class Emitter {
         M.localGet(0);
     }
 
+    /* in-module 档 0x7FFE 一个 tag 承载两种值：类实例（低 32 位 = 内存 offset）与
+     * 动态类值（低 32 位 = clsId）。类值当内存基址用会静默读写 libqzvm 数据段。
+     * 实例 offset 恒 ≥ 本模块 arena 基址（独立档 arena 在低址，但那里类值是 0x7FFD
+     * 宿主句柄，不占 0x7FFE）；clsId 恒 < 类数。用量级区分，界取 arena 基址。
+     * 界外接收者一律交宿主 prop_get/prop_set——宿主按 dyn 类值分派静态属性，语义正确。 */
+    _memBaseFloor() { return this._inModuleLink ? INMOD_HOST_LIMIT : 8; }
+    // 发射「接收者不可作内存基址」（动态类值）判定：栈上留 i32 返 true；独立档不发射返 false。
+    _emitNotMemBase(local) {
+        if (!this._inModuleLink) return false;
+        const M = this.m;
+        M.localGet(local); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffEn); M.i64Eq();
+        M.localGet(local); M.i32WrapI64(); M.i32Const(this._memBaseFloor()); M.i32LtU(); M.i32And();
+        return true;
+    }
+
     _emitPropReadFromLocal(base, name) {
         const M = this.m;
         if (name === "stack") { M.localGet(base); M.call("qz.err_stack"); return; }   // Error 族 .stack → 宿主合成
         if (name === "constructor") {                    // 实例 .constructor → 类对象（JS 语义）；非实例退回宿主 prop_get
             M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
+            if (this._emitNotMemBase(base)) { M.i32Eqz(); M.i32And(); }   // 类值（同 tag）不可 load [0] 当 clsId
             M.ifBlock("i64");
             M.localGet(base); M.i32WrapI64(); M.i32Load(2, 0); M.call("qz.class_value");   // 实例内存[0] = __cls
             M.else_();
@@ -675,6 +691,7 @@ class Emitter {
         M.i32Or();
         M.localGet(base); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7fffn); M.i64Eq();   // 闭包值（函数）→ 自身属性 length/name/toString/call…
         M.i32Or();
+        if (this._emitNotMemBase(base)) M.i32Or();   // 动态类值 → 宿主（读其静态属性），不可按字段槽 load
         M.ifBlock("i64");
         M.localGet(base); M.i32Const(this._strId(name)); M.call("qz.prop_get");
         M.else_();
@@ -796,10 +813,17 @@ class Emitter {
         // 走宿主 qz.set_index 是每次 ~1µs 的跨界，`new C(); b.v = 1` 的热路径慢 300 倍的主因。
         // 越界或别的 tag（宿主对象/数组/字符串）仍回落宿主，语义不变。
         const foff = this._fieldIndex(pname);
+        const clsVal = this._emitNotMemBase(t.v);   // 动态类值：属性写 = 静态属性写 → 宿主 prop_set（set_index 不认类值，会 loud）
+        if (clsVal) {
+            M.ifBlock("void");
+            M.localGet(t.v); M.i32Const(this._strId(pname)); M.localGet(t.w); M.call("qz.prop_set");
+            this._emitErrCheck(false);
+            M.else_();
+        }
         M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ff9n); M.i64Eq();
         M.localGet(t.v); M.i64Const(48n); M.i64ShrU(); M.i64Const(0x7ffen); M.i64Eq();
         M.i32Or();
-        M.localGet(t.v); M.i32WrapI64(); M.i32Const(8); M.i32GeU();
+        M.localGet(t.v); M.i32WrapI64(); M.i32Const(this._memBaseFloor()); M.i32GeU();
         M.i32And();
         M.localGet(t.v); M.i32WrapI64(); M.i32Load(2, 4); M.i32Const(foff + 8); M.i32GeU();
         M.i32And();
@@ -814,6 +838,7 @@ class Emitter {
         this._emitErrCheck(false);   // 冻结/不可扩展对象写入 → 抛 TypeError（转入 catch）
         M.end();
         M.end();
+        if (clsVal) M.end();
         M.localGet(t.w);
         this._expLeave();
     }

@@ -3,10 +3,11 @@
 //   [count:i32][clsId0_itemOff:i32]×count  索引表
 //   项数据紧密排列：
 //     [clsId:i32][parent:i32(-1)][instSize:i32][ctorSlot:i32(-1)]
-//     [nMethods:i32][nStatics:i32][nAccessors:i32]
-//     methods  × nMethods  : [nameStrId:i32][slot:i32][n:i32][rest:i8][pad×3]
-//     statics  × nStatics  : [nameStrId:i32][slot:i32][n:i32]
-//     accessors× nAccessors: [nameStrId:i32][getSlot:i32][setSlot:i32]
+//     [nMethods:i32][nStatics:i32][nAccessors:i32][nStaticAccessors:i32]
+//     methods          × nMethods        : [nameStrId:i32][slot:i32][n:i32][rest:i8][pad×3]
+//     statics          × nStatics        : [nameStrId:i32][slot:i32][n:i32]
+//     accessors        × nAccessors      : [nameStrId:i32][getSlot:i32][setSlot:i32]
+//     staticAccessors  × nStaticAccessors: [nameStrId:i32][getSlot:i32][setSlot:i32]
 // nameStrId 必须与 emitter 的 strings 表对齐（emitter 已为每个方法名分配 strId）。
 export function serializeClassMeta(L, mem, classMeta) {
   if (!classMeta || !classMeta.length) return 0;
@@ -17,11 +18,21 @@ export function serializeClassMeta(L, mem, classMeta) {
     const accessors = Object.entries(c.getters).map(([name, g]) => ({
       nameStrId: g.nameStrId, getSlot: g.slot, setSlot: (c.setters[name] || {}).slot ?? -1
     }));
-    const hdr = 28;
+    // 静态访问器（static get/set）此前不入表：类值（工厂类表达式）的 `C.gs` 在
+    // in-module 档无从解析。取 get/set 键并集——只有 setter 的访问器同样合法。
+    const saNames = [...new Set([...Object.keys(c.staticGetters || {}), ...Object.keys(c.staticSetters || {})])];
+    const staticAccessors = saNames.map(name => ({
+      nameStrId: (c.staticGetters[name] || c.staticSetters[name]).nameStrId,
+      getSlot: (c.staticGetters[name] || {}).slot ?? -1,
+      setSlot: (c.staticSetters[name] || {}).slot ?? -1
+    }));
+    const hdr = 32;
     const methodsBytes = methods.length * 16;
     const staticsBytes = statics.length * 12;
     const accessorsBytes = accessors.length * 12;
-    return { c, methods, statics, accessors, bytes: hdr + methodsBytes + staticsBytes + accessorsBytes };
+    const staticAccessorsBytes = staticAccessors.length * 12;
+    return { c, methods, statics, accessors, staticAccessors,
+             bytes: hdr + methodsBytes + staticsBytes + accessorsBytes + staticAccessorsBytes };
   });
   const idxSize = 4 + items.length * 4;
   let total = idxSize + items.reduce((a, b) => a + b.bytes, 0);
@@ -41,7 +52,8 @@ export function serializeClassMeta(L, mem, classMeta) {
     v.setUint32(cur + 16, it.methods.length, true);
     v.setUint32(cur + 20, it.statics.length, true);
     v.setUint32(cur + 24, it.accessors.length, true);
-    let q = cur + 28;
+    v.setUint32(cur + 28, it.staticAccessors.length, true);
+    let q = cur + 32;
     for (const m of it.methods) {
       v.setUint32(q, m.nameStrId, true);
       v.setInt32(q + 4, m.slot, true);
@@ -59,6 +71,12 @@ export function serializeClassMeta(L, mem, classMeta) {
       v.setUint32(q, ac.nameStrId, true);
       v.setInt32(q + 4, ac.getSlot ?? -1, true);
       v.setInt32(q + 8, ac.setSlot ?? -1, true);
+      q += 12;
+    }
+    for (const sac of it.staticAccessors) {
+      v.setUint32(q, sac.nameStrId, true);
+      v.setInt32(q + 4, sac.getSlot ?? -1, true);
+      v.setInt32(q + 8, sac.setSlot ?? -1, true);
       q += 12;
     }
     cur += it.bytes;

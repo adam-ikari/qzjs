@@ -10,8 +10,10 @@
 //   4) 静态方法/getter/setter 捕获工厂局部：self 是类值，env 取法改用 class_env_get_static
 //      （宿主动态类值经 ctor.__qzClsId；C 档类值低 32 位即 clsId）。宿主档同时把静态访问器
 //      装到类对象上，支持 `const C = mk(); C.g` 的动态读取。
-// in-module 档动态类值的成员访问整体未实现（低 32 位是 clsId 不是实例 offset），
-// 已改为 loud（qz_dyncls_loud），见 static-getter-factory-capture 在 C 侧的行为说明。
+// in-module 档动态类值的静态成员已实现（按 clsId 查 classMeta + g_statics：静态方法/
+// 静态 getter/setter/静态字段读写/字段删除）；其余「把接收者当普通对象」的原语
+// （下标键、k in C、String(C)、Object.* 反射）物化类值会拿 clsId 当内存基址读垃圾
+// → 一律 loud（qz_dyncls_loud / qz_clsval_loud），见 cross_tier 探针 dynwork.ts。
 module.exports = [
   { name: "finally-break-loop", fn: "run", ts: `
 export function run() { let log = ""; for (let i = 0; i < 5; i++) { try { if (i === 2) break; log += i; } finally { log += "f" + i; } } return log; }`, args: [] },

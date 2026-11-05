@@ -756,10 +756,24 @@ int64_t qz_guest_ref_get(int32_t nameId)
 }
 
 /* 动态类值（class_expr_value 克隆的 clsId）判定：定义见 classMeta 节。
- * 这些值的成员访问本层未实现（低 32 位是 clsId、不是实例内存 offset），
- * 直接落进实例路径会读垃圾 → 返回 -1；命中返回 clsId。*/
+ * 命中返回 clsId；这些值支持**静态**成员（方法/访问器/字段）按 clsId 解析。
+ * 未登记的 clsId 返回 -1（那是普通类值或实例，走各自原路径）。*/
 static int32_t qz_dyncls_cls(uint32_t low);
 static void qz_dyncls_loud(JSContext *ctx, const char *what);
+static int32_t qz_clsmeta_static_chain(int32_t clsId, int32_t nameStrId, int32_t *n_out);
+static int32_t qz_clsmeta_static_accessor_chain(int32_t clsId, int32_t nameStrId,
+                                               int wantSet, int32_t *found);
+static int64_t qz_static_chain_get(int32_t clsId, int32_t nameStrId, int32_t *hit);
+/* qz_guest_static_set 是导出原语（static_set），前向声明不可加 static——否则内部链接
+ * 吞掉 export_name，产物 import qz.static_set 时链接失败。定义见 statics 节。*/
+void qz_guest_static_set(int32_t clsId, int32_t nameStrId, int64_t val);
+/* 类值判定（tag 0x7FFE 且低 32 位是 clsId，静态或动态）→ clsId；实例/其它 -1。
+ * 定义见 classMeta 节。删除/`in`/转字符串这类「接收者当对象」的原语要先分流，
+ * 否则 qz_tojs 会把 clsId 当内存基址物化 → 读垃圾并静默返回错值。*/
+static int32_t qz_clsvalue_of(int64_t v);
+static void qz_clsval_loud(JSContext *ctx, const char *what);
+/* 类值的属性删除 = 静态属性删除（定义见 statics 节）。*/
+static void qz_static_delete(JSContext *ctx, int32_t clsId, int32_t nameStrId);
 
 /* 把 JSValue 登记为**宿主对象**句柄（0x7FFD|idx）。与 qz_ret 的区别只在 tag：
  * emitter 对 0x7FFD 走 prop_get/prop_set（宿主属性），对 0x7FF9 走 POJO 内存
@@ -1209,6 +1223,7 @@ int64_t qz_guest_in_op(int64_t key, int64_t obj)
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
+    if (qz_clsvalue_of(obj) >= 0) { qz_clsval_loud(ctx, "属性存在性检查（k in C）"); return 0; }
     JSValue k = qz_tojs(ctx, key), o = qz_tojs(ctx, obj);
     int found = 0;
     if (JS_IsObject(o)) {
@@ -1440,8 +1455,16 @@ void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
       } }
     /* 类实例 setter：classMeta.accessors → 表槽 → 蹦床(self, val) */
     if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFE) {
-        if (qz_dyncls_cls((uint32_t)((uint64_t)obj & 0xFFFFFFFFu)) >= 0) {
-            qz_dyncls_loud(ctx, "写属性");
+        int32_t dynCls = qz_dyncls_cls((uint32_t)((uint64_t)obj & 0xFFFFFFFFu));
+        if (dynCls >= 0) {
+            /* 类值的属性写 = 静态属性写（JS：C.x = v 落在接收者类自有静态）*/
+            int32_t found = 0;
+            int32_t slot = qz_clsmeta_static_accessor_chain(dynCls, keyId, 1, &found);
+            if (found) {
+                if (slot > 0) ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(obj, val, 0, 0, 0);
+            } else {
+                qz_guest_static_set(dynCls, keyId, val);
+            }
             JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
             return;
         }
@@ -1475,6 +1498,8 @@ void qz_guest_prop_delete(int64_t obj, int32_t keyId)
     if (!g_current_rt) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return;
+    int32_t clsVal = qz_clsvalue_of(obj);   // 类值：删静态属性，不能当对象物化
+    if (clsVal >= 0) { qz_static_delete(ctx, clsVal, keyId); return; }
     JSValue o = qz_tojs(ctx, obj);
     JSValue k = qz_strval(ctx, keyId);
     if (JS_IsObject(o) && !JS_IsSymbol(k)) {
@@ -1510,8 +1535,8 @@ int64_t qz_guest_get_index(int64_t obj, int64_t key)
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
-    if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFE && qz_dyncls_cls((uint32_t)((uint64_t)obj & 0xFFFFFFFFu)) >= 0) {
-        qz_dyncls_loud(ctx, "按索引读属性");
+    if (qz_clsvalue_of(obj) >= 0) {          // 类值：下标键是运行期值，解析不出 strId → 无法查静态表
+        qz_clsval_loud(ctx, "按索引读属性（下标键不是静态名）");
         return 0;
     }
     JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
@@ -1527,8 +1552,8 @@ void qz_guest_set_index(int64_t obj, int64_t key, int64_t val)
     if (!g_current_rt) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return;
-    if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFE && qz_dyncls_cls((uint32_t)((uint64_t)obj & 0xFFFFFFFFu)) >= 0) {
-        qz_dyncls_loud(ctx, "按索引写属性");
+    if (qz_clsvalue_of(obj) >= 0) {
+        qz_clsval_loud(ctx, "按索引写属性（下标键不是静态名）");
         return;
     }
     JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
@@ -1543,6 +1568,10 @@ int64_t qz_guest_delete_index(int64_t obj, int64_t key)
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
+    if (qz_clsvalue_of(obj) >= 0) {
+        qz_clsval_loud(ctx, "按索引删除属性（下标键不是静态名）");
+        return 0;
+    }
     JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
     int ok = 1;
     if (JS_IsObject(o) && !JS_IsSymbol(k)) {
@@ -1757,6 +1786,7 @@ void qz_guest_spread_order(int64_t dst, int64_t src)
     if (!g_current_rt) return;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return;
+    if (qz_clsvalue_of(src) >= 0 || qz_clsvalue_of(dst) >= 0) { qz_clsval_loud(ctx, "展开类值（{...C}）"); return; }
     JSValue d = qz_tojs(ctx, dst), s = qz_tojs(ctx, src);
     if (JS_IsObject(d) && JS_IsObject(s)) {
         JSValue arr = JS_GetPropertyStr(ctx, s, QZ_KEYS);
@@ -1786,6 +1816,7 @@ int64_t qz_guest_to_string(int64_t a)
     if (!g_current_rt) return a;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return a;
+    if (qz_clsvalue_of(a) >= 0) { qz_clsval_loud(ctx, "转字符串（String(C) / 模板串插值）"); return 0; }
     JSValue va = qz_tojs(ctx, a);
     size_t len = 0;
     const char *s = JS_ToCStringLen(ctx, &len, va);
@@ -1881,8 +1912,21 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
       } }
     /* 类实例 getter：classMeta.accessors → 表槽 → 蹦床(self) */
     if ((uint16_t)((uint64_t)recv >> 48) == 0x7FFE) {
-        if (qz_dyncls_cls((uint32_t)((uint64_t)recv & 0xFFFFFFFFu)) >= 0) {
-            qz_dyncls_loud(ctx, "读取属性");
+        int32_t dynCls = qz_dyncls_cls((uint32_t)((uint64_t)recv & 0xFFFFFFFFu));
+        if (dynCls >= 0) {
+            /* 类值读属性 = 静态属性读：静态访问器 → 静态字段（沿父链）→ 否则 loud。
+             * 静态**方法**作为函数值取不出来（C 侧无法把表槽包成可调用句柄）→ 同样 loud。*/
+            int32_t found = 0;
+            int32_t slot = qz_clsmeta_static_accessor_chain(dynCls, keyId, 0, &found);
+            if (found) {
+                JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+                return slot > 0 ? ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(recv, 0, 0, 0, 0)
+                                : (int64_t)((uint64_t)0x7FF9 << 48);   /* 只有 setter → undefined */
+            }
+            int32_t hit = 0;
+            int64_t sv = qz_static_chain_get(dynCls, keyId, &hit);
+            if (hit) { JS_FreeValue(ctx, k); JS_FreeValue(ctx, o); return sv; }
+            qz_dyncls_loud(ctx, "读取静态属性");
             JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
             return (int64_t)((uint64_t)0x7FF9 << 48);
         }
@@ -2492,6 +2536,9 @@ void qz_guest_prot_check(int64_t v, int32_t nameId)
         if (qz_pojo_flags(off)) qz_set_throw(ctx, JS_NewTypeError(ctx, "cannot assign to non-extensible object"));
         return;
     }
+    /* 类值不可冻结：Object.freeze(C) 已在 builtin 里 loud，写保护状态无从记录，
+     * 这里无事可查——物化类值只会拿 clsId 当内存基址读垃圾。*/
+    if (qz_clsvalue_of(v) >= 0) return;
     JSValue o = qz_tojs(ctx, v);
     int sealed_ = JS_IsObject(o) ? !JS_IsExtensible(ctx, o) : 0;
     JS_FreeValue(ctx, o);
@@ -2506,6 +2553,11 @@ int64_t qz_guest_obj_assign(int32_t id, int64_t dst, int64_t a0, int64_t a1, int
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
+    if (qz_clsvalue_of(dst) >= 0 || qz_clsvalue_of(a0) >= 0 || qz_clsvalue_of(a1) >= 0
+        || qz_clsvalue_of(a2) >= 0) {
+        qz_clsval_loud(ctx, "Object.assign 读写类值");
+        return 0;
+    }
     JSValue d = qz_tojs(ctx, dst);
     int64_t srcs[3] = { a0, a1, a2 };
     JSValue undef = JS_UNDEFINED;
@@ -2648,13 +2700,17 @@ typedef int64_t (*qz_cls_fn)(int64_t, int64_t, int64_t, int64_t, int64_t);
 
 /* classMeta 表基址（宿主经 __set_clsmeta 注入）。表格式见 qz_clsmeta 注释。*/
 static uint32_t g_clsmeta_base = 0;
-/* classMeta 项格式（与 emitter 序列化对齐）：
+/* classMeta 项格式（与 emitter 序列化对齐，见 test/m6b-poc/clsmeta_ser.mjs）：
  *   [clsId:i32][parent:i32(-1)][nameStrId:i32][ctorSlot:i32(-1)]
- *   [nMethods:i32][nStatics:i32][nAccessors:i32]
- *   methods  × nMethods  : [nameStrId:i32][slot:i32][n:i32][rest:i8][pad:3]
- *   statics  × nStatics  : [nameStrId:i32][slot:i32][n:i32]
- *   accessors× nAccessors: [nameStrId:i32][getSlot:i32][setSlot:i32]
- * 项按 clsId 顺序紧密排列；索引表 = [count:i32][clsId0_itemOff:i32]×count，随后是项数据。*/
+ *   [nMethods:i32][nStatics:i32][nAccessors:i32][nStaticAccessors:i32]
+ *   methods        × nMethods        : [nameStrId:i32][slot:i32][n:i32][rest:i8][pad:3]
+ *   statics        × nStatics        : [nameStrId:i32][slot:i32][n:i32]
+ *   accessors      × nAccessors      : [nameStrId:i32][getSlot:i32][setSlot:i32]
+ *   staticAccessors× nStaticAccessors: [nameStrId:i32][getSlot:i32][setSlot:i32]
+ * 项按 clsId 顺序紧密排列；索引表 = [count:i32][clsId0_itemOff:i32]×count，随后是项数据。
+ * 静态访问器入表是后加的：类值（工厂类表达式）的 `C.gs` 只能按 clsId 反查表，
+ * 早期只有序列化实例访问器，静态侧无从解析。*/
+#define QZ_CLSMETA_HDR 32
 
 /* __set_clsmeta(base:i32)：宿主注入 classMeta 表。*/
 __attribute__((export_name("__set_clsmeta")))
@@ -2695,13 +2751,34 @@ static int32_t qz_dyncls_cls(uint32_t low)
     return -1;
 }
 
-/* 动态类值的成员访问本层未实现（低 32 位是 clsId 不是实例 offset，实例路径
- * 会读垃圾并静默返回错值）→ 统一的 loud 出口。*/
+/* 动态类值上「本层无法表达」的成员操作（低 32 位是 clsId 不是实例 offset，实例
+ * 路径会读垃圾并静默返回错值）→ 统一的 loud 出口。静态方法/getter/setter/字段
+ * 已支持（按 clsId 查 classMeta + g_statics），剩下的形状走这里。*/
 static void qz_dyncls_loud(JSContext *ctx, const char *what)
 {
     qz_set_throw(ctx, JS_NewTypeError(ctx,
         "in-module 档暂不支持动态类值（工厂类表达式）的成员访问：%s；"
         "请改为通过静态可见的类名访问，或在独立档（JS 宿主）运行", what));
+}
+
+/* 类值判定：tag 0x7FFE 且低 32 位能解析出 classMeta 项（动态旁路表或静态注入表）。
+ * 实例的 low 是内存 offset，既不在旁路表也越出静态 count，不会误判。*/
+static int32_t qz_clsvalue_of(int64_t v)
+{
+    if ((uint16_t)((uint64_t)v >> 48) != 0x7FFE) return -1;
+    uint32_t low = (uint32_t)((uint64_t)v & 0xFFFFFFFFu);
+    if (qz_dyncls_cls(low) >= 0) return (int32_t)low;
+    return qz_clsmeta_item_off((int32_t)low) ? (int32_t)low : -1;
+}
+
+/* 类值走「接收者当普通对象」的原语（in/转字符串/反射）会 qz_tojs 物化 → 把 clsId
+ * 当内存基址读垃圾并静默返回错值 → 一律 loud。静态成员（方法/访问器/字段）本身
+ * 是支持的，所以这里不建议改写法，只指出未实现的反射面。*/
+static void qz_clsval_loud(JSContext *ctx, const char *what)
+{
+    qz_set_throw(ctx, JS_NewTypeError(ctx,
+        "in-module 档不支持对类值做%s（低 32 位是 clsId，物化成普通对象会读垃圾）；"
+        "静态方法/访问器/字段的读写已支持", what));
 }
 
 /* 克隆一个类项为新动态类：新 clsId 的 parent 指向原类（语义 = 派生），返回新 clsId。
@@ -2712,9 +2789,11 @@ static int32_t qz_clsmeta_clone(int32_t srcClsId)
     if (!srcOff) return -1;
     if (g_dyncls_n >= QZ_DYNCLS_CAP) return -1;
     const unsigned char *p = (const unsigned char *)(uintptr_t)srcOff;
-    int32_t nMethods, nStatics, nAccessors;
+    int32_t nMethods, nStatics, nAccessors, nStaticAcc;
     memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4); memcpy(&nAccessors, p + 24, 4);
-    int32_t nbytes = 28 + nMethods * 16 + nStatics * 12 + nAccessors * 12;
+    memcpy(&nStaticAcc, p + 28, 4);
+    int32_t nbytes = QZ_CLSMETA_HDR + nMethods * 16 + nStatics * 12
+        + nAccessors * 12 + nStaticAcc * 12;
     unsigned char *dst = (unsigned char *)malloc((size_t)nbytes);
     if (!dst) return -1;
     memcpy(dst, p, (size_t)nbytes);
@@ -2743,7 +2822,7 @@ static int32_t qz_clsmeta_method_slot(int32_t clsId, int32_t nameStrId, int32_t 
     memcpy(&cid, p, 4); memcpy(&parent, p+4, 4); memcpy(&nameId, p+8, 4);
     memcpy(&ctorSlot, p+12, 4); memcpy(&nMethods, p+16, 4);
     memcpy(&nStatics, p+20, 4); memcpy(&nAccessors, p+24, 4);
-    const unsigned char *q = p + 28;
+    const unsigned char *q = p + QZ_CLSMETA_HDR;
     for (int32_t i = 0; i < nMethods; i++) {
         int32_t nid, slot, n; int8_t rest;
         memcpy(&nid, q, 4); memcpy(&slot, q+4, 4); memcpy(&n, q+8, 4); memcpy(&rest, q+12, 1);
@@ -2761,7 +2840,7 @@ static int32_t qz_clsmeta_accessor_slot(int32_t clsId, int32_t nameStrId, int wa
     const unsigned char *p = (const unsigned char *)(uintptr_t)off;
     int32_t nMethods, nStatics, nAccessors;
     memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4); memcpy(&nAccessors, p + 24, 4);
-    const unsigned char *q = p + 28 + nMethods * 16 + nStatics * 12;
+    const unsigned char *q = p + QZ_CLSMETA_HDR + nMethods * 16 + nStatics * 12;
     for (int32_t i = 0; i < nAccessors; i++) {
         int32_t nid, g, st;
         memcpy(&nid, q, 4); memcpy(&g, q+4, 4); memcpy(&st, q+8, 4);
@@ -2784,7 +2863,7 @@ static int32_t qz_clsmeta_accessor_chain(int32_t clsId, int32_t nameStrId, int w
         const unsigned char *p = (const unsigned char *)(uintptr_t)off;
         int32_t nMethods, nStatics, nAccessors;
         memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4); memcpy(&nAccessors, p + 24, 4);
-        const unsigned char *q = p + 28 + nMethods * 16 + nStatics * 12;
+        const unsigned char *q = p + QZ_CLSMETA_HDR + nMethods * 16 + nStatics * 12;
         for (int32_t i = 0; i < nAccessors; i++) {
             int32_t nid; memcpy(&nid, q, 4);
             if (nid == nameStrId) { if (found) *found = 1; return slot; }
@@ -2810,6 +2889,76 @@ static int32_t qz_clsmeta_method_chain(int32_t clsId, int32_t nameStrId, int32_t
     }
     return 0;
 }
+
+/* 在 classMeta 项的 statics 段按名字找静态方法槽。*/
+static int32_t qz_clsmeta_static_slot(int32_t clsId, int32_t nameStrId, int32_t *n_out)
+{
+    uint32_t off = qz_clsmeta_item_off(clsId);
+    if (!off) return 0;
+    const unsigned char *p = (const unsigned char *)(uintptr_t)off;
+    int32_t nMethods, nStatics;
+    memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4);
+    const unsigned char *q = p + QZ_CLSMETA_HDR + nMethods * 16;
+    for (int32_t i = 0; i < nStatics; i++) {
+        int32_t nid, slot, n;
+        memcpy(&nid, q, 4); memcpy(&slot, q+4, 4); memcpy(&n, q+8, 4);
+        if (nid == nameStrId) { if (n_out) *n_out = n; return slot; }
+        q += 12;
+    }
+    return 0;
+}
+
+/* 沿继承链找静态方法槽（JS：派生类静态查找含父类 static）。*/
+static int32_t qz_clsmeta_static_chain(int32_t clsId, int32_t nameStrId, int32_t *n_out)
+{
+    int32_t cur = clsId, guard = 0;
+    while (cur >= 0 && guard++ < 64) {
+        int32_t slot = qz_clsmeta_static_slot(cur, nameStrId, n_out);
+        if (slot) return slot;
+        uint32_t off = qz_clsmeta_item_off(cur);
+        if (!off) break;
+        int32_t parent; memcpy(&parent, (const unsigned char *)(uintptr_t)off + 4, 4);
+        cur = parent;
+    }
+    return 0;
+}
+
+/* 在某项的 staticAccessors 段按名字找 get/set 槽。返回 -2 = 该类无此项。*/
+static int32_t qz_clsmeta_static_accessor_slot(int32_t clsId, int32_t nameStrId, int wantSet)
+{
+    uint32_t off = qz_clsmeta_item_off(clsId);
+    if (!off) return -2;
+    const unsigned char *p = (const unsigned char *)(uintptr_t)off;
+    int32_t nMethods, nStatics, nAccessors, nStaticAcc;
+    memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4);
+    memcpy(&nAccessors, p + 24, 4); memcpy(&nStaticAcc, p + 28, 4);
+    const unsigned char *q = p + QZ_CLSMETA_HDR + nMethods * 16 + nStatics * 12 + nAccessors * 12;
+    for (int32_t i = 0; i < nStaticAcc; i++) {
+        int32_t nid, g, st;
+        memcpy(&nid, q, 4); memcpy(&g, q+4, 4); memcpy(&st, q+8, 4);
+        if (nid == nameStrId) return wantSet ? st : g;
+        q += 12;
+    }
+    return -2;
+}
+
+/* 沿继承链找静态访问器槽。found=0 表示整条链都没有该访问器。
+ * 与 qz_clsmeta_accessor_chain 同形：-1 = 命中但本方向缺失（只有 setter/getter）。*/
+static int32_t qz_clsmeta_static_accessor_chain(int32_t clsId, int32_t nameStrId,
+                                               int wantSet, int32_t *found)
+{
+    int32_t cur = clsId, guard = 0;
+    if (found) *found = 0;
+    while (cur >= 0 && guard++ < 64) {
+        int32_t slot = qz_clsmeta_static_accessor_slot(cur, nameStrId, wantSet);
+        if (slot != -2) { if (found) *found = 1; return slot; }
+        uint32_t off = qz_clsmeta_item_off(cur);
+        if (!off) break;
+        int32_t parent; memcpy(&parent, (const unsigned char *)(uintptr_t)off + 4, 4);
+        cur = parent;
+    }
+    return -1;
+}
 __attribute__((export_name("method_call")))
 int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
                              int64_t a2, int64_t a3, int64_t ovf)
@@ -2830,7 +2979,13 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
      * 方法槽，调蹦床。emitter 静态分派的类方法已蹦床化进共享表。 */
     uint64_t ru = (uint64_t)recv;
     if ((uint16_t)(ru >> 48) == 0x7FFE) {
-        if (qz_dyncls_cls((uint32_t)(ru & 0xFFFFFFFFu)) >= 0) {
+        int32_t dynCls = qz_dyncls_cls((uint32_t)(ru & 0xFFFFFFFFu));
+        if (dynCls >= 0) {
+            /* 类值接收者 = 静态方法调用：沿 classMeta 父链查 statics 段。
+             * self 传类值句柄（静态方法体内 this.x 经 static_get_dyn 按 clsId 取）。*/
+            int32_t n;
+            int32_t slot = qz_clsmeta_static_chain(dynCls, mid, &n);
+            if (slot) return ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(recv, a0, a1, a2, a3);
             qz_dyncls_loud(ctx, "调用方法");
             return 0;
         }
@@ -3892,6 +4047,24 @@ static int32_t qz_static_find(int32_t clsId, int32_t nameStrId)
     return -1;
 }
 
+/* 沿 classMeta 父链查静态字段值（与独立档 static_get_dyn 一致）：静态方法/访问器内
+ * this 可能是派生类，父类静态字段应可见；派生类同名字段优先。此前只查接收者自身 →
+ * `class B extends A {}; B.m()` 里 this.x 静默 0。hit 回报「表里有没有这一项」。*/
+static int64_t qz_static_chain_get(int32_t clsId, int32_t nameStrId, int32_t *hit)
+{
+    int32_t cid = clsId;
+    for (int32_t depth = 0; cid >= 0 && depth < 64; depth++) {
+        int32_t k = qz_static_find(cid, nameStrId);
+        if (k >= 0) { if (hit) *hit = 1; return g_statics[k].val; }
+        uint32_t off = qz_clsmeta_item_off(cid);
+        if (!off) break;
+        int32_t parent; memcpy(&parent, (const unsigned char *)(uintptr_t)(off + 4), 4);
+        if (parent == cid) break;
+        cid = parent;
+    }
+    return 0;
+}
+
 /* static_get(clsId, nameStrId) → i64：读静态字段值；未命中则调静态方法蹦床。*/
 __attribute__((export_name("static_get")))
 int64_t qz_guest_static_get(int32_t clsId, int32_t nameStrId)
@@ -3904,7 +4077,7 @@ int64_t qz_guest_static_get(int32_t clsId, int32_t nameStrId)
     uint32_t off = qz_clsmeta_item_off(clsId);
     if (!off) return 0;
     int32_t nStatics; memcpy(&nStatics, (const unsigned char *)(uintptr_t)off + 20, 4);
-    const unsigned char *q = (const unsigned char *)(uintptr_t)off + 28;
+    const unsigned char *q = (const unsigned char *)(uintptr_t)off + QZ_CLSMETA_HDR;
     /* 跳过 methods */
     int32_t nMethods; memcpy(&nMethods, (const unsigned char *)(uintptr_t)off + 16, 4);
     q += nMethods * 16;
@@ -3925,20 +4098,7 @@ int64_t qz_guest_static_get_dyn(int64_t clsVal, int32_t nameStrId)
 {
     uint64_t u = (uint64_t)clsVal;
     if ((uint16_t)(u >> 48) != 0x7FFE) return 0;
-    int32_t cid = (int32_t)(u & 0xFFFFFFFFu);
-    /* 沿 classMeta 父链查（与独立档 static_get_dyn 一致）：静态方法/访问器内 this 可能是
-     * 派生类，父类静态字段应可见；派生类同名字段优先。此前只查接收者自身 →
-     * `class B extends A {}; B.m()` 里 this.x 静默 0。 */
-    for (int32_t depth = 0; cid >= 0 && depth < 64; depth++) {
-        int32_t k = qz_static_find(cid, nameStrId);
-        if (k >= 0) return g_statics[k].val;
-        uint32_t off = qz_clsmeta_item_off(cid);
-        if (!off) break;
-        int32_t parent; memcpy(&parent, (const unsigned char *)(uintptr_t)(off + 4), 4);
-        if (parent == cid) break;
-        cid = parent;
-    }
-    return 0;
+    return qz_static_chain_get((int32_t)(u & 0xFFFFFFFFu), nameStrId, NULL);
 }
 
 __attribute__((export_name("static_set")))
@@ -3964,6 +4124,26 @@ void qz_guest_static_set_dyn(int64_t clsVal, int32_t nameStrId, int64_t val)
     qz_guest_static_set((int32_t)(u & 0xFFFFFFFFu), nameStrId, val);
 }
 
+/* 类值（静态或动态）的 `delete C.k` = 删除**自有**静态属性，与 JS 一致：
+ *   · 静态字段 → 值本就在 g_statics，移除条目即真删；删除后沿父链查找会透出
+ *     继承来的同名静态（qz_static_chain_get 语义），与 JS 原型链一致。
+ *   · 静态方法 / 静态访问器 → 在 classMeta 只读表里，删不掉。留着旧值是静默错值
+ *     （JS 里 `delete C.m` 后 C.m 变 undefined 或透出父类），故 loud。只查**自有**项：
+ *     名字来自父类时 `delete C.m` 在 JS 里本就无效果，不该因父类有方法而炸。
+ * 无此条目 → 删除不存在属性，JS 返回 true 且无副作用，这里静默通过。*/
+static void qz_static_delete(JSContext *ctx, int32_t clsId, int32_t nameStrId)
+{
+    if (qz_clsmeta_static_accessor_slot(clsId, nameStrId, 0) != -2
+        || qz_clsmeta_static_accessor_slot(clsId, nameStrId, 1) != -2) {
+        qz_dyncls_loud(ctx, "删除静态访问器"); return;
+    }
+    if (qz_clsmeta_static_slot(clsId, nameStrId, NULL)) { qz_dyncls_loud(ctx, "删除静态方法"); return; }
+    int32_t k = qz_static_find(clsId, nameStrId);
+    if (k < 0) return;
+    for (int32_t i = k; i + 1 < g_static_n; i++) g_statics[i] = g_statics[i + 1];
+    g_static_n--;
+}
+
 __attribute__((export_name("statics_ready")))
 int32_t qz_guest_statics_ready(int32_t clsId)
 {
@@ -3978,7 +4158,7 @@ int32_t qz_guest_statics_has(int32_t clsId, int32_t nameStrId)
     uint32_t off = qz_clsmeta_item_off(clsId);
     if (!off) return 0;
     int32_t nStatics; memcpy(&nStatics, (const unsigned char *)(uintptr_t)off + 20, 4);
-    const unsigned char *q = (const unsigned char *)(uintptr_t)off + 28;
+    const unsigned char *q = (const unsigned char *)(uintptr_t)off + QZ_CLSMETA_HDR;
     int32_t nMethods; memcpy(&nMethods, (const unsigned char *)(uintptr_t)off + 16, 4);
     q += nMethods * 16;
     for (int32_t i = 0; i < nStatics; i++) {
@@ -4201,6 +4381,14 @@ int64_t qz_guest_builtin(int32_t id, int32_t n, int64_t a0, int64_t a1,
         if (!strcmp(nm, "Object.freeze")) f = QZ_POJO_FROZEN;
         else if (!strcmp(nm, "Object.seal") || !strcmp(nm, "Object.preventExtensions")) f = QZ_POJO_SEALED;
         if (f) { qz_pojo_set_flags((uint32_t)((uint64_t)a0 & 0xFFFFFFFFu), f); return a0; }
+    }
+    /* Object.* 反射原语（keys/values/entries/getPrototypeOf/freeze/assign/…）要把
+     * 接收者/源物化成普通 JS 对象；类值物化 = 拿 clsId 当内存基址读垃圾 → loud。
+     * 静态方法/访问器/字段的读写不经这里（prop_get/prop_set/method_call 按 clsId 查表）。*/
+    if (!strncmp(nm, "Object.", 7)) {
+        int64_t argv[4] = { a0, a1, a2, a3 };
+        for (int i = 0; i < 4; i++)
+            if (qz_clsvalue_of(argv[i]) >= 0) { qz_clsval_loud(ctx, nm); return 0; }
     }
     JSValue fn = qz_builtin_lookup(ctx, nm);
     if (JS_IsException(fn)) { JS_FreeValue(ctx, fn); return 0; }

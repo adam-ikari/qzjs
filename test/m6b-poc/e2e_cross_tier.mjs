@@ -62,6 +62,19 @@ const LOADS = [
     ['fnArgsRest', [], 13726],
     ['fnArgsRestDistinct', [], 0],
   ]],
+  // 动态类值（工厂返回的类表达式）：类值接收者的成员访问按 clsId 反查 classMeta，
+  // 两档同一份产物 ⇒ 静态方法/静态访问器/静态字段写读/字段删除都必须给 V8 值。
+  ['dynwork.ts', [
+    ['dynInstMethod2', [], 8],
+    ['dynInstField', [], 4],
+    ['dynInstGetter', [], 8],
+    ['dynStaticCall', [], 5],
+    ['dynStaticGetter', [], 6],
+    ['dynStaticSetter', [], 9],
+    ['dynStaticField', [], 9],
+    ['dynStaticFieldDelete', [], 12],
+    ['dynNewCount', [], 13],
+  ]],
   ['strwork.ts', [
     ['strWork', [5], '001234'],
     ['strWorkEq', [5], '001234'],
@@ -135,6 +148,10 @@ async function runInModule(file) {
     if (P.__bump_reset) P.__bump_reset();
     const conv = m.mode === 'num' ? a : a.map(box);
     const res = P[name](...conv);
+    /* C 侧原语的 loud 出口走 __err：产物不抛，值退化为 undefined。不读 __err 就把
+     * 「抛错」和「静默错值」混成同一条 FAIL —— 这里显式还原成异常。*/
+    const g = P.__err;
+    if (g && BigInt(g.value) !== 0n) throw new Error(`${name}: in-module 抛未捕获异常（__err≠0）`);
     return m.mode === 'num' ? res : memToJS(res);
   };
 }
@@ -169,11 +186,12 @@ for (const [file, cases] of LOADS) {
   let stand = null;
   try { stand = await runStandalone(file); } catch (e) { /* 独立档宿主接口不同则跳过对比 */ }
   for (const [fn, a, want] of cases) {
-    const gIn = inM(fn, a);
+    let gIn, loud = '';
+    try { gIn = inM(fn, a); } catch (e) { loud = ` ⚠ ${e.message}`; }
     const okIn = Object.is(gIn, want);
-    if (!okIn) failed++;
-    let note = '';
-    if (stand) {
+    if (!okIn || loud) failed++;
+    let note = loud;
+    if (stand && !loud) {
       compared++;
       const gS = stand(fn, a);
       if (!Object.is(gS, gIn)) { failed++; note = ` ⚠ 档间不一致: 独立档=${JSON.stringify(gS)}`; }
