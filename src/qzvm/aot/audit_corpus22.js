@@ -122,13 +122,20 @@ export function f(): any {
   const out: any = [];
   const words: any = ["banana", "Apple", "cherry", "apple"];
   out.push(words.slice().sort().join(","));
-  out.push(words.slice().sort((a: any, b: any) => a.toLowerCase() < b.toLowerCase() ? -1 : 1).join(","));
   out.push("a" < "b" ? 1 : 0, "A" < "a" ? 1 : 0, "abc" < "abd" ? 1 : 0);
   out.push("10" < "9" ? 1 : 0, 10 < 9 ? 1 : 0);
   const objs: any = [{ n: 3 }, { n: 1 }, { n: 2 }];
   out.push(objs.slice().sort((a: any, b: any) => a.n - b.n).map((o: any) => o.n).join(","));
   return out.join("|");
-}`, envdiff: "comparator 对相等元素恒返 ±1（非严格弱序）→ 排序结果实现相关（V8 TimSort vs quickjs-ng）" },
+}` },
+  // 「不区分大小写」比较器对 "Apple"/"apple" 两个方向都返回 -1|1 ⇒ 非严格弱序，
+  // ES 不规定结果。两档由自实现的确定性归并给出唯一值（钉住），不追 V8 TimSort 的序。
+  { name: "string-compare-sort-tiebreak", fn: "f",
+    impldiff: "comparator 对相等元素恒返 ±1（非严格弱序）→ 结果规范未定；两档必须同值",
+    want: "apple,Apple,banana,cherry", ts: `export function f(): any {
+  const words: any = ["banana", "Apple", "cherry", "apple"];
+  return words.slice().sort((a: any, b: any) => a.toLowerCase() < b.toLowerCase() ? -1 : 1).join(",");
+}` },
   { name: "closures-module-pattern", fn: "f", ts: `const Mod: any = (function () {
   let secret = 0;
   const listeners: any = [];

@@ -62,7 +62,7 @@ function lit(v) {
 }
 
 
-let pass = 0, fail = 0, envPass = 0;
+let pass = 0, fail = 0, envPass = 0, implPass = 0;
 const rows = [];
 
 for (const c of corpus) {
@@ -117,23 +117,30 @@ for (const c of corpus) {
   // 抛出而 oracle 出值 → 记 ENV 通过；构建/装配失败（error）仍算 FAIL（防装配回归被登记掩盖）。
   const envOk = !c.unsupported && !!c.envdiff && wantKind === "value" &&
     ((kind === "value" && got !== want) || kind === "throw");
+  // impldiff：ES **未规定**的行为（矛盾 comparator 的排序结果、比较调用次数）。两档由自实现的
+  // 确定性算法给出唯一确定的值，与 oracle(V8) 可以不同；登记用 `want` 钉住该值 → 跨宿主必须相等，
+  // 比 envdiff（只要求「不同」）更严：算法被改动而静默换序会被这条抓住。
+  const implOk = !c.unsupported && !!c.impldiff && kind === "value" && got === c.want;
   const ok = c.unsupported
     ? kind !== "value"
-    : envOk || (wantKind === "throw" ? kind !== "value" : (kind === "value" && got === want));
+    : implOk || envOk || (wantKind === "throw" ? kind !== "value" : (kind === "value" && got === want));
   if (ok) pass++; else fail++;
   if (envOk) envPass++;
+  if (implOk) implPass++;
   rows.push({
-    name: c.name, ok, env: envOk,
+    name: c.name, ok, env: envOk, impl: implOk,
     got: kind === "value" ? got : kind.toUpperCase() + ":" + String(err).slice(0, 80),
-    want: c.unsupported ? "unsupported: " + c.unsupported : (wantKind === "throw" ? "THROW:" + want : want),
+    want: c.unsupported ? "unsupported: " + c.unsupported
+      : (c.impldiff ? "impldiff(钉 " + JSON.stringify(c.want) + "): " + c.impldiff
+        : (wantKind === "throw" ? "THROW:" + want : want)),
   });
 }
 
 const w = Math.max(...rows.map(r => r.name.length), 4);
 for (const r of rows) {
-  console.log(`${r.ok ? (r.env ? "ENV  " : "PASS") : "FAIL"}  ${r.name.padEnd(w)}  got=${r.got}`);
+  console.log(`${r.ok ? (r.impl ? "IMPL" : (r.env ? "ENV  " : "PASS")) : "FAIL"}  ${r.name.padEnd(w)}  got=${r.got}`);
   if (!r.ok) console.log(`      ${"".padEnd(w)}  want=${r.want}`);
 }
-console.log(`\n${pass}/${pass + fail}${envPass ? `（含 ${envPass} 条已登记宿主引擎差异 envdiff）` : ""} ${fail === 0 ? "全部一致（glue 装配路径）" : "有差异"}　corpus=${path.basename(corpusPath)}`);
+console.log(`\n${pass}/${pass + fail}${envPass || implPass ? `（含 ${envPass} 条宿主引擎差异 envdiff、${implPass} 条规范未定钉值 impldiff）` : ""} ${fail === 0 ? "全部一致（glue 装配路径）" : "有差异"}　corpus=${path.basename(corpusPath)}`);
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 process.exit(fail === 0 ? 0 : 1);

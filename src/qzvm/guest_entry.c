@@ -572,6 +572,20 @@ static void qz_arr_writeback(uint32_t aoff, JSValue arr)
     }
 }
 
+/* 块 → 既有 JS 数组：按块当前内容覆盖元素并把 length 改成 alen。
+ * 与 qz_arr_writeback 反向配对。必须在数组**已存在**时也能重放（缓存命中走这条），
+ * 故长度收缩要显式截掉尾部旧元素。 */
+static void qz_arr_fill(JSContext *ctx, JSValue arr, int32_t alen, uint32_t dataOff)
+{
+    for (int32_t i = 0; i < alen; i++) {
+        int64_t el = 0;
+        memcpy(&el, (const void *)(uintptr_t)(dataOff + (uint32_t)i * 8u), 8);
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, qz_tojs(ctx, el));
+    }
+    JSValue lv = JS_NewInt32(ctx, alen);
+    JS_SetPropertyStr(ctx, arr, "length", lv);
+}
+
 static JSValue qz_tojs(JSContext *ctx, int64_t b)
 {
     uint64_t bits = (uint64_t)b;
@@ -613,14 +627,16 @@ static JSValue qz_tojs(JSContext *ctx, int64_t b)
         memcpy(&dataOff, (const void *)(uintptr_t)(aoff + 8), 4);
         if (alen < 0 || alen > 1000000) return JS_UNDEFINED;
         for (int i = 0; i < g_arr_cache_n; i++)        /* 同句柄 → 同一个 JS 数组（别名）*/
-            if (g_arr_cache[i].off == aoff && !JS_IsUndefined(g_arr_cache[i].js))
-                return JS_DupValue(ctx, g_arr_cache[i].js);
+            if (g_arr_cache[i].off == aoff && !JS_IsUndefined(g_arr_cache[i].js)) {
+                /* 命中也**必须按块重灌**：arena 块地址会被回收复用，同址缓存项可能是
+                 * 另一个（更早的）数组的镜像 → 直接返回就是静默错值（实测：复用块读回
+                 * 长度 0 的旧镜像，join 得 ""）。重灌既保住别名身份，又让内容跟上块。*/
+                JSValue m = g_arr_cache[i].js;
+                qz_arr_fill(ctx, m, alen, (uint32_t)dataOff);
+                return JS_DupValue(ctx, m);
+            }
         JSValue arr = JS_NewArray(ctx);
-        if (dataOff) for (int32_t i = 0; i < alen; i++) {
-            int64_t el = 0;
-            memcpy(&el, (const void *)(uintptr_t)((uint32_t)dataOff + i * 8), 8);
-            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, qz_tojs(ctx, el));
-        }
+        if (dataOff) qz_arr_fill(ctx, arr, alen, (uint32_t)dataOff);
         if (g_arr_cache_n >= QZ_ARR_CACHE_MAX) {       /* 满：整体丢弃（缓存只是优化）*/
             for (int i = 0; i < g_arr_cache_n; i++) JS_FreeValue(ctx, g_arr_cache[i].js);
             g_arr_cache_n = 0;
@@ -1383,6 +1399,8 @@ static int qz_is_closure_like(int64_t v)
 }
 
 static int64_t qz_array_callback_op(int64_t recv, const char *nm, int64_t cb, int64_t seed);
+/* 前向：sort/toSorted 的稳定归并（定义在 qz_array_callback_op 之后）。*/
+static int64_t qz_arr_sort_op(int64_t recv, int64_t cb, int toSorted);
 
 /* 前向：闭包分派（定义于 closure_call 节）。*/
 int64_t qz_guest_closure_call(int64_t handle, int64_t a0, int64_t a1, int64_t a2,
@@ -2829,6 +2847,13 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
      * **不能**把回调交给 JS 内建。qz_tojs(闭包值) 不物化（C 侧回调 wasm 会崩），
      * 内建会收到 undefined 回调 → 静默错值（返回空数组/undefined）。
      * 这里自己遍历：回调经 closure_call 走 call_indirect，实参与结果全程 tagged。*/
+    /* sort/toSorted 自实现稳定归并（勿交内建：引擎排序实现相关，矛盾 comparator 下
+     * 两档会分序；稳定性 ES2019 也要求 cmp=0 保序）。比较器不可调时不接手 →
+     * 内建路径抛 TypeError。*/
+    if (!strcmp(nm, "sort") || !strcmp(nm, "toSorted")) {
+        int64_t r = qz_arr_sort_op(recv, a0, !strcmp(nm, "toSorted"));
+        if (r != QZ_NO_CALLBACK_OP) return r;
+    }
     if (qz_is_closure_like(a0)) {
         int64_t r = qz_array_callback_op(recv, nm, a0, a1);
         if (r != QZ_NO_CALLBACK_OP) return r;
@@ -3021,6 +3046,221 @@ static int64_t qz_array_callback_op(int64_t recv, const char *nm, int64_t cb, in
         return acc;
     }
     return QZ_NO_CALLBACK_OP;
+}
+
+/* ── sort / toSorted：确定性稳定归并（两档同形，不委托宿主引擎）──────────────
+ * 为什么自己排：引擎的 Array.prototype.sort 是实现相关的——矛盾 comparator（对相等
+ * 元素恒返 ±1，非严格弱序）下 quickjs-ng 与 V8 的 TimSort 给出不同的序，而「同一段
+ * TS 在两档跑出同一个序」是硬要求。归并的趟数、区间划分、平手取左全都固定 →
+ * 比较调用序列由长度唯一确定，只要 comparator 每次给同样的数，两档逐位同序。
+ * 顺带满足 ES2019 的稳定性要求（cmp=0 保原序）。
+ * 语义对齐 ES Array.prototype.sort（SortIndexedProperties + SortCompare）：
+ *   · undefined（含洞）不参与排序，落到尾部；
+ *   · 无 comparator → ToString 后按 UTF-16 **码元**序比较（JS_ToCStringLenUTF16；
+ *     UTF-8 字节序在代理对/落单代理上与码元序分叉，故不用 JS_ToCStringLen）；
+ *   · comparator 结果 ToNumber，NaN 视作 +0（返回字符串/对象/undefined 都不报错）。
+ * 与宿主档 qzvm.js 的 sortBitsInto 同算法——改一边必须同步另一边，否则两档分序。*/
+
+/* 「空元素」位型：undefined（0x7FF9|0）与洞（0x7FF9|2，宿主档 HOLE 同值）。
+ * null（0x7FF9|1）**不是**空元素，参与排序。*/
+static int qz_bits_is_empty(int64_t b)
+{
+    uint64_t u = (uint64_t)b;
+    return (u >> 48) == 0x7FF9 && (((uint32_t)u == 0u) || ((uint32_t)u == 2u));
+}
+
+/* 元素位读写。0x7FFB 是 wasm 内存块（[len][cap][dataOff] + i64×cap）→ 直读槽，
+ * 元素身份（POJO/实例句柄）原样搬运；其余载体是宿主 JS 数组句柄（本档 map/filter/
+ * slice 的结果就是 JS 数组）→ 经属性读写，与本档既有数组路径同形。*/
+typedef struct { JSContext *ctx; int isBlock; uint32_t dataOff; JSValue arr; } qz_av;
+
+static int64_t qz_av_get(qz_av *av, int32_t i)
+{
+    if (av->isBlock) {
+        int64_t el = 0;
+        memcpy(&el, (const void *)(uintptr_t)(av->dataOff + (uint32_t)i * 8u), 8);
+        return el;
+    }
+    JSValue v = JS_GetPropertyUint32(av->ctx, av->arr, (uint32_t)i);
+    int64_t b = qz_ret(av->ctx, v);
+    JS_FreeValue(av->ctx, v);
+    return b;
+}
+
+static void qz_av_set(qz_av *av, int32_t i, int64_t b)
+{
+    if (av->isBlock) {
+        memcpy((void *)(uintptr_t)(av->dataOff + (uint32_t)i * 8u), &b, 8);
+        return;
+    }
+    JS_SetPropertyUint32(av->ctx, av->arr, (uint32_t)i, qz_tojs(av->ctx, b));
+}
+
+/* 三路比较（-1/0/1）。*err=1 → ToString/ToNumber 抛了错，调用方中止并把错交给产物
+ * 的 __err 路径。comparator 自身内部的抛错由闭包体的 _emitErrCheck 负责（与本档
+ * map/filter 的回调路径同边界）。*/
+static int qz_sort_cmp(int64_t x, int64_t y, int64_t cb, int hasCb, int *err)
+{
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    int64_t undef = (int64_t)((uint64_t)0x7FF9 << 48);
+    if (!hasCb) {
+        JSValue vx = qz_tojs(ctx, x), vy = qz_tojs(ctx, y);
+        JSValue sx = JS_ToString(ctx, vx), sy = JS_ToString(ctx, vy);
+        JS_FreeValue(ctx, vx); JS_FreeValue(ctx, vy);
+        int bad = JS_IsException(sx) || JS_IsException(sy);     /* Symbol 元素 → TypeError */
+        int r = 0;
+        if (!bad) {
+            size_t lx = 0, ly = 0;
+            const uint16_t *px = JS_ToCStringLenUTF16(ctx, &lx, sx);
+            const uint16_t *py = JS_ToCStringLenUTF16(ctx, &ly, sy);
+            if (!px || !py) bad = 1;
+            else {
+                size_t mn = lx < ly ? lx : ly;
+                for (size_t i = 0; i < mn; i++)
+                    if (px[i] != py[i]) { r = px[i] < py[i] ? -1 : 1; break; }
+                if (!r) r = lx < ly ? -1 : (lx > ly ? 1 : 0);
+            }
+            if (px) JS_FreeCStringUTF16(ctx, px);
+            if (py) JS_FreeCStringUTF16(ctx, py);
+        }
+        if (!JS_IsException(sx)) JS_FreeValue(ctx, sx);
+        if (!JS_IsException(sy)) JS_FreeValue(ctx, sy);
+        if (bad) { *err = 1; return 0; }
+        return r;
+    }
+    /* 比较器按规范以 this=undefined 调用（第 3 实参也不给）。 */
+    int64_t rv = qz_guest_closure_call(cb, x, y, undef, undef, undef);
+    JSValue v = qz_tojs(ctx, rv);
+    double d = 0;
+    int rc = JS_ToFloat64(ctx, &d, v);
+    JS_FreeValue(ctx, v);
+    if (rc != 0) { *err = 1; return 0; }
+    if (d != d) return 0;                    /* 规范：NaN 视作 +0（相等，保序） */
+    return d > 0 ? 1 : (d < 0 ? -1 : 0);
+}
+
+/* 比较器是否可用（wasm 闭包 / 宿主函数）。不可调（null、数字、普通对象）时不接手，
+ * 交回内建路径 —— Array.prototype.sort 会抛 TypeError（规范），比静默排序正确。*/
+static int qz_sort_cb_ok(JSContext *ctx, int64_t cb)
+{
+    uint16_t t = (uint16_t)((uint64_t)cb >> 48);
+    if (t == 0x7FFF || t == 0x7FFD) return 1;
+    if (t == 0x7FF9) {
+        JSValue f = qz_tojs(ctx, cb);
+        int ok = JS_IsFunction(ctx, f);
+        JS_FreeValue(ctx, f);
+        return ok;
+    }
+    return 0;
+}
+
+/* 比较器错误文案里的值形态。V8 渲染时**不调**用户 toString（`{toString(){…}}` 得
+ * "[object Object]"），故这里也只取内建形态；对象在 V8 是引擎内部形（#<Object>），
+ * 不复刻 —— 两档的契约是 TypeError 种类 + 可捕获性，不是对象文本。 */
+static void qz_sort_cb_display(JSContext *ctx, int64_t cb, char *out, size_t osz)
+{
+    uint16_t t = (uint16_t)((uint64_t)cb >> 48);
+    snprintf(out, osz, "%s", "[object Object]");
+    if (t == 0x7FF9 && (uint32_t)((uint64_t)cb & 0xFFFFFFFFu) == 1u) { snprintf(out, osz, "null"); return; }
+    JSValue v = qz_tojs(ctx, cb);
+    int vt = JS_VALUE_GET_NORM_TAG(v);
+    if (vt == JS_TAG_SYMBOL) {
+        /* 无公开的 symbol→atom API（js_symbol_to_atom 是引擎内部），走规范自身的
+         * Symbol.prototype.description getter 取描述。 */
+        JSValue d = JS_GetPropertyStr(ctx, v, "description");
+        size_t l = 0;
+        const char *s = JS_IsUndefined(d) ? NULL : JS_ToCStringLen(ctx, &l, d);
+        if (s) { snprintf(out, osz, "Symbol(%.*s)", (int)l, s); JS_FreeCString(ctx, s); }
+        else snprintf(out, osz, "Symbol()");
+        JS_FreeValue(ctx, d);
+    } else if (vt == JS_TAG_STRING || vt == JS_TAG_INT || vt == JS_TAG_FLOAT64
+               || vt == JS_TAG_BOOL || vt == JS_TAG_BIG_INT) {
+        size_t l = 0;
+        const char *s = JS_ToCStringLen(ctx, &l, v);        /* 内建 toString，无用户代码 */
+        if (s) { snprintf(out, osz, "%.*s", (int)l, s); JS_FreeCString(ctx, s); }
+    }
+    JS_FreeValue(ctx, v);
+}
+
+/* 返回 QZ_NO_CALLBACK_OP 表示不接手（交回内建路径）。toSorted 为真时不改 recv。*/
+static int64_t qz_arr_sort_op(int64_t recv, int64_t cb, int toSorted)
+{
+    if (!g_current_rt) return QZ_NO_CALLBACK_OP;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return QZ_NO_CALLBACK_OP;
+    int64_t undef = (int64_t)((uint64_t)0x7FF9 << 48);
+
+    qz_av av; av.ctx = ctx; av.isBlock = 0; av.dataOff = 0; av.arr = JS_UNDEFINED;
+    av.isBlock = ((uint16_t)((uint64_t)recv >> 48)) == 0x7FFB;
+    int32_t n = 0;
+    if (av.isBlock) {
+        uint32_t aoff = (uint32_t)((uint64_t)recv & 0xFFFFFFFFu);
+        memcpy(&n, (const void *)(uintptr_t)aoff, 4);
+        memcpy(&av.dataOff, (const void *)(uintptr_t)(aoff + 8), 4);
+        if (n < 0) n = 0;
+    } else {
+        av.arr = qz_tojs(ctx, recv);
+        if (!JS_IsArray(av.arr)) { JS_FreeValue(ctx, av.arr); return QZ_NO_CALLBACK_OP; }
+        JSValue lv = JS_GetPropertyStr(ctx, av.arr, "length");
+        if (JS_ToInt32(ctx, &n, lv) != 0 || n < 0) n = 0;
+        JS_FreeValue(ctx, lv);
+    }
+    int hasCb = !qz_bits_is_empty(cb);
+    if (hasCb && !qz_sort_cb_ok(ctx, cb)) {
+        /* 规范：comparefn 非 undefined 且不可调 → TypeError。不能交回内建路径：
+         * method_call 的通用分支会吞掉 JS_Call 的异常（返回 0 = 静默错值）。 */
+        char disp[64];
+        qz_sort_cb_display(ctx, cb, disp, sizeof disp);
+        JS_FreeValue(ctx, av.arr);
+        qz_set_throw(ctx, JS_NewTypeError(ctx, "The comparison function must be either a function or undefined: %s", disp));
+        return undef;
+    }
+
+    int64_t *it = (int64_t *)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
+    int64_t *tmp = (int64_t *)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
+    if (!it || !tmp) {
+        free(it); free(tmp); JS_FreeValue(ctx, av.arr);
+        return QZ_NO_CALLBACK_OP;                       /* 分配失败：交回内建，不静默错值 */
+    }
+    int32_t m = 0;
+    for (int32_t i = 0; i < n; i++) {
+        int64_t el = qz_av_get(&av, i);
+        if (!qz_bits_is_empty(el)) it[m++] = el;
+    }
+    int err = 0;
+    for (int64_t width = 1; width < m && !err; width *= 2) {
+        for (int64_t left = 0; left + width < m && !err; left += 2 * width) {
+            int64_t mid = left + width, right = left + 2 * width;
+            if (right > m) right = m;
+            int64_t i = left, j = mid, k = left;
+            while (i < mid && j < right)
+                tmp[k++] = qz_sort_cmp(it[i], it[j], cb, hasCb, &err) <= 0 ? it[i++] : it[j++];
+            while (i < mid) tmp[k++] = it[i++];
+            while (j < right) tmp[k++] = it[j++];
+            for (int64_t t = left; t < right; t++) it[t] = tmp[t];
+        }
+    }
+    if (err) {
+        free(it); free(tmp); JS_FreeValue(ctx, av.arr);
+        JSValue ex = JS_GetException(ctx);
+        if (!JS_IsException(ex)) qz_set_throw(ctx, ex); else JS_FreeValue(ctx, ex);
+        return undef;
+    }
+    if (toSorted) {
+        JSValue out = JS_NewArray(ctx);
+        for (int32_t i = 0; i < m; i++) JS_SetPropertyUint32(ctx, out, (uint32_t)i, qz_tojs(ctx, it[i]));
+        for (int32_t i = m; i < n; i++) JS_SetPropertyUint32(ctx, out, (uint32_t)i, JS_UNDEFINED);
+        int64_t rr = qz_ret(ctx, out);
+        JS_FreeValue(ctx, out);
+        free(it); free(tmp);
+        return rr;
+    }
+    /* 原地：长度不变（cap ≥ len 恒成立），尾部按本档「空」表示写 undefined。
+     * V8 尾部留洞、本档数组载体无洞表示（与 map/filter 结果同形）——读回都是 undefined。*/
+    for (int32_t i = 0; i < n; i++) qz_av_set(&av, i, i < m ? it[i] : undef);
+    free(it); free(tmp);
+    JS_FreeValue(ctx, av.arr);
+    return recv;
 }
 
 __attribute__((export_name("closure_call_spread")))

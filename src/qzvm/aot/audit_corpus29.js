@@ -44,11 +44,43 @@ export function f(): any {
   out.push(data.slice().sort((x: any, y: any) => x.v - y.v).map((x: any) => x.k).join(","));
   out.push([3, 1, 4, 1, 5, 9, 2, 6].sort((a: any, b: any) => a - b).join(","));
   out.push(["b", "a", "c"].sort().join(","), [10, 9, 8].sort().join(","), [10, 9, 8].sort((a: any, b: any) => a - b).join(","));
-  out.push([1, 2, 3].sort(() => 0).join(","), [2, 1].sort(() => 1).join(","), [2, 1].sort(() => -1).join(","));
+  out.push([1, 2, 3].sort(() => 0).join(","));
   out.push([5, 3, 8, 1].sort((a: any, b: any) => b - a).join(","));
   out.push(["aa", "b", "ccc"].sort((x: any, y: any) => x.length - y.length).join("|"));
   return out.join("__");
-}`, envdiff: "矛盾 comparator（恒 1/恒 -1）下排序结果实现相关（quickjs-ng vs V8 TimSort）" },
+}` },
+  // 规范**未定**（非严格弱序 comparator → SortCompare 不传递，结果不唯一）：两档由自实现的
+  // 确定性归并给出唯一值（平手取左），钉我们自己的值，不要求等于 V8 TimSort。
+  { name: "sort-contradictory-cmp", fn: "f",
+    impldiff: "矛盾 comparator（恒 1 / 恒 -1）下 ES 不规定结果，V8 TimSort 与本实现归并可不同；两档必须同值",
+    want: "1,2__2,1__3,4,1,2__2,1,4,3", ts: `export function f(): any {
+  const out: any = [];
+  out.push([2, 1].sort(() => 1).join(","));
+  out.push([2, 1].sort(() => -1).join(","));
+  const a: any = new Array(4); a[0] = 2; a[1] = 1; a[2] = 4; a[3] = 3;
+  out.push(a.sort(() => 1).join(","));
+  const b: any = new Array(4); b[0] = 2; b[1] = 1; b[2] = 4; b[3] = 3;
+  out.push(b.sort(() => -1).join(","));
+  return out.join("__");
+}` },
+  // 比较调用次数：ES 不规定（TimSort 有 run 检测，归并没有）→ 钉本实现的确定序列长度
+  { name: "sort-cmp-call-count", fn: "f",
+    impldiff: "比较次数由算法决定，规范未定（V8 少几次）；结果序本身仍与 V8 一致",
+    want: "1,2,3,5,7,8,9|14", ts: `export function f(): any {
+  let n = 0;
+  const a = [5, 3, 8, 1, 9, 2, 7];
+  a.sort((x: any, y: any) => { n = n + 1; return x - y; });
+  return a.join(",") + "|" + n;
+}` },
+  { name: "sort-undef-tail", fn: "f", ts: `export function f(): any {
+  const out: any = [];
+  const a = [3, undefined, 1]; a.sort();
+  out.push(a.join(","), a.length, 1 in a, a[2] === undefined);
+  const b = [2, undefined, undefined, 1];
+  const c = b.toSorted();
+  out.push(b.join(","), b.length, c.join(","), c.length, 2 in c, 3 in c);
+  return out.join("/");
+}` },
   { name: "float-accumulation", fn: "f", ts: `export function f(): any {
   const out: any = [];
   let sum = 0; for (let i = 0; i < 10; i++) sum += 0.1;

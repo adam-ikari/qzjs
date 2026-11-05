@@ -795,6 +795,75 @@ function makeQzvm(strings, opts) {
   // 而 method_call 的导入签名是 (result i64) → 「Cannot convert undefined to a BigInt」。
   // WAMR AOT 容忍该错配，故只有 pure-wasm 路径崩。此处统一归一为 TAG（= undefined 的句柄表示）。
   const callM = (fn, args) => { const r = fn(...args); return r === undefined ? TAG : r; };
+  // sort/toSorted 自实现确定性稳定归并，**不委托宿主 Array.prototype.sort**：引擎排序
+  // 实现相关（矛盾 comparator 下 V8 与 quickjs-ng 分序），而「同一段 TS 两档同序」是硬
+  // 要求。归并的趟数、区间划分、平手取左固定 → 比较调用序列由长度唯一确定，与 C 档
+  // guest_entry.c 的 qz_arr_sort_op 同算法（改一边必须同步另一边）。
+  // 语义对齐 ES：undefined（含洞）不参与排序、落到尾部；无 comparator → ToString 后按
+  // UTF-16 码元序；comparator 结果 ToNumber，NaN 视作 +0；比较器以 this=undefined 调用。
+  const sortRunsInto = (items, cmp) => {          // 与 C 档同形的自底向上稳定归并
+    const m = items.length;
+    const tmp = new Array(m);
+    for (let width = 1; width < m; width *= 2) {
+      for (let left = 0; left + width < m; left += 2 * width) {
+        const mid = left + width, right = Math.min(left + 2 * width, m);
+        let i = left, j = mid, k = left;
+        while (i < mid && j < right) tmp[k++] = cmp(items[i], items[j]) <= 0 ? items[i++] : items[j++];
+        while (i < mid) tmp[k++] = items[i++];
+        while (j < right) tmp[k++] = items[j++];
+        for (let t = left; t < right; t++) items[t] = tmp[t];
+      }
+    }
+    return items;
+  };
+  const sortCmp = (cb, hasCb) => hasCb
+    ? (x, y) => { const n = Number(toJS(closureCall(cb, x, y, TAG, TAG, undefined, TAG)));
+                  return Number.isNaN(n) ? 0 : (n > 0 ? 1 : (n < 0 ? -1 : 0)); }
+    : (x, y) => { const sx = String(toJS(x)), sy = String(toJS(y));   // Symbol 元素 → TypeError（规范）
+                  return sx < sy ? -1 : (sx > sy ? 1 : 0); };
+  // 比较器错误文案里的值形态：原始值按 V8 形态（V8 渲染时不调用户 toString），
+  // symbol 取 description，其余（对象/函数）一律 "[object Object]"。
+  const cmpDisplay = (v) => {
+    if (typeof v === "string") return v;
+    if (v === null) return "null";
+    if (typeof v === "symbol") return v.description === undefined ? "Symbol()" : "Symbol(" + v.description + ")";
+    if (typeof v === "object") return "[object Object]";
+    return String(v);                                       // number / boolean / bigint
+  };
+  // 数组排序（recv=0x7FFB 内存块）：全程搬 tagged 位 → 元素身份（POJO/实例句柄）不变。
+  // copy=true 返回新数组（toSorted），否则原地写回。两种形态长度都是 n，尾部写 **present
+  // undefined（TAG）而不是洞（HOLE）**：规范 SortIndexedProperties 把 undefined/洞计到
+  // 尾部后用 CreateDataProperty 逐个赋 undefined → 排完 `k in a` 为 true（V8 同形）。
+  // 写 HOLE 会让尾部索引消失（`in`/for-in/Object.keys 全变），故 C 档 qz_arr_sort_op
+  // 与本档都必须用 TAG。
+  const sortArrBits = (recv, cb, copy) => {
+    const off = Number(BigInt.asUintN(64, recv) & MASK32);
+    const dv = new DataView(mem.buffer);
+    const len = Math.max(0, dv.getInt32(off, true));
+    const dataOff = dv.getInt32(off + 8, true);
+    const items = [];
+    for (let i = 0; i < len; i++) {
+      const u = BigInt.asUintN(64, dv.getBigInt64(dataOff + i * 8, true));
+      if (u === TAG || u === HOLE) continue;                     // undefined/洞不参与
+      items.push(BigInt.asIntN(64, u));
+    }
+    const cv = toJS(cb);
+    if (cv !== undefined && typeof cv !== "function") {
+      // 规范：comparefn 非 undefined 且不可调 → TypeError（检查先于任何重排）。
+      // 对象文本 V8 用引擎内部形（#<Object>），不复刻；C 档同规则（qz_sort_cb_display）。
+      throwValue(new TypeError("The comparison function must be either a function or undefined: " + cmpDisplay(cv)));
+      return recv;
+    }
+    sortRunsInto(items, sortCmp(cb, cv !== undefined));
+    const m = items.length;
+    if (copy) {
+      if (m < len) { items.length = len; items.fill(TAG, m); }   // 尾部补 present-undefined（长度不变）
+      return arrWriteback(items);
+    }
+    for (let i = 0; i < len; i++)
+      dv.setBigInt64(dataOff + i * 8, i < m ? items[i] : TAG, true);
+    return recv;
+  };
   const doArrMethod = (recv, mid, a0, a1, a2, a3, ex) => {   // ex = 溢出实参（ovf[1..]，ovf[0] 已在 a3）
     const extra = (first) => [a0, a1, a2, a3].slice(first).filter(givenSlot).map(toJS);
     const name = strings[mid];
@@ -829,7 +898,7 @@ function makeQzvm(strings, opts) {
       case "findIndex":   r = arr().findIndex((v, i) => !!cbv(a0, v, i)); break;
       case "some":        r = arr().some((v, i) => !!cbv(a0, v, i)); break;
       case "every":       r = arr().every((v, i) => !!cbv(a0, v, i)); break;
-      case "sort":        r = arrSetInPlace(recv, toJS(a0) !== undefined ? arr().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv))) : arr().sort()); return recv;   // 无比较器 → JS 默认字典序
+      case "sort":        return sortArrBits(recv, a0, false);   // 稳定归并自实现（勿交宿主 sort，见 sortArrBits）
       case "splice":      { const a = arr(); const del = a.splice(toJS(a0), toJS(a1) === undefined ? a.length : toJS(a1)); arrSetInPlace(recv, a); r = del; break; }
       case "flat":         r = arr().flat(toJS(a0) === undefined ? 1 : toJS(a0)); break;
       case "flatMap":      r = arr().flatMap((v, i) => cbv(a0, v, i)); break;   // cbv 已返回 JS 值，勿再 toJS
@@ -851,7 +920,7 @@ function makeQzvm(strings, opts) {
       case "values":       return liveIter(recv, "values");
       case "copyWithin":   { const a3 = arr(); a3.copyWithin(toJS(a0), a1 === undefined ? 0 : toJS(a1), a2 === undefined ? a3.length : toJS(a2)); arrSetInPlace(recv, a3); return recv; }
       case "toString":     r = arr().map(x => x === undefined || x === null ? "" : String(x)).join(","); break;
-      case "toSorted":     r = givenSlot(a0) ? arr().slice().sort((x, y) => toJS(closureCall(a0, bitsOf(x), bitsOf(y), recv))) : arr().slice().sort(); break;
+      case "toSorted":     return sortArrBits(recv, a0, true);   // 同上；原数组不动
       case "fill":        { const a = arr(); const st = givenSlot(a1) ? toJS(a1) : 0, en = givenSlot(a2) ? toJS(a2) : a.length; a.fill(toJS(a0), st, en); arrSetInPlace(recv, a); return recv; }
       default: throw new Error("method_call: 数组无方法 " + name);
     }

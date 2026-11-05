@@ -46,6 +46,25 @@ const LOADS = [
     ['strWorkEq', [5], '001234'],
     ['strMethods', [], 'Hello|HELLO, WORLD|7|e|Hello, qz|ababab'],
   ]],
+  // 排序：两档各自行同一确定性稳定归并（不委托宿主引擎），
+  // 因此期望值就是 V8 语义值，且档间必须逐位相同。
+  ['sortwork.ts', [
+    ['sortDefault', [], '1,10,100,2,9'],
+    ['sortStrings', [], 'Apple,apple,banana,cherry'],
+    ['sortNumCmp', [], '11345'],
+    ['sortStableZero', [], '73918'],
+    ['sortStableKey', [], '11,12,21,22,23'],
+    ['sortCmpNaN', [], '213'],
+    ['sortCopy', [], '123|312'],
+    ['sortCopyCmp', [], '321'],
+    ['sortBadCmp', [], "The comparison function must be either a function or undefined: 123"],
+    ['sortMany', [], 36],
+    // 规范未定的两支：期望值是**本实现钉住的**确定性值（不等于 V8），档间必须相同
+    ['sortContradictory', [], '1,2__2,1'],
+    ['sortHostCarrierContradictory', [], '3,4,1,2__2,1,4,3'],
+    ['sortCmpCount', [], '1,2,3,5,7,8,9|14'],
+    ['sortUndefTail', [], '1,3,/3/true/true/2,,,1/4/1,2,,/4/true/true'],
+  ]],
 ];
 
 const { compileTS } = await import('../../src/qzvm/aot/emitter.js');

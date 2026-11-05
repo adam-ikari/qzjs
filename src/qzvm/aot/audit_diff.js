@@ -65,6 +65,15 @@ function jsFn(src, fn) {
       rows.push({ name: c.name || c.fn, ok: !!aotErr, got: aotErr || j(got), exp: "unsupported: " + c.unsupported });
       continue;
     }
+    /* 规范未定行为登记（corpus 条目 `impldiff` + `want`）：ES 不规定矛盾 comparator（非严格
+     * 弱序）下的排序结果、也不规定比较调用次数。两档由自实现的确定性归并给出唯一确定的值，
+     * 与 oracle(V8) 可以不同 —— 这里钉住**我们自己的**值：换算法而静默改序会被这条抓住，
+     * 而 envdiff 式「只要不同就算过」掩盖回归。*/
+    if (c.impldiff) {
+      rows.push({ name: c.name || c.fn, ok: !aotErr && j(got) === j(c.want),
+                  got: aotErr || j(got), exp: "impldiff(钉 " + j(c.want) + "): " + c.impldiff });
+      continue;
+    }
     const same = (aotErr || jsErr)
       ? (!!aotErr === !!jsErr)
       : (typeof got === "number" && typeof exp === "number")
