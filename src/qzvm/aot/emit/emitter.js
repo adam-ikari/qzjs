@@ -161,8 +161,9 @@ class Emitter {
         const name = d.name;
         if (ts.isIdentifier(name)) {
             if (d.initializer) {
-                if (ts.isClassExpression(d.initializer) && this.clsExprMap && this.clsExprMap.has(d.initializer)) {
-                    this._emitUndefined(); this._emitVarStore(name.text, this.scratchB); this.m.drop(); return;   // const C = class {…}：C 仅作 new/instanceof 的类名
+                if (ts.isClassExpression(d.initializer) && this.clsExprMap && this.clsExprMap.has(d.initializer)
+                    && !(this.nestedAliasClsExpr && this.nestedAliasClsExpr.has(d.initializer))) {
+                    this._emitUndefined(); this._emitVarStore(name.text, this.scratchB); this.m.drop(); return;   // const C = class {…}（模块顶层）：C 仅作 new/instanceof 的类名
                 }
                 if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
                     this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text);
@@ -1991,19 +1992,20 @@ class Emitter {
                 for (const f of staticFields) if (f.init) addRefs(staticRefsC, this._synthCaptureArrow(f.init));
                 for (const blk of staticBlocks) addRefs(staticRefsC, this._synthCaptureArrow(blk));
             }
-            /* 提升后的类读不到定义点外层绑定：函数/块内 class 声明、以及 `const C = class` 形式的
-             * 类表达式（该形式只把 C 当类名别名、类值不物化），若其实现体引用了非模块级局部名，
-             * 运行时没有 env 槽 → 此前静默 undefined，改为 loud。 */
+            /* 提升后的类读不到定义点外层绑定：函数/块内 class 声明（整树提升到模块级、定义点
+             * 不建值）若实现体引用了非模块级局部名，运行时没有 env 槽 → 此前静默 undefined，改为 loud。
+             * `const K = class` 别名形式只在**模块顶层**仍是纯类名别名（类值不物化）；非顶层的
+             * 别名已改在创建点物化类值（合成类名错开 → K 是普通类值局部 → 走动态 env 路径），
+             * 故不再拒绝。 */
             if (this.declaredNames) {
-                const isAlias = !!(this.aliasClsExprDecls && this.aliasClsExprDecls.has(st));
-                const lostDecl = isAlias || !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
+                const isTopLevelAlias = !!(this.aliasClsExprDecls && this.aliasClsExprDecls.has(st))
+                    && !(this.nestedAliasClsDecls && this.nestedAliasClsDecls.has(st));
+                const lostDecl = isTopLevelAlias || !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
                 if (lostDecl) {
                     const lost = [];
                     for (const nm2 of capSetC) if (this.declaredNames.has(nm2)) lost.push(nm2);
                     if (lost.length) {
-                        const form = isAlias
-                            ? "const " + st.name.text + " = class 形式（只作类名别名，类值不物化）"
-                            : "函数/块内 class 声明（类被提升到模块级）";
+                        const form = "函数/块内 class 声明（类被提升到模块级）";
                         throw new Error("[tagged] " + form + "捕获了外层局部变量（" + lost.join(", ") + "），方法/构造器/字段初值运行时读不到该绑定；请把变量提升到模块级，或改用工厂函数返回类表达式");
                     }
                 }
@@ -2030,7 +2032,7 @@ class Emitter {
                     throw new Error("[tagged] " + form + "的静态字段/静态块暂不支持（静态表按类名共享、只初始化一次，多次求值会串味/读不到初值）：" + cname + "；请改用模块顶层类声明，或把静态状态放到模块级变量/实例字段");
                 }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, parent: parentName, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；

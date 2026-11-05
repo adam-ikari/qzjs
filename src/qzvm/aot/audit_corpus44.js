@@ -208,9 +208,9 @@ export function run() { const c = new C(); return (c as any).p; }`, args: [], un
   { name: "static-getter-factory-capture-alias", fn: "run", ts: `
 function mk(n: number) { const K = class { static get g() { return n; } }; return K; }
 const C = mk(9);
-export function run() { return C.g; }`, args: [], unsupported: "const K = class 别名形式（类值不物化），捕获工厂局部 → 编译期 loud" },
-  { name: "cls-expr-method-capture-modlocal", fn: "f", ts: `export function f(): any { let lab = "L"; const K: any = class { m(): any { return lab; } }; return new K().m(); }`, args: [], unsupported: "const K = class 别名形式（类值不物化），方法体捕获模块顶层局部 → 编译期 loud" },
-  { name: "cls-expr-getter-capture-modlocal", fn: "g", ts: `export function g(): any { let lab = "G"; const K: any = class { get label(): any { return lab; } }; return new K().label; }`, args: [], unsupported: "const K = class 别名形式（类值不物化），访问器捕获模块顶层局部 → 编译期 loud" },
+export function run() { return C.g; }`, args: [] },
+  { name: "cls-expr-method-capture-modlocal", fn: "f", ts: `export function f(): any { let lab = "L"; const K: any = class { m(): any { return lab; } }; return new K().m(); }`, args: [] },
+  { name: "cls-expr-getter-capture-modlocal", fn: "g", ts: `export function g(): any { let lab = "G"; const K: any = class { get label(): any { return lab; } }; return new K().label; }`, args: [] },
   // 内建宿主承载（两档一致）：构造器名连普通调用也构造；实例为宿主对象；
   // instanceof 走 Symbol.hasInstance + 原型链（旧 C 实现把 symbol 当函数调 → 恒 false）。
   { name: "host-map-ops", fn: "run", ts: `

@@ -690,7 +690,10 @@ function makeQzvm(strings, opts) {
     const ctor = function (...as3) { return buildInstance(clsId, as3); };
     Object.defineProperty(ctor, "__qzClsId", { value: clsId, configurable: true });
     Object.setPrototypeOf(ctor, pc || bp || Function.prototype);
-    Object.defineProperty(ctor, "name", { value: meta.name || "C", configurable: true });
+    // 静态表按**编译期类名**（meta.name）为键；JS 可见 `.name` 可能让位给名推断的显示名
+    // （合成类表达式改名，见 clsJsNames）→ 两者分开存，否则静态字段读写会查错桶。
+    Object.defineProperty(ctor, "__qzStaticsName", { value: meta.name, configurable: true });
+    Object.defineProperty(ctor, "name", { value: meta.jsName === undefined ? (meta.name || "C") : meta.jsName, configurable: true });
     const proto = Object.create(pc ? pc.prototype : (bp && bp.prototype ? bp.prototype : Object.prototype));
     Object.defineProperty(proto, "constructor", { value: ctor, enumerable: false, writable: true, configurable: true });
     ctor.prototype = proto;
@@ -2684,7 +2687,7 @@ function makeQzvm(strings, opts) {
     const key = strings[id];
     let cur = handles[idxOf(selfH)];
     while (cur && typeof cur === "function") {
-      const nm = String(cur.name || "");
+      const nm = String(cur.__qzStaticsName || "");   // 静态表键 = 编译期类名（ctor.name 是 JS 显示名，可能被合成改名顶替）
       // statics 以类名文本为键；直接按名查（不再依赖名字是否已登记进 strings，
       // 否则 static_set_dyn 新建的派生类槽位会因 cid<0 读不到）。
       const o = nm ? statics.get(nm) : undefined;
@@ -2698,7 +2701,7 @@ function makeQzvm(strings, opts) {
   api.static_set_dyn = (selfH, id, v) => {
     const cur = handles[idxOf(selfH)];
     if (typeof cur !== "function") return;
-    const nm = String(cur.name || "");
+    const nm = String(cur.__qzStaticsName || "");   // 与 static_get_dyn 同一把键：编译期类名
     if (!nm) return;
     let o = statics.get(nm);
     if (!o) { o = {}; statics.set(nm, o); }

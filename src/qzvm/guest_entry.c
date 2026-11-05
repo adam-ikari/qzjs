@@ -783,6 +783,8 @@ static int32_t qz_clsvalue_of(int64_t v);
 static void qz_clsval_loud(JSContext *ctx, const char *what);
 /* 类值的属性删除 = 静态属性删除（定义见 statics 节）。*/
 static void qz_static_delete(JSContext *ctx, int32_t clsId, int32_t nameStrId);
+/* 类值句柄构造（定义见 M6b 类元数据节）：实例 .constructor 要用。*/
+int64_t qz_guest_class_value(int32_t clsId);
 
 /* 把 JSValue 登记为**宿主对象**句柄（0x7FFD|idx）。与 qz_ret 的区别只在 tag：
  * emitter 对 0x7FFD 走 prop_get/prop_set（宿主属性），对 0x7FF9 走 POJO 内存
@@ -2062,6 +2064,16 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
             return (int64_t)((uint64_t)0x7FF9 << 48);
         }
         int32_t clsId; memcpy(&clsId, (const unsigned char *)(uintptr_t)(uint32_t)(uint64_t)recv, 4);
+        /* 实例 .constructor → 自身类值。物化副本的 constructor 是 Object，动态类的
+         * `o.constructor === C` 因此静默 false → 必须直接回 class_value(内存[0])。 */
+        if (qz_clsvalue_of(recv) < 0) {
+            size_t cnlen = 0;
+            const char *cnn = qz_str_by_id(keyId, &cnlen);
+            if (cnn && cnlen == 11 && !memcmp(cnn, "constructor", 11)) {
+                JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+                return qz_guest_class_value(clsId);
+            }
+        }
         int32_t found = 0;
         int32_t slot = qz_clsmeta_accessor_chain(clsId, keyId, 0, &found);
         if (found) {

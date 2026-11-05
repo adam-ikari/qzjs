@@ -51,7 +51,7 @@ export function run() { return mk(7); }`, args: [], unsupported: "函数内 clas
   { name: "nested-class-field-captures-outer-local", fn: "run", ts: `function mk(n: number) { class K { x: any = n; } return new K().x; }
 export function run() { return mk(7); }`, args: [], unsupported: "函数内 class 字段初值捕获外层局部（提升后无 env 槽）" },
   { name: "alias-class-captures-outer-local", fn: "run", ts: `function mk(n: number) { const C = class { m() { return n; } }; return new C().m(); }
-export function run() { return mk(7); }`, args: [], unsupported: "const C = class 只作物化别名，类值不携带创建点 env" },
+export function run() { return mk(7); }`, args: [] },
   { name: "factory-static-init-captures-outer", fn: "run", ts: `function mk(n: number) { return class { static x = n; }; }
 const C = mk(7);
 export function run() { return C.x; }`, args: [], unsupported: "类表达式静态初始化引用工厂局部（静态按类名共享，创建点 env 不可见）" },

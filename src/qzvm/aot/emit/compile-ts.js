@@ -89,6 +89,17 @@ function compileTS(input, outWasm, opts = {}) {
     const nestedClsDecls = new WeakSet();      // 非模块顶层的 class 声明：提升后读不到外层局部 → collectClasses 校验
     const aliasClsExprDecls = new WeakSet();   // `const C = class {…}` 初值位置的类表达式：C 只作类名别名（类值不物化）
     const topAliasClsExprDecls = new WeakSet();   // 其中的**模块顶层**形式：只求值一次、类名稳定 → 静态字段可支持
+    /* 非模块顶层的别名形式（`function f(){ const K = class {…} }`）：类被提升、别名又是类名
+     * → 一切按名解析（new K / K.m / instanceof K）都落到静态类，捕获读不到定义点局部。
+     * 现把它的合成类名强制错开成 `__clsExpr_N`（不占绑定名）、不进 classAlias，于是 `K`
+     * 就是一个持有类值的普通局部，逐处退到既有的动态类值路径（class_expr_value 克隆 +
+     * 按 clsId 查 classMeta/g_statics，与工厂返回类表达式同一条路）。*/
+    const nestedAliasClsExpr = new WeakSet();  // 类表达式节点：非顶层别名形式（值在创建点物化）
+    const nestedAliasClsDecls = new WeakSet(); // 其合成 ClassDeclaration
+    /* 合成类名（表键、静态表键）与 JS 可见 `.name` 分离：JS 名推断取类表达式自有名，
+     * 其次最近绑定名（`const K = class{}` → "K"），都没有 → ""。名字被占用/需要错开时
+     * 表键让位给 `__clsExpr_N`，显示名仍按 JS 记在这里。 */
+    const clsJsNames = new Map();              // 合成类名 → JS 可见 .name
     const declaredNames = new Set();           // 全部文件内声明过的名字（判定「外层绑定」vs「宿主全局」）
     const noteDeclared = (pat) => {
         if (!pat) return;
@@ -159,16 +170,20 @@ function compileTS(input, outWasm, opts = {}) {
             }
             if (ts.isEnumDeclaration(n)) enumStmts.push(n);
             if (ts.isClassExpression(n) && !clsExprMap.has(n)) {   // 类表达式：合成类名（用于 new / instanceof）
-                let synth = n.name ? n.name.text : (bind || null);   // JS 名推断：`const C = class {}` → C.name === "C"
-                if (!synth || clsStmts.some(d2 => d2.name && d2.name.text === synth) || fns.some(f2 => f2.name.text === synth)) {
-                    synth = "__clsExpr_" + (++clsExprSeq);   // 无绑定名/重名 → 合成名
+                const nestedAlias = aliasInit && !aliasTop;   // 非顶层别名形式 → 类名让位给绑定名以外的合成名
+                const jsnm = n.name ? n.name.text : (bind || null);   // JS 名推断：`const C = class {}` → C.name === "C"
+                let synth = jsnm;
+                if (nestedAlias || !synth || clsStmts.some(d2 => d2.name && d2.name.text === synth) || fns.some(f2 => f2.name.text === synth)) {
+                    synth = "__clsExpr_" + (++clsExprSeq);   // 无绑定名/重名/非顶层别名 → 合成名
                 }
+                if (synth !== jsnm) clsJsNames.set(synth, jsnm || "");   // 表键与显示名分叉
                 clsExprMap.set(n, synth);
                 const decl = ts.factory.createClassDeclaration(n.modifiers, ts.factory.createIdentifier(synth), n.typeParameters, n.heritageClauses, n.members);
                 decl.pos = n.pos; decl.end = n.end;
                 clsExprSynthDecls.add(decl);
                 if (aliasInit) aliasClsExprDecls.add(decl);
                 if (aliasInit && aliasTop) topAliasClsExprDecls.add(decl);
+                if (nestedAlias) { nestedAliasClsExpr.add(n); nestedAliasClsDecls.add(decl); }
                 clsStmts.push(decl);
             }
             let childBind = bind;
@@ -388,7 +403,8 @@ function compileTS(input, outWasm, opts = {}) {
             if ((ts.isVariableDeclaration(n) || ts.isBindingElement(n) || ts.isPropertyAssignment(n)) && n.initializer && ts.isClassExpression(n.initializer)
                 && clsExprMap.has(n.initializer)) {
                 const nm = (n.name && ts.isIdentifier(n.name)) ? n.name.text : null;
-                if (nm) classAlias.set(nm, clsExprMap.get(n.initializer));
+                // 非顶层别名形式不进 classAlias：K 是持有类值的局部，按名解析必须失败才能退动态路径
+                if (nm && !nestedAliasClsExpr.has(n.initializer)) classAlias.set(nm, clsExprMap.get(n.initializer));
             }
             ts.forEachChild(n, walkCE);
         };
@@ -953,6 +969,9 @@ function compileTS(input, outWasm, opts = {}) {
         em.nestedClsDecls = nestedClsDecls;       // 函数/块内 class 声明（提升后外层绑定不可见）
         em.aliasClsExprDecls = aliasClsExprDecls; // `const C = class {…}` 初值位置（类值不物化）
         em.topAliasClsExprDecls = topAliasClsExprDecls;   // 其中模块顶层形式（静态字段支持的稳定类名）
+        em.nestedAliasClsExpr = nestedAliasClsExpr;       // 非顶层别名形式：类表达式节点（声明处须物化类值）
+        em.nestedAliasClsDecls = nestedAliasClsDecls;     // 其合成 ClassDeclaration（跳过提升捕获检查）
+        em.clsJsNames = clsJsNames;                       // 合成类名 → JS 可见 .name（表键与显示名分离）
         em.declaredNames = declaredNames;         // 全程序声明名（外层绑定 vs 宿主全局）
         em.usesKeyOrder = usesKeyOrder;
         em.usesDynAcc = usesDynAcc;
@@ -1197,7 +1216,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
         const ctorSlot = em._inModuleLink ? mthToSlot(ctorName(cname)) : undefined;
-        return { id: c.id, name: cname, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null,
+        return { id: c.id, name: cname, jsName: c.jsName, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null,
                  methods, getters, setters, staticMethods, staticGetters, staticSetters, ctorSlot,
                  ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };
     });
