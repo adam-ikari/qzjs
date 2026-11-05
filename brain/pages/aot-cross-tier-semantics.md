@@ -4,7 +4,7 @@ title: "AOT 跨档语义一致性：闭包/数组/动态类的两档对齐"
 category: decision
 status: active
 created: "2026-10-19T18:41:21"
-updated: "2026-11-04T10:27:49"
+updated: "2026-11-06T00:19:44"
 ---
 
 <!-- compiled_truth -->
@@ -12,16 +12,18 @@ updated: "2026-11-04T10:27:49"
 
 AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须**语义等价**，差异只允许在「实现载体」。判据是 `audit_corpus*.js` 的 wasm-vs-js 输出对比：**任何 diff 都是缺陷**，除非是 loud 报错（显式抛错）。静默错值不可接受。
 
-## 本轮修的静默错值类别
+## 已修的静默错值类别
 
 1. **闭包值（0x7FFF）不是 JS 对象** → 属性读写 / `new` / `instanceof` 全失效。C 侧曾让 `qz_tojs(0x7FFF)` 返回 undefined，`ctor.prototype.m = f` 于是静默写坏线性内存。
 2. **数组句柄（0x7FFB）在 C 侧 `qz_tojs` 无映射** → `a.join()` / `indexOf` 收到 undefined 实参，内建静默返回 +0。
+3. **arena 块偏移回收后，缓存的 JS 数组镜像变脏** → C 侧 `qz_tojs(0x7FFB)` 直接返回旧镜像，读回长度 0、`join` 得 ""（实测）。镜像缓存必须命中即重灌。
 
 ## 硬约束（推导得出，非风格选择）
 
 - **C 侧不能把 wasm 闭包物化成 JS 函数**。QuickJS 在 wasm 内运行，JS 回调再进 wasm 蹦床会 "null function or function signature mismatch"（栈/表上下文破坏）。闭包调用统一走 `closure_call` 的 `call_indirect`。
 - 数组高阶方法（map/filter/reduce/find/some/every/forEach/findIndex）在 C 侧**必须自己遍历**，回调经 `closure_call` 派发，实参与结果全程 tagged。交给 JS 内建 = 静默错值。
-- 数组原地变异（reverse/sort/splice/push/pop/shift/unshift/fill/copyWithin）改的是 JS 侧副本 → **必须写回 wasm 内存**。独立档靠 `arrOf` WeakMap 保持别名；C 侧靠「句柄 → JS 数组」缓存 + 写回。
+- **`sort`/`toSorted` 两档都自实现同一确定性稳定归并**，不委托宿主引擎——委托时矛盾 comparator 的结果与比较次数都实现相关，跨档一致无从检验；规范已定部分（默认排序、稳定性、undefined 落尾、TypeError 文案）仍逐条对 V8 oracle。详见 [[aot-sort-deterministic-merge]]。
+- 数组原地变异（reverse/sort/splice/push/pop/shift/unshift/fill/copyWithin）改的是 JS 侧副本 → **必须写回 wasm 内存**。独立档靠 `arrOf` WeakMap 保持别名；C 侧靠「arena 块偏移 → JS 数组」缓存 + 写回，且**命中也必须按块重灌**（`qz_arr_fill`）：块地址会被回收复用，同址缓存项可能是更早那个数组的镜像，直接返回即静默错值。重灌既保住别名身份，又让内容跟上块。
 - 声明式类的动态 extends 用 `class_value_dyn` **就地**改写 `classMeta.parent`：紧随其后的 `super()` 按 clsId 查父构造器，返回克隆 id 会查不到。工厂式类表达式（`class_expr_value`）相反——每次求值必须克隆出新 clsId，否则 `new A() instanceof B` 误判。
 - emitter 给部分方法名加 in-module 特化后缀（`"reduce$i"`）。C 侧 strcmp 前必须按 `$` 截断，否则整段回调路径被跳过。
 - **静态成员捕获的 env 必须用 `class_env_get_static` 读取**：静态方法/getter/setter 的 self 是**类值**（宿主档 ctor 句柄带 `__qzClsId`；C 档 `0x7FFE|clsId`，低 32 位即 clsId、无实例内存），不能复用按实例内存首 4 字节取 clsId 的 `class_env_get`。宿主档把静态访问器装到类对象上（`const C = mk(); C.g` / `C.g = v` 可动态读写）；C 档动态类值成员访问未实现 → `qz_dyncls_loud` 统一抛 TypeError（只拦 `g_dyncls[]` 里的克隆 id，静态类值的静态发射路径不受影响）。
@@ -30,13 +32,11 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
 - **静态方法/访问器内 `this` = 运行期接收者类**：`B.getX()` 调继承自 A 的静态方法时 `this === B`。读 `this.x` 沿运行期父链（C 档 classMeta parent 链 / 宿主 ctor `__proto__` 链）；写 `this.x` 写**接收者自有**静态（`static_set_dyn`），不是定义类；`this.x++/--`、复合赋值同理；私有静态 `this.#n` 的键 = `#定义类#名`（词法归属，不走接收者类）。惰性静态守卫必须覆盖接收者的整条父链（`_emitStaticsChainGuard`），只初始化接收者自身会让父链字段读到 undefined。
 - **void 方法没有 wasm 返回值**：直调点与类方法蹦床都按**登记签名**判定（`wasm-encoder.funcResults`），不得按名字猜（`$ctor/$set` 规则漏掉 `: void` 静态/实例方法 → 调用点 `local.set` 栈失衡、产物校验失败）。C 侧蹦床 ABI 恒为 `(self,a0..a3) → i64`，被调 void 时补 undefined 占位。
 - **类表达式/嵌套 class 声明的静态字段/静态块**：静态表按类名共享且只初始化一次，无法重放「每次求值重建静态状态」的 JS 语义 → 仅模块顶层 `const/let C = class {…}`（求值一次、类名稳定）受支持，其余编译期 loud 并给出改法。
-
-
 - **未声明标识符读一律经 `qz.ref_get`（strId）运行期查全局**：globalThis 有 → 宿主句柄；无 → ReferenceError（loud、可 catch）。发射期静默 undefined 兜底已废除（违「静默错值 > loud」裁决）；唯一例外是 `typeof x` 规范特例——未声明标识符仍编译期常量 "undefined"。该原语三处必须同步：consts.js QZ 签名表 + 两档宿主面（qzvm.js `ref_get` / guest_entry.c `qz_guest_ref_get`），且每个调用点后紧跟 `_emitErrCheck`。
 - **方法/构造器形参默认值与解构形参的 prologue 只在 `_mEnter` 内发射一次**，位置在 capMap/env 就绪之后、env 种子写入之前（与 emitFunc 同序）。提前发射（capMap 空）会让默认式中的捕获名落 ref_get 误抛 ReferenceError；发射两次则默认式重复执行、且 env 种子停留在形参原始值（被捕获的默认值进不了 env）。c44 即此双发射回归。
 - **提取的类方法 strict this 语义**：类体恒 strict，`C.prototype.m` 读出的 HOST_HI wrapper 以调用点 thisArg 为 `this`，undefined/null **不**回填原实例——`c.m.call(null)` 抛 TypeError（与 V8 一致）；`method_call` 的 POJO/实例字段派发同时接受 HOST_HI 可调用体。
 - **跨函数 throw 取回优先 `__take_err()`**：i64 **返回值**经 qzjs 的 WAMR 绑定是 BigInt（精确）；读 `__err` 全局则经 JS_NewInt64 落 Number，>2^53 的 tagged 句柄被舍成垃圾。旧产物无该导出时才退回全局读取。
-- **P4 装配路径结案**：build.js 实参补齐 + take_err 后，glue_audit 与 compileTS 直连档对齐；剩余 9 条差异（c2/c3/c7/c11/c20/c22/c28/c29/c33 各 1 条）全是**宿主引擎差异**——oracle=V8(node) vs 生产档=qzjs(quickjs-ng)：Math.cbrt 精度（4 条）、Intl 千分位/排序 collation（c2/c11）、非严格弱序 comparator 下 sort 实现细节（c22/c29）、WAMR/qzjs 栈深度（c7）。非编译器/glue 缺陷。glue_audit 基线对导出函数须**裸调用**（`g(...args)`）——`exp[fn](...)` 会把 exports 泄进顶层函数的 this。
+- **P4 装配路径结案**：build.js 实参补齐 + take_err 后，glue_audit 与 compileTS 直连档对齐。剩余差异全是**宿主引擎差异**——oracle=V8(node) vs 生产档=qzjs(quickjs-ng)：Math.cbrt 精度、Intl 千分位/排序 collation（c2/c11）、WAMR/qzjs 栈深度（c7）。c22/c29 的 sort 差异**不再是宿主差异**：两档自实现确定性归并后，规范已定部分对 V8 归零，规范未定部分改由 `impldiff` 钉本实现值（见 [[aot-sort-deterministic-merge]]）。glue_audit 基线对导出函数须**裸调用**（`g(...args)`）——`exp[fn](...)` 会把 exports 泄进顶层函数的 this。
 
 
 ## Timeline
@@ -122,3 +122,21 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
   summary: "内建类两档对齐结案：new 走独立原语 qz.new_builtin(nameId,n,a0..a3,ovf)（construct 与 call 在 ABI 上必须可分 + 需要 n），构造结果两档统一 0x7FFD 宿主承载，Map/Set/WeakMap/WeakSet/Proxy 普通调用两档一律可捕获 TypeError（文案对齐 V8）。详见 [[aot-host-builtin-carrier]]。"
   source: "c44 内建宿主承载批次"
   affects: [aot-cross-tier-semantics, aot-host-builtin-carrier]
+
+- time: 2026-11-06T00:19:29
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "sort 自实现批次：数组镜像重灌约束 + c22/c29 sort 差异归类推翻"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-06T00:19:37
+  kind: reversal
+  summary: "推翻 2026-11-04 的 envdiff 登记：c22/c29 的 sort 差异原判为「宿主引擎差异（V8 TimSort vs quickjs-ng）」，实为**把排序委托给引擎**的后果。现两档各自实现同一确定性稳定归并（趟数/区间/平手取左固定 ⇒ 比较序列仅由长度决定），结果：① 规范已定的 sort 行为（默认 ToString 码元序、稳定性、undefined 落尾且尾部写 present-undefined、comparefn 非可调 → 真 TypeError 文案）两档对 V8 oracle 全等，envdiff 登记撤销；② 规范未定的两支（矛盾 comparator 的结果、比较调用次数）改用新登记的 impldiff+want 钉本实现值（比 envdiff 严：静默改序必失败）。验证：audit_diff c22 20/20、c29 23/23 全 0 diff；glue_audit c22 20/20（1 IMPL）、c29 23/23（2 IMPL）；e2e_cross_tier 38 项跨档一致。"
+  source: "src/qzvm/aot/{qzvm.js,guest_entry.c,sortwork.ts,audit_diff.js,glue_audit.js,audit_corpus22.js,audit_corpus29.js} + test/m6b-poc/e2e_cross_tier.mjs"
+  affects: [aot-cross-tier-semantics, aot-sort-deterministic-merge]
+
+- time: 2026-11-06T00:19:44
+  kind: decision
+  summary: "补硬约束：C 侧「arena 块偏移 → JS 数组」镜像缓存**命中也必须重灌**（新增 qz_arr_fill，反向配对 qz_arr_writeback，长度收缩要显式截尾）。该静默错值由 sort 跨档覆盖暴露：sortNumCmp 只在 mix.ts 用例先跑时返回 ——复用块读回更早那个数组的 0 长镜像。"
+  source: "src/qzvm/guest_entry.c: qz_arr_fill + qz_tojs 的 0x7FFB 分支"
+  affects: [aot-cross-tier-semantics]

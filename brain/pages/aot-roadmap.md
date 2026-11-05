@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-04T10:27:49"
+updated: "2026-11-06T00:23:58"
 ---
 
 <!-- compiled_truth -->
@@ -272,3 +272,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "内建类宿主承载（Map/Set/Date/RegExp/Error 族）C 档 + JS 档对齐完成（c44 56/56 两档一致，test_aot ALL PASS，m6b 13 PASS，两档交叉 25 项 PASS）。剩余语义欠账：sort 稳定性自实现（两档）、类方法内 arguments provider、const K = class 别名捕获外层局部、内建子类承载（class M extends Map，静态路径不经宿主原语 → 需 classMeta builtinParent strId + 实例宿主承载）。"
   source: "c44 内建宿主承载批次"
   affects: [aot-roadmap]
+
+- time: 2026-11-06T00:23:58
+  kind: decision
+  summary: "语义欠账清一项：sort/toSorted 两档自实现确定性稳定归并结案（见 [[aot-sort-deterministic-merge]]），并新增第三种门禁类别 impldiff（规范未定行为钉本实现值）。剩余欠账：类方法内 arguments provider、const K = class 别名捕获外层局部、内建子类承载（class M extends Map 静态路径）。"
+  source: "src/qzvm/aot/{qzvm.js,guest_entry.c,sortwork.ts,audit_diff.js,glue_audit.js,audit_corpus22.js,audit_corpus29.js} + test/m6b-poc/e2e_cross_tier.mjs"
+  affects: [aot-roadmap, aot-sort-deterministic-merge]

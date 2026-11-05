@@ -5,6 +5,16 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: sort/toSorted 两档自实现确定性稳定归并 + `impldiff` 钉值登记（2026-11-05）
+- **排序不再委托宿主引擎**：宿主档新增 `sortArrBits`/`sortRunsInto`/`sortCmp`（`qzvm.js`），C 档新增 `qz_arr_sort_op`/`qz_sort_cmp`/`qz_av_get`/`qz_av_set`（`guest_entry.c`），两侧是**同一个**自底向上稳定归并——趟数、区间划分、平手取左（`cmp <= 0` 取左）固定 ⇒ 比较调用序列只由元素个数决定 ⇒ 两档逐位一致。委托引擎时这条硬约束无从检验：矛盾 comparator 下结果与次数都由引擎决定（实测 V8 `2,1,4,3__3,4,1,2` vs quickjs-ng `3,4,1,2__2,1,4,3`）。
+- **规范语义逐条对齐**：undefined/洞不参与排序、落尾部；**尾部写 present-undefined 而非洞**（`SortIndexedProperties` 之后用 CreateDataProperty 逐个赋 undefined）⇒ `length` 不变、`k in a` 为 true、`Object.keys` 含尾部索引；`toSorted` 的副本同样保长度 n（此前宿主档返回紧凑后的 m，与规范和 C 档分叉）。无 comparator → ToString 后按 **UTF-16 码元**序（C 档 `JS_ToCStringLenUTF16`，不是 UTF-8 字节序也不是 collation）；comparator 结果 ToNumber、NaN 视作 +0；比较器以 `this=undefined` 调用；Symbol 元素 → TypeError。
+- **非可调 comparator → 真 TypeError，且检查先于任何重排**：文案对齐 oracle(V8) `The comparison function must be either a function or undefined: X`（值形态两档同规则：原始值按 V8 形态渲染、symbol 取 description、其余 `[object Object]`）。C 档不能交回内建路径——`method_call` 的通用分支吞掉 `JS_Call` 异常返回 0（静默错值），故 `qz_sort_cb_ok` 直接在 C 侧 `qz_set_throw`。元素全程搬 tagged 位（不经 JS 物化）⇒ POJO/实例句柄的别名身份不变。
+- **新登记类别 `impldiff` + `want`**（`audit_diff.js`/`glue_audit.js` 双侧）：规范**未定**的行为（矛盾 comparator 的结果、比较调用次数）钉住本实现自己的确定值，跨宿主必须相等——比 `envdiff`（只要求「可不同」）严：将来换算法而静默改序会被这条抓住。规范**已定**的 sort 行为一律撤销 envdiff 登记、直接与 V8 oracle 比：c22 `string-compare-sort`、c29 `sort-stability-compare` 的登记已解除，改登记 `string-compare-sort-tiebreak`/`sort-contradictory-cmp`/`sort-cmp-call-count` 三条 impldiff。
+- **顺带修一个既有静默错值**：C 档 `qz_tojs(0x7FFB)` 的「arena 块偏移 → JS 数组」镜像缓存在命中时直接返回旧镜像；块地址回收复用后读到的是**更早那个数组**的镜像（实测 `sortNumCmp` 仅在 mix.ts 用例先跑时返回 `""`）。新增 `qz_arr_fill`（与 `qz_arr_writeback` 反向配对，长度收缩显式截尾）：命中也按块重灌，既保别名身份又让内容跟上块。
+- 测试：新增 `src/qzvm/aot/sortwork.ts`（14 例：默认码元序、数值 comparator、稳定性、NaN comparator、`toSorted` 不改原数组、非可调 TypeError、37 元素多轮归并、undefined 尾部、两支钉值、宿主承载数组上的矛盾 comparator）；`e2e_cross_tier.mjs` 跨档对比 25 → 39 项；c29 增 `sort-undef-tail`，c22 拆出平手支。
+- 结果：`test_aot` ALL PASS；跨档 39 项一致；`audit_diff` 45 批全量 0 diff（c22 20/20、c29 23/23）；`glue_audit` c22 20/20（1 IMPL）、c29 23/23（2 IMPL）；in-module e2e 13 套 PASS（QZ 契约面 125 项签名）。
+
+
 ### AOT: 内建类宿主承载（construct/call 分道）+ require-new 协议（2026-11-04）
 - **新增 `qz.new_builtin(nameId, n, a0..a3, ovf)`（两档）**：`new 内建类` 从此不走 `qz.builtin` 的调用形状。此前 `Map()` 与 `new Map()` 在 ABI 上完全同形，规范里 Map/Set/WeakMap/WeakSet/Proxy **无 [[Call]]**（普通调用必须 TypeError）却无从区分；`emit/tagged.js` 的 `new` 分支现发射 `qz.new_builtin`，宿主档 `Reflect.construct`、C 档 `JS_CallConstructor`。
 - **`n`（语法实参个数）是必需的**：4 槽 ABI 的未用槽位与「显式传入 undefined」同为 undefined 句柄，只有 n 能分开——`new Array(undefined)` 长度 1 vs `new Array()` 长度 0、`new Date(undefined)` Invalid Date vs `new Date()` now。C 档 `qz_collect_args` 会压缩丢弃 undefined 槽，故 `new_builtin` 自行按 n 逐槽取舍，不经它。`n = -1` 表示展开实参（`new Date(...xs)`）。别名 new 的动态路径（`builtin_fn` + `new_dynamic`）无 n，只能近似（已登记偏差）。
