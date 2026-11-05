@@ -126,4 +126,5 @@ transpile 出的 JS（去类型 + 去模块语法），`__call` 对 `mode === "i
 - `cls.ts` — 类回归（继承 + super + 遮蔽字段 + 合成 ctor 转发 + 多参动态分派）
 - `mix.ts` — 混合负载（数值 + 对象计算），实测 ~70x
 - `strwork.ts` — 字符串拼接（wasm 内原生表示），回归断言 + 性能画像
+- `argswork.ts` — 类方法/静态方法体内 `arguments`（全走静态直调 provider：length、越界读、>4 实参、for-of、解构形参、继承 owner、`this` 派发、箭头捕获、实参单次求值）
 - （AS 化率抽样样本 algo/strproc/objbiz 已删除，数据见 ASSESSMENT）

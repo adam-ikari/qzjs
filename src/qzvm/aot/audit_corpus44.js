@@ -137,7 +137,72 @@ const C = mk(A);
 export function run() { const c: any = new C(); return c.m(); }`, args: [], unsupported: "动态父类下 super.<prop> 赋值" },
   { name: "class-method-arguments", fn: "run", ts: `
 class C { m(a: number) { return arguments[0]; } }
-export function run() { return new C().m(3); }`, args: [], unsupported: "类方法内的 arguments（方法体无 arguments provider）" },
+export function run() { return new C().m(3); }`, args: [] },
+  // ── 类方法/静态方法内的 arguments（本轮实现）───────────────────────────────
+  // 通道：调用点把「全量实参」构造成数组一次求值后写 __args，callee 入口读入本地并消费即清；
+  // 值槽从数组回读（越界 → undefined）。类体恒严格模式 → arguments 非映射，数组承载即等价。
+  { name: "class-args-length", fn: "run", ts: `
+class C { m(a: number, b?: number) { return arguments.length; } }
+export function run() { const c = new C(); return c.m(1, 2) + "/" + c.m(1) + "/" + c.m(); }`, args: [] },
+  { name: "class-args-beyond-formals", fn: "run", ts: `
+class C { m(a: number) { return String(arguments[1]) + "/" + arguments.length; } }
+export function run() { return new C().m(7, 8, 9); }`, args: [] },
+  { name: "class-args-more-than-four", fn: "run", ts: `
+class C { m(a: number) { return arguments.length + ":" + String(arguments[4]); } }
+export function run() { return new C().m(1, 2, 3, 4, 5); }`, args: [] },
+  { name: "class-args-forof", fn: "run", ts: `
+class C { m() { let s = ""; for (const x of arguments) s += String(x); return s; } }
+export function run() { return new C().m("a", "b", "c"); }`, args: [] },
+  { name: "class-args-eval-once", fn: "run", ts: `
+let n = 0;
+function bump() { n++; return 5; }
+class C { m(x: number) { return arguments[0] + ":" + arguments.length; } }
+export function run() { const v = new C().m(bump()); return v + "/n=" + n; }`, args: [] },
+  { name: "class-args-default-excluded", fn: "run", ts: `
+class C { m(a: number = 1) { return arguments.length + ":" + a; } }
+export function run() { const c = new C(); return c.m() + "/" + c.m(4); }`, args: [] },
+  { name: "class-args-destructure-formal", fn: "run", ts: `
+class C { m({ p }: { p: number }) { return arguments.length + ":" + p + ":" + String((arguments[0] as any).p); } }
+export function run() { return new C().m({ p: 6 }); }`, args: [] },
+  { name: "static-method-arguments", fn: "run", ts: `
+class C { static m(a: number) { return arguments.length + ":" + String(arguments[1]); } }
+export function run() { return C.m(1, 2); }`, args: [] },
+  { name: "class-args-inherited-owner", fn: "run", ts: `
+class A { m(a: number) { return arguments.length + ":" + arguments[0]; } }
+class B extends A { }
+export function run() { const b = new B(); return b.m(9); }`, args: [] },
+  { name: "class-args-via-this-direct", fn: "run", ts: `
+class A { m(a: number): number { return this.n(a); } n(x: number): number { return arguments.length + x; } }
+export function run() { return new A().m(2); }`, args: [] },
+  { name: "class-args-arrow-capture", fn: "run", ts: `
+class C { m(a: number) { const f = () => String(arguments[0]) + "/" + arguments.length; return f(); } }
+export function run() { return new C().m(3, 4); }`, args: [] },
+  // 已知窄面（编译期 loud）：被调类方法拿不到实参个数的派发形态 + 构造器/访问器无 provider。
+  { name: "class-args-dyn-dispatch", fn: "run", ts: `
+class C { m(a: number) { return arguments[0]; } }
+function h(o: any) { return o.m(3); }
+export function run() { return h(new C()); }`, args: [], unsupported: "宿主动态派发下的类方法 arguments（接收者静态不可判）" },
+  { name: "class-args-extracted-value", fn: "run", ts: `
+class C { m(a: number) { return arguments[0]; } }
+export function run() { const c: any = new C(); const g = c.m; return g(3); }`, args: [], unsupported: "方法取成值再调用（经 closure_call/call_value，无实参个数）" },
+  { name: "class-args-spread-call", fn: "run", ts: `
+class C { m(a: number) { return arguments[0]; } }
+export function run() { const c = new C(); const r = [3]; return c.m(...r); }`, args: [], unsupported: "展开实参调用（实参数组在宿主侧，两档宿主写不了产物 __args）" },
+  { name: "class-args-void-method", fn: "run", ts: `
+class C { k = 0; m(a: number): void { this.k = arguments.length; } }
+export function run() { const c = new C(); c.m(1); return c.k; }`, args: [], unsupported: ": void 方法退回宿主动态派发 → 无 arguments provider" },
+  { name: "class-args-rest-formal", fn: "run", ts: `
+class C { m(a: number, ...r: number[]) { return arguments.length; } }
+export function run() { return new C().m(1, 2); }`, args: [], unsupported: "arguments 与 rest 形参混用（尾部实参被打包进槽，逐槽值不可得）" },
+  { name: "class-args-many-formals", fn: "run", ts: `
+class C { m(a: number, b: number, c: number, d: number, e: number) { return arguments.length; } }
+export function run() { return new C().m(1, 2, 3, 4, 5); }`, args: [], unsupported: "arguments 与 >4 形参混用（溢出实参经 $ovf，无逐槽值可读）" },
+  { name: "class-args-ctor", fn: "run", ts: `
+class C { k: number; constructor(a: number) { this.k = arguments.length; } }
+export function run() { return new C(1).k; }`, args: [], unsupported: "构造器内的 arguments（无 provider）" },
+  { name: "class-args-getter", fn: "run", ts: `
+class C { get p() { return arguments.length; } }
+export function run() { const c = new C(); return (c as any).p; }`, args: [], unsupported: "访问器内的 arguments（无 provider）" },
   { name: "static-getter-factory-capture-alias", fn: "run", ts: `
 function mk(n: number) { const K = class { static get g() { return n; } }; return K; }
 const C = mk(9);

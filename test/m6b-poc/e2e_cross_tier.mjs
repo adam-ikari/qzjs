@@ -41,6 +41,23 @@ const LOADS = [
     ['postFieldInc', [], 3004],
     ['fieldIncLoop', [], 2508],
   ]],
+  // 类方法体内 arguments：全量实参由**直调点**在 wasm 里写 __args，两档宿主都不参与
+  // ⇒ 期望值即 V8 值，且档间必须逐位相同（任一侧走动态派发就会编译期拒绝而非错值）。
+  ['argswork.ts', [
+    ['argsTwo', [], 212],
+    ['argsExtra', [], 321],
+    ['argsMany', [], 6406],
+    ['argsHole', [], 21],
+    ['argsSum', [], 45],
+    ['argsDest', [], 112],
+    ['argsInherited', [], 321],
+    ['argsViaThis', [], 306],
+    ['argsDefaultNone', [], 7],
+    ['argsDefaultGiven', [], 109],
+    ['argsStatic', [], 207],
+    ['argsArrow', [], 15],
+    ['argsEvalOnce', [], 11007],
+  ]],
   ['strwork.ts', [
     ['strWork', [5], '001234'],
     ['strWorkEq', [5], '001234'],

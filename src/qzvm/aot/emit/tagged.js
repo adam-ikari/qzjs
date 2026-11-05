@@ -503,7 +503,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const ai = this._local("arguments");
             if (ai !== undefined) { this.m.localGet(ai); return; }   // 全量实参数组（调用点/宿主经 __args 写入）
             if (this.capMap.has("arguments")) { this._emitCapturedRead("arguments"); return; }   // 箭头继承外层函数 arguments
-            throw new Error("[tagged] `arguments` 仅支持顶层函数体与闭包体（类方法内为已知 loud——见 ASSESSMENT）");
+            throw new Error("[tagged] `arguments` 在构造器/访问器内无 provider（顶层函数、闭包、类方法与静态方法已支持）");
         }
         if (this.capMap.has(e.text)) { this._emitCapturedRead(e.text); return; }   // 捕获名优先走 env（与本体共享）
         const idx = this._local(e.text);
@@ -911,6 +911,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._expLeave();
         return;
     }
+    // 成员**取值为值**（`const g = c.m` / `arr.forEach(c.m)` / `C.create` 之类）：此后调用经
+    // closure_call/call_value，两档宿主都不能为被调类方法提供实参个数 → 体内用 arguments 的方法
+    // 必须编译期拒绝（否则 callee 读到哨兵 0 运行期 trap）。按名保守：同名数据成员也会被拒。
+    if (ts.isPropertyAccessExpression(e) && !ts.isPrivateIdentifier(e.name)) this._assertNoArgsProviderTarget(e.name.text, "把成员取成值再调用");
     // 可选链 `o?.x` / `o?.[i]` / `o?.length`：base 求值一次 → 若 null/undefined 则结果 undefined（短路，不求 index），否则按普通访问。
     if ((ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) && e.questionDotToken) {
         const M = this.m;
@@ -1146,6 +1150,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const method = e.expression.name.text;
         if (!this._curClassObj && this._inLitMethod) {          // 对象字面量方法内的 super.m(args)：运行时解析（宿主走 receiver 的原型链，this = receiver）
             const M4 = this.m;
+            this._assertNoArgsProviderTarget(method, "对象字面量 super 派发");
             this._emitThisReceiver();
             M4.i32Const(this._strId(method));
             for (let i = 0; i < 4; i++) {
@@ -1161,6 +1166,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (dynHome) {                                       // 动态父（运行时类的父链）：实例方法按 home 的运行时父链派发
             if (this._inStaticMethod) throw new Error("[tagged] 静态方法内的 super." + method + "() 在动态父类下暂不支持");
             if (e.arguments.length > 4) throw new Error("[tagged] super." + method + "() 最多 4 参");
+            this._assertNoArgsProviderTarget(method, "动态父类下的 super 派发");
             this._emitThisReceiver();
             this.m.i32Const(this._curClassObj.id);
             this.m.i32Const(this._strId(method));
@@ -1182,14 +1188,18 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (isStaticM) {                                     // 静态父方法：self = 当前 self 槽（super 静态调用保持原接收者）
             this._emitStaticsGuard(c);
             this.m.localGet(0);
-            for (let i = 0; i < 4; i++) {
+            const smt = (this.classes.get(c).staticMethods || []).find(s => s.name === method);
+            if (smt && this._methUsesArgs(smt.node)) this._emitMethodArgsForProvider(e.arguments);
+            else for (let i = 0; i < 4; i++) {
                 if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
             }
             this.m.call(staticMethName(c, method));
             return;
         }
         this._emitThisReceiver();                            // self = this（闭包内 this 走捕获/形参槽，local0 是 blk）
-        for (let i = 0; i < 4; i++) {
+        const smt2 = (this.classes.get(c).methods || []).find(s => s.name === method);
+        if (smt2 && this._methUsesArgs(smt2.node)) this._emitMethodArgsForProvider(e.arguments);
+        else for (let i = 0; i < 4; i++) {
             if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
         }
         this.m.call(methName(c, method));
@@ -1287,6 +1297,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (!ts.isIdentifier(e.expression)) {
             // `obj.f(...)`：f 是属性值（方法简写/具名函数表达式都是闭包值）→ 传 obj 作 receiver，
             // 否则闭包体里的 `this` 无法绑定（zod：`parse: function _parse(){ …this… }`）。
+            if (ts.isPropertyAccessExpression(e.expression)) this._assertNoArgsProviderTarget(e.expression.name.text, "把方法取成值再调用");
             const recvV = ts.isPropertyAccessExpression(e.expression) ? e.expression.expression : undefined;
             this._emitValueCall(e.expression, e.arguments, recvV);   // 值调用：宿主按句柄类型分派（闭包/宿主函数）
             return;
@@ -2426,6 +2437,28 @@ Emitter.prototype._emitMethodArgs = function (params, args) {
         this.emitTaggedExpr(lit);
     }
 };
+// 被调方法体内用 arguments 的直调形态：全量实参**一次**求值成数组（否则参数副作用会重发），
+// 4 个值槽再从数组回读（越界 → undefined，与补占位 undefined 等价），数组句柄写进 __args
+// 供 callee 入口取（消费即清，见 emitter._mEnter）。前提：self 已压栈；目标无 rest 形参、
+// 形参 ≤4、实参无展开 —— 后三者分别由 _mEnter / _emitSpreadCall 的守卫在编译期拒绝。
+Emitter.prototype._emitMethodArgsForProvider = function (args) {
+    const M = this.m, t = this._expEnter();
+    const lit = ts.factory.createArrayLiteralExpression(args);
+    lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+    this.emitTaggedExpr(lit);
+    M.localSet(t.v);
+    for (let i = 0; i < 4; i++) {
+        if (i < args.length) this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
+        else this._emitUndefined();
+    }
+    M.localGet(t.v); M.globalSet(this._argGlobal);
+    this._expLeave();
+};
+// 「体内用 arguments」的方法拿不到实参个数的派发形态 → 编译期 loud（不让 callee 读到哨兵 0 后运行期 trap）。
+Emitter.prototype._assertNoArgsProviderTarget = function (method, how) {
+    if (this._methArgsNames().has(method))
+        throw new Error(`[tagged] 方法 ${method} 体内用 arguments，但${how}无法为被调类方法提供实参个数（两档宿主都写不了产物的 __args）；请改具名形参，或让接收者静态可判（const c = new C()）走直调`);
+};
 Emitter.prototype._emitDynMethod = function (rx, method, args) {
     const M = this.m;
     if (/^#[^#]+$/.test(method)) {                      // 私有方法：类名限定（PrivateIdentifier.text 自带 #）
@@ -2457,7 +2490,8 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         this._emitStaticsChainGuard(cnS);             // 继承来的静态方法内 this.x 可能读任一层父类静态
         this._emitClassValue(this.classes.get(cnS));   // self = 接收者类（JS：B.describe() 内 this = B，含继承自 A 的方法）
         const smNode = (this.classes.get(owner).staticMethods || []).find(s => s.name === method);
-        this._emitMethodArgs(smNode && smNode.node ? smNode.node.parameters : null, args);
+        if (smNode && this._methUsesArgs(smNode.node)) this._emitMethodArgsForProvider(args);
+        else this._emitMethodArgs(smNode && smNode.node ? smNode.node.parameters : null, args);
         M.call(staticMethName(owner, method));
         if (smNode && smNode.node.type && smNode.node.type.kind === ts.SyntaxKind.VoidKeyword) {
             this._emitErrCheck(false);                 // void 静态方法：不取返回，调用表达式值 = undefined
@@ -2474,7 +2508,8 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         if (owner && meta && !meta.accessor && !voidRet) {   // getter/setter 走动态路径（getter 需先取值再调用）
             // 纯值栈：self + 4 参按形参序压栈（实参可为嵌套调用，天然按深度隔离，无需暂存槽）。
             this.emitTaggedExpr(rx);                                // self
-            this._emitMethodArgs(meta.node.parameters, args);
+            if (this._methUsesArgs(meta.node)) this._emitMethodArgsForProvider(args);
+            else this._emitMethodArgs(meta.node.parameters, args);
             M.call(methName(owner, method));
             this._emitErrCheck();   // 同上：直调路径的跨函数 throw
             return;
@@ -2489,6 +2524,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         }
     }
     // 动态：压 recv + mid + 4 参入值栈（实参可为嵌套调用，无暂存槽覆盖问题）。
+    this._assertNoArgsProviderTarget(method, "宿主动态派发");   // 接收者静态不可判 → 被调方法是否要 arguments 无法确定，也不能写 __args
     this.emitTaggedExpr(rx);
     M.i32Const(this._strId(((method === "reduce" || method === "reduceRight") && args.length >= 2) ? method + "$i" : method));   // 显式提供初值（含 undefined）→ $i 变体
 

@@ -486,6 +486,12 @@ class Emitter {
     _staticRecvClass(rx) {
         if (ts.isIdentifier(rx) && this._staticVars && this._staticVars.has(rx.text)) return this._staticVars.get(rx.text);
         if (rx.kind === ts.SyntaxKind.ThisKeyword && this._curClass && this._leafClasses.has(this._curClass)) return this._curClass;
+        // 内联 `new C().m(…)`：接收者恒为 C 实例（判据与 _emitNewCall 的静态构造一致）。
+        // 直调点能写 __args → 方法体里的 arguments 只有走直调才拿得到实参个数。
+        if (ts.isNewExpression(rx) && ts.isIdentifier(rx.expression)) {
+            const cnN = this._className(rx.expression.text);
+            if (this.classes.has(cnN)) return cnN;
+        }
         return null;
     }
     // owner 类声明的 method 元数据（含 accessor）；无则 null。
@@ -884,6 +890,9 @@ class Emitter {
             if (ts.isAsExpression(cx) || ts.isTypeAssertionExpression(cx) || ts.isNonNullExpression(cx)) { cx = cx.expression; continue; }
             break;
         }
+        // 展开实参 → 全量数组在宿主侧（method_spread/builtin_spread），C 档宿主写不了产物的 __args
+        // → 被调类方法拿不到 arguments：编译期 loud（比运行期 trap 早，且两档一致）。
+        if (ts.isPropertyAccessExpression(cx)) this._assertNoArgsProviderTarget(cx.name.text, "展开实参调用");
         if (ts.isPropertyAccessExpression(cx) && ts.isIdentifier(cx.expression) && this._isClassName(cx.expression)) {
             // C.m(...args)：静态方法直调（导出名静态可知）
             let owner = this._className(cx.expression.text);
@@ -2049,7 +2058,8 @@ class Emitter {
             .concat(realParams.length > 4 ? ["$ovf"] : []);
         // 先置位再 _mEnter：静态方法的类捕获 env 要按**类值** self 取（class_env_get_static）
         this._inStaticMethod = true;                       // 静态方法体内 this ≡ 类（_classOfExpr）
-        this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters);
+        this._mEnter(staticMethName(cname, sm.name + (sm.accessor === "set" ? "$set" : "")), cname, params, sm.node.body, isVoid, sm.node.parameters,
+            undefined, !sm.accessor && this._methUsesArgs(sm.node));
         this._emitOvfParamUnpack(sm.node.parameters, params);
         this._curClassObj = this.classes.get(cname);
         this._emitFnDeclClosures(sm.node.body);
@@ -2118,6 +2128,34 @@ class Emitter {
             M.i64Store(3, this._fieldIndex(f.name));
         }
     }
+    // ── 类方法 arguments provider ────────────────────────────────────────────
+    // 类体恒严格模式 → 方法内 arguments 是「非映射」对象：值 = 调用点全量实参的有序副本
+    // （length/索引/迭代一致，无形参联动）→ 用全量实参数组承载即等价。
+    // 通道沿用既有 __args 全局（顶层函数/闭包同款）：静态直调点写入数组，callee 入口读入
+    // 本地并**消费即清**；读到哨兵 0（没有直调点写过）即 unreachable —— 绝不静默给错值。
+    // 宿主分派（method_call/展开调用/取值为调用）拿不到实参个数，且 C 档宿主无法写产物的
+    // __args 全局（循环导入）→ 这些派发点按方法名在编译期 loud 拒绝。
+    _methUsesArgs(node) {
+        if (!node || !node.body) return false;
+        if (!this._methArgsSeen) this._methArgsSeen = new WeakMap();
+        let v = this._methArgsSeen.get(node);
+        if (v === undefined) { v = usesArguments(node.body); this._methArgsSeen.set(node, v); }
+        return v;
+    }
+    // 体内用 arguments 的（非访问器）方法名集合 —— 不可提供个数的派发点据此拒绝。
+    // 按名保守：同名内建方法/非类成员也会被拒（编译期 loud，不产生静默错值）。
+    _methArgsNames() {
+        if (this._mArgsNameSet && this._mArgsNameAt === this._classList.length) return this._mArgsNameSet;
+        const s = new Set();
+        for (const cn of this._classList) {
+            const c = this.classes.get(cn);
+            if (!c) continue;
+            for (const m of (c.methods || [])) if (!m.accessor && this._methUsesArgs(m.node)) s.add(m.name);
+            for (const m of (c.staticMethods || [])) if (!m.accessor && this._methUsesArgs(m.node)) s.add(m.name);
+        }
+        this._mArgsNameSet = s; this._mArgsNameAt = this._classList.length;
+        return s;
+    }
     _emitMethodBody(cname, mth) {
         const M = this.m;
         this._assertNotAsync(mth.node, `方法 ${cname}.${mth.name}`);
@@ -2126,7 +2164,8 @@ class Emitter {
         const params = realParams.slice(0, 4).concat(["$p1", "$p2", "$p3", "$p4"].slice(0, Math.max(0, 4 - realParams.length)))
             .concat(realParams.length > 4 ? ["$ovf"] : []);            // 前 4 槽 + 可选 $ovf（实参 4.. 数组）
         this._inStaticMethod = false;                      // 须在 _mEnter 前复位：实例 env 取法依赖此标志
-        this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters);
+        this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters,
+            undefined, !mth.accessor && this._methUsesArgs(mth.node));
         this._emitOvfParamUnpack(mth.node.parameters, params);   // >4 形参：从 $ovf 数组解包到各自 local
         this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);
@@ -2137,7 +2176,11 @@ class Emitter {
     }
     // 方法/构造器发射作用域：this=local0，参数 1..，完整 scratch/sT/obj/forOf/clo 槽布局。
     // 与 emitFunc(tagged) 同构；额外 _curClass 供静态方法分派解析继承链。
-    _mEnter(fname, cname, params, body, isVoid, astParams, extraNodes) {
+    _mEnter(fname, cname, params, body, isVoid, astParams, extraNodes, needsArgs) {
+        if (needsArgs && astParams) {   // rest 形参：尾部实参被打包进一个槽 → 槽位与 arguments 语义冲突；>4 形参：溢出实参只经 $ovf 传递
+            if (astParams.some(p => p.dotDotDotToken)) throw new Error(`[tagged] 方法 ${fname} 内 arguments 与 rest 形参混用暂不支持`);
+            if (astParams.length > 4) throw new Error(`[tagged] 方法 ${fname} 内 arguments 暂不支持 >4 形参（溢出实参走 $ovf，无逐槽值可读）`);
+        }
         this._mSaved = {
             mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
             blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef, fnVars: this._fnVars,
@@ -2187,17 +2230,28 @@ class Emitter {
         const mthLoopSaveDecls = new Array(this._loopSaveCount).fill("i32");
         this.cloSlotsLen = cloSlots.length;
         // 方法体内被（嵌套）lambda 捕获的 this/参数/局部 → 共享环境（同 emitFunc）
-        const capNames = this._probeCaptured(extraNodes ? [body].concat(extraNodes) : body, params, locals);
+        const capNames = this._probeCaptured(extraNodes ? [body].concat(extraNodes) : body,
+            needsArgs ? params.concat(["arguments"]) : params, locals);
         { const ciC = this.classes.get(cname);
           /* 类捕获名一律并入 capMap：方法体内裸引用外层捕获也须走 env（而非 undefined 兜底），
            * 嵌套 lambda 才能沿环境链看到它们。 */
           if (ciC && ciC.captured) for (const n0 of ciC.captured) if (!capNames.includes(n0)) capNames.push(n0); }
         const envDecls = capNames.length ? ["i32"] : [];
         const bodyLocals = locals.map(() => "i64").concat(["i64", "i64", "i64"]).concat(extra)
-            .concat(sT).concat(objPool).concat(restKeyPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(mthLoopSaveDecls).concat(envDecls);
+            .concat(sT).concat(objPool).concat(restKeyPool).concat(["i32"]).concat(forOfLocals).concat(cloSlots).concat(["i64"]).concat(mthLoopSaveDecls)
+            .concat(needsArgs ? ["i64"] : []).concat(envDecls);
         const localNames = this.m.debug ? ["this"].concat(params).concat(locals) : null;
         this.m.startBody(fname, bodyLocals, localNames);
         this.m.i64Const(0n); this.m.globalSet(1);           // 入口清 __err
+        this._mArgsLocal = needsArgs ? (1 + params.length) + bodyLocals.length - 1 - envDecls.length : undefined;
+        if (needsArgs) {
+            const MA = this.m;
+            MA.globalGet(this._argGlobal); MA.localSet(this._mArgsLocal);   // 调用点写入的全量实参数组
+            MA.i64Const(0n); MA.globalSet(this._argGlobal);                 // 消费即清：不把残留留给下个 callee
+            MA.localGet(this._mArgsLocal); MA.i64Const(0n); MA.i64Eq();
+            MA.ifBlock("void"); MA.unreachable(); MA.end();                 // 0 = 无静态直调点写过 → loud（绝不静默错值）
+            this.varMap.set("arguments", this._mArgsLocal);
+        }
         this.envLocal = capNames.length ? (1 + params.length) + bodyLocals.length - 1 : undefined;
         this.capMap = new Map(capNames.map(n => [n, this.envLocal]));
         this.envRef = this.envLocal;
@@ -2235,6 +2289,7 @@ class Emitter {
             for (const n of capNames) {
                 const li = this._local(n);
                 if (n === "this") { M.localGet(this.envLocal); M.i32Const(this._strId("this")); M.localGet(0); M.call("qz.env_def"); }
+                else if (n === "arguments") { M.localGet(this.envLocal); M.i32Const(this._strId("arguments")); M.localGet(this._mArgsLocal); M.call("qz.env_def"); }
                 else if (li !== undefined) {
                     M.localGet(this.envLocal); M.i32Const(this._strId(n));
                     if (li < 1 + params.length) M.localGet(li); else this._emitUndefined();
