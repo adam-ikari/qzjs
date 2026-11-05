@@ -1,9 +1,10 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-05T16:23:58.812Z._
+_Auto-generated. Last updated 2026-11-05T17:12:37.668Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [aot-bigint-tagged-backend](pages/aot-bigint-tagged-backend.md) — category: decision | tags: [aot, wasm, bigint, qzvm, emitter] | # AOT BigInt tagged 后端（批 39，2026-10-18）
+- [aot-class-method-arguments-provider](pages/aot-class-method-arguments-provider.md) — category: decision | tags: [aot, arguments, class, abi] | ## 结论
 - [aot-cross-tier-semantics](pages/aot-cross-tier-semantics.md) — category: decision | ## 结论
 - [aot-experiment-verification](pages/aot-experiment-verification.md) — category: decision | status: archived | tags: [aot, wasm, wamr, assemblyscript, ts2c, qzvm, experiment] | # AOT 实验验证（experiment/aot 分支）
 - [aot-gc-rc-allocator](pages/aot-gc-rc-allocator.md) — category: decision | tags: [aot, gc, memory, emitter, qzvm] | - **GC 性能基线（2026-10-22）**：3MB 堆 23ms / 11MB 堆 61ms，吞吐 ~185 MB/s 且线性扩展。

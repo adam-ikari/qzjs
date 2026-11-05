@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-06T00:23:58"
+updated: "2026-11-06T01:12:37"
 ---
 
 <!-- compiled_truth -->
@@ -278,3 +278,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "语义欠账清一项：sort/toSorted 两档自实现确定性稳定归并结案（见 [[aot-sort-deterministic-merge]]），并新增第三种门禁类别 impldiff（规范未定行为钉本实现值）。剩余欠账：类方法内 arguments provider、const K = class 别名捕获外层局部、内建子类承载（class M extends Map 静态路径）。"
   source: "src/qzvm/aot/{qzvm.js,guest_entry.c,sortwork.ts,audit_diff.js,glue_audit.js,audit_corpus22.js,audit_corpus29.js} + test/m6b-poc/e2e_cross_tier.mjs"
   affects: [aot-roadmap, aot-sort-deterministic-merge]
+
+- time: 2026-11-06T01:12:37
+  kind: decision
+  summary: "语义欠账再清一项：类方法内 arguments provider 结案（静态直调点在产物 wasm 里写 __args，两档由构造一致，见 [[aot-class-method-arguments-provider]]）。剩余欠账：const K = class 别名捕获外层局部、内建子类承载（class M extends Map 静态路径）、顶层函数 arguments 双求值、C 档闭包 arguments。"
+  source: "类方法 arguments provider 批次"
+  affects: [aot-roadmap, aot-class-method-arguments-provider]

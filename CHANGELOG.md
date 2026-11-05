@@ -5,6 +5,17 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 类方法体内 `arguments` 由静态直调点提供实参个数（两档一致）（2026-11-06）
+- **裁决：不改 ABI，provider 建在产物里。** 类方法调用的 4 槽 ABI 用 undefined 句柄补齐空槽，宿主 `givenSlot` 分不清「补占位」与「显式传入 undefined」⇒ 实参个数从未真正到达过被调方法体；而 C 档（in-module）与产物是**单向导入**（产物 import `qz.*`），宿主既不能给方法加参数也不能写产物全局 `__args`——加参数就要为每个 `__m_C$m`/`__sm_C$m`/ctor/trampoline 改函数类型，`call_indirect` 的表项类型必须一致 ⇒ 逐方法加参会直接撞表。故：**静态直调点**在发射的 wasm 里把全量实参构造成数组、写进产物全局 `__args`，callee 入口读入专属本地。两档跑同一段 wasm ⇒ 档间等价**由构造成立**，不靠宿主对齐。
+- **语义根据：类体恒严格模式 ⇒ `arguments` 是非映射对象**——只有 `length`/下标/迭代，与形参无联动，默认值与解构形参也不进数组 ⇒ 用实参数组承载即等价（`arguments.length`、越界读 undefined、`for-of`、>4 实参、继承 owner、`this` 兄弟派发、静态方法、箭头经 env 捕获逐条对齐 V8）。
+- **消费即清 + 哨兵 loud**：callee 读完立刻把 `__args` 清回 0（不把上一次调用的残留留给下一个 callee），读到 0 即 `unreachable`——宁可 trap 也不静默给错值。
+- **拿不到个数的派发形态一律编译期 loud**（按方法名拒绝，比运行期 trap 早且两档一致）：宿主动态派发（`f(o)` 里 `o.m(3)`，接收者静态不可判）、把成员取成值再调用（`const g = c.m` / `arr.forEach(c.m)`，走 `closure_call`/`call_value`）、展开实参调用（`c.m(...r)`，实参数组在宿主侧）、`: void` 方法（退动态派发）、对象字面量/动态父类下的 `super` 派发；以及构造器与访问器内的 `arguments`（无 provider）。形参含 rest 或形参 >4 且体内用 `arguments` 也编译期拒绝（rest 把尾部实参打包进一个槽、>4 形参的溢出实参只经 `$ovf` 传递 ⇒ 无逐槽值可读）。按名拒绝是保守的：同名数据成员也会被拒。
+- 顺带把内联 `new C().m(…)` 纳入静态接收者判定（`_staticRecvClass`），这类最常见写法从此走直调。
+- 测试：`audit_corpus44.js` 撤销 `class-method-arguments` 的缺口登记（现取 V8 值），补 11 例支持形状 + 8 例必须 loud 的形状（67 → **78/78**）；新增 `src/qzvm/aot/argswork.ts` 13 例跨档负载，`e2e_cross_tier.mjs` 跨档对比 39 → **52 项**（两档逐位相同，含实参只求值一次的探针）。
+- 结果：`test_aot` ALL PASS；`audit_diff` 45 批全量 0 diff；`glue_audit` c44 78/78；跨档 52 项 PASS；`test_m6b_e2e.sh` 13 套 PASS。
+- 记下两处既有欠账（本批未改，见 [[aot-class-method-arguments-provider]]）：顶层函数的 `arguments` provider 在发射槽位后又重发一遍实参节点 ⇒ **实参副作用执行两次**；C 档从不写 `__args` ⇒ 闭包内 `arguments` 只在独立档正确（宿主经 `lamMeta.needsArgs` 写，C 宿主写不了产物全局）。
+
+
 ### AOT: sort/toSorted 两档自实现确定性稳定归并 + `impldiff` 钉值登记（2026-11-05）
 - **排序不再委托宿主引擎**：宿主档新增 `sortArrBits`/`sortRunsInto`/`sortCmp`（`qzvm.js`），C 档新增 `qz_arr_sort_op`/`qz_sort_cmp`/`qz_av_get`/`qz_av_set`（`guest_entry.c`），两侧是**同一个**自底向上稳定归并——趟数、区间划分、平手取左（`cmp <= 0` 取左）固定 ⇒ 比较调用序列只由元素个数决定 ⇒ 两档逐位一致。委托引擎时这条硬约束无从检验：矛盾 comparator 下结果与次数都由引擎决定（实测 V8 `2,1,4,3__3,4,1,2` vs quickjs-ng `3,4,1,2__2,1,4,3`）。
 - **规范语义逐条对齐**：undefined/洞不参与排序、落尾部；**尾部写 present-undefined 而非洞**（`SortIndexedProperties` 之后用 CreateDataProperty 逐个赋 undefined）⇒ `length` 不变、`k in a` 为 true、`Object.keys` 含尾部索引；`toSorted` 的副本同样保长度 n（此前宿主档返回紧凑后的 m，与规范和 C 档分叉）。无 comparator → ToString 后按 **UTF-16 码元**序（C 档 `JS_ToCStringLenUTF16`，不是 UTF-8 字节序也不是 collation）；comparator 结果 ToNumber、NaN 视作 +0；比较器以 `this=undefined` 调用；Symbol 元素 → TypeError。
