@@ -4,7 +4,7 @@ title: "多进程模型 M-P0..M-P5 + CTL + M-R2（宿主⇄主RT 进程模型与
 category: decision
 status: active
 created: "2026-09-15T23:20:12"
-updated: "2026-09-30T08:58:47"
+updated: "2026-10-09T15:17:00"
 ---
 
 <!-- compiled_truth -->
@@ -266,4 +266,10 @@ quickjs 断言上终止、NDEBUG 下静默泄漏——根因在 vendored quickjs
   kind: decision
   summary: "启动脚本传输改管道、零落盘（2026-09-30，break change 非-public API）：worker/主RT 的启动源码不再经 /tmp 临时脚本文件（qzjs-worker-<id>.js / qzjs-rt-script-*）传递。父端在 qz_proc_spawn 里、握手之前用 qz_ipc_write_frame 把源码以长度前缀帧写入已 fork 的 socketpair（--parent-fd 通道）；子端 rt_main 以新形态 --script-stdin 从同一管道读首帧。时序（全双工 socketpair 无死锁）：父 write(源码)→子 read(源码)→子 write(握手)→父 read(握手)→父 write(ack)。理由：临时文件是明文落盘（worker 脚本可含密钥/字面量）、靠 unlink 清理（崩溃路径必泄漏）、命名靠自增 id（跨进程必撞）、且与 argv 长度限制赛跑。保留 --script PATH 形态供手动运行  与兼容。新增 pal.processSpawn opts.source 字段。--bytecode 仍走独立 --bytecode 临时文件（二进制，本次未动）。契约锁：mp1 e2e 用 compgen -G 逐个 glob 断言两个前缀零残留（注入即红）"
   source: "2026-09-30 第一性原理：磁盘不是必需的传输介质，子进程已继承管道 fd"
+  affects: [multi-process-model]
+
+- time: 2026-10-09T15:17:00
+  kind: decision
+  summary: "单入口合并（5342631a）：qz_rt target 删除，qzjs_main.c 按 argv 分发 CLI/RT，产出唯一 ELF qzjs。但「伴随二进制发现契约」整体未变——resolve_binary 找 <exe_dir>/qzjs-rt、examples 注入 QZ_RT_SERVER=<build>/qzjs-rt、e2e 脚本 pgrep -x qzjs-rt、install。缺 qzjs-rt = 每个真 ISOLATED 构建（qz_create spawn 主RT）ENOENT→NULL，8 个 CI job 挂；作者本地因重构前残留 ELF 逃逸。定式：保持单入口，qz_cli POST_BUILD 生成 qzjs-rt→qzjs symlink（comm 名随 exec 路径=qzjs-rt，pgrep 命中；argv 分发照常），install 段随附。改入口/改产物名时必须同步 resolve_binary 的发现链。"
+  source: "PR #24 评审修复 (d2787d0d)"
   affects: [multi-process-model]

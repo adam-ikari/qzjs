@@ -12,6 +12,7 @@
 #include "base/qz_rt.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <sched.h>   /* sched_yield: WAMR singleton init spin */
 #if QZ_WITH_WAMR
 #include "wasm_export.h"
@@ -58,6 +59,105 @@ static wamr_state_t g_wamr_state;   /* process singleton, M-R1 §13.2: see CAS s
  *   2 = 初始化进行中（非报主者 spin 等待；报主者失败回滚到 0）
  * 项目严格 -std=c99（无 _Atomic）：uint32_t + __atomic 内建，与
  * bridge.c g_qz_next_port_id 同款。 */
+/* WAMR runtime 一次性初始化。默认走 wasm_runtime_init()；开启源码级调试时
+ * 必须走 wasm_runtime_full_init() 并填 ip_addr —— debug-engine 只在
+ * full_init 的 init_args.ip_addr 非空时被 wasm_debug_engine_init() 初始化
+ * （wasm_runtime_common.c:786），否则后续 wasm_runtime_start_debug_instance*
+ * 会因 g_debug_engine==NULL 直接返回 0（日志里表现为「无法启动调试实例」）。*/
+static bool wamr_runtime_init_once(void)
+{
+#ifdef QZ_WAMR_DEBUG_INTERP
+    RuntimeInitArgs init_args;
+    memset(&init_args, 0, sizeof(init_args));
+    init_args.mem_alloc_type = Alloc_With_System_Allocator;
+    const char *host = getenv("QZ_WAMR_DEBUG_HOST");
+    snprintf(init_args.ip_addr, sizeof(init_args.ip_addr), "%s",
+             host ? host : "127.0.0.1");
+    const char *port_env = getenv("QZ_WAMR_DEBUG_PORT");
+    init_args.instance_port = port_env ? (int)atoi(port_env) : 0;
+    return wasm_runtime_full_init(&init_args);
+#else
+    return wasm_runtime_init();
+#endif
+}
+
+#if WASM_ENABLE_MULTI_MODULE != 0
+/* M6b PoC: multi-module reader — 按 import module name 找 libqzvm.wasm。
+ * emitter 产物 import "qz" "memory" + "qz" "qz_add" 等 → WAMR instantiate 时
+ * 调 reader("qz") → 返回 libqzvm.wasm buffer → 加载注册 → import 链接到
+ * libqzvm export（共享 memory + 函数）。路径经 QZ_LIBQZVM_WASM 环境变量
+ * （PoC）；未设则当前目录 libqzvm.wasm。
+ * uint8/uint32 是 WAMR typedef（platform_common.h:102 = uint8_t）；ext_wamr
+ * 未 include 该 header，用 uint8_t/uint32_t（同型）+ cast 注册。 */
+static bool
+qz_module_reader(package_type_t module_type, const char *module_name,
+                 uint8_t **p_buffer, uint32_t *p_size)
+{
+    (void)module_type;
+    if (!module_name || strcmp(module_name, "qz") != 0) return false;
+    const char *path = getenv("QZ_LIBQZVM_WASM");
+    if (!path || !*path) path = "libqzvm.wasm";
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return false; }
+    uint8_t *buf = (uint8_t *)malloc((size_t)sz);
+    if (!buf) { fclose(f); return false; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf); fclose(f); return false;
+    }
+    fclose(f);
+    *p_buffer = buf;
+    *p_size = (uint32_t)sz;
+    return true;
+}
+
+static void
+qz_module_destroyer(uint8_t *buffer, uint32_t size)
+{
+    (void)size;
+    free(buffer);
+}
+/* M6b PoC: libqzvm（guest wasm）import "qz_host" "drain"/"fs_read"（宿主 API）。
+ * multi-module 下 libqzvm 作 submodule，其 import 需全局 native registration
+ * （wasm_runtime_register_natives 按 module name 匹配，host_bench3.c:56 先例）。
+ * PoC 用 stub：drain 返回 0（无事件）、fs_read 返回 -1（失败）。后续接真
+ * qzjs host 事件循环（in-module 形态 host 侧工程）。签名匹配 wasm import
+ * (i32,i32)->i32（drain(void*,i32)->i32 / fs_read(void*,i32)->i32）。 */
+static int32_t
+qz_host_stub_drain(void *buf, int32_t max)
+{
+    (void)buf; (void)max;
+    return 0;
+}
+
+static int32_t
+qz_host_stub_fs_read(void *path, int32_t len)
+{
+    (void)path; (void)len;
+    return -1;
+}
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+static NativeSymbol qz_host_stub_natives[] = {
+    { "drain",   (void *)qz_host_stub_drain,   "(ii)i", NULL },
+    { "fs_read", (void *)qz_host_stub_fs_read, "(ii)i", NULL },
+};
+#pragma GCC diagnostic pop
+
+static void
+qz_register_qz_host_natives(void)
+{
+    if (!wasm_runtime_register_natives("qz_host", qz_host_stub_natives,
+                                       (uint32_t)(
+                                           sizeof(qz_host_stub_natives) /
+                                           sizeof(qz_host_stub_natives[0]))))
+        fprintf(stderr, "[qzvm] qz_host natives registration failed\n");
+}
+#endif /* WASM_ENABLE_MULTI_MODULE */
+
 static int wamr_ensure_runtime(void)
 {
     {
@@ -65,11 +165,18 @@ static int wamr_ensure_runtime(void)
         if (__atomic_compare_exchange_n(&g_wamr_state.initialized, &zero,
                                         inprogress, 0, __ATOMIC_ACQ_REL,
                                         __ATOMIC_ACQUIRE)) {
-            if (!wasm_runtime_init()) {
+            if (!wamr_runtime_init_once()) {
                 __atomic_store_n(&g_wamr_state.initialized, 0,
                                  __ATOMIC_RELEASE);   /* 回滚：后续实例可重试 */
                 return -1;
             }
+#if WASM_ENABLE_MULTI_MODULE != 0
+            /* M6b PoC: 注册 multi-module reader，WAMR 按 import module name
+             * 自动加载 submodule（emitter 产物 import "qz" 链接 libqzvm.wasm）。*/
+            wasm_runtime_set_module_reader((module_reader)qz_module_reader,
+                                           (module_destroyer)qz_module_destroyer);
+            qz_register_qz_host_natives();
+#endif
             __atomic_store_n(&g_wamr_state.initialized, 1, __ATOMIC_RELEASE);
         } else {
             while (__atomic_load_n(&g_wamr_state.initialized,
@@ -252,6 +359,16 @@ static void wamr_instance_finalizer(JSRuntime *jsrt, JSValue val)
 }
 
 static void wamr_global_class_finalizer(JSRuntime *jsrt, JSValue val);
+static void wamr_memory_class_finalizer(JSRuntime *jsrt, JSValue val);
+
+/* gc_mark：向 QuickJS 循环收集器暴露 opaque 内 JSValue 强边（quickjs-ng
+ * mark_children 走 class gc_mark）。缺失时 instance↔module、exports.memory
+ * 持有者→instance、global→instance、import closure→js_func 等边对 GC 不可见
+ * → 引用环不可回收 → JS_FreeRuntime 断言 gc_obj_list 非空（wasm3 后端同款
+ * 缺陷已修，见 ext_wasm3.c）。定义在各 wrap 结构之后。 */
+static void wamr_instance_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb);
+static void wamr_global_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb);
+static void wamr_memory_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb);
 
 static void wamr_register_classes(qz_t *rt, JSContext *ctx)
 {
@@ -270,6 +387,7 @@ static void wamr_register_classes(qz_t *rt, JSContext *ctx)
     JSClassDef instance_class = {
         .class_name = "WebAssembly.Instance",
         .finalizer = wamr_instance_finalizer,
+        .gc_mark = wamr_instance_gc_mark,
     };
     JS_NewClass(jsrt, rt->wamr_instance_class_id, &instance_class);
 
@@ -278,8 +396,18 @@ static void wamr_register_classes(qz_t *rt, JSContext *ctx)
     JSClassDef global_class = {
         .class_name = "WebAssembly.Global",
         .finalizer = wamr_global_class_finalizer,
+        .gc_mark = wamr_global_class_gc_mark,
     };
     JS_NewClass(jsrt, rt->wamr_global_class_id, &global_class);
+
+    /* Memory class (exported linear memory with live buffer + grow) */
+    JS_NewClassID(jsrt, &rt->wamr_memory_class_id);
+    JSClassDef memory_class = {
+        .class_name = "WebAssembly.Memory",
+        .finalizer = wamr_memory_class_finalizer,
+        .gc_mark = wamr_memory_class_gc_mark,
+    };
+    JS_NewClass(jsrt, rt->wamr_memory_class_id, &memory_class);
 }
 
 /* ================================================================
@@ -300,28 +428,115 @@ typedef struct wamr_global_closure_t {
     JSValue instance_ref;
 } wamr_global_closure_t;
 
-/* Owner of an exported linear-memory ArrayBuffer. The ArrayBuffer wraps
- * WAMR memory owned by the instance; holding a JS reference to the instance
- * (freed when the ArrayBuffer is finalized) prevents the instance from being
- * deinstantiated while exports.memory is still referenced. */
-typedef struct wamr_mem_owner_t {
-    JSValue instance_ref;
-} wamr_mem_owner_t;
+/* Owner of an exported linear memory: the JS instance is held so its WAMR
+ * instance outlives any ArrayBuffer still referencing its memory. Also carries
+ * the live memory handle so `buffer` can be rebuilt after memory.grow. */
+typedef struct wamr_memory_owner_t {
+    JSValue instance_ref;      /* JS instance object (keeps WAMR inst alive) */
+    wasm_module_inst_t inst;   /* live WAMR instance (page count source) */
+    JSValue last_ab;           /* cached ArrayBuffer (stable identity until grow) */
+    size_t last_len;           /* byte length of last_ab (0 = none yet) */
+    uint8_t *last_base;        /* base address last_ab points at */
+} wamr_memory_owner_t;
 
-/* JSReallocArrayBufferDataFunc shim: holds a JS reference to the WAMR
- * instance while the ArrayBuffer lives. size==0 releases the owner. */
-static void *wamr_mem_owner_realloc(JSRuntime *jsrt, void *opaque, void *ptr, size_t size)
+static void wamr_memory_owner_free(JSRuntime *jsrt, wamr_memory_owner_t *owner)
 {
-    wamr_mem_owner_t *owner = (wamr_mem_owner_t *)opaque;
-    if (size == 0) {
-        if (owner) {
-            JS_FreeValueRT(jsrt, owner->instance_ref);
-            js_free_rt(jsrt, owner);
-        }
-        return NULL;
+    if (!owner) return;
+    JS_FreeValueRT(jsrt, owner->instance_ref);
+    JS_FreeValueRT(jsrt, owner->last_ab);
+    js_free_rt(jsrt, owner);
+}
+
+static void wamr_memory_class_finalizer(JSRuntime *jsrt, JSValue val)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    if (!rt) return;
+    wamr_memory_owner_t *owner = (wamr_memory_owner_t *)
+        JS_GetOpaque(val, rt->wamr_memory_class_id);
+    if (owner) {
+        JS_SetOpaque(val, NULL);
+        wamr_memory_owner_free(jsrt, owner);
     }
-    (void)ptr;
-    return ptr; /* fixed-size: nothing to resize */
+}
+
+/* Return the ArrayBuffer over the memory's current base/size. The buffer is
+ * cached and its identity is stable while the page count is unchanged (Web
+ * platform semantics). When WAMR grows/relocates the memory, a fresh buffer is
+ * built and the previous one detached (neutered), so hosts that cached the old
+ * `buffer` are forced to re-read it instead of touching stale memory. */
+static JSValue wamr_memory_make_buffer(JSContext *ctx, wamr_memory_owner_t *owner)
+{
+    wasm_memory_inst_t mem = wasm_runtime_get_memory(owner->inst, 0);
+    if (!mem) return JS_NULL;
+
+    uint64_t num_pages = wasm_memory_get_cur_page_count(mem);
+    uint64_t bytes_per_page = wasm_memory_get_bytes_per_page(mem);
+    size_t byte_len = (size_t)(num_pages * bytes_per_page);
+    uint8_t *base = (uint8_t *)wasm_memory_get_base_address(mem);
+    if (!base) return JS_NULL;
+
+    if (JS_IsArrayBuffer(owner->last_ab) && owner->last_len == byte_len &&
+        base == owner->last_base) {
+        return JS_DupValue(ctx, owner->last_ab);
+    }
+
+    /* Detach the stale buffer (browser neutering semantics) before replacing. */
+    if (JS_IsArrayBuffer(owner->last_ab)) {
+        JS_DetachArrayBuffer(ctx, owner->last_ab);
+    }
+    JS_FreeValue(ctx, owner->last_ab);
+    owner->last_ab = JS_UNDEFINED;
+    owner->last_len = 0;
+
+    JSValue ab = JS_NewArrayBuffer(ctx, base, byte_len, 0, NULL, NULL, 0);
+    if (JS_IsException(ab)) return ab;
+    owner->last_ab = JS_DupValue(ctx, ab);
+    owner->last_len = byte_len;
+    owner->last_base = base;
+    return ab;
+}
+
+static JSValue wamr_memory_buffer_get(JSContext *ctx, JSValueConst this_val)
+{
+    qz_t *rt = qz_get_rt_from_ctx(ctx);
+    if (!rt) return JS_NULL;
+    wamr_memory_owner_t *owner = (wamr_memory_owner_t *)
+        JS_GetOpaque(this_val, rt->wamr_memory_class_id);
+    if (!owner) return JS_NULL;
+    return wamr_memory_make_buffer(ctx, owner);
+}
+
+static void wamr_instance_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    wamr_instance_wrap_t *wrap = rt ? (wamr_instance_wrap_t *)
+        JS_GetOpaque(val, rt->wamr_instance_class_id) : NULL;
+    if (!wrap) return;
+    JS_MarkValue(jsrt, wrap->module_obj, mark_cb);
+    JS_MarkValue(jsrt, wrap->pending_exception, mark_cb);
+    for (uint32_t i = 0; i < wrap->import_closure_count; i++) {
+        wamr_import_closure_t *ic = wrap->import_closures[i];
+        if (ic) JS_MarkValue(jsrt, ic->js_func, mark_cb);
+    }
+}
+
+static void wamr_global_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    wamr_global_closure_t *gc = rt ? (wamr_global_closure_t *)
+        JS_GetOpaque(val, rt->wamr_global_class_id) : NULL;
+    if (gc) JS_MarkValue(jsrt, gc->instance_ref, mark_cb);
+}
+
+static void wamr_memory_class_gc_mark(JSRuntime *jsrt, JSValue val, JS_MarkFunc *mark_cb)
+{
+    qz_t *rt = qz_get_rt_from_jsrt(jsrt);
+    wamr_memory_owner_t *owner = rt ? (wamr_memory_owner_t *)
+        JS_GetOpaque(val, rt->wamr_memory_class_id) : NULL;
+    if (owner) {
+        JS_MarkValue(jsrt, owner->instance_ref, mark_cb);
+        JS_MarkValue(jsrt, owner->last_ab, mark_cb);
+    }
 }
 
 static void wamr_global_class_finalizer(JSRuntime *jsrt, JSValue val)
@@ -986,6 +1201,12 @@ static int wamr_register_module_imports(JSContext *ctx, wamr_module_wrap_t *wrap
         wasm_runtime_get_import_type(wrap->module, i, &imp);
         if (!imp.module_name || !imp.name) continue;
         if (imp.kind != WASM_IMPORT_EXPORT_KIND_FUNC) continue; /* instance-time error */
+#if WASM_ENABLE_MULTI_MODULE != 0
+        /* M6b: multi-module 开时，"qz" function import 由 reader 加载
+         * libqzvm.wasm 提供（共享 memory + 内联绑定函数），跳过 native
+         * registration（否则 dispatch 到 JS shim 拦截 multi-module reader）。 */
+        if (imp.module_name && strcmp(imp.module_name, "qz") == 0) continue;
+#endif
 
         wasm_func_type_t ft = imp.u.func_type;
         wamr_import_slot_t *slot = (wamr_import_slot_t *)
@@ -1124,7 +1345,12 @@ static int wamr_build_instance_imports(JSContext *ctx, wasm_module_t module,
         wasm_import_t imp;
         wasm_runtime_get_import_type(module, i, &imp);
         if (!imp.module_name || !imp.name) continue;
-
+#if WASM_ENABLE_MULTI_MODULE != 0
+        /* M6b: multi-module 开时，"qz" import（function+memory）在 load 阶段
+         * 经 reader 链接到 libqzvm submodule（共享 memory + 内联绑定函数），
+         * 跳过 JS importObject 查找 + memory import 不支持检查。 */
+        if (strcmp(imp.module_name, "qz") == 0) continue;
+#endif
         /* Only function imports are implemented; memory/global/table imports
          * fail fast with a clear message (documented limitation). */
         if (imp.kind != WASM_IMPORT_EXPORT_KIND_FUNC) {
@@ -1279,7 +1505,9 @@ static JSValue wamr_call_exported_func(JSContext *ctx, JSValueConst this_val,
                 return JS_ThrowTypeError(ctx, "WebAssembly function: invalid i32 argument %u", j);
             break;
         case WASM_I64:
-            if (JS_ToInt64(ctx, &wargs[j].of.i64, argv[j]) != 0)
+            /* 看不到 NaN-box 的宿主直接传 BigInt（qzvm._fromJS 恒返回 BigInt）；
+             * JS_ToInt64 拒收 BigInt，须用 ...Ext 版本。 */
+            if (JS_ToInt64Ext(ctx, &wargs[j].of.i64, argv[j]) != 0)
                 return JS_ThrowTypeError(ctx, "WebAssembly function: invalid i64 argument %u", j);
             break;
         case WASM_F32: {
@@ -1327,7 +1555,9 @@ static JSValue wamr_call_exported_func(JSContext *ctx, JSValueConst this_val,
     if (results[0].kind == WASM_I32)
         return JS_NewInt32(ctx, results[0].of.i32);
     else if (results[0].kind == WASM_I64)
-        return JS_NewInt64(ctx, results[0].of.i64);
+        /* 必须返回 BigInt：JS_NewInt64 对 >2^31 的值转 float64，
+         * 会毁掉 NaN-box 位型（句柄高 16 位 0x7FF9/0x7FFA 恰在 f64 NaN 区外）。 */
+        return JS_NewBigInt64(ctx, results[0].of.i64);
     else if (results[0].kind == WASM_F32)
         return JS_NewFloat64(ctx, (double)results[0].of.f32);
     else if (results[0].kind == WASM_F64)
@@ -1386,11 +1616,14 @@ static JSValue wamr_instance_constructor(JSContext *ctx, JSValueConst new_target
         }
     }
 
-    /* Instantiate */
+    /* Instantiate.
+     * host_managed_heap_size 是 wasm_runtime_module_malloc 的池（guest 侧 malloc
+     * 走的是它自己线性内存里的 wasi-libc 堆，不是这个）；qzjs 从不调 module_malloc，
+     * 故只需最小值。原 8 MiB 每实例 mprotect 提交，是纯浪费。 */
     char error_buf[128] = {0};
     wasm_module_inst_t module_inst = wasm_runtime_instantiate(mod_wrap->module,
                                                               64 * 1024,
-                                                              8 * 1024 * 1024,
+                                                              4 * 1024,
                                                               error_buf, sizeof(error_buf));
     if (!module_inst) {
         if (wrap) {
@@ -1428,6 +1661,23 @@ static JSValue wamr_instance_constructor(JSContext *ctx, JSValueConst new_target
     /* Attach the wrap to the module instance so import dispatch can reach the
      * pending-exception slot (and so exported calls can rethrow it). */
     wasm_runtime_set_custom_data(module_inst, wrap);
+
+#ifdef QZ_WAMR_DEBUG_INTERP
+    /* 源码级调试：把该实例的 cluster 绑定到 WAMR debug-interp（GDB RSP over
+     * TCP）。仅 bytecode 模块可调（AOT 实例在 WAMR 内部直接拒绝并告警）。
+     * 端口由 QZ_WAMR_DEBUG_PORT 决定：0=自动分配，-1=用 RuntimeInitArgs
+     * 全局设置；未设则默认 0（自动）。仅当构建开 QZ_WITH_WAMR_DEBUG_INTERP
+     * 时此块才存在——该函数在 WAMR 内被 (THREAD_MGR && DEBUG_INTERP) 守卫，
+     * 未开调试的构建调用会链接失败。 */
+    {
+        const char *port_env = getenv("QZ_WAMR_DEBUG_PORT");
+        int32_t dbg_port = port_env ? (int32_t)atoi(port_env) : 0;
+        uint32_t chosen = wasm_runtime_start_debug_instance_with_port(exec_env, dbg_port);
+        if (chosen)
+            fprintf(stderr, "[qzjs] wasm debug server listening on port %u (GDB RSP)\n",
+                    chosen);
+    }
+#endif
 
     JSValue obj = JS_NewObjectClass(ctx, rt->wamr_instance_class_id);
     if (JS_IsException(obj)) {
@@ -1488,23 +1738,32 @@ static JSValue wamr_instance_constructor(JSContext *ctx, JSValueConst new_target
 
             uint64_t num_pages = wasm_memory_get_cur_page_count(mem);
             uint64_t max_pages = wasm_memory_get_max_page_count(mem);
-            size_t byte_len = (size_t)num_pages * 65536;
-            uint8_t *base = (uint8_t *)wasm_memory_get_base_address(mem);
 
-            JSValue mem_obj = JS_NewObject(ctx);
-            /* The ArrayBuffer wraps WAMR memory owned by the instance. Give
-             * it an owner that holds a JS reference to the instance, so the
-             * instance cannot be deinstantiated (freeing the memory) while
-             * exports.memory is still referenced — fixes a use-after-free. */
-            wamr_mem_owner_t *owner = (wamr_mem_owner_t *)js_malloc(ctx, sizeof(*owner));
-            if (!owner) continue;
-            JSValue ab = JS_NewArrayBuffer(ctx, base, byte_len, 0,
-                                           wamr_mem_owner_realloc, owner, 0);
-            if (JS_IsException(ab)) {
-                wamr_mem_owner_realloc(JS_GetRuntime(ctx), owner, NULL, 0);
-                continue;
-            }
-            JS_SetPropertyStr(ctx, mem_obj, "buffer", ab);
+            /* The `buffer` property is a live getter, not a snapshot: WAMR may
+             * relocate/enlarge the linear memory (guest malloc, memory.grow),
+             * which a fixed ArrayBuffer cannot track — hosts would then read/
+             * write out of bounds. The owner holds a JS reference to the
+             * instance so it cannot be deinstantiated (freeing the memory)
+             * while exports.memory is still referenced. */
+            JSValue mem_obj = JS_NewObjectClass(ctx, rt->wamr_memory_class_id);
+            if (JS_IsException(mem_obj)) continue;
+            wamr_memory_owner_t *owner = (wamr_memory_owner_t *)
+                js_mallocz(ctx, sizeof(*owner));
+            if (!owner) { JS_FreeValue(ctx, mem_obj); continue; }
+            owner->instance_ref = JS_DupValue(ctx, obj);
+            owner->inst = module_inst;
+            owner->last_ab = JS_UNDEFINED;
+            JS_SetOpaque(mem_obj, owner);
+
+            JSAtom buffer_atom = JS_NewAtom(ctx, "buffer");
+            _QZ_WAMR_DIAG_PUSH
+            _QZ_WAMR_DIAG_IGNORE_CAST
+            JS_DefinePropertyGetSet(ctx, mem_obj, buffer_atom,
+                JS_NewCFunction2(ctx, (JSCFunction *)wamr_memory_buffer_get,
+                    "get buffer", 0, JS_CFUNC_getter, 0),
+                JS_UNDEFINED, JS_PROP_CONFIGURABLE);
+            _QZ_WAMR_DIAG_POP
+            JS_FreeAtom(ctx, buffer_atom);
             JS_SetPropertyStr(ctx, mem_obj, "_initial",
                               JS_NewInt32(ctx, (int32_t)num_pages));
             if (max_pages > 0 && max_pages < UINT32_MAX) {
@@ -1856,6 +2115,7 @@ static int wamr_ext_init(qz_ext_t *ext, qz_t *rt)
 static void wamr_ext_destroy(qz_ext_t *ext, qz_t *rt)
 {
     (void)ext;
+    (void)rt;
     /* 卸载本线程安装的 WAMR signal 环境（SIGSEGV/SIGBUS handler、栈 guard
      * pages、sigaltstack）。WAMR 的 guard pages 与 signal handler 都是进程
      * 级副作用：不清理的话，下一个实例（新 worker 线程）在 os_thread_signal_init
@@ -1863,10 +2123,13 @@ static void wamr_ext_destroy(qz_ext_t *ext, qz_t *rt)
      * 线程内（qz_thread_teardown → qz_ctx_destroy），与本线程的
      * wasm_runtime_init_thread_env 对称。 */
     wasm_runtime_destroy_thread_env();
-    /* Reset class IDs so JS_NewClassID allocates fresh ones for the next runtime */
-    rt->wamr_module_class_id = 0;
-    rt->wamr_instance_class_id = 0;
-    rt->wamr_global_class_id = 0;
+    /* 注意：绝不在此清空 wamr_*_class_id。qzjs teardown 顺序是
+     * ctx_destroy（含本 destroy）→ JS_FreeRuntime，而 JS_FreeRuntime 内部
+     * 的 JS_RunGC 依赖 finalizer/gc_mark 用 class_id 经 JS_GetOpaque 取 wrap；
+     * 清零后 finalizer 的 JS_GetOpaque 返回 NULL 直接 return →
+     * instance wrap 的 module_obj 引用永不释放 → gc_obj_list 断言非空。
+     * 每个 runtime 是全新 qz_t（calloc，字段天然 0），JS_NewClassID 在
+     * register_classes 里重新分配，无需手动重置。（wasm3 后端同款注释。） */
 }
 
 static int wamr_ext_suspend(qz_ext_t *ext, qz_t *rt)

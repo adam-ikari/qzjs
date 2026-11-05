@@ -25,12 +25,57 @@ static const unsigned char kAddModule[] = {
     0x00, 0x20, 0x01, 0x6a, 0x0b
 };
 
+// i64.wat — exports id64(i64)->i64, add64(i64,i64)->i64, hi()->i64.
+// Guards the export-side i64 bridge: arguments accepted as BigInt
+// (JS_ToInt64Ext) and results returned as BigInt (JS_NewBigInt64) — a plain
+// Number return corrupts values above 2^31 (NaN-box handles live there).
+static const unsigned char kI64Module[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x60,
+    0x01, 0x7e, 0x01, 0x7e, 0x60, 0x02, 0x7e, 0x7e, 0x01, 0x7e, 0x60, 0x00,
+    0x01, 0x7e, 0x03, 0x04, 0x03, 0x00, 0x01, 0x02, 0x07, 0x15, 0x03, 0x04,
+    0x69, 0x64, 0x36, 0x34, 0x00, 0x00, 0x05, 0x61, 0x64, 0x64, 0x36, 0x34,
+    0x00, 0x01, 0x02, 0x68, 0x69, 0x00, 0x02, 0x0a, 0x1c, 0x03, 0x04, 0x00,
+    0x20, 0x00, 0x0b, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x7c, 0x0b, 0x0d,
+    0x00, 0x42, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0xc0, 0xfc, 0xff, 0x00,
+    0x0b
+};
+
 // Forged .aot: \0aot magic (0x00 0x61 0x6f 0x74) + version 0 (≠ 5). WAMR's
 // wasm_runtime_load routes on the magic to aot_load_from_aot_file, which
 // rejects the version -> load fails -> the JS shim must fall back to .wasm.
 static const unsigned char kBadAotModule[] = {
     0x00, 0x61, 0x6f, 0x74,
     0x00, 0x00, 0x00, 0x00
+};
+
+// shrink.wasm — declares (memory 32) and exports it, but has no memory.size/
+// memory.grow. WAMR's SHRUNK_MEMORY loader path folds the declared page count
+// into num_bytes_per_page and collapses init_page_count to 1; the export shim
+// must derive the buffer length from the real page size, not a hardcoded
+// 64 KiB spec constant, or the ArrayBuffer undershoots the live memory.
+static const unsigned char kShrinkMemModule[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x02, 0x60,
+    0x02, 0x7f, 0x7f, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02,
+    0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x20, 0x07, 0x18, 0x03, 0x06, 0x6d,
+    0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x6f, 0x6b, 0x65,
+    0x00, 0x00, 0x04, 0x70, 0x65, 0x65, 0x6b, 0x00, 0x01, 0x0a, 0x13, 0x02,
+    0x09, 0x00, 0x20, 0x00, 0x20, 0x01, 0x36, 0x02, 0x00, 0x0b, 0x07, 0x00,
+    0x20, 0x00, 0x28, 0x02, 0x00, 0x0b
+};
+
+// growmem.wasm — (memory (export "memory") 1 4), poke(i32,i32)->i32 writing a
+// byte through the exported memory, and grow(i32)->i32 calling memory.grow.
+// The module contains a memory.grow instruction, so WAMR must not run its
+// SHRUNK_MEMORY folding on it (that path collapses max_page_count to 1 and
+// would make growth impossible).
+static const unsigned char kGrowMemModule[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x02, 0x60,
+    0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03,
+    0x02, 0x00, 0x01, 0x05, 0x04, 0x01, 0x01, 0x01, 0x04, 0x07, 0x18, 0x03,
+    0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x6f,
+    0x6b, 0x65, 0x00, 0x00, 0x04, 0x67, 0x72, 0x6f, 0x77, 0x00, 0x01, 0x0a,
+    0x17, 0x02, 0x0e, 0x00, 0x20, 0x00, 0x20, 0x01, 0x3a, 0x00, 0x00, 0x20,
+    0x00, 0x2d, 0x00, 0x00, 0x0b, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b
 };
 
 // JS fixtures: _wasmBytes (ArrayBuffer), _badAot (ArrayBuffer), _src (a
@@ -46,6 +91,24 @@ static const std::string kFixtures = [] {
     for (size_t i = 0; i < sizeof(kBadAotModule); i++) {
         if (i) s += ",";
         s += std::to_string(kBadAotModule[i]);
+    }
+    s += "]).buffer;\n";
+    s += "var _i64Bytes = new Uint8Array([";
+    for (size_t i = 0; i < sizeof(kI64Module); i++) {
+        if (i) s += ",";
+        s += std::to_string(kI64Module[i]);
+    }
+    s += "]).buffer;\n";
+    s += "var _shrinkBytes = new Uint8Array([";
+    for (size_t i = 0; i < sizeof(kShrinkMemModule); i++) {
+        if (i) s += ",";
+        s += std::to_string(kShrinkMemModule[i]);
+    }
+    s += "]).buffer;\n";
+    s += "var _growBytes = new Uint8Array([";
+    for (size_t i = 0; i < sizeof(kGrowMemModule); i++) {
+        if (i) s += ",";
+        s += std::to_string(kGrowMemModule[i]);
     }
     s += "]).buffer;\n";
     s += "var _src = { arrayBuffer: function(){ return Promise.resolve(_wasmBytes); } };";
@@ -210,5 +273,98 @@ TEST(wasm_aot, no_options_unaffected) {
     std::string v;
     ASSERT_TRUE(host_poll_until_value(h, "String(_r)", "11", &v))
         << "no-options instantiate regressed, got: " << v;
+    host_destroy(h);
+}
+
+// Export-side i64 bridge: arguments must round-trip as BigInt and results
+// must come back as BigInt (not Number). A Number return truncates to f64
+// and destroys NaN-box handles above 2^31.
+TEST(wasm_aot, export_i64_bigint_roundtrip) {
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    std::string out;
+    ASSERT_TRUE(host_eval(h, (kFixtures +
+        "\nvar _r = null;\n"
+        "WebAssembly.instantiate(_i64Bytes).then(function(res){\n"
+        "  var e = res.instance.exports;\n"
+        "  _r = [typeof e.id64(7n), String(e.add64(5n, 9n)), String(e.hi())].join('|');\n"
+        "}).catch(function(e){ _r = 'ERR:' + e.message; });\n"
+        "0").c_str(), &out));
+
+    // hi() = 0x7FF9000000000001 = 9221401712017801217.
+    std::string v;
+    ASSERT_TRUE(host_poll_until_value(h, "String(_r)",
+        "bigint|14|9221401712017801217", &v))
+        << "i64 export bridge wrong (expected bigint args + bigint result), got: " << v;
+    host_destroy(h);
+}
+
+// SHRUNK_MEMORY regression: exporting (memory 32) with no memory.size must
+// still expose a buffer covering 32 pages (32 * 64 KiB = 2097152). Before the
+// page-size fix the shim used num_pages * 65536 against WAMR's folded page
+// size, exposing only 64 KiB — writes past that silently no-op.
+TEST(wasm_aot, shrunk_memory_export_length) {
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    std::string out;
+    ASSERT_TRUE(host_eval(h, (kFixtures +
+        "\nvar _r = null;\n"
+        "WebAssembly.instantiate(_shrinkBytes).then(function(res){\n"
+        "  var mem = res.instance.exports.memory;\n"
+        "  var n = mem.buffer.byteLength;\n"
+        "  mem.__probe = new Uint8Array(mem.buffer);\n"
+        "  _r = (n >= 2097152 && mem.__probe.length === n) ? 'ok' : ('bad:' + n);\n"
+        "}).catch(function(e){ _r = 'ERR:' + e.message; });\n"
+        "0").c_str(), &out));
+
+    std::string v;
+    ASSERT_TRUE(host_poll_until_value(h, "String(_r)", "ok", &v))
+        << "shrunk-memory export exposed a short buffer, got: " << v;
+    host_destroy(h);
+}
+
+// Live-buffer regression: `exports.memory.buffer` must be a getter that
+// re-reads the WAMR memory, not a snapshot. When the guest grows its linear
+// memory, WAMR enlarges/relocates it; a fixed ArrayBuffer left hosts reading/
+// writing out of bounds (its length lagged the live page count). Verifies the
+// buffer refreshes after a guest `memory.grow`, that a host view taken before
+// the grow is detached, and that host<->guest writes agree through the
+// refreshed buffer. Buffer identity must stay stable while the size is
+// unchanged (Web platform semantics).
+TEST(wasm_aot, memory_buffer_is_live_across_grow) {
+    HostCtx *h = host_create();
+    ASSERT_NE(nullptr, h);
+
+    std::string out;
+    ASSERT_TRUE(host_eval(h, (kFixtures +
+        "\nvar _r = null;\n"
+        "WebAssembly.instantiate(_growBytes).then(function(res){\n"
+        "  var e = res.instance.exports;\n"
+        "  var mem = e.memory;\n"
+        "  var before = mem.buffer.byteLength;\n"
+        "  var stable = mem.buffer === mem.buffer;\n"
+        "  var oldView = mem.buffer;\n"
+        "  var oldPages = e.grow(1);\n"          /* guest memory.grow */
+        "  var after = mem.buffer.byteLength;\n"
+        "  var grew = after === before + 65536;\n"
+        "  var detached = oldView.byteLength === 0;\n"
+        "  var writable = false;\n"
+        "  try { var v = new Uint8Array(mem.buffer); v[after - 1] = 0xAB;"
+        "        writable = v[after - 1] === 0xAB; } catch (err) {}\n"
+        // Guest write through the grown memory is visible via the host buffer.
+        "  var guest = e.poke(after - 1, 0x5A);\n"
+        "  var visible = guest === 0x5A && new Uint8Array(mem.buffer)[after - 1] === 0x5A;\n"
+        "  _r = (stable && grew && detached && writable && visible) ? 'ok'\n"
+        "     : ('bad stable=' + stable + ' grew=' + grew + ' oldPages=' + oldPages +\n"
+        "        ' detached=' + detached + ' writable=' + writable +\n"
+        "        ' visible=' + visible + ' before=' + before + ' after=' + after);\n"
+        "}).catch(function(err){ _r = 'ERR:' + err.message; });\n"
+        "0").c_str(), &out));
+
+    std::string v;
+    ASSERT_TRUE(host_poll_until_value(h, "String(_r)", "ok", &v))
+        << "live memory buffer semantics wrong, got: " << v;
     host_destroy(h);
 }

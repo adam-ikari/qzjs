@@ -207,3 +207,48 @@ TEST_F(HostMessagingTest, BadJsonHostMessageYieldsErrorEnvelope) {
     /* 防的 bug：坏 JSON 静默丢弃（宿主无从得知）或把残片喂给 dispatch。 */
     EXPECT_EQ(out, R"({"type":"error","error":"bad-json"})") << out;
 }
+
+// ================================================================
+// 7. __qz_dispatch__ 直接抛异常 → error envelope
+// ================================================================
+
+TEST_F(HostMessagingTest, DispatchThrowYieldsErrorEnvelope) {
+    /* 覆盖 __qz_dispatch__ 被覆盖为直接抛异常（绕过 onmessage 的
+     * try/catch 包装）：异常冒泡到 qz_dispatch_message 的 JS_Call，
+     * bridge 应投递 error envelope 而非静默吞掉。 */
+    std::string out;
+    ASSERT_TRUE(host_eval(h,
+        "globalThis.__qz_dispatch__ = function() { throw new Error('dispatch-boom'); }",
+        &out));
+    /* 现在发一条消息 → 新 __qz_dispatch__ 直接抛 → error envelope */
+    ASSERT_EQ(0, qz_post_message(h->rt, "{\"hello\":1}", 11));
+    ASSERT_TRUE(host_wait_msg(h, &out)) << "无回执——异常被静默吞了？";
+    EXPECT_NE(std::string::npos, out.find("\"type\":\"error\"")) << out;
+    EXPECT_NE(std::string::npos, out.find("dispatch-failed")) << out;
+    EXPECT_NE(std::string::npos, out.find("dispatch-boom")) << out;
+}
+
+// ================================================================
+// 8. OOM（uncatchable）穿 onmessage try/catch → error envelope
+// ================================================================
+
+TEST(DispatchError, OomPunchesThroughTryCatchYieldsErrorEnvelope) {
+    /* 覆盖约束③ 的 OOM 可观测性：memory_limit 限堆 → onmessage 里大分配
+     * 触发 OOM（uncatchable error，与栈溢出同类）→ 穿过 onmessage 的
+     * try/catch → 冒泡到 qz_dispatch_message 的 JS_Call → error envelope。
+     * OOM 双重失败（envelope 对象建不起来）退静态
+     * {"type":"error","error":"out-of-memory"} 帧。 */
+    HostCtx *h = host_create_limited(16u << 20);  /* 16 MiB */
+    ASSERT_NE(nullptr, h);
+    /* kTestBootstrap 的 onmessage evals code；OOM 穿透 try/catch */
+    std::string payload =
+        "{\"cmd\":\"eval\",\"id\":1,\"code\":\"new ArrayBuffer(67108864)\"}";
+    ASSERT_EQ(0, qz_post_message(h->rt, payload.data(), payload.size()));
+    std::string out;
+    ASSERT_TRUE(host_wait_msg(h, &out, 10000)) << "无回执——OOM 被静默吞了？";
+    EXPECT_NE(std::string::npos, out.find("\"type\":\"error\"")) << out;
+    bool has_oom = out.find("out-of-memory") != std::string::npos ||
+                    out.find("out of memory") != std::string::npos;
+    EXPECT_TRUE(has_oom) << out;
+    host_destroy(h);
+}

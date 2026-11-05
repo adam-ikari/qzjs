@@ -9,14 +9,15 @@ qzjs 内置了一个 **DAP（调试适配器协议）** 步进调试器，直接
 
 ## 工作原理
 
-调试器是一种**库能力**，而非独立进程。它位于 `src/debugger.c`（调试核心）和 `src/debugger_dap.c`（DAP 协议层）中，当 `QZ_BUILD_DEBUGGER=ON` 时编译进 `libqzjs.a`。对 QuickJS-ng 引擎的一个小补丁（`deps/quickjs-ng-debugger.patch`）添加了调试核心使用的断点/步进内省原语。
+调试器是一种**库能力**，而非独立进程。它位于 `src/qzvm/debugger.c`（调试核心）和 `src/qzvm/debugger_dap.c`（DAP 协议层）中，当 `QZ_BUILD_DEBUGGER=ON` 时编译进 `libqzjs.a`。对 QuickJS-ng 引擎的一个小补丁（`src/qzvm/patches/engine-dap-debugger.patch`）添加了调试核心使用的断点/步进内省原语。
 
 激活方式为**通过配置或环境变量自动**——你的宿主代码无需更改。`qz_create` 检查调试设置，如果启用，则附加 DAP 层（通过 stdin/stdout 进行 DAP 通信）并在入口处暂停。VS Code 随后附加。
 
 ### 双层禁用（关闭时零开销）
 
-- `QZ_BUILD_DEBUGGER=OFF`（默认）：**不**应用引擎补丁，**不**编译 `src/debugger.c`/`src/debugger_dap.c`，`qz_create` 中没有调试代码路径。调试功能不存在；`libqzjs.a` 保持不变。
-- `QZ_BUILD_DEBUGGER=ON`：应用补丁并编译源文件，但引擎的每个操作码的 `DEBUGGER_CHECK` 是无操作的（一个永不执行的分支），**除非运行时附加了调试器**。非调试运行几乎没有性能开销。
+- 引擎补丁（`src/qzvm/patches/engine-dap-debugger.patch`）在配置时**无条件应用**——不受 `QZ_BUILD_DEBUGGER` 门控。该选项门控的是 qzjs 侧的调试源文件。
+- `QZ_BUILD_DEBUGGER=OFF`（默认）：**不**编译 `src/qzvm/debugger.c`/`src/qzvm/debugger_dap.c`，**不**定义 `QZ_DEBUG_SUPPORT`，`qz_create` 中没有调试代码路径。调试功能不存在。
+- `QZ_BUILD_DEBUGGER=ON`：源文件编译进来，但引擎每个操作码的 `DEBUGGER_CHECK` 是无操作的（一个永不执行的分支），**除非运行时附加了调试器**。非调试运行几乎没有性能开销。
 
 ## 构建
 
@@ -25,7 +26,7 @@ cmake -B build -DQZ_BUILD_DEBUGGER=ON -DQZ_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 ```
 
-这会在配置时将 `deps/quickjs-ng-debugger.patch` 应用到 QuickJS-ng 子模块的工作树（子模块在 git 中保持干净——补丁是事实来源）。`cmake -DQZ_BUILD_DEBUGGER=OFF` 恢复原始状态。
+这会在配置时将 `src/qzvm/patches/engine-dap-debugger.patch` 应用到 QuickJS-ng 子模块的工作树（子模块在 git 中保持干净——补丁是事实来源）。该步骤对**每次**构建都执行；`QZ_BUILD_DEBUGGER` 选项不门控它。
 
 ## 在你的程序中启用调试
 
@@ -256,13 +257,13 @@ CI 两个门都跑：`debugger` job 执行 `ctest -L dap` 与这些 e2e 测试
 **断点不命中 / 无 `stopped` 事件 / 测试 30 秒超时**
 
 引擎的逐 opcode 断点检查由编译期宏门控。若 CMake 传给引擎的宏与
-`deps/quickjs-ng-debugger.patch` 里的宏不一致，`DEBUGGER_CHECK` 会编译成
+`src/qzvm/patches/engine-dap-debugger.patch` 里的宏不一致，`DEBUGGER_CHECK` 会编译成
 空操作——调试静默失效：不报错，断点就是不生效。
 
 1. 核对两处宏名一致：
 
    ```bash
-   grep -n DEBUG_SUPPORT deps/quickjs-ng-debugger.patch | head -4
+   grep -n DEBUG_SUPPORT src/qzvm/patches/engine-dap-debugger.patch | head -4
    grep -n "QZ_DEBUG_SUPPORT_DEFINE" CMakeLists.txt
    ```
 

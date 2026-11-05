@@ -5,10 +5,9 @@ category: decision
 status: active
 tags: [build, upstream]
 created: "2026-08-31T11:59:47"
-updated: "2026-10-06T15:33:49"
+updated: "2026-10-13T08:35:24"
 ---
 
-<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## quickjs-ng 上游同步与改动分层策略
 
@@ -136,4 +135,10 @@ simplify-asan(6c94b099)、wasm-stack-size(d3762f56)、windows-sdk(70823096/590fd
   kind: decision
   summary: "推翻『不 fork』：重新 fork quickjs-ng → adam-ikari/quickjs；引擎改动分层（修复→fork master 同步；AOT 等大型私有→fork 独立分支不进 master）"
   source: "2026-10-06 用户：删除旧 fork 重新建；AOT 永不提交 upstream"
+  affects: [quickjs-upstream-merge-strategy]
+
+- time: 2026-10-13T08:35:24
+  kind: decision
+  summary: "规范化存储标记：compiled_truth 区块开头重复的 <!-- compiled_truth --> 标记（CLI extractSection 会把它当正文首行）已去掉；正文无实质改动。"
+  source: "brain CLI 重复 marker 自愈"
   affects: [quickjs-upstream-merge-strategy]

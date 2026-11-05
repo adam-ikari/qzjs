@@ -992,6 +992,40 @@ static void ctl_metrics(qz_t *rt, JSContext *ctx, char *correl)
                       JS_NewInt32(ctx, JS_IsJobPending(rt->jsrt) ? 1 : 0));
     JS_SetPropertyStr(ctx, r, "ctx_count", JS_NewInt32(ctx, rt->context_count));
     JS_SetPropertyStr(ctx, r, "worker_count", JS_NewInt32(ctx, workers));
+    /* GC 观测（约束③ ⑤）：与 "gc" op 回执同源（rt->gc_*）。这里是**不改状态**
+     * 的即时快照——宿主不必为了读计数就跑一次回收。 */
+    JS_SetPropertyStr(ctx, r, "gc_runs", JS_NewInt64(ctx, (int64_t)rt->gc_runs));
+    JS_SetPropertyStr(ctx, r, "gc_last_us", JS_NewInt64(ctx, (int64_t)rt->gc_last_us));
+    JS_SetPropertyStr(ctx, r, "gc_total_us", JS_NewInt64(ctx, (int64_t)rt->gc_total_us));
+    ctl_send_receipt(rt, ctx, r);
+}
+
+/* 控制面 "gc" op：在本线程（= JS 线程，dispatch 即安全点）就地跑一次
+ * mark-sweep，回执带回收量。这是**可观测**的回收点——qz_gc() 只保证「已
+ * 排队到确定点」，要看回收了多少得用本 op（见 qzjs.h 的说明）。
+ *
+ * 回收量 = memory_used_size 的进/出差值。注意它**不是**「本次回收释放的
+ * 全部字节」——JS_RunGC 同时回收环与引用计数已归零但尚未 free 的残块，
+ * 差值就是这两者之和；且若期间有别的分配混入会偏小。作为诊断量足够，不用
+ * 它做精确账。 */
+static void ctl_gc(qz_t *rt, JSContext *ctx, char *correl)
+{
+    JSMemoryUsage before, after;
+    JS_ComputeMemoryUsage(rt->jsrt, &before);
+    qz_gc_drive(rt);   /* 唯一入口：JS_RunGC + 记账（约束③ ⑤） */
+    JS_ComputeMemoryUsage(rt->jsrt, &after);
+
+    JSValue r = ctl_receipt_obj(ctx, correl, 1);
+    JS_SetPropertyStr(ctx, r, "reclaimed_bytes",
+                      JS_NewInt64(ctx, (int64_t)before.memory_used_size -
+                                           (int64_t)after.memory_used_size));
+    JS_SetPropertyStr(ctx, r, "heap_bytes",
+                      JS_NewInt64(ctx, after.memory_used_size));
+    /* 累计驱动次数/耗时（约束③ ⑤）：gc_runs 是确定量（宿主驱动 N 次 → N），
+     * 暂停时长是 wall-clock 诊断量，别拿它做复现性断言。 */
+    JS_SetPropertyStr(ctx, r, "gc_runs", JS_NewInt64(ctx, (int64_t)rt->gc_runs));
+    JS_SetPropertyStr(ctx, r, "gc_last_us", JS_NewInt64(ctx, (int64_t)rt->gc_last_us));
+    JS_SetPropertyStr(ctx, r, "gc_total_us", JS_NewInt64(ctx, (int64_t)rt->gc_total_us));
     ctl_send_receipt(rt, ctx, r);
 }
 
@@ -1045,6 +1079,9 @@ void qz_control_dispatch(qz_t *rt, qz_msg_t *m)
         correl0 = NULL;
         JS_SetPropertyStr(ctx, r, "interrupted", JS_TRUE);
         ctl_send_receipt(rt, ctx, r);
+    } else if (op && strcmp(op, "gc") == 0) {
+        ctl_gc(rt, ctx, correl0);
+        correl0 = NULL;
     } else {
         /* 未知 op（含 IDLE_SAFEPOINT 类——CTL-0 不执行，§6 范围外） */
         ctl_error_receipt(rt, ctx, correl0, op ? op : "missing op",

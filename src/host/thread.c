@@ -16,17 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
-/* 在安全点排空 JS 微任务/待执行 job。返回本轮处理数。worker.c 也调用（其
- * 自己的线程主循环）。 */
-int qz_flush_microtasks(qz_t *rt)
-{
-    int total = 0, n;
-    JSContext *job_ctx = NULL;
-    while ((n = JS_ExecutePendingJob(rt->jsrt, &job_ctx)) > 0) total += n;
-    return total;
-}
-
 /* ── idle detection (qz_wait_idle support) ── */
 
 /* uv_walk callback: any active handle other than the internal wake async → busy */
@@ -69,7 +58,7 @@ int qz_loop_idle(qz_t *rt)
      * （JS_IsJobPending），必须判 busy —— 否则 wait_idle 会提前 teardown，
      * promise 回调（bridge_io_done 的 JS_Call resolve 等）访问已释放的
      * JSRuntime → UAF/回调丢失。 */
-    qz_flush_microtasks(rt);
+    qz_tick(rt);
     if (JS_IsJobPending(rt->jsrt)) return 0;
     qz_idle_state_t st;
     st.rt = rt;
@@ -116,7 +105,12 @@ static void qz_wake_cb(uv_async_t *a)
          * 的非零取值。 */
         if (m->flags == QZ_MSG_FLAG_CONTROL)
             qz_control_dispatch(rt, m);
-        else
+        else if (m->flags == QZ_MSG_FLAG_GC_RUN) {
+            /* 同 rt_main child_wake_cb：C 层就地 mark-sweep 回收引用环，
+             * 不进 JS（不需要 JS 栈），本点即 WAKE_SAFEPOINT 确定点。
+             * 经 qz_gc_drive 走唯一入口：回收 + 计数（约束③ ⑤）。 */
+            qz_gc_drive(rt);
+        } else
             qz_dispatch_message(rt, m);
         /* 节点不 free：pop 内部已释放旧 head；m 成为下次 pop 的 head */
 
@@ -125,7 +119,7 @@ static void qz_wake_cb(uv_async_t *a)
          * 下一条消息的 JS 会在本消息 promise 副作用落定之前被派发（读到旧
          * 状态）。逐条冲刷保持"每条消息 = 一个任务，任务后微任务先跑完"的
          * 事件循环语义。 */
-        qz_flush_microtasks(rt);
+        qz_tick(rt);
     }
 }
 
@@ -185,7 +179,7 @@ void qz_thread_main(void *arg)
         /* CTL-0 §1.2：每轮顺带扫描过期回执条目，发 TIMEOUT 回执。 */
         qz_ctl_reap_timeouts(rt);
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE)) break;
-        qz_flush_microtasks(rt);
+        qz_tick(rt);
         if (__atomic_load_n(&rt->wait_idle, __ATOMIC_ACQUIRE) && qz_loop_idle(rt)) {
             __atomic_store_n(&rt->shutting_down, 1, __ATOMIC_RELEASE);
             break;

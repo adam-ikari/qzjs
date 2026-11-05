@@ -13,7 +13,7 @@ mixing them up is the main source of confusion.
 | Number | Where it lives | What it means |
 |--------|----------------|---------------|
 | **Release version** (`0.3.0`) | The Git tag, `project(... VERSION ...)` in CMake, `qzjs --version` | The version of the whole project: JS-level APIs, behavior, features |
-| **ABI version** (`QZ_ABI_VERSION`, currently `1`) | `include/qzjs/qzjs.h` | The binary layout of the C boundary: struct fields, function signatures |
+| **ABI version** (`QZ_ABI_VERSION`, currently `2`) | `include/qzjs/qzjs.h` | The binary layout of the C boundary: struct fields, function signatures |
 
 A release may bump the release version without touching `QZ_ABI_VERSION` — adding
 a JS-level feature does not change how a C struct is laid out in memory.
@@ -22,7 +22,7 @@ a JS-level feature does not change how a C struct is laid out in memory.
 
 `QZ_ABI_VERSION` is bumped when any of these change:
 
-- a field is **removed** or **reordered** in a public struct (`qz_config_t`)
+- a field is **removed**, **reordered**, or **appended** in a public struct (`qz_config_t`)
 - a field's **type** or size changes
 - a public function's **signature** changes (parameters, return type, calling convention)
 - a function is removed or renamed
@@ -31,7 +31,6 @@ a JS-level feature does not change how a C struct is laid out in memory.
 
 It is **not** bumped when:
 
-- fields are **appended to the end** of a public struct (see below)
 - new functions are **added** alongside existing ones
 - JS-level behavior changes: new Web APIs, new polyfill features, engine upgrades
 
@@ -42,7 +41,7 @@ It is **not** bumped when:
 `qz_config_t` starts with two fields that exist only for this purpose:
 
 ```c
-#define QZ_ABI_VERSION 1
+#define QZ_ABI_VERSION 2
 
 typedef struct qz_config_s {
     uint32_t struct_size;   /* qz_config_init fills this with sizeof(qz_config_t) */
@@ -117,18 +116,22 @@ int main(void) {
 
 ## Adding fields to a public struct
 
-New fields are **appended to the end** and the ABI version stays the same. This
-is safe because the host passes the struct by value and `struct_size` records
-how much of it is meaningful: a host on the older header sends the shorter
-size, and the library reads only the fields that header knew about.
+Append the new field at the end **and bump `QZ_ABI_VERSION`** in the same commit,
+noting the migration in `CHANGELOG.md`.
 
-The guarantee is one-directional and worth stating plainly: a **newer library
-keeps working with an older-compiled host**. A host recompiled against a newer
-header but run against an older library does not work — the gate rejects it.
+Appending is a layout change, and the gate treats it as one: `qz_create` requires
+`config->struct_size` to equal `sizeof(qz_config_t)` **exactly**
+(`src/host/qzjs.c`), so a `qz_config_t` built from any other header — older *or*
+newer — is rejected outright. Nothing is partially read or silently defaulted.
 
-If a change genuinely cannot be expressed as an append — a field is removed,
-retyped, or reordered — bump `QZ_ABI_VERSION` in the same commit and note the
-migration in `CHANGELOG.md`.
+The bump is what makes that rejection legible to hosts whose only runtime check
+is `qz_abi_version() != QZ_ABI_VERSION`; without it, such a host would sail past
+its own check and fail later, on the `struct_size` comparison inside `qz_create`.
+
+> Making appends *backward compatible* instead — accepting
+> `struct_size <= sizeof(qz_config_t)` and copying only `struct_size` bytes — is
+> a deliberate design change, not a documentation fix. It would also make the
+> library's own over-read behaviour depend on host-supplied sizes.
 
 ## Enums that vary by build
 

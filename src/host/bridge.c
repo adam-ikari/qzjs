@@ -2209,7 +2209,58 @@ void qz_dispatch_message(qz_t *rt, qz_msg_t *m)
             data = JS_NewArrayBufferCopy(ctx, (const uint8_t *)m->data, m->len);
         }
         JSValue args[3] = { data, src, kind };
-        qz_js_call_cleanup(ctx, fn, JS_UNDEFINED, 3, args);
+        JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 3, args);
+        if (JS_IsException(ret)) {
+            /* spec §5: __qz_dispatch__ 抛异常 → error envelope。此前
+             * qz_js_call_cleanup 静默吞掉（JS_GetException + free），宿主
+             * 只见超时。OOM 是 uncatchable（is_uncatchable_error，与栈
+             * 溢出同类）：JS_GetException 取回的是 InternalError 对象或
+             * JS_NULL（引擎 OOM-of-OOM 退路，quickjs.c:8716-8717 "throw
+             * JS_NULL to avoid recursing"）。此时堆仍在上限，建 envelope
+             * 对象会再 OOM → 退静态 OOM 帧。 */
+            JSValue exc = JS_GetException(ctx);
+            /* Error 对象的 message/stack 是非可枚举属性，JSON.stringify(err)
+             * → "{}"——须先 toString() 取字符串再放进 detail。 */
+            size_t msglen = 0;
+            const char *msg = (!JS_IsNull(exc) && !JS_IsException(exc))
+                ? JS_ToCStringLen(ctx, &msglen, exc) : NULL;
+            JS_FreeValue(ctx, exc);
+            JSValue env = JS_NewObject(ctx);
+            bool posted = false;
+            if (!JS_IsException(env)) {
+                JS_SetPropertyStr(ctx, env, "type",
+                                  JS_NewString(ctx, "error"));
+                JS_SetPropertyStr(ctx, env, "error",
+                                  JS_NewString(ctx, "dispatch-failed"));
+                if (msg)
+                    JS_SetPropertyStr(ctx, env, "detail",
+                                      JS_NewStringLen(ctx, msg, msglen));
+                else
+                    JS_SetPropertyStr(ctx, env, "detail",
+                                      JS_NewString(ctx, "out-of-memory"));
+                JSValue j = JS_JSONStringify(ctx, env, JS_UNDEFINED,
+                                             JS_UNDEFINED);
+                if (!JS_IsException(j)) {
+                    size_t slen;
+                    const char *s = JS_ToCStringLen(ctx, &slen, j);
+                    if (s) {
+                        qz_post_to_host(rt, s, slen);
+                        JS_FreeCString(ctx, s);
+                        posted = true;
+                    }
+                }
+                JS_FreeValue(ctx, j);
+                JS_FreeValue(ctx, env);
+            }
+            JS_FreeCString(ctx, msg);
+            if (!posted) {
+                /* 双重 OOM（envelope 对象建不起来）或 stringify 失败 */
+                static const char *oom =
+                    "{\"type\":\"error\",\"error\":\"out-of-memory\"}";
+                qz_post_to_host(rt, oom, strlen(oom));
+            }
+        }
+        JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, data);
         JS_FreeValue(ctx, src);
         JS_FreeValue(ctx, kind);
@@ -2325,86 +2376,4 @@ JSValue qz_create_pal_object_ctx(qz_t *rt, qz_ctx_t *ctx)
     }
 
     return pal;
-}
-
-/* ================================================================
- * Inject polyfill via __native_inject__ temp global (per-context version)
- * ================================================================ */
-
-int qz_inject_polyfill_ctx(qz_t *rt, qz_ctx_t *ctx, const uint8_t *code, size_t code_len)
-{
-    JSContext *jsctx = ctx->jsctx;
-    JSValue global = JS_GetGlobalObject(jsctx);
-
-    /* Create the pal object */
-    JSValue pal = qz_create_pal_object_ctx(rt, ctx);
-    if (JS_IsException(pal)) {
-        JS_FreeValue(jsctx, global);
-        return -1;
-    }
-
-    /* Set __native_inject__ as a global temp var */
-    JS_SetPropertyStr(jsctx, global, "__native_inject__", pal);
-
-    JS_FreeValue(jsctx, global);
-
-    /* Evaluate the polyfill code.
-     * Expected format: (function(pal){ ... })(__native_inject__);
-     */
-    JSValue result = JS_Eval(jsctx, (const char *)code, code_len, "<polyfill>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(result)) {
-        JSValue exc = JS_GetException(jsctx);
-        if (rt->debug) {
-            const char *err_str = JS_ToCString(jsctx, exc);
-            if (err_str) {
-                fprintf(stderr, "[qzjs] polyfill eval error: %s\n", err_str);
-                JS_FreeCString(jsctx, err_str);
-            }
-        }
-        JS_FreeValue(jsctx, exc);
-        return -1;
-    }
-    JS_FreeValue(jsctx, result);
-
-    /* Post-polyfill fixup: set ReadableStream[Symbol.asyncIterator]
-     * if not already set. The polyfill may not set it if Symbol.asyncIterator
-     * was not available during evaluation (QuickJS IIFE loading order). */
-    {
-        JSValue global2 = JS_GetGlobalObject(jsctx);
-        JSValue rs_ctor = JS_GetPropertyStr(jsctx, global2, "ReadableStream");
-        JS_FreeValue(jsctx, global2);
-        if (JS_IsFunction(jsctx, rs_ctor)) {
-            /* Set asyncIterator on ReadableStream.prototype if not already set.
-             * Using JS_Eval since Symbol.asyncIterator is awkward to construct from C.
-             * The `if` guard prevents overwriting if the polyfill already set it. */
-            const char *iter_code =
-                "if(!ReadableStream.prototype[Symbol.asyncIterator])"
-                "ReadableStream.prototype[Symbol.asyncIterator]=function(){"
-                "var r=this.getReader();"
-                "return{next:function(){return r.read();},"
-                "return:function(v){r.releaseLock();return{done:true,value:v};}};"
-                "}";
-            JSValue iter_result = JS_Eval(jsctx, iter_code, strlen(iter_code),
-                                            "<asyncIterator>", JS_EVAL_TYPE_GLOBAL);
-            JS_FreeValue(jsctx, iter_result);
-        }
-        JS_FreeValue(jsctx, rs_ctor);
-    }
-
-    /* After polyfill runs, move __native_inject__ to __native__ so extension init
-     * hooks can register functions on the same pal object that the polyfill's
-     * closures reference. */
-    global = JS_GetGlobalObject(jsctx);
-    JSAtom inject_atom = JS_NewAtom(jsctx, "__native_inject__");
-    JSValue pal_ref = JS_GetProperty(jsctx, global, inject_atom);
-    JS_DeleteProperty(jsctx, global, inject_atom, 0);
-    JS_FreeAtom(jsctx, inject_atom);
-    if (!JS_IsUndefined(pal_ref) && !JS_IsException(pal_ref)) {
-        JS_SetPropertyStr(jsctx, global, "__native__", pal_ref);
-    } else {
-        JS_FreeValue(jsctx, pal_ref);
-    }
-    JS_FreeValue(jsctx, global);
-
-    return 0;
 }
