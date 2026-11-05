@@ -51,3 +51,21 @@ function argsEvalOnce(): number {
     const v = new Args().probe(bump(hits));                    // 1*1000 + 7
     return hits[0] * 10000 + v;                                // 11007
 }
+
+// ── 顶层函数体内 arguments：同一条 __args 通道，实参同样只求值一次 ────────────
+function fpair(a: number, b: number): number { return arguments.length * 10 + a + b; }
+function frest(a: number, ...r: number[]): number { return arguments.length * 1000 + a * 100 + r.length * 10 + r[0]; }
+function fident(a: number, ...r: number[]): number { return (arguments === (r as any)) ? 1 : 0; }
+
+function fnArgsOnce(): number {                                // 129
+    const hits = [0];
+    const v = fpair(bump(hits), 2);                            // 2*10 + 7 + 2 = 29
+    return hits[0] * 100 + v;
+}
+function fnArgsRest(): number {                                // 13726
+    const hits = [0];
+    const v = frest(bump(hits), 6, 7);                         // 3*1000 + 7*100 + 2*10 + 6
+    return hits[0] * 10000 + v;
+}
+function fnArgsRestDistinct(): number { return fident(1, 2); } // 0：rest 数组与 arguments 是两个对象
+

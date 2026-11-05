@@ -57,6 +57,10 @@ const LOADS = [
     ['argsStatic', [], 207],
     ['argsArrow', [], 15],
     ['argsEvalOnce', [], 11007],
+    // 顶层函数体内 arguments：同一条 __args 通道（实参只求值一次；rest 段是独立新数组）
+    ['fnArgsOnce', [], 129],
+    ['fnArgsRest', [], 13726],
+    ['fnArgsRestDistinct', [], 0],
   ]],
   ['strwork.ts', [
     ['strWork', [5], '001234'],

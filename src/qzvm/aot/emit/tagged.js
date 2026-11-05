@@ -1341,7 +1341,37 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             throw new Error(`[tagged] num 函数 ${fn} 需 ${nPar} 个实参（JS 少传 → undefined 无法在 f64 ABI 表示）`);
         }
         const calleeParams = !calleeNum ? (this._calleeParams(fn) || this._calleeParams(this._fnName(fn))) : null;
-        if (calleeParams && calleeParams.length === nPar && calleeParams.some(p => p.dotDotDotToken && p === calleeParams[nPar - 1])) {
+        const restTail = !!(calleeParams && calleeParams.length === nPar
+            && calleeParams.some(p => p.dotDotDotToken && p === calleeParams[nPar - 1]));
+        const argsProv = !!(this._fnArgs && this._fnArgs.has(this._fnName(fn)) && this._argGlobal !== undefined
+            && !e.arguments.some(a2 => ts.isSpreadElement(a2)));   // 被调需要 arguments（实参无展开）
+        if (argsProv) {
+            // 全量实参**先一次**求值成数组，值槽再从数组回读（旧写法：发完槽再重发一遍数组字面量
+            // ⇒ 副作用实参执行两次，静默错）。rest 收尾形参的数组由 slice 出**新数组**——JS 里
+            // rest 数组与 arguments 也是两个不同对象，不能同句柄。
+            const MF = this.m, tf = this._expEnter();
+            const litA = ts.factory.createArrayLiteralExpression(e.arguments);
+            litA.pos = e.pos; litA.end = e.end;
+            this.emitTaggedExpr(litA); MF.localSet(tf.v);
+            if (restTail) {
+                const nFix = calleeParams.length - 1;
+                for (let i = 0; i < nFix; i++) {
+                    if (i < e.arguments.length) this._emitElemOf(tf.v, ts.factory.createNumericLiteral(i)); else this._emitUndefined();
+                }
+                MF.localGet(tf.v); MF.i32Const(this._strId("slice"));
+                MF.i64ConstBits(...f64Bits(nFix)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                this._emitUndefined();                        // ovf
+                MF.call("qz.method_call");
+            } else {
+                const nPass = calleeNum ? e.arguments.length : nPar;
+                for (let i = 0; i < nPass; i++) {
+                    if (i < e.arguments.length) { this._emitElemOf(tf.v, ts.factory.createNumericLiteral(i)); if (xt) this._argToCallee(fn); }
+                    else this._emitUndefined();
+                }
+            }
+            MF.localGet(tf.v); MF.globalSet(this._argGlobal);
+            this._expLeave();
+        } else if (restTail) {
             this._emitCallArgs(calleeParams, e.arguments, fn);       // rest 收尾：打包余下实参
         } else {
             const nPass = calleeNum ? e.arguments.length : nPar;
@@ -1349,13 +1379,6 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                 if (i < e.arguments.length) { this.emitTaggedExpr(e.arguments[i]); if (xt) this._argToCallee(fn); }
                 else this._emitUndefined();
             }
-        }
-        if (this._fnArgs && this._fnArgs.has(this._fnName(fn)) && this._argGlobal !== undefined
-            && !e.arguments.some(a2 => ts.isSpreadElement(a2))) {   // 被调需要 arguments：构造全量实参数组写入 __args
-            const litA = ts.factory.createArrayLiteralExpression(e.arguments);
-            litA.pos = e.pos; litA.end = e.end;
-            this.emitTaggedExpr(litA);
-            this.m.globalSet(this._argGlobal);
         }
         this.m.call(this._fnName(fn));
         this._retFromCallee(fn);
