@@ -580,6 +580,15 @@ static void qz_arr_fill(JSContext *ctx, JSValue arr, int32_t alen, uint32_t data
     for (int32_t i = 0; i < alen; i++) {
         int64_t el = 0;
         memcpy(&el, (const void *)(uintptr_t)(dataOff + (uint32_t)i * 8u), 8);
+        if (el == (int64_t)0x7FF9000000000000ULL) {
+            /* undefined 槽 = 洞（`delete a[i]` 与稀疏字面量的表示）。JS 数组的洞与
+             * 显式 undefined 在本表示法里同形（与 POJO 字段槽同一边界）：值语义一致
+             * （读都得 undefined、join/JSON 都得空/null），只有 map/forEach 这类
+             * 「跳过洞」的遍历差别可观测。 */
+            JSAtom a = JS_NewAtomUInt32(ctx, (uint32_t)i);
+            if (a != JS_ATOM_NULL) { JS_DeleteProperty(ctx, arr, a, 0); JS_FreeAtom(ctx, a); }
+            continue;
+        }
         JS_SetPropertyUint32(ctx, arr, (uint32_t)i, qz_tojs(ctx, el));
     }
     JSValue lv = JS_NewInt32(ctx, alen);
@@ -1379,13 +1388,10 @@ void qz_guest_set_fields(int32_t base)
     g_fields_base = (uint32_t)base;
 }
 
-/* 按 nameStrId 查全局字段索引；-1 = 该名不是字段。*/
-static int32_t qz_field_index(int32_t nameStrId)
+/* 按属性名（字节）查全局字段索引；-1 = 该名不是字段。*/
+static int32_t qz_field_index_named(const char *want, size_t wlen)
 {
-    if (!g_fields_base) return -1;
-    size_t wlen = 0;
-    const char *want = qz_str_by_id(nameStrId, &wlen);
-    if (!want || wlen >= 256) return -1;
+    if (!g_fields_base || wlen >= 256) return -1;
     const unsigned char *b = (const unsigned char *)(uintptr_t)g_fields_base;
     int32_t count;
     memcpy(&count, b, 4);
@@ -1396,6 +1402,57 @@ static int32_t qz_field_index(int32_t nameStrId)
         if (len == wlen && memcmp((const void *)(uintptr_t)off, want, len) == 0) return i;
     }
     return -1;
+}
+
+/* 按 nameStrId 查全局字段索引；-1 = 该名不是字段。*/
+static int32_t qz_field_index(int32_t nameStrId)
+{
+    size_t wlen = 0;
+    const char *want = qz_str_by_id(nameStrId, &wlen);
+    return want ? qz_field_index_named(want, wlen) : -1;
+}
+
+/* 内存块接收者（对象字面量 POJO / 类实例）：0x7FF9|off（off ≥ 块下界）或
+ * 0x7FFE|off（实例；同 tag 的类值已被 qz_clsvalue_of 排除）。*/
+static int qz_mem_block_of(int64_t v, uint32_t *off)
+{
+    uint16_t tag = (uint16_t)((uint64_t)v >> 48);
+    uint32_t low = (uint32_t)((uint64_t)v & 0xFFFFFFFFu);
+    if (tag == 0x7FF9) { if (low < QZ_POJO_MIN_OFF) return 0; *off = low; return 1; }
+    if (tag == 0x7FFE) { if (qz_clsvalue_of(v) >= 0) return 0; *off = low; return 1; }
+    return 0;
+}
+
+/* `delete o.f` 落在内存块上 = 槽写 undefined 句柄。物化把 undefined 槽当「非自有
+ * 属性」跳过（见 qz_pojo_materialize），故 `f in o`、Object.keys、JSON 一并跟上。
+ * 交 qz_tojs 只删得掉副本 → 旧值静默留着（实测 `delete o.x` 后 `x in o` 仍 true）。
+ * 删除与显式 `o.f = undefined` 在本表示法里同形，是既有的表示边界，非本轮引入。*/
+static void qz_slot_delete(uint32_t off, const char *name, size_t nlen)
+{
+    int32_t i = qz_field_index_named(name, nlen);
+    if (i < 0) return;
+    int32_t sz = 0;
+    memcpy(&sz, (const void *)(uintptr_t)(off + 4), 4);
+    uint32_t foff = (uint32_t)(i + 1) * 8u;
+    if (foff + 8u > (uint32_t)sz) return;   /* 本块没有这一槽 = 删不存在的属性，无副作用 */
+    int64_t u = (int64_t)0x7FF9 << 48;      /* undefined 句柄 */
+    memcpy((void *)(uintptr_t)(off + foff), &u, 8);
+}
+
+/* 内存块字段槽写（POJO 与类实例同布局）。只在「访问器未命中」后调用：交 qz_tojs 的
+ * **副本**写是静默丢写——程序里一旦有字面量访问器，emitter 就把全部属性写路由到
+ * prop_set（usesDynAcc），POJO 从此落物化镜像（实测 `{get gv(){…}}` 删掉访问器后
+ * `o.gv = 9` 读回 undefined）。无名/越界 → 返回 0，交回原路径。*/
+static int qz_slot_write(uint32_t off, int32_t keyId, int64_t val)
+{
+    int32_t i = qz_field_index(keyId);
+    if (i < 0) return 0;
+    int32_t sz = 0;
+    memcpy(&sz, (const void *)(uintptr_t)(off + 4), 4);
+    uint32_t foff = (uint32_t)(i + 1) * 8u;
+    if (foff + 8u > (uint32_t)sz) return 0;
+    memcpy((void *)(uintptr_t)(off + foff), &val, 8);
+    return 1;
 }
 
 /* 前向：类访问器链查找（定义于 classMeta 节）+ 类方法蹦床类型。*/
@@ -1438,6 +1495,21 @@ static int32_t qz_acc_find(int64_t obj, int32_t nameStrId)
     return -1;
 }
 
+/* `delete o.f` 要把**自有**访问器条目一起摘掉，否则删完仍走 getter/setter。
+ * 按名（字节）匹配：动态键（delete o[k]）手里只有串，没有 strId。*/
+static void qz_acc_delete_named(int64_t obj, const char *name, size_t nlen)
+{
+    for (int32_t i = 0; i < g_acc_n; i++) {
+        if (g_accs[i].obj != obj) continue;
+        size_t l = 0;
+        const char *nm = qz_str_by_id(g_accs[i].nameId, &l);
+        if (!nm || l != nlen || memcmp(nm, name, nlen) != 0) continue;
+        for (int32_t j = i; j + 1 < g_acc_n; j++) g_accs[j] = g_accs[j + 1];
+        g_acc_n--;
+        return;
+    }
+}
+
 __attribute__((export_name("prop_set")))
 void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
 {
@@ -1450,6 +1522,13 @@ void qz_guest_prop_set(int64_t obj, int32_t keyId, int64_t val)
     { int32_t ai = qz_acc_find(obj, keyId);
       if (ai >= 0 && g_accs[ai].setClo) {
           qz_guest_closure_call(g_accs[ai].setClo, val, 0, 0, 0, obj);
+          JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+          return;
+      } }
+    /* POJO（对象字面量内存块）：写槽，不写物化副本 */
+    { uint32_t moff;
+      if ((uint16_t)((uint64_t)obj >> 48) == 0x7FF9 && qz_mem_block_of(obj, &moff)
+          && qz_slot_write(moff, keyId, val)) {
           JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
           return;
       } }
@@ -1500,6 +1579,11 @@ void qz_guest_prop_delete(int64_t obj, int32_t keyId)
     if (!ctx) return;
     int32_t clsVal = qz_clsvalue_of(obj);   // 类值：删静态属性，不能当对象物化
     if (clsVal >= 0) { qz_static_delete(ctx, clsVal, keyId); return; }
+    size_t klen = 0;
+    const char *knm = qz_str_by_id(keyId, &klen);
+    if (knm) qz_acc_delete_named(obj, knm, klen);   /* 自有访问器条目随删除一起摘除 */
+    uint32_t moff;
+    if (knm && qz_mem_block_of(obj, &moff)) { qz_slot_delete(moff, knm, klen); return; }
     JSValue o = qz_tojs(ctx, obj);
     JSValue k = qz_strval(ctx, keyId);
     if (JS_IsObject(o) && !JS_IsSymbol(k)) {
@@ -1571,6 +1655,53 @@ int64_t qz_guest_delete_index(int64_t obj, int64_t key)
     if (qz_clsvalue_of(obj) >= 0) {
         qz_clsval_loud(ctx, "按索引删除属性（下标键不是静态名）");
         return 0;
+    }
+    /* 内存承载的接收者先在本层处理：物化后 JS_DeleteProperty 只删得掉副本/镜像，
+     * 原块与元素槽纹丝不动（实测 `delete o.x` 后 `x in o` 仍 true、`delete a[1]`
+     * 后 `1 in a` 仍 true）——静默错值。数组元素写 undefined 句柄即留洞。*/
+    {
+        JSValue k0 = qz_tojs(ctx, key);
+        size_t knlen = 0;
+        const char *knm = JS_ToCStringLen(ctx, &knlen, k0);
+        JS_FreeValue(ctx, k0);
+        if (knm) {
+            uint16_t tag = (uint16_t)((uint64_t)obj >> 48);
+            uint32_t low = (uint32_t)((uint64_t)obj & 0xFFFFFFFFu);
+            int done = 0;
+            if (tag == 0x7FFB) {
+                int32_t alen = 0, dataOff = 0;
+                memcpy(&alen, (const void *)(uintptr_t)low, 4);
+                memcpy(&dataOff, (const void *)(uintptr_t)(low + 8), 4);
+                int32_t idx = -1;
+                if (knlen > 0 && knlen <= 7) {
+                    int32_t v = 0, all = 1;
+                    for (size_t i = 0; i < knlen; i++) {
+                        if (knm[i] < '0' || knm[i] > '9') { all = 0; break; }
+                        v = v * 10 + (knm[i] - '0');
+                    }
+                    if (all) idx = v;
+                }
+                if (dataOff && idx >= 0 && idx < alen) {
+                    int64_t u = (int64_t)0x7FF9 << 48;
+                    memcpy((void *)(uintptr_t)((uint32_t)dataOff + (uint32_t)idx * 8u), &u, 8);
+                    done = 1;
+                }
+            } else {
+                uint32_t moff;
+                if (qz_mem_block_of(obj, &moff)) {
+                    qz_acc_delete_named(obj, knm, knlen);
+                    qz_slot_delete(moff, knm, knlen);
+                    done = 1;
+                }
+            }
+            JS_FreeCString(ctx, knm);
+            if (done) {
+                JSValue vr = JS_NewBool(ctx, 1);   /* JS：非自有/不存在的属性 delete 也返回 true */
+                int64_t r = qz_ret(ctx, vr);
+                JS_FreeValue(ctx, vr);
+                return r;
+            }
+        }
     }
     JSValue o = qz_tojs(ctx, obj), k = qz_tojs(ctx, key);
     int ok = 1;
@@ -4181,34 +4312,42 @@ void qz_guest_statics_mark(int32_t clsId)
 /* obj_accessor(obj, nameStrId, getClo, setClo)：defineProperty / 字面量访问器。
  * 参数是闭包**句柄**（0x7FFF|off），不是表槽——闭包值由 emitter 在字面量处生成。
  * C 侧无法把 wasm 函数包成 JSFunction，故登记到 g_accs 由 prop_get/prop_set
- * 自行分派。*/
+ * 自行分派。签名按契约面为 void：返回 i64 会让 import 该原语的产物链接期就被引擎
+ * 拒绝（"imported function does not match the expected type"，整个模块起不来）。*/
 __attribute__((export_name("obj_accessor")))
-int64_t qz_guest_obj_accessor(int64_t obj, int32_t nameStrId, int64_t getClo, int64_t setClo)
+void qz_guest_obj_accessor(int64_t obj, int32_t nameStrId, int64_t getClo, int64_t setClo)
 {
     int32_t k = qz_acc_find(obj, nameStrId);
     if (k < 0) {
-        if (g_acc_n >= QZ_ACC_CAP) return obj;
+        if (g_acc_n >= QZ_ACC_CAP) return;
         k = g_acc_n++;
         g_accs[k].obj = obj;
         g_accs[k].nameId = nameStrId;
     }
     g_accs[k].getClo = getClo;
     g_accs[k].setClo = setClo;
-    return obj;
 }
 
+/* 对象字面量方法在 in-module 档无法承载：C 侧不能把 wasm 闭包包成可调用 JS 值，
+ * 而旧实现是静默占位（方法凭空消失，`o.m()` 读 undefined）→ 改为构造期 loud。*/
 __attribute__((export_name("object_set_method")))
-int64_t qz_guest_object_set_method(int64_t obj, int32_t nameStrId, int32_t slot)
+void qz_guest_object_set_method(int64_t obj, int32_t nameStrId, int32_t slot)
 {
     (void)obj; (void)nameStrId; (void)slot;
-    return obj;   /* 占位 */
+    JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+    if (ctx) qz_set_throw(ctx, JS_NewTypeError(ctx,
+        "in-module 档不支持对象字面量方法（无法把 wasm 闭包登记为可调用值）；"
+        "改为具名函数赋值或类方法，或在独立档（JS 宿主）运行"));
 }
 
 __attribute__((export_name("object_set_method_key")))
-int64_t qz_guest_object_set_method_key(int64_t obj, int64_t key, int32_t slot)
+void qz_guest_object_set_method_key(int64_t obj, int64_t key, int32_t slot)
 {
     (void)obj; (void)key; (void)slot;
-    return obj;   /* 占位 */
+    JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+    if (ctx) qz_set_throw(ctx, JS_NewTypeError(ctx,
+        "in-module 档不支持对象字面量计算键名方法（Symbol.iterator 等）；"
+        "改为具名函数赋值或类方法，或在独立档（JS 宿主）运行"));
 }
 
 /* ── M6b: 内建全局分派（builtin 系列 + instanceof 内建） ─────────────

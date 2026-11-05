@@ -28,6 +28,10 @@ const LOADS = [
     ['literals', [], 5],
     ['arrGrowWrite', [], 102],
     ['strConcatEq', [], 11],
+    ['delPropIn', [], 1101],
+    ['delElemIn', [], 1110],
+    ['delInstField', [], 11101],
+    ['delAccessor', [], 11],
   ]],
   ['cls.ts', [
     ['dogRun', [], 'hi woof/woof!'],

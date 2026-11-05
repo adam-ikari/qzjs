@@ -135,3 +135,42 @@ function strConcatEq(): any {
   const b = "ab";
   return (a === b ? 1 : 0) + (a.length === 2 ? 10 : 0);   // 11
 }
+
+// delete 语义探针：属性删除后 in/读值/键序都应更新；数组元素删除留洞但保长度。
+function delPropIn(): any {
+  const o: any = { x: 1, y: 2 };
+  const before = ("x" in o);
+  delete o.x;
+  return (before ? 1 : 0) + (("x" in o) ? 10 : 0) + (o.x === undefined ? 100 : 0)
+       + (Object.keys(o).join(",") === "y" ? 1000 : 0);      // V8: 1101
+}
+
+function delElemIn(): any {
+  const a: any = [1, 2, 3];
+  delete a[1];
+  return ((1 in a) ? 1 : 0) + (a[1] === undefined ? 10 : 0) + (a.length === 3 ? 100 : 0)
+       + (Object.keys(a).join(",") === "0,2" ? 1000 : 0);    // V8: 1110
+}
+
+class DelProbe {
+  t: number = 3;
+  m(): number { return 7; }
+}
+
+// 实例字段删除走同一槽写；原型上的方法删不掉且 delete 返回 true（JS 语义）。
+function delInstField(): any {
+  const p: any = new DelProbe();
+  delete p.t;
+  return (p.t === undefined ? 1 : 0) + (("t" in p) ? 10 : 0) + (p.m() === 7 ? 100 : 0)
+       + ((delete p.m) ? 1000 : 0) + ((delete p.nope) ? 10000 : 0);   // V8: 11101
+}
+
+// 自有访问器条目必须随删除一起摘除，否则删完仍走 getter；摘除后同名赋值落普通字段。
+function delAccessor(): any {
+  const o: any = { get gv(): number { return 5; }, set gv(v: number) { } };
+  const before: any = o.gv;
+  delete o.gv;
+  const after: any = o.gv;
+  return (before === 5 ? 1 : 0) + (after === undefined ? 10 : 0)
+       + (("gv" in o) ? 100 : 0);                                           // V8: 11
+}
