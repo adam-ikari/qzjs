@@ -5,6 +5,14 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 修顶层函数 `arguments` 的实参重复求值（静默错值，两档同）（2026-11-06）
+- **症状**：被调顶层函数体内读 `arguments` 时，调用点先把实参发射成 4 个值槽、**再**用同一批 AST 节点重发一遍「全量实参数组」写入 `__args` ⇒ 带副作用的实参执行两次。实测 `f(bump(), 2)`（bump 自增计数）得 `n=2`、`g(s("p"), s("q"))` 的日志变 `pqpq`、`f(t = 1, t + 1)` 的 t 语义被改写——全是**静默**错值，V8 为 `n=1`。
+- **修法与类方法 provider 同形**：全量实参**先一次**求值成数组，值槽再从数组回读（`_emitElemOf`，越界 → undefined，与补占位等价）。rest 收尾形参的 rest 段不再重发节点，而是对同一数组 `slice(nFix)` 取**新数组**——JS 里 `arguments === r` 恒为 false（二者是不同对象），共享句柄会造出可观测偏差，故显式加了一条 `fident` 探针钉住。`xt`（跨档表示）转换、元数补齐、num 被调少传的 loud 行为逐条保持原样。
+- **反作用面收敛在两档一致**：`__args` 的写入点在产物 wasm 里（不是宿主），所以这一改两档同时生效；跨档负载补 3 例（`fnArgsOnce`/`fnArgsRest`/`fnArgsRestDistinct`），档间逐位相同。
+- 测试：新增 `audit_corpus46.js` 7 例（含"被调不用 arguments 时行为不变"的对照组）；修前 `audit_diff` **5/7 diff**（`n=2`/`pqpq`/`n=12`），修后 **7/7**、`glue_audit` 7/7；`argswork.ts` 跨档负载 13 → 16 例，`e2e_cross_tier.mjs` 跨档对比 52 → **55 项**全 PASS。
+- 结果：`test_aot` ALL PASS；`audit_diff` 46 批全量 0 diff；`glue_audit` 46 批全绿；`test_m6b_e2e.sh` 13 套 PASS。
+
+
 ### AOT: 类方法体内 `arguments` 由静态直调点提供实参个数（两档一致）（2026-11-06）
 - **裁决：不改 ABI，provider 建在产物里。** 类方法调用的 4 槽 ABI 用 undefined 句柄补齐空槽，宿主 `givenSlot` 分不清「补占位」与「显式传入 undefined」⇒ 实参个数从未真正到达过被调方法体；而 C 档（in-module）与产物是**单向导入**（产物 import `qz.*`），宿主既不能给方法加参数也不能写产物全局 `__args`——加参数就要为每个 `__m_C$m`/`__sm_C$m`/ctor/trampoline 改函数类型，`call_indirect` 的表项类型必须一致 ⇒ 逐方法加参会直接撞表。故：**静态直调点**在发射的 wasm 里把全量实参构造成数组、写进产物全局 `__args`，callee 入口读入专属本地。两档跑同一段 wasm ⇒ 档间等价**由构造成立**，不靠宿主对齐。
 - **语义根据：类体恒严格模式 ⇒ `arguments` 是非映射对象**——只有 `length`/下标/迭代，与形参无联动，默认值与解构形参也不进数组 ⇒ 用实参数组承载即等价（`arguments.length`、越界读 undefined、`for-of`、>4 实参、继承 owner、`this` 兄弟派发、静态方法、箭头经 env 捕获逐条对齐 V8）。
