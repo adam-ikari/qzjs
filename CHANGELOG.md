@@ -5,6 +5,25 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: in-module 档 `delete` 落回内存块（三处静默 no-op）+ 字面量访问器的链接与 loud 边界（2026-11-06）
+- **症状（全静默）**：`delete o.x` / `delete a[1]` 在 in-module 档什么都不发生——宿主原语把接收者 `qz_tojs` **物化成副本**再 `JS_DeleteProperty`，POJO 无回写通道（只有数组有 `qz_arr_writeback`），原块槽位纹丝不动。实测 `delete o.x` 后 `x in o` 仍 true（V8 1101 → 本档 11）、`delete a[1]` 后 `1 in a` 仍 true（V8 1110 → 101）、`delete p.t`（类实例字段）同病。
+- **修法**：删除由宿主原语**直接写内存槽**——属性名经 `qz_field_index_named` 换算槽位写 undefined 句柄，而 `qz_pojo_materialize` 把 undefined 槽当「非自有属性」跳过，故 `in`/`Object.keys`/JSON/展开一并跟上；数组元素同法写 undefined 句柄，`qz_arr_fill` 命中该句柄即 `JS_DeleteProperty` 造**真洞**（保长度）；`delete o.f` 同时摘除 `g_accs` 里的自有访问器条目（`qz_acc_delete_named`，否则删完仍走 getter）；类值接收者（`0x7FFE|clsId`）经 `qz_clsvalue_of` 分流到 `qz_static_delete`（自有静态方法/静态访问器必须 own-only 判定——删继承来的名字在 JS 里是无副作用的 true，不能 loud）。
+- **顺带关掉一个签名盲区**：`obj_accessor` 的 C 实现返回 `i64` 而契约面是 `void`，任何含**字面量访问器**的产物实例化即被引擎拒绝（`imported function does not match the expected type`，整模块起不来），而 `check_qz_signatures.mjs` 只比参数个数（wasm 类型段不经 JS API 暴露）→ 一直没被抓到。改 `void` 后访问器读写/删除在 C 档可用。同区的 `object_set_method`/`object_set_method_key` 是**静默占位**（字面量方法凭空消失）→ 改为构造期 loud，不再给假值。
+- **POJO 经 `prop_set` 的写也丢**：程序内出现 `Object.defineProperty` 时 emitter 把**全部**属性写路由到 `qz.prop_set`（`usesDynAcc`），POJO 分支落物化副本 → 写静默丢失。现补 `qz_slot_write`（与类实例分支对称）。
+- **表示边界（登记，非本轮引入）**：①「已删除/从未赋值」与「显式 `= undefined`」同形，值语义一致，只有 `map`/`forEach` 这类跳过洞的遍历可观测；②`delete` 恒返回 true，非 configurable/已 freeze 的接收者无从拒绝（emitter 硬编码 true 且 delete 不调 `prot_check`）；③`g_accs` 以（对象句柄, nameId）为键，句柄跨调用回收 → 同一访问器形状第二次调用丢写，故 `delAccessor` 探针只钉到「摘除访问器」。
+- 测试：`mix.ts` 新增 4 例跨档探针（`delPropIn`=1101、`delElemIn`=1110、`delInstField`=11101、`delAccessor`=11，期望值取自真实 V8 运行），`e2e_cross_tier.mjs` 跨档对比 64 → **68 项**全 PASS（两档逐位一致）。
+- 结果：`test_aot` ALL PASS；`audit_diff` 45 批全量 0 diff；`glue_audit` 45 批全绿；`test_m6b_e2e.sh` 13 套 PASS（含 POJO 物化/访问器表）；`test_inmodule_guest_e2e.sh` PASS。
+
+### AOT: 类值（`0x7FFE|clsId`）在 in-module 档的成员派发 + 内存快路径量级门（2026-11-06）
+- **症状（静默写坏内存）**：同一个 tag `0x7FFE` 承载两种值——类实例（低 32 位 = 线性内存 offset）与类值（低 32 位 = clsId）。工厂返回的类表达式 `const C = mk(4); C.tag = 9` 走 emitter 的字段直存快路径，把 clsId 当基址 `i64.store` → **静默写坏 libqzvm 数据段**（clsId 恒小，落在 arena 之下）；读侧 `C.stat()`/`C.gs` 物化类值即读垃圾。
+- **量级门**：内存快路径前先比 `u32 < 本档 arena 基址`（in-module `INMOD_HOST_LIMIT`=12MiB，独立档 8——那边类值是 `0x7FFD` 宿主句柄，不占 `0x7FFE`），命中即交宿主 `prop_get`/`prop_set`/`method_call` 按 clsId 反查 `classMeta` + `g_statics`。发射侧 `_memBaseFloor()`/`_emitNotMemBase()` 统一两处（属性写与 `++/--`），standalone 档不发射多余比较。
+- **支持面**：静态方法调用、静态 getter/setter（含写）、静态字段读写、**静态字段删除**（`delete C.f` 移走 `g_statics` 条目，own-only 判定）；实例侧方法/字段/访问器本就走 clsId 反查，跨档一致。宿主侧新增 `qz_clsvalue_of`（动态**或**静态类值）与 `qz_clsval_loud`，把 `prop_delete`/`in_op`/`to_string`/`spread_order`/`obj_assign`/`builtin(Object.*)`/`prot_check`/`get_index`/`set_index`/`delete_index` 全部先分流——`obj_assign` 的检查必须在任何 `qz_tojs` 之前，否则先物化再报。
+- **loud 面（可捕获，不给假值）**：下标键（`C[k]`——下标键不是静态名）、`k in C`、`String(C)`/模板插值、展开类值、`Object.keys/freeze/assign` 等反射面。
+- 测试：`src/qzvm/aot/dynwork.ts` 9 例跨档负载（实例方法/字段/getter、静态调用/getter/setter/字段/字段删除、new+调用），`e2e_cross_tier.mjs` 跨档对比 55 → 64 项；`audit_corpus44.js` 头部说明改向（in-module 静态成员已实现）。
+- 结果：`test_aot` ALL PASS；`audit_diff` 46 批全量 0 diff；`glue_audit` 46 批全绿；`test_m6b_e2e.sh` 13 套 PASS；`test_inmodule_guest_e2e.sh` PASS。
+
+
+
 ### AOT: 修顶层函数 `arguments` 的实参重复求值（静默错值，两档同）（2026-11-06）
 - **症状**：被调顶层函数体内读 `arguments` 时，调用点先把实参发射成 4 个值槽、**再**用同一批 AST 节点重发一遍「全量实参数组」写入 `__args` ⇒ 带副作用的实参执行两次。实测 `f(bump(), 2)`（bump 自增计数）得 `n=2`、`g(s("p"), s("q"))` 的日志变 `pqpq`、`f(t = 1, t + 1)` 的 t 语义被改写——全是**静默**错值，V8 为 `n=1`。
 - **修法与类方法 provider 同形**：全量实参**先一次**求值成数组，值槽再从数组回读（`_emitElemOf`，越界 → undefined，与补占位等价）。rest 收尾形参的 rest 段不再重发节点，而是对同一数组 `slice(nFix)` 取**新数组**——JS 里 `arguments === r` 恒为 false（二者是不同对象），共享句柄会造出可观测偏差，故显式加了一条 `fident` 探针钉住。`xt`（跨档表示）转换、元数补齐、num 被调少传的 loud 行为逐条保持原样。

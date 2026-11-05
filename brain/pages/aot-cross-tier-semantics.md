@@ -4,7 +4,7 @@ title: "AOT 跨档语义一致性：闭包/数组/动态类的两档对齐"
 category: decision
 status: active
 created: "2026-10-19T18:41:21"
-updated: "2026-11-06T00:19:44"
+updated: "2026-11-06T03:21:36"
 ---
 
 <!-- compiled_truth -->
@@ -26,7 +26,11 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
 - 数组原地变异（reverse/sort/splice/push/pop/shift/unshift/fill/copyWithin）改的是 JS 侧副本 → **必须写回 wasm 内存**。独立档靠 `arrOf` WeakMap 保持别名；C 侧靠「arena 块偏移 → JS 数组」缓存 + 写回，且**命中也必须按块重灌**（`qz_arr_fill`）：块地址会被回收复用，同址缓存项可能是更早那个数组的镜像，直接返回即静默错值。重灌既保住别名身份，又让内容跟上块。
 - 声明式类的动态 extends 用 `class_value_dyn` **就地**改写 `classMeta.parent`：紧随其后的 `super()` 按 clsId 查父构造器，返回克隆 id 会查不到。工厂式类表达式（`class_expr_value`）相反——每次求值必须克隆出新 clsId，否则 `new A() instanceof B` 误判。
 - emitter 给部分方法名加 in-module 特化后缀（`"reduce$i"`）。C 侧 strcmp 前必须按 `$` 截断，否则整段回调路径被跳过。
-- **静态成员捕获的 env 必须用 `class_env_get_static` 读取**：静态方法/getter/setter 的 self 是**类值**（宿主档 ctor 句柄带 `__qzClsId`；C 档 `0x7FFE|clsId`，低 32 位即 clsId、无实例内存），不能复用按实例内存首 4 字节取 clsId 的 `class_env_get`。宿主档把静态访问器装到类对象上（`const C = mk(); C.g` / `C.g = v` 可动态读写）；C 档动态类值成员访问未实现 → `qz_dyncls_loud` 统一抛 TypeError（只拦 `g_dyncls[]` 里的克隆 id，静态类值的静态发射路径不受影响）。
+- **静态成员捕获的 env 必须用 `class_env_get_static` 读取**：静态方法/getter/setter 的 self 是**类值**（宿主档 ctor 句柄带 `__qzClsId`；C 档 `0x7FFE|clsId`，低 32 位即 clsId、无实例内存），不能复用按实例内存首 4 字节取 clsId 的 `class_env_get`。宿主档把静态访问器装到类对象上（`const C = mk(); C.g` / `C.g = v` 可动态读写）；C 档按 clsId 反查 classMeta + `g_statics`，静态方法/getter/setter/字段读写/字段删除均已支持。
+- **`0x7FFE` 一名两值：类实例（低 32 位 = 线性内存 offset）与类值（低 32 位 = clsId）**。凡发射内存快路径（字段直读/直写、`++/--`、delete 槽写）必须先过**量级门**：`u32 < 本档 arena 基址` 即类值 → 交宿主。界取 in-module `INMOD_HOST_LIMIT`(12MiB)、独立档 8（那边类值是 `0x7FFD` 宿主句柄）。不做门，`C.tag = 9` 会拿 clsId 当基址 `i64.store`，**静默写坏 libqzvm 数据段**；宿主侧对应物是 `qz_clsvalue_of`（动态或静态类值），`prop_delete`/`in_op`/`to_string`/`spread_order`/`obj_assign`/`builtin(Object.*)`/`get_index`/`set_index`/`delete_index` 都必须先分流——类值物化即读垃圾。守卫要放在任何 `qz_tojs` 之前。
+- **in-module 档的「接收者当对象」原语一律在宿主层写内存，不写物化副本**：POJO 无回写通道（只有数组有 `qz_arr_writeback`），`qz_tojs` 出来的是副本 → `delete o.x`/`delete a[i]`/`prop_set` 落副本就是静默 no-op。正确形态：属性名经 `qz_field_index_named` → 槽 `(i+1)*8` 写值或 undefined 句柄（`qz_pojo_materialize` 把 undefined 槽当非自有属性跳过 ⇒ `in`/`keys`/JSON 自动跟上）；数组元素写 undefined 句柄 + `qz_arr_fill` 见句柄即 `JS_DeleteProperty` 造真洞。表示边界：「已删除/从未赋值」与「显式 `= undefined`」同形（只有跳过洞的遍历可观测）；`delete` 恒返回 true（emitter 硬编码，且 delete 不调 `prot_check`）→ 非 configurable/freeze 接收者无从拒绝。
+- **契约面签名核对只比参数个数是盲区**：wasm 类型段不经 JS API 暴露，结果类型不符只在**产物真 import 该原语时**由引擎拒绝（`imported function does not match the expected type`，整模块实例化失败）。`obj_accessor` 曾 C 侧返回 i64 / 契约 void ⇒ 任何含字面量访问器的产物在 C 档起不来，而 125 项签名核对全绿。新增/改动原语时结果类型必须与 `consts.js` 逐字对齐；调用点丢弃返回值的，C 侧就写 `void`。
+- **`g_accs`（运行期访问器表）以（对象句柄, nameId）为键 → 句柄跨调用回收即串味**：C 档不能把 wasm 闭包包成 JS 函数，访问器只能登记在宿主表里由 `prop_get`/`prop_set` 分派；同一形状第二次调用会命中陈旧条目（实测 `delete o.gv` 后 `o.gv = 9` 读回 undefined）。字面量方法（`object_set_method`/`object_set_method_key`）在 C 档无承载 → 构造期 loud。
 - **`super.v` 走原型语义**：数据字段只存在实例上、不在原型链 → 读为 undefined；父 getter 照常调用；父方法作值 loud。动态父（运行期解析的 `class extends B`）的 `super.v` 读/写 loud，`super.m()` 走 `super_method_dyn` 按 home 的运行时父链派发。
 - **静态字段的「类键」按档取**（`_staticClassKey`）：C 档键 = clsId（与 `static_get_dyn`/classMeta 同空间），独立档键 = 类名 strId。静态读写、`statics_ready`/`statics_mark`/`statics_has` 必须统一经该 helper；混用（如用 strId 写、clsId 读）在 strId≠clsId 时静默读 0。
 - **静态方法/访问器内 `this` = 运行期接收者类**：`B.getX()` 调继承自 A 的静态方法时 `this === B`。读 `this.x` 沿运行期父链（C 档 classMeta parent 链 / 宿主 ctor `__proto__` 链）；写 `this.x` 写**接收者自有**静态（`static_set_dyn`），不是定义类；`this.x++/--`、复合赋值同理；私有静态 `this.#n` 的键 = `#定义类#名`（词法归属，不走接收者类）。惰性静态守卫必须覆盖接收者的整条父链（`_emitStaticsChainGuard`），只初始化接收者自身会让父链字段读到 undefined。
@@ -139,4 +143,28 @@ AOT 两档（in-module = C 侧 libqzvm；独立档 = JS 宿主 qzvm.js）必须*
   kind: decision
   summary: "补硬约束：C 侧「arena 块偏移 → JS 数组」镜像缓存**命中也必须重灌**（新增 qz_arr_fill，反向配对 qz_arr_writeback，长度收缩要显式截尾）。该静默错值由 sort 跨档覆盖暴露：sortNumCmp 只在 mix.ts 用例先跑时返回 ——复用块读回更早那个数组的 0 长镜像。"
   source: "src/qzvm/guest_entry.c: qz_arr_fill + qz_tojs 的 0x7FFB 分支"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-06T03:20:44
+  kind: decision
+  summary: "推翻「C 档动态类值成员访问未实现」条目；补四条硬约束：0x7FFE 一名两值须量级门、接收者当对象的原语必须写内存不写副本、契约面结果类型盲区、g_accs 句柄回收串味"
+  source: "src/qzvm/guest_entry.c + src/qzvm/aot/emit/emitter.js + src/qzvm/aot/mix.ts"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-06T03:20:55
+  kind: reversal
+  summary: "推翻本页旧硬约束「C 档动态类值成员访问未实现 → qz_dyncls_loud 统一抛 TypeError」：类值接收者的静态方法、静态 getter/setter、静态字段读写与字段删除在 in-module 档已按 clsId 反查 classMeta + g_statics 实现，跨档逐位一致（dynwork.ts 9 例）。仍 loud 的是本层无法表达的反射面：下标键 C[k]、k in C、String(C)、展开类值、Object.keys/freeze/assign。"
+  source: "src/qzvm/aot/dynwork.ts + test/m6b-poc/e2e_cross_tier.mjs (68 项跨档)"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-06T03:21:24
+  kind: note
+  summary: "本轮登记的表示边界与欠账（非本轮引入，均已在代码注释/README 标注）：① 恒返回 true 且不调 prot_check（emitter tagged.js 硬编码）→ 非 configurable / 已 freeze 的接收者拒绝不了，两档同；②「已删除/从未赋值」与「显式 = undefined」同形（POJO 槽与数组槽共用），只有 map/forEach 这类跳过洞的遍历可观测；③类值的反射面仍 loud：下标键 C[k]、k in C、String(C)/模板插值、展开类值、Object.keys/freeze/assign；④g_accs 句柄回收串味 → 字面量访问器同一形状第二次调用丢写（delAccessor 探针只钉到摘除访问器）；⑤字面量方法在 C 档无承载 → 构造期 loud；⑥ 别名捕获外层局部（emitter 编译期拒绝）与 C 档闭包内 arguments（宿主写不了产物 __args）仍是欠账。"
+  source: "src/qzvm/guest_entry.c (qz_slot_delete/qz_arr_fill/qz_acc_delete_named) + src/qzvm/aot/emit/tagged.js:1416"
+  affects: [aot-cross-tier-semantics]
+
+- time: 2026-11-06T03:21:36
+  kind: note
+  summary: "更正上一条 note（反引号被 shell 吃掉，条目残缺）——本轮登记的表示边界与欠账：(1) delete 恒返回 true 且不调 prot_check（emit/tagged.js:1416 硬编码），非 configurable / 已 freeze 的接收者无从拒绝，两档同；(2) 「已删除/从未赋值」与「显式赋 undefined」同形（POJO 字段槽与数组元素槽共用），只有 map/forEach 这类跳过洞的遍历可观测；(3) 类值的反射面仍 loud：下标键 C[k]、k in C、String(C)/模板插值、展开类值、Object.keys/freeze/assign；(4) g_accs 以对象句柄为键、句柄跨调用回收 → 字面量访问器同一形状第二次调用丢写，delAccessor 探针因此只钉到「摘除访问器」；(5) 字面量方法在 C 档无承载 → object_set_method/object_set_method_key 改构造期 loud；(6) const K = class 别名捕获外层局部（emitter 编译期拒绝）与 C 档闭包内 arguments（宿主写不了产物 __args）仍是欠账。"
+  source: "src/qzvm/guest_entry.c (qz_slot_delete/qz_arr_fill/qz_acc_delete_named) + src/qzvm/aot/emit/tagged.js"
   affects: [aot-cross-tier-semantics]
