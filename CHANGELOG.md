@@ -5,6 +5,15 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 非模块顶层 `const K = class {…}` 在定义点物化类值（别名形式捕获外层局部）+ 实例 `.constructor` 回落类值（2026-11-06）
+- **症状**：`function mk(n){ const K = class { m(){ return n; } }; return K; }` 这类**函数/块内的别名形式**此前编译期报错（"const C = class 只作物化别名，类值不携带创建点 env"），因为 `K` 被当成类名别名：`new K()`/`K.m()`/`instanceof K` 全部按名静态解析到提升后的模块级类，定义点的 `n` 无从传递。同一形状的**工厂返回类表达式**（`return class {…}`）早已支持（每次求值克隆类元 + 各建 env）——差的就是别名那一层。
+- **修法（复用既有动态路径，不新增机制）**：合成类名在别名场景强制错开成 `__clsExpr_N`（不占绑定名），且**不进 `classAlias`**，于是 `K` 退化成一个持有类值的普通局部，逐处自动走 `class_expr_value` 克隆 + 按 clsId 反查 `classMeta`/`g_statics`；声明点也不再跳过初值（`_emitBindingDecl` 只对模块顶层别名跳过）。collectClasses 的提升捕获校验随之只对「函数/块内 `class` **声明**」与模块顶层别名生效。
+- **`.name` 与表键分离**：改名会把独立档宿主 ctor 的 `.name` 变成 `__clsExpr_N`（实测 `class-expression-names` 回归）。新增 `clsJsNames`（类表达式自有名 → 其次绑定名 → 都没有为 `""`）随 classMeta 下发为 `jsName`，宿主 `.name` 取 `jsName`；静态表继续按编译期类名索引，故另存 `__qzStaticsName` 给 `static_get_dyn`/`static_set_dyn` 用——两处若混用即静默查错桶。
+- **实例 `.constructor` 的静默错值（两档共有，in-module 侧修）**：动态类实例走 `qz.prop_get`，C 侧把它物化成副本再读 `constructor` → 拿到 `Object`，`o.constructor === C` 静默 false（`eqDyn`/`eqAlias`/`eqDynCross` 实测 0，V8 为 1）。现于字段槽之前按名短路，直接回 `class_value(内存[0])`。`mkCls`（工厂返回）形状本就命中该缺陷，本条不是别名形式新引入的，只是它让这条路径更可及。
+- **边界（登记）**：类体内部自指 `K`（递归 `new K()`、把 `K` 当值返回）仍由既有 TDZ 规则编译期报错，两档一致；类值自身的 `.name` 属已登记的反射面 loud（in-module）；非顶层别名形式的静态字段/静态块照旧编译期报错（静态表按名共享、只初始化一次）。
+- 测试：`audit_corpus44.js` 取消 3 条登记（`static-getter-factory-capture-alias`、`cls-expr-method-capture-modlocal`、`cls-expr-getter-capture-modlocal`）、`audit_corpus43.js` 取消 1 条（`alias-class-captures-outer-local`）；`dynwork.ts` 新增 9 例跨档别名负载（实例方法/字段/getter、静态调用/getter、别名在工厂内直用、两次求值不串味=18、跨求值 `instanceof`=1、构造器身份=1，期望值取自真实 V8），`e2e_cross_tier.mjs` 跨档对比 68 → **77 项**。
+- 结果：`test_aot` ALL PASS；`audit_diff` 46 批全量 0 diff；`glue_audit` 46 批全绿；`test_m6b_e2e.sh` 13 套 PASS（契约面 125 项签名匹配）；`test_inmodule_guest_e2e.sh` PASS。
+
 ### AOT: in-module 档 `delete` 落回内存块（三处静默 no-op）+ 字面量访问器的链接与 loud 边界（2026-11-06）
 - **症状（全静默）**：`delete o.x` / `delete a[1]` 在 in-module 档什么都不发生——宿主原语把接收者 `qz_tojs` **物化成副本**再 `JS_DeleteProperty`，POJO 无回写通道（只有数组有 `qz_arr_writeback`），原块槽位纹丝不动。实测 `delete o.x` 后 `x in o` 仍 true（V8 1101 → 本档 11）、`delete a[1]` 后 `1 in a` 仍 true（V8 1110 → 101）、`delete p.t`（类实例字段）同病。
 - **修法**：删除由宿主原语**直接写内存槽**——属性名经 `qz_field_index_named` 换算槽位写 undefined 句柄，而 `qz_pojo_materialize` 把 undefined 槽当「非自有属性」跳过，故 `in`/`Object.keys`/JSON/展开一并跟上；数组元素同法写 undefined 句柄，`qz_arr_fill` 命中该句柄即 `JS_DeleteProperty` 造**真洞**（保长度）；`delete o.f` 同时摘除 `g_accs` 里的自有访问器条目（`qz_acc_delete_named`，否则删完仍走 getter）；类值接收者（`0x7FFE|clsId`）经 `qz_clsvalue_of` 分流到 `qz_static_delete`（自有静态方法/静态访问器必须 own-only 判定——删继承来的名字在 JS 里是无副作用的 true，不能 loud）。
