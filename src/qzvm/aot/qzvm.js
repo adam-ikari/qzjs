@@ -2498,8 +2498,10 @@ function makeQzvm(strings, opts) {
       arrSetInPlace(acc, a2);
       return acc;
     },
-    // 顶层函数作值（回调/别名/属性宿主）：包装为宿主 JS 函数，调用时按 arity 补 TAG 后直调 wasm 导出
-    fn_value: (sid, arity, hasThis) => {
+    // 顶层函数作值（回调/别名/属性宿主）：包装为宿主 JS 函数，调用时按 arity 补值后直调 wasm 导出。
+    // isNum=1：目标是 f64 ABI → 实参按 Number 传、结果按裸数返回（调用方再装箱）；
+    // 否则 tagged 位型进出。此前不分模式，f64 导出收到 tagged 位型 → BigInt 转换报错。
+    fn_value: (sid, arity, hasThis, isNum) => {
       const nm = strings[sid];
       const n = arity | 0;
       fnCacheMap = fnCacheMap || new Map();
@@ -2508,6 +2510,11 @@ function makeQzvm(strings, opts) {
       const hv = tagHandle(function (...as) {
         const f = exportsRef && exportsRef[nm];
         if (typeof f !== "function") throw new Error("fn_value: 未导出函数 " + nm);
+        if (isNum && !hasThis) {                               // f64 ABI：JS 少传 = NaN（与 call_named 一致）
+          const a3 = as.slice(0, n).map(x => Number(x));
+          while (a3.length < n) a3.push(NaN);
+          return f(...a3);
+        }
         const a2 = as.slice(0, n).map(x => (x === undefined || x === null) ? TAG : bitsOf(x));   // JS 少传 = undefined → TAG
         while (a2.length < n) a2.push(TAG);
         if (hasThis) {   // 带 TS `this` 形参的顶层函数：receiver 由宿主前置于第一形参（ABI 恒 (this, 实参…)）

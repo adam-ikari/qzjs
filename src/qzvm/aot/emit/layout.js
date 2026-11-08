@@ -421,7 +421,7 @@ function numArrNames(f) {
  * 其余（对象/数组/字符串字面量、属性/元素访问、模板、new、箭头、类型断言…）num 路径
  * emitExpr 会直接抛 `不支持的表达式` —— 必须在 funcMode 阶段就检出并退到 tagged。
  * 这不是「性能换语义」——是编译器**崩溃预防**：不降级的后果是硬错误而非运行时慢。 */
-function funcMode(f, argsFns) {
+function funcMode(f, argsFns, knownFns) {
     const rt = f.type;
     const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
     const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
@@ -465,6 +465,18 @@ function funcMode(f, argsFns) {
         } else { if (retCount !== 0) safe = false; }
         return safe;
     };
+    /* 内联零参箭头声明的名字（与 Emitter._probeInlineArrows 同一判据）。num 路径对这类
+     * 调用是直接内联函数体，故算安全；其余标识符被调 = 函数值调用，num 通道没有 call_value。*/
+    const inlineNames = new Set();
+    if (f.body) {
+        const collectInline = (n) => {
+            if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer
+                && ts.isArrowFunction(n.initializer) && isInlineArrow(n.initializer)) inlineNames.add(n.name.text);
+            if (ts.isArrowFunction(n) || ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n)) return;
+            ts.forEachChild(n, collectInline);
+        };
+        collectInline(f.body);
+    }
     const walk = (n) => {
         if (n === f) { ts.forEachChild(n, walk); return; }
         /* `arguments` 与「调用需要 arguments 的函数」都只有 tagged 通道：
@@ -472,6 +484,14 @@ function funcMode(f, argsFns) {
          * 故这两类函数降级 tagged；调用者同理（否则直调点写不了 __args）。 */
         if (ts.isIdentifier(n) && n.text === "arguments") unsafe = true;
         if (argsFns && ts.isCallExpression(n) && ts.isIdentifier(n.expression) && argsFns.has(n.expression.text)) unsafe = true;
+        /* 调用目标不是「静态可知的 num 可直调者」→ taggged。判据：顶层函数 / 内联箭头 /
+         * Math.* / num 数组 push 之外，标识符被调就是**函数值调用**（call_value 通道）。
+         * 此前不查 → num 路径按名发 `call <标识符>`：`const h = g; h(3)` 编译期硬崩
+         * 「call 未定义」，而它本该是 tagged（函数作值）。*/
+        if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) {
+            const cn = n.expression.text;
+            if (!(numArrs.has(cn) || inlineNames.has(cn) || (knownFns && knownFns.has(cn)))) unsafe = true;
+        }
         if (isMath1(n)) { ts.forEachChild(n, walk); return; }
         if (isNumArrPA(n) || isNumArrEA(n) || isNumArrEmpty(n)) { ts.forEachChild(n, walk); return; }
         if (isInlineArrow(n)) { ts.forEachChild(n, walk); return; }

@@ -493,6 +493,24 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("in (数组)", callId("iinArr"), "true:false");
     check("delete (POJO)", callId("del"), "true:true:2");
     check("delete (宿主对象)", callId("delHost"), "true:true:2");
+    // num 函数作值（fn_value 第 4 参 = f64 ABI）：别名调用 + 作回调 + tagged 函数内引用 num 函数。
+    // 守此前两崩：funcMode 不查 knownFns → num 路径按名发 `call h` 编译期「未定义变量」；
+    // fn_value 不分模式 → f64 导出收到 tagged 位型「Cannot convert a BigInt to number」。
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_fnval.ts"),
+        "export function inc(x: number): number { return x + 1; }\n"
+      + "export function dbl(x: number): number { return x * 2; }\n"
+      + "export function aliasCall(n: number): number { const h = inc; return h(n) + h(n + 10); }\n"
+      + "export function viaCallback(arr: number[]): number { const r: any = arr.map(dbl); let s = 0; for (let i = 0; i < (r as any).length; i++) s = s + (r as any)[i]; return s; }\n"
+      + "export function mixedTagged(n: number): any { const h = inc; return h(n); }\n");
+    const rFv = compileTS(path.join(os.tmpdir(), "qz_aot_fnval.ts"), path.join(os.tmpdir(), "qz_aot_fnval.wasm"), {});
+    const qzFv = makeQzvm(rFv.strings, { fields: rFv.fields });
+    const { instance: instFv } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_fnval.wasm")), { qz: qzFv });
+    qzFv.bindMem(instFv.exports.memory); if (instFv.exports.__bump) qzFv.bindBump(instFv.exports.__bump);
+    qzFv.bindClosures(instFv.exports, rFv.lamMeta);
+    const callFv = (n, a) => { if (instFv.exports.__bump_reset) instFv.exports.__bump_reset(); const m = rFv.funcMeta.find(f => f.name === n); const conv = m.mode === "num" ? a : a.map(x => qzFv._fromJS(x)); const res = instFv.exports[n](...conv); return m.mode === "num" ? res : qzFv._toJS(res); };
+    check("fn值.别名调用(num)", callFv("aliasCall", [5]), 22);            // inc(5)+inc(15)=6+16
+    check("fn值.作回调(num)", callFv("viaCallback", [[1, 2, 3]]), 12);    // map(dbl)=[2,4,6] sum
+    check("fn值.tagged内引用num", callFv("mixedTagged", [9]), 10);       // inc(9)=10
 }
 
 async function runClasses() {

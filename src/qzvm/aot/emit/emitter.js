@@ -522,9 +522,8 @@ class Emitter {
                 if (g2 !== undefined) { M.globalGet(g2); return; }
             }
             if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
-                // 顶层函数作值（回调/别名/属性宿主）→ 包装为宿主函数句柄（此前 loud：未定义捕获变量）
-                M.i32Const(this._strId(this._fnName(name))); M.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0);
-                M.i32Const(this._fnHasThis && this._fnHasThis.get(this._fnName(name)) ? 1 : 0); M.call("qz.fn_value");
+                // 顶层函数作值（回调/别名/属性宿主）→ 包装为宿主函数句柄
+                this._emitFnValue(name);
                 return;
             }
             if (BUILTIN_GLOBALS.has(name)) { M.i32Const(this._strId(name)); M.call("qz.builtin_member"); return; }   // 内建全局作值（Symbol/Math/JSON…）
@@ -552,8 +551,7 @@ class Emitter {
                 if (g2 !== undefined) { this.m.globalGet(g2); return; }
             }
             if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
-                this.m.i32Const(this._strId(this._fnName(name))); this.m.i32Const((this._fnParams && this._fnParams.get(this._fnName(name))) || 0);
-                this.m.i32Const(this._fnHasThis && this._fnHasThis.get(this._fnName(name)) ? 1 : 0); this.m.call("qz.fn_value");
+                this._emitFnValue(name);
                 return;
             }
             if (BUILTIN_GLOBALS.has(name)) { this.m.i32Const(this._strId(name)); this.m.call("qz.builtin_member"); return; }
@@ -870,7 +868,21 @@ class Emitter {
         if (keepValue) M.localGet(t.v);
         this._expLeave();
     }
-    // 值调用：被调值求值到可重入槽 → 参数压栈 → qz.call_value（闭包 → closure_call；宿主函数 → 调用）
+    /* 顶层函数作值：包装为宿主函数句柄（fn_value 第 4 参 = 目标是否 f64 ABI）。
+     * num 目标必须由宿主按 f64 传参/返回——此前一律按 tagged 位型装箱，
+     * f64 导出收到 tagged 位型 → "Cannot convert a BigInt value to a number"。
+     * C 档按名查不到产物函数（单向导入）→ 原语设 TypeError，经 _emitErrCheck 转入 catch。*/
+    _emitFnValue(name) {
+        const M = this.m;
+        const real = this._fnName(name);
+        const ci = this.fnMode && this.fnMode.get(real);
+        M.i32Const(this._strId(real));
+        M.i32Const((this._fnParams && this._fnParams.get(real)) || 0);
+        M.i32Const(this._fnHasThis && this._fnHasThis.get(real) ? 1 : 0);
+        M.i32Const(ci && ci.mode === "num" ? 1 : 0);
+        M.call("qz.fn_value");
+        this._emitErrCheck();
+    }
     // 第 6 参 = 溢出实参数组（args[3..]）：闭包形参 >4 时宿主按 meta.n 展开（本 ABI 仅 4 个实参槽）
     // o[Symbol.<wellknown>] ≡ o["@@<name>"]：类/对象字面量的 [Symbol.x] 成员在 this.classes 里登记为 @@<x>（物化时挂真 Symbol）。
     _symKeyName(expr) {
@@ -1477,7 +1489,7 @@ class Emitter {
         // 模块初始化：值恒 tagged（模块级名字是 i64 全局）。其余按 compile-ts 已定的 fnMode
         // 读取，避免此处用不同判据重算（argsFnNames 含 import 别名展开）。
         const fm = this.fnMode && this.fnMode.get(f.name.text);
-        this.mode = this._inModInit ? "tagged" : (fm ? fm.mode : funcMode(f, this._fnArgs));
+        this.mode = this._inModInit ? "tagged" : (fm ? fm.mode : funcMode(f, this._fnArgs, this._fnKnown));
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
         const locals = this._collectLocals(f.body);

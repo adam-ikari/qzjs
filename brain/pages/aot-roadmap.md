@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-08T09:43:17"
+updated: "2026-11-09T00:18:24"
 ---
 
 <!-- compiled_truth -->
@@ -296,3 +296,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "语义欠账清一项：顶层函数 arguments 的展开实参 provider + 入口消费即清/0 哨兵结案（见 [[aot-class-method-arguments-provider]]）。展开调用点把全量数组直接写 __args（rest/非 rest 两分支）；非 rest 展开改按形参表拆包直调——qz.call_named 在 in-module 档查 guest 的 globalThis，产物函数不在那里 → 静默 0（fnArgsSpread 独立档 212 / C 档 0）；静态方法展开同改直调并去掉 self 的 undefined 占位；callee 入口读后清 0、读到 0 trap。funcMode 把 arguments 函数及其调用者统一降级 tagged（import 别名展开成目标名）。验证：audit_diff 46 批 1071 例 0 diff、glue_audit c46 16/16、跨档 83 项、m6b 12 组 + guest e2e PASS。剩余欠账：内建子类承载（class M extends Map 静态路径）、C 档闭包 arguments、静态字段持函数的展开调用（loud，非本批引入）。"
   source: "src/qzvm/aot/emit/{compile-ts.js,emitter.js,layout.js}, audit_corpus46.js, argswork.ts, test/m6b-poc/e2e_cross_tier.mjs"
   affects: [aot-roadmap, aot-class-method-arguments-provider]
+
+- time: 2026-11-09T00:18:24
+  kind: decision
+  summary: "num 函数作值修两崩：funcMode 加 knownFns 白名单（非静态直调目标→函数值调用→退 tagged，否则 num 路径 call 未定义编译崩）；fn_value 加第 4 参 isNum 选 f64 ABI（否则 f64 导出收 tagged 位型 BigInt 转换错）。test_aot runTagged 尾 fn值.* 三项钉住。新页 aot-fn-value-f64-abi。"
+  source: emitter.js _emitFnValue / layout.js funcMode / qzvm.js fn_value
+  affects: [aot-fn-value-f64-abi]
