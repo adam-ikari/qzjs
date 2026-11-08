@@ -5,6 +5,21 @@ All notable changes to qzjs.
 ## [Unreleased]
 - 
 
+### AOT: 顶层函数 `arguments` 的展开实参 provider + 入口消费即清哨兵（两档一致）（2026-11-08）
+- **症状**：上一批只覆盖「静态直调」一种 provider 形态，其余调用点仍落到没有 `__args` 写入的路径。
+  ① **展开实参** `f(...[1,2])` 走 `qz.call_named`（宿主按名查函数）：独立档查产物导出表可用，in-module 档查 guest 的 `globalThis`——产物函数不在那里，`qz_global_path` 返回 undefined 后**静默回 0**（`fnArgsSpread` 独立档 212 / in-module 0）。
+  ② 直调点写好 `__args` 后展开调用**不覆写**它 → 被调读到**上一个 callee 的残留数组**：`f(9); f(...[1,2])` 的第二个调用得 `1:1` 而非 `2:2:1`（静默错值）。
+  ③ 没有静态直调点的入口（导出函数由宿主直接调、闭包调用）读到残留或 0，没有 loud。
+- **修法**：
+  - 展开实参的全量数组本来就在手上 → 调用点直接写 `__args`（rest 与非 rest 两个分支都写），实参不重求值。
+  - 非 rest 展开调用改为**按形参表从数组拆包后直调**，不再走 `qz.call_named`；num 被调缺参（越界读 → undefined）运行期 `unreachable`，与非展开路径的编译期拒绝同一条边界。顺带修掉 in-module 档里**任何**展开调用到产物函数的静默 0（`call_named` 在该档按名查不到产物函数）。直调后补 `_emitErrCheck`：被调 throw 会设 `__err` 正常返回，调用点不查就会带着错值继续（`fn-spread-throw` 钉住；修前异常穿出整个 try/catch）。
+  - 静态方法展开同样改直调（self 单独发射、rest 段 slice 成新数组）；实参数组不再前置 `undefined` 占位（那个占位会作为首个实参进入静态字段持函数的 `method_spread`）。
+  - 函数入口**消费即清 + 0 哨兵**：`__args` 读入专属 local 后立刻清 0，读到 0 即 `unreachable`——宁可 trap 也不把上一个 callee 的数组留给下一个（与类方法同款）。
+  - `funcMode`：函数体引用 `arguments`、或调用这类函数者一律降级 tagged（num 通道没有全量实参数组），import 别名先展开成目标名再判；`emitFunc` 改读 compile-ts 已定的 `fnMode`，避免两处判据分叉。
+- **边界（登记）**：静态字段持函数 + 展开实参仍 loud（`method_spread` 从类值物化副本上取不到闭包属性，修前报同样的 `f is not a function`）；C 档闭包 `arguments` 仍缺 provider（宿主写不了产物全局，见 [[aot-class-method-arguments-provider]]）。
+- 测试：`audit_corpus46.js` 7 → **18 例**（展开 / 残留顺序 / rest 展开 / 宿主直调 loud / num 被调缺参 loud / 静态方法展开 / 静态 rest 展开 / 展开调用的跨函数 throw）；`argswork.ts` 16 → **22 例**；`e2e_cross_tier.mjs` 77 → **83 项**（两档逐位相同）。
+- 结果：`test_aot` ALL PASS；`audit_diff` 46 批 **1073 例**全量 0 diff；`glue_audit` c46 18/18；`test_m6b_e2e.sh` 签名核对 + 12 组 PASS；`test_inmodule_guest_e2e.sh` PASS。
+
 ### AOT: 非模块顶层 `const K = class {…}` 在定义点物化类值（别名形式捕获外层局部）+ 实例 `.constructor` 回落类值（2026-11-06）
 - **症状**：`function mk(n){ const K = class { m(){ return n; } }; return K; }` 这类**函数/块内的别名形式**此前编译期报错（"const C = class 只作物化别名，类值不携带创建点 env"），因为 `K` 被当成类名别名：`new K()`/`K.m()`/`instanceof K` 全部按名静态解析到提升后的模块级类，定义点的 `n` 无从传递。同一形状的**工厂返回类表达式**（`return class {…}`）早已支持（每次求值克隆类元 + 各建 env）——差的就是别名那一层。
 - **修法（复用既有动态路径，不新增机制）**：合成类名在别名场景强制错开成 `__clsExpr_N`（不占绑定名），且**不进 `classAlias`**，于是 `K` 退化成一个持有类值的普通局部，逐处自动走 `class_expr_value` 克隆 + 按 clsId 反查 `classMeta`/`g_statics`；声明点也不再跳过初值（`_emitBindingDecl` 只对模块顶层别名跳过）。collectClasses 的提升捕获校验随之只对「函数/块内 `class` **声明**」与模块顶层别名生效。

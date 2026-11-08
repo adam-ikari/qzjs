@@ -69,3 +69,26 @@ function fnArgsRest(): number {                                // 13726
 }
 function fnArgsRestDistinct(): number { return fident(1, 2); } // 0：rest 数组与 arguments 是两个对象
 
+// 展开实参：全量数组本来就在手上，调用点直接写 __args。此前该形态没有 provider，
+// 被调读到上一个 callee 的残留数组（fnArgsSpreadStale 的直调先行会把 9 留下）。
+function fspread(a: number): number { return arguments.length * 100 + a * 10 + (arguments[1] === undefined ? 0 : (arguments[1] as number)); }
+function fsrest(a: number, ...r: number[]): number { return arguments.length * 1000 + a * 100 + r.length * 10 + r[0]; }
+
+function fnArgsSpread(): number { return fspread(...[1, 2]); }              // 212
+function fnArgsSpreadStale(): number {
+    const second = fspread(9);            // 1*100 + 9*10 = 190
+    const first = fspread(...[1, 2]);     // 212（修前读残留 → 1*100+10 = 110 的形态）
+    return first * 1000 + second;         // 212190
+}
+function fnArgsSpreadRest(): number { return fsrest(...[1, 5, 6]); }        // 3125
+
+// 静态方法展开：self 单独发射，槽位从同一数组回读直调（rest 段是 slice 出的新数组）。
+class SpreadStatic {
+    static sm(a: number, b: number): number { return a * 100 + b; }
+    static sr(a: number, ...rest: number[]): number { return a * 1000 + rest.length * 10 + rest[0]; }
+}
+function fnum(a: number, b: number): number { return a * 10 + b; }            // num（f64 ABI）
+function fnSpreadNum(): number { return fnum(...[1, 2]); }                    // 12
+function fnSpreadStatic(): number { return SpreadStatic.sm(...[3, 4]); }      // 304
+function fnSpreadStaticRest(): number { return SpreadStatic.sr(...[3, 4, 5]); } // 3024
+

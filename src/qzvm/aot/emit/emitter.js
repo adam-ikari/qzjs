@@ -901,11 +901,10 @@ class Emitter {
     // 展开实参调用：实参合成一个数组（复用数组字面量展开路径），宿主按 callee 动态调用。
     _emitSpreadCall(e) {
         const M = this.m, t = this._expEnter();
-        // 实参数组：createArrayLiteralExpression(e.arguments)（含 SpreadElement → 走 concat 折叠）
-        const isStaticSpread = ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression) && this._isClassName(e.expression.expression);
-        // 静态方法 ABI 为 (self, a0..a3)：实参数组前置 undefined 占位 self
-        const elems = isStaticSpread ? [ts.factory.createIdentifier("undefined"), ...e.arguments] : e.arguments;
-        const lit = ts.factory.createArrayLiteralExpression(elems);
+        // 实参数组：createArrayLiteralExpression(e.arguments)（含 SpreadElement → 走 concat 折叠）。
+        // 静态方法也用**纯实参**数组（self 由调用点单独发射）：此前为迁就 qz.call_named 的扁平
+        // ABI 前置过一次 undefined，被静态字段持函数的 method_spread 收下 → 多传一个 undefined。
+        const lit = ts.factory.createArrayLiteralExpression(e.arguments);
         lit.pos = e.pos; lit.end = e.end;
         this.emitTaggedExpr(lit); M.localSet(t.v);
         // 剥掉纯语法包裹：(expr) / expr as T —— 只影响类型层，让分派看到真 callee
@@ -938,9 +937,36 @@ class Emitter {
                 this._expLeave();
                 return;
             }
-            this._emitStaticsGuard(cx.expression.text);
-            M.i32Const(this._strId(staticMethName(owner, method))); M.localGet(t.v); M.i32Const(0);
-            M.call("qz.call_named");
+            // 静态方法：self + 槽位按形参表从数组回读后直调。不走 qz.call_named——in-module 档
+            // 的宿主 JSContext 里没有产物函数（静默 0）；call_named 的扁平数组也表达不了 rest
+            // 形参的打包（rest 槽会收到单个元素而不是数组）。
+            const smS = (this.classes.get(owner).staticMethods || []).find(s2 => s2.name === method);
+            // 静态访问器（get g/set g）不是可直接调用的函数：C.f(...args) 在 JS 里是对 getter 的**值**
+            // 调用（非函数即 TypeError）。本路径不做值调用，编译期拒绝比给错值早。
+            if (smS && smS.accessor) throw new Error(`[tagged] 静态访问器 ${cx.expression.text}.${method} 的展开调用未支持`);
+            const sparams = smS && smS.node ? smS.node.parameters : null;
+            const sn = sparams ? sparams.length : 0;
+            if (!sparams) throw new Error(`[tagged] 展开实参调用 ${cx.expression.text}.${method} 缺少形参表（无法按元数拆包）`);
+            const sRest = (sparams && sn > 0 && sparams[sn - 1].dotDotDotToken) ? sn - 1 : -1;
+            if (sRest >= 4) throw new Error("[tagged] static rest 形参在索引 ≥4 的展开调用未支持");
+            const recvCn = this._className(cx.expression.text);
+            this._emitStaticsChainGuard(recvCn);
+            this._emitClassValue(this.classes.get(recvCn));   // self = 接收者类（继承来的方法 this = 子类）
+            const sliceFrom = (start) => {
+                M.localGet(t.v); M.i32Const(this._strId("slice"));
+                M.i64ConstBits(...f64Bits(start)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
+                this._emitUndefined();   // ovf（实参 4..；当前恒 undefined）
+                M.call("qz.method_call");
+            };
+            for (let i = 0; i < 4; i++) {
+                if (i === sRest) sliceFrom(i);                                  // rest 段 = 新数组
+                else if (i < sn) this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
+                else this._emitUndefined();
+            }
+            if (sn > 4) sliceFrom(3);                                            // 第 5 槽 = 实参 3..（方法 ABI）
+            M.call(staticMethName(owner, method));
+            const smVoid = !!(smS && smS.node && smS.node.type && smS.node.type.kind === ts.SyntaxKind.VoidKeyword);
+            if (smVoid) { this._emitErrCheck(false); this._emitUndefined(); } else this._emitErrCheck();
             this._expLeave();
             return;
         }
@@ -961,7 +987,9 @@ class Emitter {
         if (!ts.isIdentifier(cx)) throw new Error("[tagged] 展开实参仅支持顶层函数/闭包/静态方法/内建调用");
         const name = this._fnName(cx.text);
         if (this.m._funcIdx[name] !== undefined || this.fnNames.has(name)) {
-            const isNum = !!(this._calleeInfo(cx.text) && this._calleeInfo(cx.text).mode === "num");
+            const ciS = this._calleeInfo(cx.text);
+            const isNum = !!(ciS && ciS.mode === "num");
+            const xtS = !!(ciS && ciS.mode !== this.mode);
             const cp2 = this._calleeParams(cx.text) || this._calleeParams(name);
             const hasRest2 = !!(cp2 && cp2.length > 0 && cp2[cp2.length - 1].dotDotDotToken);
             if (hasRest2) {
@@ -972,13 +1000,35 @@ class Emitter {
                 M.i64ConstBits(...f64Bits(nFix)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined();
                 this._emitUndefined();   // ovf（实参 4..；当前恒 undefined，>4 形参支持后由调用点传入）
                 M.call("qz.method_call");
+                // 展开实参的数组就是全量实参 → 被调要 arguments 时直接写 __args（此前无 provider，读到残留）
+                if (this._fnArgs && this._fnArgs.has(name) && this._argGlobal !== undefined) { M.localGet(t.v); M.globalSet(this._argGlobal); }
                 M.call(this._fnName(name));
                 this._retFromCallee(cx.text);
+                const ciR = this._calleeInfo(cx.text);
+                if (ciR && ciR.void) { this._emitErrCheck(false); this._emitUndefined(); } else this._emitErrCheck();
                 this._expLeave();
                 return;
             }
-            M.i32Const(this._strId(name)); M.localGet(t.v); M.i32Const(isNum ? 1 : 0);
-            M.call("qz.call_named");
+            if (this._fnArgs && this._fnArgs.has(name) && this._argGlobal !== undefined) { M.localGet(t.v); M.globalSet(this._argGlobal); }
+            // 非 rest：按被调形参元数从数组拆包直调。**不走 qz.call_named**——它是宿主按名查函数
+            // （独立档查产物导出，in-module 档查 guest 的 globalThis，那里没有产物函数 → 静默 0）。
+            // 数组即全量实参：调用点已写 __args，槽位只是从同一个数组回读（实参不再重求值）。
+            const nPar2 = cp2 ? cp2.length : 0;
+            if (!cp2) throw new Error(`[tagged] 展开实参调用 ${cx.text} 缺少形参表（无法按元数拆包）`);
+            for (let i = 0; i < nPar2; i++) {
+                this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
+                if (isNum) {   // f64 ABI 表示不了 undefined：缺参（越界读）→ loud，与非展开路径的编译期拒绝同一边界
+                    const g = this._expEnter();
+                    M.localSet(g.v); M.localGet(g.v); this._emitUndefined(); M.i64Eq();
+                    M.ifBlock("void"); M.unreachable(); M.end();
+                    M.localGet(g.v); this._expLeave();
+                }
+                if (xtS) this._argToCallee(cx.text);
+            }
+            M.call(this._fnName(name));
+            this._retFromCallee(cx.text);
+            const ci2 = this._calleeInfo(cx.text);
+            if (ci2 && ci2.void) { this._emitErrCheck(false); this._emitUndefined(); } else this._emitErrCheck();
             this._expLeave();
             return;
         }
@@ -1424,7 +1474,10 @@ class Emitter {
         const isVoid = !!f.type && f.type.kind === ts.SyntaxKind.VoidKeyword;
         this._fnVoid = isVoid;
         this._inModInit = f.name !== undefined && f.name.text === "__module_init";
-        this.mode = this._inModInit ? "tagged" : funcMode(f);   // 模块初始化：值恒 tagged（模块级名字是 i64 全局）
+        // 模块初始化：值恒 tagged（模块级名字是 i64 全局）。其余按 compile-ts 已定的 fnMode
+        // 读取，避免此处用不同判据重算（argsFnNames 含 import 别名展开）。
+        const fm = this.fnMode && this.fnMode.get(f.name.text);
+        this.mode = this._inModInit ? "tagged" : (fm ? fm.mode : funcMode(f, this._fnArgs));
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
         const locals = this._collectLocals(f.body);
@@ -1510,7 +1563,16 @@ class Emitter {
         this.envLocal = capNames.length ? f.parameters.length + decls.length - 1 : undefined;   // 参数在 local 0..n-1 之后
         this.capMap = new Map(capNames.map(n => [n, this.envLocal]));   // 捕获名 → 所在 env 的 i32 local
         this.envRef = this.envLocal;
-        if (needsArgs0) { const MA = this.m; MA.globalGet(this._argGlobal); MA.localSet(this._argsLocal); this.varMap.set("arguments", this._argsLocal); }
+        if (needsArgs0) {
+            // 与类方法同款：读走即清，0 = 没有静态直调点写过 → loud。
+            // 否则无 provider 的调用（导出函数由宿主直接调、闭包调用）会读到上一个 callee 的残留实参数组。
+            const MA = this.m;
+            MA.globalGet(this._argGlobal); MA.localSet(this._argsLocal);
+            MA.i64Const(0n); MA.globalSet(this._argGlobal);
+            MA.localGet(this._argsLocal); MA.i64Const(0n); MA.i64Eq();
+            MA.ifBlock("void"); MA.unreachable(); MA.end();
+            this.varMap.set("arguments", this._argsLocal);
+        }
         if (capNames.length) {
             const M = this.m;
             M.i32Const(-1); M.call("qz.env_new"); M.i32WrapI64(); M.localSet(this.envLocal);   // 根环境（parentIdx=-1）

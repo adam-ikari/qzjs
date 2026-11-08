@@ -65,6 +65,14 @@ const LOADS = [
     ['fnArgsOnce', [], 129],
     ['fnArgsRest', [], 13726],
     ['fnArgsRestDistinct', [], 0],
+    // 展开实参：调用点把全量数组直接写 __args（此前无 provider，读到上一次 callee 的残留）
+    ['fnArgsSpread', [], 212],
+    ['fnArgsSpreadStale', [], 212190],
+    ['fnArgsSpreadRest', [], 3125],
+    // 静态方法展开（self 单独发射 + 槽位回读）与 num 被调展开（f64 位重解释）
+    ['fnSpreadNum', [], 12],
+    ['fnSpreadStatic', [], 304],
+    ['fnSpreadStaticRest', [], 3024],
   ]],
   // 动态类值（工厂返回的类表达式）：类值接收者的成员访问按 clsId 反查 classMeta，
   // 两档同一份产物 ⇒ 静态方法/静态访问器/静态字段写读/字段删除都必须给 V8 值。

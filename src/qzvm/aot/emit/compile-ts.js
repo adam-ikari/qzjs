@@ -932,16 +932,23 @@ function compileTS(input, outWasm, opts = {}) {
             if (text) interpJs += text + "\n";
         }
     }
+    /* 函数体引用 arguments 的顶层函数名（真实编译名）。num 模式没有全量实参数组通道，
+     * 故这些函数与其直调者都必须是 tagged（funcMode 第二参数）。import 别名要展开成
+     * 目标名后再传给调用方判定，否则跨文件直调点仍会被判成 num。 */
+    const argsFnReal = new Set();
+    for (const st of fns) if (st.body && usesArguments(st.body)) argsFnReal.add(st.name.text);
+    const argsFnNames = new Set(argsFnReal);
+    for (const [local, target] of importAlias) if (argsFnReal.has(target)) argsFnNames.add(local);
     // interp 函数不占 wasm，故不参与「是否需要 tagged 运行时」的判定。
-    const hasNumArr = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "num" && numArrNames(f).size > 0);
-    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f) === "tagged") || emitClassesToWasm || hasNumArr;
+    const hasNumArr = fns.some(f => !interpSet.has(f.name.text) && funcMode(f, argsFnNames) === "num" && numArrNames(f).size > 0);
+    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f, argsFnNames) === "tagged") || emitClassesToWasm || hasNumArr;
     // 顶层函数名 → {mode, void}：跨模式调用点据此插入 f64↔i64 按位重解释。
     // interp 函数不进 wasm（其调用者经传递闭包一并退），故不在表内 —— 表内即 wasm 内可直调者。
     const fnMode = new Map();
     for (const st of fns) {
         if (interpSet.has(st.name.text)) continue;
         fnMode.set(st.name.text, {
-            mode: funcMode(st),
+            mode: funcMode(st, argsFnNames),
             void: !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword,
         });
     }
@@ -984,7 +991,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.protNameId = (n) => em._strId(n);
 
         em._fnHasThis = new Map();       // 顶层函数名 → 是否带 TS this 形参（receiver 由宿主前置）
-        em._fnArgs = new Set();   // 顶层函数名 → 函数体引用 arguments（需全量实参数组）
+        em._fnArgs = argsFnReal;   // 顶层函数名 → 函数体引用 arguments（需全量实参数组）
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
         em._fnNodes = new Map();         // 顶层函数名 → 声明节点（rest 形参打包用）
         for (const st of fns) em._fnNodes.set(st.name.text, st);
@@ -1056,7 +1063,7 @@ function compileTS(input, outWasm, opts = {}) {
         for (const st of fns) {
             if (interpSet.has(st.name.text)) continue;   // interp 函数不进 wasm
             const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
-            const isNum = funcMode(st) === "num";
+            const isNum = funcMode(st, argsFnNames) === "num";
             const vt = isNum ? "f64" : "i64";   // num=f64；tagged=i64（NaN-box）
             m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
         }
@@ -1236,7 +1243,7 @@ function compileTS(input, outWasm, opts = {}) {
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
     const funcMeta = fns.map(f => ({
         name: f.name.text,
-        mode: interpSet.has(f.name.text) ? "interp" : funcMode(f),   // interp = 不编 wasm，glue 走宿主 JS
+        mode: interpSet.has(f.name.text) ? "interp" : funcMode(f, argsFnNames),   // interp = 不编 wasm，glue 走宿主 JS
         params: f.parameters.length,
         async: !!(f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)),
     }));

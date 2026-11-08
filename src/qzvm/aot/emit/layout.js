@@ -421,7 +421,7 @@ function numArrNames(f) {
  * 其余（对象/数组/字符串字面量、属性/元素访问、模板、new、箭头、类型断言…）num 路径
  * emitExpr 会直接抛 `不支持的表达式` —— 必须在 funcMode 阶段就检出并退到 tagged。
  * 这不是「性能换语义」——是编译器**崩溃预防**：不降级的后果是硬错误而非运行时慢。 */
-function funcMode(f) {
+function funcMode(f, argsFns) {
     const rt = f.type;
     const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
     const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
@@ -467,6 +467,11 @@ function funcMode(f) {
     };
     const walk = (n) => {
         if (n === f) { ts.forEachChild(n, walk); return; }
+        /* `arguments` 与「调用需要 arguments 的函数」都只有 tagged 通道：
+         * num 模式没有全量实参数组（无 __args provider），callee 入口哨兵会 trap。
+         * 故这两类函数降级 tagged；调用者同理（否则直调点写不了 __args）。 */
+        if (ts.isIdentifier(n) && n.text === "arguments") unsafe = true;
+        if (argsFns && ts.isCallExpression(n) && ts.isIdentifier(n.expression) && argsFns.has(n.expression.text)) unsafe = true;
         if (isMath1(n)) { ts.forEachChild(n, walk); return; }
         if (isNumArrPA(n) || isNumArrEA(n) || isNumArrEmpty(n)) { ts.forEachChild(n, walk); return; }
         if (isInlineArrow(n)) { ts.forEachChild(n, walk); return; }
