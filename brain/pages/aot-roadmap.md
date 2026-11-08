@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-06T01:12:37"
+updated: "2026-11-08T09:43:17"
 ---
 
 <!-- compiled_truth -->
@@ -283,4 +283,16 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "语义欠账再清一项：类方法内 arguments provider 结案（静态直调点在产物 wasm 里写 __args，两档由构造一致，见 [[aot-class-method-arguments-provider]]）。剩余欠账：const K = class 别名捕获外层局部、内建子类承载（class M extends Map 静态路径）、顶层函数 arguments 双求值、C 档闭包 arguments。"
   source: "类方法 arguments provider 批次"
+  affects: [aot-roadmap, aot-class-method-arguments-provider]
+
+- time: 2026-11-07T19:18:19
+  kind: decision
+  summary: "语义欠账清一项：非模块顶层 const K = class 别名捕获外层局部结案（8514ae05）。别名场景合成类名错开为 __clsExpr_N 且不进 classAlias，K 退化为持有类值的普通局部，声明点求值并复用 class_expr_value 每次克隆 + class env 路径；.name 与静态表键分离（classMeta jsName / __qzStaticsName）；in-module 档实例 .constructor 回类值。剩余欠账：内建子类承载（class M extends Map 静态路径）、顶层函数 arguments 消费即清/哨兵、C 档闭包 arguments。"
+  source: "src/qzvm/aot/emit/{compile-ts.js,emitter.js}, src/qzvm/aot/qzvm.js, src/qzvm/guest_entry.c, audit_corpus43/44, dynwork.ts, test/m6b-poc/e2e_cross_tier.mjs"
+  affects: [aot-roadmap]
+
+- time: 2026-11-08T09:43:17
+  kind: decision
+  summary: "语义欠账清一项：顶层函数 arguments 的展开实参 provider + 入口消费即清/0 哨兵结案（见 [[aot-class-method-arguments-provider]]）。展开调用点把全量数组直接写 __args（rest/非 rest 两分支）；非 rest 展开改按形参表拆包直调——qz.call_named 在 in-module 档查 guest 的 globalThis，产物函数不在那里 → 静默 0（fnArgsSpread 独立档 212 / C 档 0）；静态方法展开同改直调并去掉 self 的 undefined 占位；callee 入口读后清 0、读到 0 trap。funcMode 把 arguments 函数及其调用者统一降级 tagged（import 别名展开成目标名）。验证：audit_diff 46 批 1071 例 0 diff、glue_audit c46 16/16、跨档 83 项、m6b 12 组 + guest e2e PASS。剩余欠账：内建子类承载（class M extends Map 静态路径）、C 档闭包 arguments、静态字段持函数的展开调用（loud，非本批引入）。"
+  source: "src/qzvm/aot/emit/{compile-ts.js,emitter.js,layout.js}, audit_corpus46.js, argswork.ts, test/m6b-poc/e2e_cross_tier.mjs"
   affects: [aot-roadmap, aot-class-method-arguments-provider]
