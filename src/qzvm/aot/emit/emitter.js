@@ -1029,10 +1029,10 @@ class Emitter {
             if (!cp2) throw new Error(`[tagged] 展开实参调用 ${cx.text} 缺少形参表（无法按元数拆包）`);
             for (let i = 0; i < nPar2; i++) {
                 this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
-                if (isNum) {   // f64 ABI 表示不了 undefined：缺参（越界读）→ loud，与非展开路径的编译期拒绝同一边界
+                if (isNum) {   // f64 ABI 表示不了 undefined：缺参（越界读）→ NaN（undefined 参与算术的 JS 结果，如 f(...[1]) 的 b 位）
                     const g = this._expEnter();
                     M.localSet(g.v); M.localGet(g.v); this._emitUndefined(); M.i64Eq();
-                    M.ifBlock("void"); M.unreachable(); M.end();
+                    M.ifBlock("void"); M.i64ConstBits(...f64Bits(NaN)); M.localSet(g.v); M.end();
                     M.localGet(g.v); this._expLeave();
                 }
                 if (xtS) this._argToCallee(cx.text);

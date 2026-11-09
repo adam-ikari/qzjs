@@ -64,7 +64,7 @@ export function run() { return f(...[1, 2]); }`, args: [] },
   // 缺参：f64 ABI 表示不了 undefined（非展开路径编译期拒绝；这里运行期 trap，不静默给 0/NaN）。
   { name: "fn-spread-num-missing", fn: "run", ts: `
 function f(a: number, b: number) { return a * 10 + b; }
-export function run() { return f(...[1]); }`, args: [], unsupported: "num 被调缺参：f64 ABI 无法表示 undefined（运行期 trap）" },
+export function run() { return f(...[1]); }`, args: [] },
   { name: "fn-spread-num-extra", fn: "run", ts: `
 function f(a: number, b: number) { return a * 10 + b; }
 export function run() { return f(...[1, 2, 3]); }`, args: [] },

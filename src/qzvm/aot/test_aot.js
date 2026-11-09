@@ -550,6 +550,18 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzS.bindClosures(iS.exports, rS.lamMeta); qzS.bindClasses(iS.exports, rS.classMeta);
         check("super.m 作值(typeof function + 调用)", qzS._toJS(iS.exports.smv()), "function:1");
     }
+    // num 展开缺参：f64 ABI 无 undefined → 缺参填 NaN（undefined 参与算术的 JS 结果）
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_numsp.ts"),
+            "function f(a: number, b: number): number { return a * 10 + b; }\n"
+          + "export function nsm(): any { return f(...[1]); }\n");
+        const rN = compileTS(path.join(os.tmpdir(), "qz_aot_numsp.ts"), path.join(os.tmpdir(), "qz_aot_numsp.wasm"), {});
+        const qzN = makeQzvm(rN.strings, { fields: rN.fields });
+        const { instance: iN } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_numsp.wasm")), { qz: qzN });
+        qzN.bindMem(iN.exports.memory); if (iN.exports.__bump) qzN.bindBump(iN.exports.__bump);
+        qzN.bindClosures(iN.exports, rN.lamMeta); qzN.bindClasses(iN.exports, rN.classMeta);
+        check("num 展开缺参=NaN", qzN._toJS(iN.exports.nsm()), NaN);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

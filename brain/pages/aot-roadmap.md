@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T04:25:23"
+updated: "2026-11-10T04:39:05"
 ---
 
 <!-- compiled_truth -->
@@ -391,4 +391,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "super.<method> 作值已支持（JS 档）：新增 qz.method_value(ownerClsId, mid) → 该类实例方法的可调用值（未绑定 this；调用时按 call-time this 分派，支持 >4 实参/ 与 usesArgs→写 __args）。emitter 的 super.prop 读分支在父链找到非访问器方法时不再 throw，改为 emit method_value(cl.id, strId)；C 档保持 loud（in-module 无此原语）。corpus44 super-method-as-value 转 supported（78/78,0 diff；typeof g='function'，g() 调通）。"
   source: "session: aot super.m as value"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T04:39:05
+  kind: decision
+  summary: "num 展开调用缺参已支持为 NaN：emitSpreadCall 中对 num 被调，越界读（undefined）不再 unreachable trap，改填 f64 NaN（undefined 参与算术的 JS 结果，如 f(...[1]) 的 b 位 → a*10+NaN=NaN）。非展开路径仍编译期拒绝（能在编译期知实参<形参）。corpus46 fn-spread-num-missing 转 supported（18/18,0 diff）。"
+  source: "session: aot num spread missing"
   affects: [aot-roadmap]
