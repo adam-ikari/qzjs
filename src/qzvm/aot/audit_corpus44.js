@@ -195,10 +195,10 @@ class C { k = 0; m(a: number): void { this.k = arguments.length; } }
 export function run() { const c = new C(); c.m(1); return c.k; }`, args: [], unsupported: ": void 方法退回宿主动态派发 → 无 arguments provider" },
   { name: "class-args-rest-formal", fn: "run", ts: `
 class C { m(a: number, ...r: number[]) { return arguments.length; } }
-export function run() { return new C().m(1, 2); }`, args: [], unsupported: "arguments 与 rest 形参混用（尾部实参被打包进槽，逐槽值不可得）" },
+export function run() { return new C().m(1, 2); }`, args: [] },
   { name: "class-args-many-formals", fn: "run", ts: `
 class C { m(a: number, b: number, c: number, d: number, e: number) { return arguments.length; } }
-export function run() { return new C().m(1, 2, 3, 4, 5); }`, args: [], unsupported: "arguments 与 >4 形参混用（溢出实参经 $ovf，无逐槽值可读）" },
+export function run() { return new C().m(1, 2, 3, 4, 5); }`, args: [] },
   { name: "class-args-ctor", fn: "run", ts: `
 class C { k: number; constructor(a: number) { this.k = arguments.length; } }
 export function run() { return new C(1).k; }`, args: [], unsupported: "构造器内的 arguments（无 provider）" },

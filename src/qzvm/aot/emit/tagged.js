@@ -1219,7 +1219,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this._emitStaticsGuard(c);
             this.m.localGet(0);
             const smt = (this.classes.get(c).staticMethods || []).find(s => s.name === method);
-            if (smt && this._methUsesArgs(smt.node)) this._emitMethodArgsForProvider(e.arguments);
+            if (smt && this._methUsesArgs(smt.node)) this._emitMethodArgsForProvider(e.arguments, smt.node.parameters);
             else for (let i = 0; i < 4; i++) {
                 if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
             }
@@ -1228,7 +1228,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this._emitThisReceiver();                            // self = this（闭包内 this 走捕获/形参槽，local0 是 blk）
         const smt2 = (this.classes.get(c).methods || []).find(s => s.name === method);
-        if (smt2 && this._methUsesArgs(smt2.node)) this._emitMethodArgsForProvider(e.arguments);
+        if (smt2 && this._methUsesArgs(smt2.node)) this._emitMethodArgsForProvider(e.arguments, smt2.node.parameters);
         else for (let i = 0; i < 4; i++) {
             if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
         }
@@ -2531,17 +2531,33 @@ Emitter.prototype._emitMethodArgs = function (params, args) {
 };
 // 被调方法体内用 arguments 的直调形态：全量实参**一次**求值成数组（否则参数副作用会重发），
 // 4 个值槽再从数组回读（越界 → undefined，与补占位 undefined 等价），数组句柄写进 __args
-// 供 callee 入口取（消费即清，见 emitter._mEnter）。前提：self 已压栈；目标无 rest 形参、
-// 形参 ≤4、实参无展开 —— 后三者分别由 _mEnter / _emitSpreadCall 的守卫在编译期拒绝。
-Emitter.prototype._emitMethodArgsForProvider = function (args) {
+// 供 callee 入口取（消费即清，见 emitter._mEnter）。前提：self 已压栈；实参无展开（由 _emitSpreadCall
+// 守卫拒绝）。rest 收尾形参与 >4 形参分别从全量数组 slice 出 rest/ovf 槽（与 arguments 异对象）。
+Emitter.prototype._emitMethodArgsForProvider = function (args, astParams) {
     const M = this.m, t = this._expEnter();
     const lit = ts.factory.createArrayLiteralExpression(args);
     lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
-    this.emitTaggedExpr(lit);
-    M.localSet(t.v);
-    for (let i = 0; i < 4; i++) {
+    this.emitTaggedExpr(lit); M.localSet(t.v);      // 全量实参一次求值成数组（避免参数副作用重发）
+    const n = astParams ? astParams.length : 0;
+    const restIdx = (n && astParams[n - 1] && astParams[n - 1].dotDotDotToken) ? n - 1 : -1;
+    // 固定槽 0..min(restIdx,4)-1：从数组回读（越界 → undefined）
+    const nFix = restIdx >= 0 ? restIdx : 4;
+    for (let i = 0; i < nFix && i < 4; i++) {
         if (i < args.length) this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
         else this._emitUndefined();
+    }
+    if (restIdx >= 0 && restIdx < 4) {              // rest 收尾形参槽 = 全量数组 slice(restIdx)（新对象，JS strict 下与 arguments 异）
+        M.localGet(t.v); M.i32Const(this._strId("slice"));
+        M.i64ConstBits(...f64Bits(restIdx)); for (let k = 0; k < 4; k++) this._emitUndefined();
+        M.call("qz.method_call");
+        for (let i = restIdx + 1; i < 4; i++) this._emitUndefined();
+    } else {
+        for (let i = nFix; i < 4; i++) this._emitUndefined();
+    }
+    if (n > 4) {                                    // >4 形参：溢出实参 → $ovf = 全量数组 slice(3)（约定 ovf[0] 哑元，callee 读 ovf[i-3]）
+        M.localGet(t.v); M.i32Const(this._strId("slice"));
+        M.i64ConstBits(...f64Bits(3)); for (let k = 0; k < 4; k++) this._emitUndefined();
+        M.call("qz.method_call");
     }
     M.localGet(t.v); M.globalSet(this._argGlobal);
     this._expLeave();
@@ -2582,7 +2598,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         this._emitStaticsChainGuard(cnS);             // 继承来的静态方法内 this.x 可能读任一层父类静态
         this._emitClassValue(this.classes.get(cnS));   // self = 接收者类（JS：B.describe() 内 this = B，含继承自 A 的方法）
         const smNode = (this.classes.get(owner).staticMethods || []).find(s => s.name === method);
-        if (smNode && this._methUsesArgs(smNode.node)) this._emitMethodArgsForProvider(args);
+        if (smNode && this._methUsesArgs(smNode.node)) this._emitMethodArgsForProvider(args, smNode.node.parameters);
         else this._emitMethodArgs(smNode && smNode.node ? smNode.node.parameters : null, args);
         M.call(staticMethName(owner, method));
         if (smNode && smNode.node.type && smNode.node.type.kind === ts.SyntaxKind.VoidKeyword) {
@@ -2600,7 +2616,7 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
         if (owner && meta && !meta.accessor && !voidRet) {   // getter/setter 走动态路径（getter 需先取值再调用）
             // 纯值栈：self + 4 参按形参序压栈（实参可为嵌套调用，天然按深度隔离，无需暂存槽）。
             this.emitTaggedExpr(rx);                                // self
-            if (this._methUsesArgs(meta.node)) this._emitMethodArgsForProvider(args);
+            if (this._methUsesArgs(meta.node)) this._emitMethodArgsForProvider(args, meta.node.parameters);
             else this._emitMethodArgs(meta.node.parameters, args);
             M.call(methName(owner, method));
             this._emitErrCheck();   // 同上：直调路径的跨函数 throw

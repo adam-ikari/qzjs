@@ -2320,10 +2320,9 @@ class Emitter {
     // 方法/构造器发射作用域：this=local0，参数 1..，完整 scratch/sT/obj/forOf/clo 槽布局。
     // 与 emitFunc(tagged) 同构；额外 _curClass 供静态方法分派解析继承链。
     _mEnter(fname, cname, params, body, isVoid, astParams, extraNodes, needsArgs) {
-        if (needsArgs && astParams) {   // rest 形参：尾部实参被打包进一个槽 → 槽位与 arguments 语义冲突；>4 形参：溢出实参只经 $ovf 传递
-            if (astParams.some(p => p.dotDotDotToken)) throw new Error(`[tagged] 方法 ${fname} 内 arguments 与 rest 形参混用暂不支持`);
-            if (astParams.length > 4) throw new Error(`[tagged] 方法 ${fname} 内 arguments 暂不支持 >4 形参（溢出实参走 $ovf，无逐槽值可读）`);
-        }
+        // arguments 读自 __args 全量实参数组（调用点写入），与形式参槽/$ovf 独立——
+        // class 体 strict 无 arguments↔形参别名，故 rest 收尾形参 / >4 形参均不影响 arguments 正确性。
+        // 动态派发/提取值等无 provider 的调用由 _assertNoArgsProviderTarget 另守 loud。
         this._mSaved = {
             mode: this.mode, varMap: this.varMap, capMap: this.capMap, capList: this.capList, capListActive: this.capListActive,
             blkLocal: this.blkLocal, depth: this.depth, labels: this.labels, labelStack: this._labelStack, curClass: this._curClass, curClassObj: this._curClassObj, staticVars: this._staticVars, envLocal: this.envLocal, envRef: this.envRef, fnVars: this._fnVars,

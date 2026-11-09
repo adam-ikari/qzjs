@@ -485,7 +485,22 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         check("动态父 super.v 读(数据字段不在原型上=undefined)+实例字段仍 7", qzD._toJS(iD.exports.dpr()), "undefined:7");
         check("动态父 super.v 写(JS [[Set]] → 实例自有字段=2)", qzD._toJS(iD.exports.dps()), 2);
     }
-    // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
+    // 类方法 arguments 与 rest/>4 形参混用：__args 全量实参数组独立于形式参槽（strict 无别名）
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_margs.ts"),
+            "class C { m(a: number, ...r: number[]): number { return arguments.length + (r.length === 1 ? 100 : 0); }\n"
+          + "  n(a: number, b: number, c: number, d: number, e: number): number { return arguments.length + arguments[4]; } }\n"
+          + "export function ar1(): any { return new C().m(1, 2); }\n"
+          + "export function ar2(): any { return new C().n(1, 2, 3, 4, 5); }\n");
+        const rA = compileTS(path.join(os.tmpdir(), "qz_aot_margs.ts"), path.join(os.tmpdir(), "qz_aot_margs.wasm"), {});
+        const qzA = makeQzvm(rA.strings, { fields: rA.fields });
+        const { instance: iA } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_margs.wasm")), { qz: qzA });
+        qzA.bindMem(iA.exports.memory); if (iA.exports.__bump) qzA.bindBump(iA.exports.__bump);
+        qzA.bindClosures(iA.exports, rA.lamMeta); qzA.bindClasses(iA.exports, rA.classMeta);
+        check("类方法 arguments+rest(arguments.length=2,rest=[2])", qzA._toJS(iA.exports.ar1()), 102);
+        check("类方法 arguments+>4形参(length=5,[4]=5)", qzA._toJS(iA.exports.ar2()), 10);
+    }
+     // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"
       + "export function fisum(): any { const o: any = { a: 1, b: 2, c: 3 }; let t = 0; for (const k in o) t = t + o[k]; return t; }\n"

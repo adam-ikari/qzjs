@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T00:09:26"
+updated: "2026-11-10T02:01:53"
 ---
 
 <!-- compiled_truth -->
@@ -344,3 +344,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "动态父类（工厂形参/mixin）下 super.<prop> 读/写已支持（JS 档）：新增 qz.super_prop_get_dyn(recv,homeId,mid)→i64 与 qz.super_prop_set_dyn(recv,homeId,mid,value)→void。读沿运行时父链（chainNext）查 getter 调之/普通方法 loud/否则 undefined（数据字段不在原型上）；写查 setter 调之/否则 JS [[Set]] 在接收者实例上建自有字段（host 直写 mem 槽，与 prop_set INST_HI 一致）。emitter 用 _inModuleLink 保持 C 档 loud 拒绝（C 侧未实现该原语）。corpus44 dynamic-parent-super-read/assign 由 unsupported 转 supported（78/78,0 diff）。"
   source: "session: aot dynamic-parent super.prop"
   affects: [aot-roadmap, aot-host-builtin-carrier]
+
+- time: 2026-11-10T02:01:53
+  kind: decision
+  summary: "类方法 arguments 与 rest/>4 形参混用已支持（两档）：移除 _mEnter 中 rest+arguments / >4形参+arguments 的编译期 throw。arguments 读自 __args 全量实参数组（调用点写入），与形式参槽/ 独立——class 体 strict 无 arguments↔形参别名，故 rest/overflow 不影响 arguments 正确性。_emitMethodArgsForProvider 重写：从全量数组 slice 出 rest 槽（slice(restIdx)）与 >4 的  槽（slice(3)，约定 ovf[0] 哑元），避免参数副作用重求值；4 调用点传 astParams。corpus44 class-args-rest-formal/many-formals 由 unsupported 转 supported（78/78,0 diff）。dyn-dispatch/extracted-value/spread/void/getter/ctor 仍由 _assertNoArgsProviderTarget 或各自守卫 loud。"
+  source: "session: aot arguments rest/overflow"
+  affects: [aot-roadmap]
