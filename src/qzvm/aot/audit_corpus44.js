@@ -201,7 +201,7 @@ class C { m(a: number, b: number, c: number, d: number, e: number) { return argu
 export function run() { return new C().m(1, 2, 3, 4, 5); }`, args: [] },
   { name: "class-args-ctor", fn: "run", ts: `
 class C { k: number; constructor(a: number) { this.k = arguments.length; } }
-export function run() { return new C(1).k; }`, args: [], unsupported: "构造器内的 arguments（无 provider）" },
+export function run() { return new C(1).k; }`, args: [] },
   { name: "class-args-getter", fn: "run", ts: `
 class C { get p() { return arguments.length; } }
 export function run() { const c = new C(); return (c as any).p; }`, args: [], unsupported: "访问器内的 arguments（无 provider）" },

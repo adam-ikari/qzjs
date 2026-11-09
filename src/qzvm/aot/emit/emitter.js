@@ -2237,7 +2237,7 @@ class Emitter {
         const body = ctor ? ctor.body : { statements: [] };
         this._inStaticMethod = false;                      // 须在 _mEnter 前复位：实例 env 取法依赖此标志
         this._mEnter(ctorName(c.name), c.name, params, body, true, ctor ? ctor.parameters : [],
-            c.fields.filter(f2 => f2.init).map(f2 => f2.init));   // 字段初值在 ctor 内联发射 → 其闭包（如 = () => this.x）须捕获 this
+            c.fields.filter(f2 => f2.init).map(f2 => f2.init), !!ctor && this._methUsesArgs(ctor));   // 字段初值内联发射须捕获 this；ctor 体用 arguments → needsArgs（调用点写 __args）
         this._curClassObj = c;
         // 派生类：字段默认值须在 super(...) 之后写（同名遮蔽字段父写后子覆写）；
         // super 语句处 _emitSuperCall 负责调用父 ctor 后回写本类默认值。基类：此处直接写。

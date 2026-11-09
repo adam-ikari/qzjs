@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T03:01:50"
+updated: "2026-11-10T03:19:45"
 ---
 
 <!-- compiled_truth -->
@@ -355,4 +355,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "动态派发/void 方法下类方法 arguments 已支持：动态 method_call 路径（_emitDynMethod 尾部）在「同名类方法有用 arguments 者」时，调用点先构建全量实参数组并写 __args（qz 全局），再走 method_call——method_call 宿主 ABI 不携实参个数，无法自建 __args，故由调用点提供。ovf 槽从全量数组 slice(3) 取（避免重求值）。原 _assertNoArgsProviderTarget 抛错从该路径移除（提取值路径 1330 仍保留 loud）。corpus44 class-args-dyn-dispatch/class-args-void-method 转 supported（78/78,0 diff）。仍 loud：extracted-value、spread-call、getter、ctor 的 arguments。"
   source: "session: aot dyn-method arguments"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T03:19:45
+  kind: decision
+  summary: "构造器内 arguments 已支持：_emitCtorBody 传 needsArgs=_methUsesArgs(ctor)；_emitNewCall 普通 ctor 直调路径在 ctor 体用 arguments 时，把全量实参一次求值成数组写 __args（全局），4 个实参槽从数组回读（免重求值，新增嵌套 _expEnter 槽）。arguments guard（tagged.js:506）因 needsArgs 已设 varMap['arguments'] 而正确绕过。corpus44 class-args-ctor 转 supported（78/78,0 diff）。仍 loud：getter/setter、extracted-value、spread-call 的 arguments（host 派发无 provider）。"
+  source: "session: aot ctor arguments"
   affects: [aot-roadmap]

@@ -2246,8 +2246,17 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
         return;
     }
     const te = this._expEnter();                            // 实例 off / ctor 实参用可重入槽（嵌套 new 不覆盖）
+    const ctorNeedsArgs = !argSrc && c.ctor && this._methUsesArgs(c.ctor);
     { const argSlots = [te.w, te.x, te.y, te.z];   // self 占 te.v，实参用 w/x/y/z
-      for (let i = 0; i < 4; i++) {
+      if (ctorNeedsArgs) {   // ctor 体用 arguments：全量实参一次求值成数组 → 写 __args，槽从数组回读（免重求值）
+        const ta = this._expEnter();
+        const litA = ts.factory.createArrayLiteralExpression(args);
+        litA.pos = args.length ? args[0].pos : 0; litA.end = args.length ? args[args.length - 1].end : 0;
+        this.emitTaggedExpr(litA); M.localSet(ta.v);
+        for (let i = 0; i < 4; i++) { if (i < args.length) this._emitElemOf(ta.v, ts.factory.createNumericLiteral(i)); else this._emitUndefined(); M.localSet(argSlots[i]); }
+        M.localGet(ta.v); M.globalSet(this._argGlobal);
+        this._expLeave();
+      } else for (let i = 0; i < 4; i++) {
         if (argSrc) argSrc(i);                                    // 实参来自运行期数组（new C(...args)）
         else if (i < args.length) this.emitTaggedExpr(args[i]);
         else this._emitUndefined();
