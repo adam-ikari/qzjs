@@ -1021,7 +1021,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         // 静态字段可继承/可被派生类遮蔽：先初始化父链各层，再**运行时**从当前类向上找持有者
         const chain = [];
-        for (let x = cn; x; x = this.classes.get(x).parent) chain.push(x);
+        for (let x = cn; x && this.classes.has(x); x = this.classes.get(x).parent) chain.push(x);   // 内建父类（Map/…）不在 classes → 停在最后一个用户类（静态字段只沿用户类链查）
         for (const x of chain.slice().reverse()) this._emitStaticsGuard(x);
         const M3 = this.m, ts2 = this._expEnter();
         M3.i32Const(this.classes.get(cn).id); M3.call("qz.class_value"); M3.i32Const(this._strId(e.name.text)); M3.call("qz.prop_get"); M3.localSet(ts2.v);   // 初值 = 类对象属性（.name/.toString/prototype…），静态字段叠加上覆

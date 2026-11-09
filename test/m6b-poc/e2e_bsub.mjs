@@ -42,6 +42,8 @@ export class MS extends Map<string, number> { addS(k: string, v: number): number
 export function msTest(): number { const m = new MS(); return m.addS("a", 5) + m.size * 10; }
 export class OS extends Map<string, number> { set(k: string, v: number): any { return super.set(k, v * 10); } }
 export function osTest(): number { const o = new OS(); o.set("k", 3); return (o.get("k") as number) + o.size * 10; }
+export class SM extends Map<string, number> { static n = 0; bump(): number { (SM as any).n++; return (SM as any).n; } }
+export function smTest(): number { const a = new SM(); a.bump(); a.bump(); return (SM as any).n + a.size * 10; }
 `);
 const info = compileTS(tsPath, wasmPath, { inModuleLink: true });
 
@@ -77,6 +79,7 @@ chk('eTest() Error 子类（message + 字段 code + instanceof Error）', unbox(
 chk('ctorTest() 实例 .constructor 回本类值（非内建）', unbox(P.ctorTest()), 1);
 chk('msTest() super.set/get（内建父方法）', unbox(P.msTest()), 5 + 10);
 chk('osTest() super.set（覆盖后越过覆写）', unbox(P.osTest()), 30 + 10);
+chk('smTest() 内建子类静态字段', unbox(P.smTest()), 2 + 0);
 
 L.qz_destroy(rt);
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }

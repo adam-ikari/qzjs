@@ -530,7 +530,9 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export class MS extends Map { addS(k: any, v: any): any { super.set(k, v); return super.get(k); } }\n"
       + "export function useMS(): any { const m = new MS(); return m.addS(\"a\", 5) + \":\" + m.size; }\n"
       + "export class OS extends Map { set(k: any, v: any): any { return super.set(k, (v as number) * 10); } }\n"
-      + "export function useOS(): any { const o = new OS(); o.set(\"k\", 3); return o.get(\"k\") + \":\" + o.size; }\n");
+      + "export function useOS(): any { const o = new OS(); o.set(\"k\", 3); return o.get(\"k\") + \":\" + o.size; }\n"
+      + "export class SM extends Map { static n = 0; bump(): number { (SM as any).n++; return (SM as any).n; } total(): number { let s = 0; for (const [, v] of this as any) s += v; return s; } }\n"
+      + "export function useSM(): any { const a = new SM(); (a as any).set(\"x\", 1); a.bump(); a.bump(); return (SM as any).n + \":\" + a.size + \":\" + a.total(); }\n");
     const rBs = compileTS(path.join(os.tmpdir(), "qz_aot_bsub.ts"), path.join(os.tmpdir(), "qz_aot_bsub.wasm"), {});
     const qzBs = makeQzvm(rBs.strings, { fields: rBs.fields });
     const { instance: instBs } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_bsub.wasm")), { qz: qzBs });
@@ -545,6 +547,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("内建子类.Array 自有字段(捕获+自有方法)", callBs("useAF"), "3:2:10:true:true");
     check("内建子类.super.set/get（内建父方法）", callBs("useMS"), "5:1");
     check("内建子类.super.set（覆盖后越过覆写）", callBs("useOS"), "30:1");
+    check("内建子类.静态字段+for-of 条目", callBs("useSM"), "2:1:1");   // 静态字段链遍历须在内建父类处停（此前 classes.get("Map").parent 崩）
 }
 
 async function runClasses() {
