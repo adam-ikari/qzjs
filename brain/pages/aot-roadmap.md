@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T02:01:53"
+updated: "2026-11-10T03:01:50"
 ---
 
 <!-- compiled_truth -->
@@ -349,4 +349,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "类方法 arguments 与 rest/>4 形参混用已支持（两档）：移除 _mEnter 中 rest+arguments / >4形参+arguments 的编译期 throw。arguments 读自 __args 全量实参数组（调用点写入），与形式参槽/ 独立——class 体 strict 无 arguments↔形参别名，故 rest/overflow 不影响 arguments 正确性。_emitMethodArgsForProvider 重写：从全量数组 slice 出 rest 槽（slice(restIdx)）与 >4 的  槽（slice(3)，约定 ovf[0] 哑元），避免参数副作用重求值；4 调用点传 astParams。corpus44 class-args-rest-formal/many-formals 由 unsupported 转 supported（78/78,0 diff）。dyn-dispatch/extracted-value/spread/void/getter/ctor 仍由 _assertNoArgsProviderTarget 或各自守卫 loud。"
   source: "session: aot arguments rest/overflow"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T03:01:50
+  kind: decision
+  summary: "动态派发/void 方法下类方法 arguments 已支持：动态 method_call 路径（_emitDynMethod 尾部）在「同名类方法有用 arguments 者」时，调用点先构建全量实参数组并写 __args（qz 全局），再走 method_call——method_call 宿主 ABI 不携实参个数，无法自建 __args，故由调用点提供。ovf 槽从全量数组 slice(3) 取（避免重求值）。原 _assertNoArgsProviderTarget 抛错从该路径移除（提取值路径 1330 仍保留 loud）。corpus44 class-args-dyn-dispatch/class-args-void-method 转 supported（78/78,0 diff）。仍 loud：extracted-value、spread-call、getter、ctor 的 arguments。"
+  source: "session: aot dyn-method arguments"
   affects: [aot-roadmap]

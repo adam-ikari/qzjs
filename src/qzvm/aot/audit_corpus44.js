@@ -183,7 +183,7 @@ export function run() { return new C().m(3, 4); }`, args: [] },
   { name: "class-args-dyn-dispatch", fn: "run", ts: `
 class C { m(a: number) { return arguments[0]; } }
 function h(o: any) { return o.m(3); }
-export function run() { return h(new C()); }`, args: [], unsupported: "宿主动态派发下的类方法 arguments（接收者静态不可判）" },
+export function run() { return h(new C()); }`, args: [] },
   { name: "class-args-extracted-value", fn: "run", ts: `
 class C { m(a: number) { return arguments[0]; } }
 export function run() { const c: any = new C(); const g = c.m; return g(3); }`, args: [], unsupported: "方法取成值再调用（经 closure_call/call_value，无实参个数）" },
@@ -192,7 +192,7 @@ class C { m(a: number) { return arguments[0]; } }
 export function run() { const c = new C(); const r = [3]; return c.m(...r); }`, args: [], unsupported: "展开实参调用（实参数组在宿主侧，两档宿主写不了产物 __args）" },
   { name: "class-args-void-method", fn: "run", ts: `
 class C { k = 0; m(a: number): void { this.k = arguments.length; } }
-export function run() { const c = new C(); c.m(1); return c.k; }`, args: [], unsupported: ": void 方法退回宿主动态派发 → 无 arguments provider" },
+export function run() { const c = new C(); c.m(1); return c.k; }`, args: [] },
   { name: "class-args-rest-formal", fn: "run", ts: `
 class C { m(a: number, ...r: number[]) { return arguments.length; } }
 export function run() { return new C().m(1, 2); }`, args: [] },

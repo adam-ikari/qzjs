@@ -500,6 +500,21 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         check("类方法 arguments+rest(arguments.length=2,rest=[2])", qzA._toJS(iA.exports.ar1()), 102);
         check("类方法 arguments+>4形参(length=5,[4]=5)", qzA._toJS(iA.exports.ar2()), 10);
     }
+    // 动态派发/void 方法下类方法 arguments：调用点写 __args（method_call 宿主不知实参个数）
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_dynargs.ts"),
+            "class C { k: number = 0; m(a: number): void { this.k = arguments.length; } }\n"
+          + "function h(o: any): any { return o.m(3); }\n"
+          + "export function dv(): any { const c = new C(); c.m(1); return c.k; }\n"
+          + "export function dd(): any { class D { m(a: number): any { return arguments[0]; } } return h(new D()); }\n");
+        const rG = compileTS(path.join(os.tmpdir(), "qz_aot_dynargs.ts"), path.join(os.tmpdir(), "qz_aot_dynargs.wasm"), {});
+        const qzG = makeQzvm(rG.strings, { fields: rG.fields });
+        const { instance: iG } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_dynargs.wasm")), { qz: qzG });
+        qzG.bindMem(iG.exports.memory); if (iG.exports.__bump) qzG.bindBump(iG.exports.__bump);
+        qzG.bindClosures(iG.exports, rG.lamMeta); qzG.bindClasses(iG.exports, rG.classMeta);
+        check("void 方法 arguments.length(动态派发)", qzG._toJS(iG.exports.dv()), 1);
+        check("动态派发 arguments[0]", qzG._toJS(iG.exports.dd()), 3);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

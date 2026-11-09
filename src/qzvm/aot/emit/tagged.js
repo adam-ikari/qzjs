@@ -2631,20 +2631,32 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
             return;
         }
     }
-    // 动态：压 recv + mid + 4 参入值栈（实参可为嵌套调用，无暂存槽覆盖问题）。
-    this._assertNoArgsProviderTarget(method, "宿主动态派发");   // 接收者静态不可判 → 被调方法是否要 arguments 无法确定，也不能写 __args
-    this.emitTaggedExpr(rx);
-    M.i32Const(this._strId(((method === "reduce" || method === "reduceRight") && args.length >= 2) ? method + "$i" : method));   // 显式提供初值（含 undefined）→ $i 变体
-
-    for (let i = 0; i < 4; i++) {
-        if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
-    }
-    {   // ovf：实参 4..（被调形参 >4 时由宿主按其 arity 解包；否则忽略）
-        const ovfA = args.slice(3);   // 与闭包 ABI 同款：ex[0] = 实参 3（已在 a3）
-        if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 方法调用的溢出实参与展开混用暂不支持");
-        const lit = ts.factory.createArrayLiteralExpression(ovfA);
-        lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
-        this.emitTaggedExpr(lit);
+    // 动态：压 recv + mid + 4 参 + ovf 入值栈。同名类方法有用 arguments 者 → 调用点写 __args 全量实参数组
+    // （method_call 宿主派发不知实参个数，无法自建；调用点已知 e.arguments）。
+    const dynArgsProv = this._methArgsNames().has(method) && !args.some(a => ts.isSpreadElement(a));
+    const midDyn = this._strId(((method === "reduce" || method === "reduceRight") && args.length >= 2) ? method + "$i" : method);
+    if (dynArgsProv) {
+        const tp = this._expEnter();
+        const litA = ts.factory.createArrayLiteralExpression(args);
+        litA.pos = args.length ? args[0].pos : 0; litA.end = args.length ? args[args.length - 1].end : 0;
+        this.emitTaggedExpr(litA); M.localSet(tp.v);            // 全量实参数组一次求值
+        this.emitTaggedExpr(rx);                                // recv
+        M.i32Const(midDyn);
+        for (let i = 0; i < 4; i++) { if (i < args.length) this._emitElemOf(tp.v, ts.factory.createNumericLiteral(i)); else this._emitUndefined(); }
+        M.localGet(tp.v); M.i32Const(this._strId("slice")); M.i64ConstBits(...f64Bits(3)); for (let k = 0; k < 4; k++) this._emitUndefined(); M.call("qz.method_call");   // ovf = 全量.slice(3)
+        M.localGet(tp.v); M.globalSet(this._argGlobal);         // __args（callee 入口消费即清）
+        this._expLeave();
+    } else {
+        this.emitTaggedExpr(rx);
+        M.i32Const(midDyn);
+        for (let i = 0; i < 4; i++) { if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined(); }
+        {   // ovf：实参 4..（被调形参 >4 时由宿主按其 arity 解包；否则忽略）
+            const ovfA = args.slice(3);   // 与闭包 ABI 同款：ex[0] = 实参 3（已在 a3）
+            if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] 方法调用的溢出实参与展开混用暂不支持");
+            const lit = ts.factory.createArrayLiteralExpression(ovfA);
+            lit.pos = args.length ? args[0].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+            this.emitTaggedExpr(lit);
+        }
     }
     M.call("qz.method_call");
     this._emitErrCheck();          // 宿主方法可能抛出（如空数组 reduce）→ 转入本函数 catch
