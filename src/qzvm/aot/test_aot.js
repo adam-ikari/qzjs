@@ -525,6 +525,18 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         check("展开实参调用 arguments[0]", qzG._toJS(iG.exports.ds()), 3);
         check("getter arguments.length(=0)", qzG._toJS(iG.exports.dg()), 0);
     }
+    // 类表达式静态字段初值捕获工厂局部：sei 在创建点跑（env 可见）→ 每 clone 各持初值
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_facap.ts"),
+            "function mk(n: number) { return class { static x = n; static y = n * 2; }; }\n"
+          + "export function fcap(): any { const A = mk(5); const B = mk(9); return (A as any).x + \":\" + (A as any).y + \":\" + (B as any).x; }\n");
+        const rH = compileTS(path.join(os.tmpdir(), "qz_aot_facap.ts"), path.join(os.tmpdir(), "qz_aot_facap.wasm"), {});
+        const qzH = makeQzvm(rH.strings, { fields: rH.fields });
+        const { instance: iH } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_facap.wasm")), { qz: qzH });
+        qzH.bindMem(iH.exports.memory); if (iH.exports.__bump) qzH.bindBump(iH.exports.__bump);
+        qzH.bindClosures(iH.exports, rH.lamMeta); qzH.bindClasses(iH.exports, rH.classMeta);
+        check("工厂类静态字段捕获局部(每 clone 独立)", qzH._toJS(iH.exports.fcap()), "5:10:9");
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

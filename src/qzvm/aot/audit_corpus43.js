@@ -54,8 +54,8 @@ export function run() { return mk(7); }`, args: [], unsupported: "函数内 clas
 export function run() { return mk(7); }`, args: [] },
   { name: "factory-static-init-captures-outer", fn: "run", ts: `function mk(n: number) { return class { static x = n; }; }
 const C = mk(7);
-export function run() { return C.x; }`, args: [], unsupported: "类表达式静态初始化引用工厂局部（静态按类名共享，创建点 env 不可见）" },
+export function run() { return C.x; }`, args: [] },
   { name: "factory-static-block-captures-outer", fn: "run", ts: `function mk(n: number) { return class { static x: number; static { C2.x = n; } }; }
 const C2 = mk(7);
-export function run() { return C2.x; }`, args: [], unsupported: "类表达式静态块引用工厂局部（静态按类名共享，创建点 env 不可见）" },
+export function run() { return C2.x; }`, args: [], unsupported: "类表达式静态块引用工厂局部（块执行点/TDZ 不可控；字段初值形式已支持）" },
 ];

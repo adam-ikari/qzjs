@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T03:59:57"
+updated: "2026-11-10T04:15:23"
 ---
 
 <!-- compiled_truth -->
@@ -379,4 +379,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "getter/setter 内 arguments 已支持（JS 档）：_emitMethodBody accessor 在 _methUsesArgs 时按 needsArgs 编译（仅 JS 档，!mth.accessor||!_inModuleLink）；classMeta getter/setter 项加 usesArgs；prop_get getter 派发写 __args=arrWriteback([])（getter 恒 0 实参）、prop_set/super_prop_set_dyn setter 派发写 __args=[v]（setter 恒 1 实参）。C 档访问器宿主派发写不了 __args → 保持 loud（guard 保留）。至此 corpus44 的 class-args-* 全族（dyn-dispatch/extracted/spread/void/getter/ctor/rest/many）均 supported。"
   source: "session: aot getter/setter arguments"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T04:15:23
+  kind: decision
+  summary: "类表达式静态字段初值捕获工厂局部已支持（JS 档）：把 clsExprSupported 判定提前到 lostStatic 校验前；类表达式静态**字段**初值的引用并入 capSetC（sei 在创建点执行，env 可见 → 每 clone 各持初值）。静态**块**引用拆到独立 staticBlockRefsC，类表达式仍按块引用 loud（块执行点/TDZ 不可控，如 static { C2.x = n } 引用待赋值 const，AOT 侧不复制 TDZ）。corpus43 factory-static-init-captures-outer 转 supported；factory-static-block-captures-outer 保持 unsupported（loud）。20/20,0 diff。"
+  source: "session: aot factory static field capture"
   affects: [aot-roadmap]

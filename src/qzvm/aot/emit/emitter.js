@@ -2036,7 +2036,8 @@ class Emitter {
                 for (const sm of staticMethods) { sm.usesThis = usesThis(sm.node && sm.node.body); sm.thisNames = thisNames(sm.node && sm.node.body); }
             }
             const capSetC = new Set();                      // 方法/构造器/实例字段初值的外围引用 → 类 env 捕获（**单一来源**，两处共用）
-            const staticRefsC = new Set();                  // 静态字段初值/静态块的外围引用：首次访问才执行 → 仅用于 loud 校验
+            const staticRefsC = new Set();                  // 静态字段初值的外围引用（类表达式可并入 env 支持）
+            const staticBlockRefsC = new Set();             // 静态块的引用：块内 TDZ/执行点不可控 → 类表达式仍 loud
             {
                 const addRefs = (set, node) => {
                     if (!node) return;
@@ -2064,8 +2065,17 @@ class Emitter {
                 if (ctor) addRefs(capSetC, ctor);
                 for (const f of fields) if (f.init) addRefs(capSetC, this._synthCaptureArrow(f.init));
                 for (const f of staticFields) if (f.init) addRefs(staticRefsC, this._synthCaptureArrow(f.init));
-                for (const blk of staticBlocks) addRefs(staticRefsC, this._synthCaptureArrow(blk));
+                for (const blk of staticBlocks) addRefs(staticBlockRefsC, this._synthCaptureArrow(blk));
             }
+            /* 类表达式/动态父/私有静态 判定（lostStatic 校验与静态块合成都用） */
+            const _isClsExpr = !!(this.clsExprSynthDecls && this.clsExprSynthDecls.has(st));
+            const _isTopAlias = !!(this.topAliasClsExprDecls && this.topAliasClsExprDecls.has(st));
+            const _isNestedDecl = !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
+            const _dynNode = parent ? parent.expression : null;
+            const _isDynParent = !!_dynNode && !(ts.isIdentifier(_dynNode)
+                && (this.classes.has(this._className(_dynNode.text)) || BUILTIN_GLOBALS.has(_dynNode.text) || EMITTER_BUILTIN_CTORS.has(_dynNode.text)));
+            const clsExprSupported = _isClsExpr && !_isTopAlias && !this._inModuleLink && !_isDynParent
+                && !staticFields.some(f => f.name.startsWith("#"));
             /* 提升后的类读不到定义点外层绑定：函数/块内 class 声明（整树提升到模块级、定义点
              * 不建值）若实现体引用了非模块级局部名，运行时没有 env 槽 → 此前静默 undefined，改为 loud。
              * `const K = class` 别名形式只在**模块顶层**仍是纯类名别名（类值不物化）；非顶层的
@@ -2083,34 +2093,31 @@ class Emitter {
                         throw new Error("[tagged] " + form + "捕获了外层局部变量（" + lost.join(", ") + "），方法/构造器/字段初值运行时读不到该绑定；请把变量提升到模块级，或改用工厂函数返回类表达式");
                     }
                 }
-                /* 静态初始化在**首次静态访问点**执行（lazy statics guard）→ 定义点外层局部同样不可见。 */
+                /* 静态初始化在**首次静态访问点**执行（lazy statics guard）→ 定义点外层局部同样不可见。
+                 * 类表达式例外：静态**字段初值**的引用已并入捕获 env（sei 在创建点立即执行，env 可见）；
+                 * 静态**块**执行点/TDZ 不可控（如 static { C2.x = n } 引用待赋值 const）→ 仍按块引用 loud。 */
                 const lostStatic = [];
-                for (const nm2 of staticRefsC) if (this.declaredNames.has(nm2)) lostStatic.push(nm2);
+                const lostSrc = clsExprSupported ? staticBlockRefsC : [...staticRefsC, ...staticBlockRefsC];
+                for (const nm2 of lostSrc) if (this.declaredNames.has(nm2)) lostStatic.push(nm2);
                 if (lostStatic.length) {
                     throw new Error("[tagged] class " + cname + " 的静态初始化捕获了非模块级变量（" + lostStatic.join(", ") + "）：静态初始化在首次静态访问点执行，读不到 class 定义点的局部绑定；请把变量提升到模块级，或改用实例字段/构造器参数");
                 }
             }
+            /* 类表达式：静态**字段初值**引用的外层局部并入捕获 env（sei 在创建点执行 → env 可见）。 */
+            if (clsExprSupported) for (const nm2 of staticRefsC) capSetC.add(nm2);
             /* 静态字段/静态块的静态表按类名共享，lazy 守卫只初始化一次；但类表达式每次
              * 求值、嵌套 class 声明每次进入定义点，JS 都会产生独立静态状态。模块顶层
              * `const C = class {…}` 只求值一次、类名稳定，是唯一可支持的类表达式形式。
              * 其余形状此前静默错值（动态读 undefined / 多次求值串味 / 静态方法 this.x
              * 读 0）→ 编译期 loud。 */
             if (staticFields.length || staticBlocks.length) {
-                const isClsExpr = !!(this.clsExprSynthDecls && this.clsExprSynthDecls.has(st));
-                const isTopAlias = !!(this.topAliasClsExprDecls && this.topAliasClsExprDecls.has(st));
-                const isNestedDecl = !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
                 /* 类表达式（工厂/对象属性/函数内别名）：每次求值克隆出独立 clsId。独立档（JS 宿主）
                  * 现于**创建点**按 clone 立即跑静态初始化（合成 __qz_sei 静态方法：this≡clone，
                  * 写 clone 自有静态桶）→ 多次求值各持一份，动态访问也能读到初值。私有静态字段
                  * 的名字（#C#x）与静态写路径键空间不同，暂仍 loud。in-module 档动态类值的静态
                  * 访问端未接，仍 loud。函数/块内 class 声明（isNestedDecl）走提升路径，另案。 */
-                const dynNode = parent ? parent.expression : null;
-                const isDynParent = !!dynNode && !(ts.isIdentifier(dynNode)
-                    && (this.classes.has(this._className(dynNode.text)) || BUILTIN_GLOBALS.has(dynNode.text) || EMITTER_BUILTIN_CTORS.has(dynNode.text)));
-                const clsExprSupported = isClsExpr && !isTopAlias && !this._inModuleLink && !isDynParent
-                    && !staticFields.some(f => f.name.startsWith("#"));
-                if (isNestedDecl || (isClsExpr && !isTopAlias && !clsExprSupported)) {
-                    const form = isClsExpr
+                if (_isNestedDecl || (_isClsExpr && !_isTopAlias && !clsExprSupported)) {
+                    const form = _isClsExpr
                         ? "class 表达式（非模块顶层 `const C = class` 形式）"
                         : "函数/块内 class 声明（每次进入定义点应重新初始化静态）";
                     throw new Error("[tagged] " + form + "的静态字段/静态块暂不支持（静态表按类名共享、只初始化一次，多次求值会串味/读不到初值）：" + cname + "；请改用模块顶层类声明，或把静态状态放到模块级变量/实例字段");
