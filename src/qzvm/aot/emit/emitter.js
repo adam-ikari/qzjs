@@ -2085,6 +2085,27 @@ class Emitter {
                 && (this.classes.has(this._className(_dynNode.text)) || BUILTIN_GLOBALS.has(_dynNode.text) || EMITTER_BUILTIN_CTORS.has(_dynNode.text)));
             const clsExprSupported = (_isClsExpr || _isNestedDecl) && !_isTopAlias && !this._inModuleLink && !_isDynParent
                 && !staticFields.some(f => f.name.startsWith("#"));   // 嵌套 class 声明与类表达式同：每求值 clone + env + sei 静态初始化
+            /* 静态块是否**写模块级外部绑定**（赋值目标基名在 declaredNames 但非捕获名，如 TDZ 的 `C2.x = n`）→ 该来源不安全。
+             * 纯 lambda/局部声明块（closure）不写外部 → 安全，可并入捕获 env。 */
+            let _blkWriteOuter = false;
+            const _scanWrites = (n) => {
+                if (_blkWriteOuter) return;
+                if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n)) return;   // 嵌套作用域
+                let tgt = null;
+                if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) tgt = n.left;
+                else if (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) tgt = n.operand;
+                if (tgt) {
+                    let b = tgt;
+                    while (b && (ts.isParenthesizedExpression(b) || ts.isAsExpression(b) || ts.isNonNullExpression(b) || ts.isTypeAssertionExpression(b) || ts.isSatisfiesExpression(b))) b = b.expression;
+                    while (b && (ts.isPropertyAccessExpression(b) || ts.isElementAccessExpression(b))) b = b.expression;
+                    while (b && (ts.isParenthesizedExpression(b) || ts.isAsExpression(b) || ts.isNonNullExpression(b))) b = b.expression;
+                    if (b && ts.isIdentifier(b) && b.text !== "this" && !BUILTIN_GLOBALS.has(b.text) && !this.classes.has(this._className(b.text))
+                        && this.declaredNames.has(b.text) && !staticBlockRefsC.has(b.text) && !capSetC.has(b.text)) _blkWriteOuter = true;   // 模块级（非捕获）外部名
+                }
+                ts.forEachChild(n, _scanWrites);
+            };
+            for (const blk of staticBlocks) _scanWrites(blk);
+            const _mergeBlk = clsExprSupported && !_blkWriteOuter;   // 静态块可并入捕获 env 的前提：不写模块级外部绑定
             /* 提升后的类读不到定义点外层绑定：函数/块内 class 声明（整树提升到模块级、定义点
              * 不建值）若实现体引用了非模块级局部名，运行时没有 env 槽 → 此前静默 undefined，改为 loud。
              * `const K = class` 别名形式只在**模块顶层**仍是纯类名别名（类值不物化）；非顶层的
@@ -2102,19 +2123,15 @@ class Emitter {
                         throw new Error("[tagged] " + form + "捕获了外层局部变量（" + lost.join(", ") + "），方法/构造器/字段初值运行时读不到该绑定；请把变量提升到模块级，或改用工厂函数返回类表达式");
                     }
                 }
-                /* 静态初始化在**首次静态访问点**执行（lazy statics guard）→ 定义点外层局部同样不可见。
-                 * 类表达式例外：静态**字段初值**的引用已并入捕获 env（sei 在创建点立即执行，env 可见）；
-                 * 静态**块**执行点/TDZ 不可控（如 static { C2.x = n } 引用待赋值 const）→ 仍按块引用 loud。 */
-                const lostStatic = [];
-                const _mergeBlk = clsExprSupported && _isNestedDecl;
+                const lostStatic = [];   // 越出安全的静态块引用（_mergeBlk=false 时）→ 若含工厂局部则 loud
                 const lostSrc = clsExprSupported ? (_mergeBlk ? [] : staticBlockRefsC) : [...staticRefsC, ...staticBlockRefsC];
                 for (const nm2 of lostSrc) if (this.declaredNames.has(nm2)) lostStatic.push(nm2);
                 if (lostStatic.length) {
                     throw new Error("[tagged] class " + cname + " 的静态初始化捕获了非模块级变量（" + lostStatic.join(", ") + "）：静态初始化在首次静态访问点执行，读不到 class 定义点的局部绑定；请把变量提升到模块级，或改用实例字段/构造器参数");
                 }
             }
-            /* 类表达式：静态**字段初值**引用的外层局部并入捕获 env（sei 在创建点执行 → env 可见）。 */
-            if (clsExprSupported) { for (const nm2 of staticRefsC) capSetC.add(nm2); if (clsExprSupported && _isNestedDecl) for (const nm2 of staticBlockRefsC) capSetC.add(nm2); }
+            /* 类表达式/嵌套声明：静态字段初值 + 安全的静态块引用并入捕获 env（sei 在创建点执行 → env 可见）。 */
+            if (clsExprSupported) { for (const nm2 of staticRefsC) capSetC.add(nm2); if (_mergeBlk) for (const nm2 of staticBlockRefsC) capSetC.add(nm2); }
             /* 静态字段/静态块的静态表按类名共享，lazy 守卫只初始化一次；但类表达式每次
              * 求值、嵌套 class 声明每次进入定义点，JS 都会产生独立静态状态。模块顶层
              * `const C = class {…}` 只求值一次、类名稳定，是唯一可支持的类表达式形式。

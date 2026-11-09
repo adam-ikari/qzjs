@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T05:49:33"
+updated: "2026-11-10T06:04:58"
 ---
 
 <!-- compiled_truth -->
@@ -415,4 +415,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "0 参导出函数由宿主直调时的 arguments 已支持：emitFunc 的 needsArgs 入口，__args 未设（=0）时——0 参函数缺省 qz.empty_array（arguments=[]），>0 参仍 unreachable（宿主 padding 使实参个数不可辨 → loud，绝不静默）。避免把 0 参导出函数的宿主调用 trap。corpus46 fn-args-host-direct 转 supported（18/18,0 diff）。仅剩 factory/closure static-block（TDZ 耦合）2 个 loud。"
   source: "session: aot host-direct arguments"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T06:04:58
+  kind: decision
+  summary: "类表达式/嵌套声明的静态块捕获工厂局部：新增『写模块级外部绑定』检测——静态块若有赋值目标基名为 declaredNames 中但**非捕获名**（如 TDZ 的 C2.x = n，C2 是待赋值 const）→ 该块不并入捕获 env、保持 loud；否则（纯 lambda/局部声明块如 const f=()=>n）并入 capSetC，sei 在创建点执行 env 可见 → 支持。_mergeBlk = clsExprSupported && !_blkWriteOuter。C 档（clsExprSupported=false）仍 loud。corpus44 closure-in-static-block-loud 转 supported（78/78,0 diff），factory-static-block-captures-outer 仍 loud（检测命中）。至此仅剩 1 个 unsupported。"
+  source: "session: aot static-block safe capture"
   affects: [aot-roadmap]

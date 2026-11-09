@@ -122,7 +122,7 @@ export function run() { const c: any = new C(); return c.go(); }`, args: [] },
   { name: "closure-in-static-block-loud", fn: "run", ts: `
 function mk(n: number) { return class { static { const f = () => n; } }; }
 const C = mk(3);
-export function run() { new C(); return 1; }`, args: [], unsupported: "静态块间接捕获工厂局部（经 lambda）" },
+export function run() { new C(); return 1; }`, args: [] },
   { name: "super-method-as-value", fn: "run", ts: `
 class A { m() { return 1; } }
 class B extends A { f() { const g = super.m; return typeof g; } }

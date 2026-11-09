@@ -588,6 +588,22 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzH.bindClosures(iH.exports, rH.lamMeta); qzH.bindClasses(iH.exports, rH.classMeta);
         check("0 参导出函数 arguments.length(=0)", qzH._toJS(iH.exports.ha()), 0);
     }
+    // 类表达式静态块：纯 lambda 捕获工厂局部（创建点 sei env 可见）→ 支持；写外部 const（TDZ）→ loud
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_sblk.ts"),
+            "function mk(n: number) { return class { static { const f = () => n; } m(): any { return n; } }; }\n"
+          + "export function sblk(): any { const C = mk(7); return new (C as any)().m(); }\n");
+        const rB = compileTS(path.join(os.tmpdir(), "qz_aot_sblk.ts"), path.join(os.tmpdir(), "qz_aot_sblk.wasm"), {});
+        const qzB = makeQzvm(rB.strings, { fields: rB.fields });
+        const { instance: iB } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_sblk.wasm")), { qz: qzB });
+        qzB.bindMem(iB.exports.memory); if (iB.exports.__bump) qzB.bindBump(iB.exports.__bump);
+        qzB.bindClosures(iB.exports, rB.lamMeta); qzB.bindClasses(iB.exports, rB.classMeta);
+        check("静态块 lambda 捕获工厂局部", qzB._toJS(iB.exports.sblk()), 7);
+        let msg = null;
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_sbw.ts"), "function mk(n: number) { return class { static x: number; static { C2.x = n; } }; }\nconst C2 = mk(7);\nexport function run() { return C2.x; }\n");
+        try { compileTS(path.join(os.tmpdir(), "qz_aot_sbw.ts"), path.join(os.tmpdir(), "qz_aot_sbw.wasm"), {}); } catch (e) { msg = String(e.message || e); }
+        check("静态块写外部 const loud(TDZ)", !!(msg && msg.indexOf("静态初始化捕获") >= 0), true);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"
