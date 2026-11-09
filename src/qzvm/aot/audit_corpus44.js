@@ -189,7 +189,7 @@ class C { m(a: number) { return arguments[0]; } }
 export function run() { const c: any = new C(); const g = c.m; return g(3); }`, args: [] },
   { name: "class-args-spread-call", fn: "run", ts: `
 class C { m(a: number) { return arguments[0]; } }
-export function run() { const c = new C(); const r = [3]; return c.m(...r); }`, args: [], unsupported: "展开实参调用（实参数组在宿主侧，两档宿主写不了产物 __args）" },
+export function run() { const c = new C(); const r = [3]; return c.m(...r); }`, args: [] },
   { name: "class-args-void-method", fn: "run", ts: `
 class C { k = 0; m(a: number): void { this.k = arguments.length; } }
 export function run() { const c = new C(); c.m(1); return c.k; }`, args: [] },

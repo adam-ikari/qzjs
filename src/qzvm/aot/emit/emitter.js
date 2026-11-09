@@ -929,7 +929,7 @@ class Emitter {
         }
         // 展开实参 → 全量数组在宿主侧（method_spread/builtin_spread），C 档宿主写不了产物的 __args
         // → 被调类方法拿不到 arguments：编译期 loud（比运行期 trap 早，且两档一致）。
-        if (ts.isPropertyAccessExpression(cx)) this._assertNoArgsProviderTarget(cx.name.text, "展开实参调用");
+        if (ts.isPropertyAccessExpression(cx) && this._inModuleLink) this._assertNoArgsProviderTarget(cx.name.text, "展开实参调用");   // C 档 method_spread 宿主写不了 __args；JS 档由 method_spread 写
         if (ts.isPropertyAccessExpression(cx) && ts.isIdentifier(cx.expression) && this._isClassName(cx.expression)) {
             // C.m(...args)：静态方法直调（导出名静态可知）
             let owner = this._className(cx.expression.text);

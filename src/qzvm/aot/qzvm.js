@@ -2817,6 +2817,7 @@ function makeQzvm(strings, opts) {
     const a = (toJS(arr) || []).map(bitsOf);
     const a0 = a.length > 0 ? a[0] : TAG, a1 = a.length > 1 ? a[1] : TAG, a2 = a.length > 2 ? a[2] : TAG, a3 = a.length > 3 ? a[3] : TAG;
     const ovfA = a.length > 3 ? arrWriteback(a.slice(3).map(toJS)) : TAG;   // ovf[0] = 实参 3（已在 a3）
+    if (exportsRef && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arr);   // 被调类方法用 arguments 时读 __args（arr 即全量实参数组句柄；非 arguments 方法不读，无副作用）
     return api.method_call(recv, mid, a0, a1, a2, a3, ovfA);
   };
   return api;
