@@ -1179,7 +1179,22 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         while (c) {                                          // 父链上查实例方法，其次静态方法（static super.m()）
             const cl = this.classes.get(c);
-            if (!cl) throw new Error(`[tagged] super.${method}() 的父类链含无法静态解析的类（${c}；内建父类或运行期父类），该调用暂不支持`);
+            if (!cl) {
+                if (this._curClassObj && this._curClassObj.hostBacked && !this._inStaticMethod && c === this._curClassObj.builtinParentName) {   // 内建父类实例方法：宿主 super_method 沿原型链跳过用户类 proto（__qzClsProto）→ 内建原型方法
+                    if (e.arguments.length > 4) throw new Error("[tagged] super." + method + "() 最多 4 参");
+                    this._assertNoArgsProviderTarget(method, "内建父类 super 派发");
+                    this._emitThisReceiver();
+                    this.m.i32Const(this._strId(method));
+                    for (let i = 0; i < 4; i++) {
+                        if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+                    }
+                    this._emitUndefined();   // ovf：>4 实参暂不打包（与对象字面量 super 调用同窄面）
+                    this.m.call("qz.super_method");
+                    this._emitErrCheck();
+                    return;
+                }
+                throw new Error(`[tagged] super.${method}() 的父类链含无法静态解析的类（${c}；内建父类或运行期父类），该调用暂不支持`);
+            }
             if ((cl.methods || []).some(m => m.name === method)) { isStaticM = false; break; }
             if ((cl.staticMethods || []).some(m => m.name === method)) { isStaticM = true; break; }
             c = cl.parent;

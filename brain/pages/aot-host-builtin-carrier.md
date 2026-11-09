@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, builtin, quickjs]
 created: "2026-11-04T10:27:39"
-updated: "2026-11-09T16:03:31"
+updated: "2026-11-09T18:07:10"
 ---
 
 <!-- compiled_truth -->
@@ -83,4 +83,10 @@ updated: "2026-11-09T16:03:31"
   kind: note
   summary: "显式 ctor 内建子类不能宿主承载（两档）：尝试把 hostBacked 放宽到「首句 super 原样转发形参」的显式 ctor，echte 但引入回归——class E1 extends Error { constructor(m){super(m); this.name=\"E1\"} } 一旦 hostBacked，则用户子类 class E2 extends E1（E2 的 builtinParentName=null → 走 bump）在 E2 的 bump 路径调 E1 ctor(self=E2 的 wasm POJO) 时，E1 的 hostBacked ctor 假定基类已由 new_builtin_sub 构造 → 真实 Error 基类缺失（message undefined、instanceof 失败）。audit_corpus31 error-handling-matrix / corpus38 error-cause-chain 立即抓出。结论：hostBacked 必须维持 !ctor——宿主承载类一旦被用户子类继承（bump 调其 ctor）即失效；要安全放宽需二次扫描「该类有无用户子类」（跨文件不可靠）。显式 ctor 内建子类保持 bump 近似（Error 族写 message/name，其余 loud）。"
   source: "src/qzvm/aot/emit/{emitter.js,tagged.js}, audit_corpus31/38"
+  affects: [aot-host-builtin-carrier, aot-roadmap]
+
+- time: 2026-11-09T18:07:10
+  kind: decision
+  summary: "内建子类 super.method()（两档）：放行 class M extends Map { m(){ super.set(...) } }——父链走到内建父类时发 qz.super_method(self, mid, args)（此前 loud 拒绝）。关键正确性：类 ObjImpl 把实例方法装到 prototype（JS 语义），super_method 直接用 Object.getPrototypeOf(o) 会命中本类覆写 → 覆盖+super 递归；改为 classObjImpl 用 WeakMap protoCls 记录用户类 proto，super_method 沿原型链跳过 protoCls.has(sp) 的 proto → 落到内建原型方法（past 本类 wasm 覆写）。用 WeakMap 而非属性标记：后者出现在 Object.getOwnPropertyNames(C.prototype) → audit_corpus30/34/35 回归（getter-setter-pairs/class-accessor-inherit/class-instance-delete），WeakMap 无痕。仅 hostBacked（根内建子类）放行；用户类 N extends O extends Map 的病理混合（N bump 调 O host 方法）仍属既知不兼容。JS: protoCls WeakMap + super_method 跳过；C: super_method 对宿主对象走 JS_GetPrototype（实例 proto=内建原型，本就正确，无需改）。验证：test_aot 两项（super.set/get + 覆盖后越过覆写）；e2e_bsub 两项；corpus30/34/35 恢复 0 diff；全 46 corpus 0 diff；全 e2e 绿。"
+  source: "src/qzvm/aot/{emit/tagged.js,qzvm.js}, test_aot.js, test/m6b-poc/e2e_bsub.mjs"
   affects: [aot-host-builtin-carrier, aot-roadmap]

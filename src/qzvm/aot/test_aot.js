@@ -526,7 +526,11 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function useMF(): any { const m = new MF(); m.set(\"a\", 7); m.x = 100; return m.get(\"a\") + \":\" + m.x + \":\" + m.y + \":\" + m.size + \":\" + (m instanceof MF) + \":\" + (m instanceof Map); }\n"
       + "const K = 5;\n"
       + "export class AF extends Array { x: number = K * 2; sum(): number { let s = 0; for (let i = 0; i < this.length; i++) s += this[i]; return s; } }\n"
-      + "export function useAF(): any { const a = new AF(); a.push(1); a.push(2); return a.sum() + \":\" + a.length + \":\" + a.x + \":\" + (a instanceof AF) + \":\" + (a instanceof Array); }\n");
+      + "export function useAF(): any { const a = new AF(); a.push(1); a.push(2); return a.sum() + \":\" + a.length + \":\" + a.x + \":\" + (a instanceof AF) + \":\" + (a instanceof Array); }\n"
+      + "export class MS extends Map { addS(k: any, v: any): any { super.set(k, v); return super.get(k); } }\n"
+      + "export function useMS(): any { const m = new MS(); return m.addS(\"a\", 5) + \":\" + m.size; }\n"
+      + "export class OS extends Map { set(k: any, v: any): any { return super.set(k, (v as number) * 10); } }\n"
+      + "export function useOS(): any { const o = new OS(); o.set(\"k\", 3); return o.get(\"k\") + \":\" + o.size; }\n");
     const rBs = compileTS(path.join(os.tmpdir(), "qz_aot_bsub.ts"), path.join(os.tmpdir(), "qz_aot_bsub.wasm"), {});
     const qzBs = makeQzvm(rBs.strings, { fields: rBs.fields });
     const { instance: instBs } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_bsub.wasm")), { qz: qzBs });
@@ -539,6 +543,8 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("内建子类.Array 继承+自有+for-of+instanceof", callBs("useA"), "2:10:10:30:true:true:A");   // Array 子类保留真数组 + 类 prototype（tagHandle 0x7FFD，不扁平为 0x7FFB）
     check("内建子类.Map 自有字段(this引用+写)", callBs("useMF"), "7:100:2:1:true:true");   // 字段存宿主属性（非 wasm 内存），基类构造由 new_builtin_sub 完成
     check("内建子类.Array 自有字段(捕获+自有方法)", callBs("useAF"), "3:2:10:true:true");
+    check("内建子类.super.set/get（内建父方法）", callBs("useMS"), "5:1");
+    check("内建子类.super.set（覆盖后越过覆写）", callBs("useOS"), "30:1");
 }
 
 async function runClasses() {

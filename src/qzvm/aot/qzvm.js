@@ -643,6 +643,7 @@ function makeQzvm(strings, opts) {
   // 数组迭代器（values/keys/entries）：惰性读 wasm 内存 → 迭代期间的 push/length 变化可见（JS 迭代的是活数组）
   // —— 类名作值：clsId → 缓存 JS 构造器（prototype 链 + 静态方法（含 @@hasInstance））——
   const classObjs = new Map();             // clsId → JS 构造器对象
+  const protoCls = new WeakMap();          // 用户类 prototype → clsId（super_method 沿链跳过用户类原型）
   const instanceById = (obj, clsId) => {     // 原型链判定（@@hasInstance 优先，含运行时父链）→ tagged bool
     let cc = classMeta && classMeta[clsId];
     while (cc) {
@@ -696,6 +697,7 @@ function makeQzvm(strings, opts) {
     Object.defineProperty(ctor, "name", { value: meta.jsName === undefined ? (meta.name || "C") : meta.jsName, configurable: true });
     const proto = Object.create(pc ? pc.prototype : (bp && bp.prototype ? bp.prototype : Object.prototype));
     Object.defineProperty(proto, "constructor", { value: ctor, enumerable: false, writable: true, configurable: true });
+    protoCls.set(proto, clsId);   // 记录：该 proto 是用户类原型（super_method 沿链跳过 → 落内建/基原型方法；用 WeakMap 不污染 getOwnPropertyNames）
     ctor.prototype = proto;
     if (classHandles.size >= 0) for (const nm of Object.keys(meta.staticMethods || {})) {
       const sm = meta.staticMethods[nm];
@@ -2474,7 +2476,9 @@ function makeQzvm(strings, opts) {
             if ((uv >> 48n) === HOST_HI) { const f2 = handles[Number(uv & MASK32)]; if (typeof f2 === "function") { const all0 = as4.concat(ex); while (all0.length && all0[all0.length-1] === undefined) all0.pop(); return ret(f2.apply(o, all0)); } }
           }
         } }
-      const f3 = proto[name];
+      let sp = proto;   // 跳过用户类 proto（protoCls 标记；其方法已挂 → 否则 super 命中本类覆写致递归）→ 落到内建/基原型方法
+      while (sp != null && (typeof sp === "object" || typeof sp === "function") && protoCls.has(sp)) sp = Object.getPrototypeOf(sp);
+      const f3 = sp != null ? sp[name] : undefined;
       if (typeof f3 !== "function") throwValue(new TypeError("super." + name + " 不是函数"));
       const all = as4.concat(ex); while (all.length && all[all.length - 1] === undefined) all.pop();
       return ret(f3.apply(o, all));

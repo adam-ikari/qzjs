@@ -38,6 +38,10 @@ export function aTest(): number { const a = new A(); a.push(1); a.push(2); retur
 export class E extends Error { code: number = 42; }
 export function eTest(): number { const e = new E("bad"); return (e.message === "bad" ? 1 : 0) + e.code * 10 + (e instanceof E ? 100 : 0) + (e instanceof Error ? 1000 : 0); }
 export function ctorTest(): number { const m = new M(); const c: any = m.constructor; return (c === M ? 1 : 0) + (c === Map ? 10 : 0); }
+export class MS extends Map<string, number> { addS(k: string, v: number): number { super.set(k, v); return super.get(k) as number; } }
+export function msTest(): number { const m = new MS(); return m.addS("a", 5) + m.size * 10; }
+export class OS extends Map<string, number> { set(k: string, v: number): any { return super.set(k, v * 10); } }
+export function osTest(): number { const o = new OS(); o.set("k", 3); return (o.get("k") as number) + o.size * 10; }
 `);
 const info = compileTS(tsPath, wasmPath, { inModuleLink: true });
 
@@ -71,6 +75,8 @@ chk('mTest() Map 子类（继承 get/set + 自有 get2 + 字段 + instanceof）'
 chk('aTest() Array 子类（push/索引/length + 自有 sum + 字段 + instanceof）', unbox(P.aTest()), 3 + 20 + 500 + 1000 + 10000);
 chk('eTest() Error 子类（message + 字段 code + instanceof Error）', unbox(P.eTest()), 1 + 420 + 100 + 1000);
 chk('ctorTest() 实例 .constructor 回本类值（非内建）', unbox(P.ctorTest()), 1);
+chk('msTest() super.set/get（内建父方法）', unbox(P.msTest()), 5 + 10);
+chk('osTest() super.set（覆盖后越过覆写）', unbox(P.osTest()), 30 + 10);
 
 L.qz_destroy(rt);
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }
