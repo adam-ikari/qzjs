@@ -511,6 +511,24 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("fn值.别名调用(num)", callFv("aliasCall", [5]), 22);            // inc(5)+inc(15)=6+16
     check("fn值.作回调(num)", callFv("viaCallback", [[1, 2, 3]]), 12);    // map(dbl)=[2,4,6] sum
     check("fn值.tagged内引用num", callFv("mixedTagged", [9]), 10);       // inc(9)=10
+    // 内建子类承载（class extends 内建）：宿主真内建实例 + 类 prototype；继承方法原生、自有方法走 wasm、instanceof 双路。
+    // 守此前 `m.set` 报「类 N 无方法 set」（实例是 POJO 式 wasm 内存，非宿主 Map）。
+    fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_bsub.ts"),
+        "export class M extends Map { tag(): string { return \"M\"; } has2(k: any): boolean { return this.has(k); } }\n"
+      + "export function useM(): any { const m = new M(); m.set(\"a\", 1); m.set(\"b\", 2); return m.get(\"a\") + \":\" + m.size + \":\" + m.has2(\"b\") + \":\" + (m instanceof M) + \":\" + (m instanceof Map) + \":\" + m.tag(); }\n"
+      + "export class S extends Set { tag(): string { return \"S\"; } }\n"
+      + "export function useS(): any { const s = new S(); s.add(1); s.add(2); return s.size + \":\" + s.has(2) + \":\" + (s instanceof S) + \":\" + (s instanceof Set) + \":\" + s.tag(); }\n"
+      + "export class D extends Date { label(): string { return \"D:\" + (this as any).getFullYear(); } }\n"
+      + "export function useD(): any { const d = new D(2026, 0, 9); return d.getFullYear() + \":\" + (d instanceof D) + \":\" + (d instanceof Date) + \":\" + d.label(); }\n");
+    const rBs = compileTS(path.join(os.tmpdir(), "qz_aot_bsub.ts"), path.join(os.tmpdir(), "qz_aot_bsub.wasm"), {});
+    const qzBs = makeQzvm(rBs.strings, { fields: rBs.fields });
+    const { instance: instBs } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_bsub.wasm")), { qz: qzBs });
+    qzBs.bindMem(instBs.exports.memory); if (instBs.exports.__bump) qzBs.bindBump(instBs.exports.__bump);
+    qzBs.bindClosures(instBs.exports, rBs.lamMeta); qzBs.bindClasses(instBs.exports, rBs.classMeta);
+    const callBs = (n) => { if (instBs.exports.__bump_reset) instBs.exports.__bump_reset(); return qzBs._toJS(instBs.exports[n]()); };
+    check("内建子类.Map 继承+自有+instanceof", callBs("useM"), "1:2:true:true:true:M");
+    check("内建子类.Set 继承+自有+instanceof", callBs("useS"), "2:true:true:true:S");
+    check("内建子类.Date 继承+自有+instanceof", callBs("useD"), "2026:true:true:D:2026");
 }
 
 async function runClasses() {

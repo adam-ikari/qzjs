@@ -757,6 +757,15 @@ function makeQzvm(strings, opts) {
     dv.setInt32(off + 4, size, true);   // [4]=size（与 wasm 侧 _emitNewCall 一致；字段越界检查 + 内联读写都依赖此槽）
     for (let k = 8; k < size; k += 8) dv.setBigInt64(off + k, TAG, true);   // 字段槽 = undefined
     const self = (0x7ffen << 48n) | BigInt(off);
+    if (meta.hostBacked) {                       // 用户类 extends 内建（合成 ctor + 无自有字段）：宿主内建实例 + 类 prototype
+      const bp = (meta.builtinParent && typeof globalThis[meta.builtinParent] === "function") ? globalThis[meta.builtinParent] : null;
+      const nt = classObjImpl(clsId);
+      if (bp && nt) {
+        const as4 = (args || []).slice(0, 4);
+        try { const r = Reflect.construct(bp, as4, nt); return typeof r === "bigint" ? r : ret(r); }
+        catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }
+      }
+    }
     const fnC = exportsRef && meta.ctor && exportsRef[meta.ctor];
     if (typeof fnC === "function") {
       const as4 = (args || []).slice(0, 4).map(x => bitsOf(x));
@@ -798,6 +807,26 @@ function makeQzvm(strings, opts) {
   // 而 method_call 的导入签名是 (result i64) → 「Cannot convert undefined to a BigInt」。
   // WAMR AOT 容忍该错配，故只有 pure-wasm 路径崩。此处统一归一为 TAG（= undefined 的句柄表示）。
   const callM = (fn, args) => { const r = fn(...args); return r === undefined ? TAG : r; };
+  // 类方法派发（method_call 的实例/宿主承载共用）：fn = wasm 方法导出，m = classMeta 方法元，recv/args 为 tagged。
+  const dispatchMethCls = (fn, m, recv, a0, a1, a2, a3, ovf) => {
+    const R = callM;   // void 方法（i64 签名缺失）在 pure-wasm 下返回 undefined → 归一为 TAG
+    const ex = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
+    const flat = [a0, a1, a2, a3].concat(ex.slice(1).map(bitsOf));   // 统一为 tagged（ex 元素是 JS 值）
+    if (m.rest) {
+      const nFix = m.synthThis ? Math.max(0, (m.n || 2) - 2) : ((m.n || 1) - 1);
+      const tail = flat.slice(nFix).filter(givenSlot);
+      const head = flat.slice(0, nFix);
+      const out2 = [recv].concat(head, [arrWriteback(tail.map(toJS))]);
+      while (out2.length < 5) out2.push(TAG);
+      return R(fn, out2);
+    }
+    if ((m.n || 0) > 4) {
+      const n2 = m.n;
+      const ovfA2 = flat.slice(3, n2).map(x => x === undefined ? TAG : x);
+      return R(fn, [recv, flat[0], flat[1], flat[2], flat[3], arrWriteback(ovfA2.map(toJS))]);
+    }
+    return R(fn, [recv, a0, a1, a2, a3]);
+  };
   // sort/toSorted 自实现确定性稳定归并，**不委托宿主 Array.prototype.sort**：引擎排序
   // 实现相关（矛盾 comparator 下 V8 与 quickjs-ng 分序），而「同一段 TS 两档同序」是硬
   // 要求。归并的趟数、区间划分、平手取左固定 → 比较调用序列由长度唯一确定，与 C 档
@@ -1206,6 +1235,17 @@ function makeQzvm(strings, opts) {
       const list = (n >= 0 ? flat.slice(0, n) : flat.filter(x => BigInt.asUintN(64, x) !== TAG)).map(x => toJS(x));
       try { const r = Reflect.construct(fn, list); return typeof r === "bigint" ? r : ret(r); }
       catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }   // 与 C 档同：可捕获，不静默
+    },
+    new_builtin_sub: (clsId, parentNameId, n, a0, a1, a2, a3, ovf) => {   // 用户类 extends 内建：宿主内建实例 + 类 prototype（Reflect.construct 第三参 newTarget）
+      const name = strings[parentNameId];
+      const fn = BUILTIN_CTORS.has(name) ? globalThis[name] : undefined;
+      const nt = classObjImpl(clsId);
+      if (typeof fn !== "function" || !nt || typeof nt !== "function") { throwValue(new TypeError("Constructor " + name + " requires 'new'")); return TAG; }
+      let flat = [a0, a1, a2, a3];
+      if (ovf !== undefined && ovf !== TAG) flat = flat.concat((toJS(ovf) || []).slice(1).map(bitsOf));
+      const list = (n >= 0 ? flat.slice(0, n) : flat.filter(x => BigInt.asUintN(64, x) !== TAG)).map(x => toJS(x));
+      try { const r = Reflect.construct(fn, list, nt); return typeof r === "bigint" ? r : ret(r); }
+      catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }
     },
     class_value_dyn: (clsId, baseObj) => {          // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
       const baseCtor = handles[idxOf(baseObj)];
@@ -2196,6 +2236,19 @@ function makeQzvm(strings, opts) {
       }
       if (isHostH(recv)) {                                   // 宿主对象（JSON.parse 结果等）：调真实 JS 方法
         const obj = handles[idxOf(recv)];
+        // 宿主承载的类实例（class extends 内建）：先查类方法链（自有/继承 wasm 方法）→ 命中则派发，否则落真 JS 方法（继承的内建方法）
+        if (obj != null && (typeof obj === "object" || typeof obj === "function")) {
+          let pp = Object.getPrototypeOf(obj), hClsId = -1;
+          while (pp && hClsId < 0) { const cns = pp.constructor; if (cns && typeof cns.__qzClsId === "number") hClsId = cns.__qzClsId; pp = Object.getPrototypeOf(pp); }
+          if (hClsId >= 0) {
+            let cc = classMeta && classMeta[hClsId];
+            while (cc) {
+              const m = own(cc.methods, name);
+              if (m && exportsRef && typeof exportsRef[m.name] === "function") return dispatchMethCls(exportsRef[m.name], m, recv, a0, a1, a2, a3, ovf);
+              cc = chainNext(cc);
+            }
+          }
+        }
         const fnH = obj == null ? undefined : obj[name];
         if (typeof fnH === "bigint" && (BigInt.asUintN(64, fnH) >> 48n) === CLO_HI) {   // 属性上是闭包值（wasm 函数）→ 调用并传 receiver（JS 语义：obj.m() 的 this = obj）
           const as2 = [a0, a1, a2, a3];
@@ -2304,28 +2357,7 @@ function makeQzvm(strings, opts) {
       let c = classMeta && classMeta[clsId];
       while (c) {
         const m = own(c.methods, name);
-        if (m) {
-          const fn = exportsRef[m.name];
-          const R = callM;   // void 方法（i64 签名缺失）在 pure-wasm 下返回 undefined → 归一为 TAG
-          {   // 平坦实参 = a0..a3 + ovf[1..]（ovf[0] = 实参 3，已在 a3）；rest 形参把尾部打包成数组
-            const ex = (ovf === undefined || ovf === TAG) ? [] : (toJS(ovf) || []);
-            const flat = [a0, a1, a2, a3].concat(ex.slice(1).map(bitsOf));   // 统一为 tagged（ex 元素是 JS 值）
-            if (m.rest) {
-              const nFix = m.synthThis ? Math.max(0, (m.n || 2) - 2) : ((m.n || 1) - 1);   // synthThis（对象字面量方法）：m.n 含 receiver 槽 → 固定实参 = n-2
-              const tail = flat.slice(nFix).filter(givenSlot);   // tagged
-              const head = flat.slice(0, nFix);
-              const out2 = [recv].concat(head, [arrWriteback(tail.map(toJS))]);   // rest 数组落在其形参槽；arrWriteback 收 JS 值
-              while (out2.length < 5) out2.push(TAG);
-              return R(fn, out2);
-            }
-            if ((m.n || 0) > 4) {
-              const n2 = m.n;
-              const ovfA2 = flat.slice(3, n2).map(x => x === undefined ? TAG : x);   // ovf[0] = 实参 3（与 callee 的 ovf[i-3] 约定一致；tagged）
-              return R(fn, [recv, flat[0], flat[1], flat[2], flat[3], arrWriteback(ovfA2.map(toJS))]);   // arrWriteback 收 JS 值；flat 为 tagged → toJS
-            }
-          }
-          return R(fn, [recv, a0, a1, a2, a3]);
-        }
+        if (m) { const fn = exportsRef[m.name]; return dispatchMethCls(fn, m, recv, a0, a1, a2, a3, ovf); }
         c = chainNext(c);
       }
       throw new Error("method_call: 类 " + clsId + " 无方法 " + name);

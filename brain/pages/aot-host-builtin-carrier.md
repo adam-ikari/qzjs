@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, builtin, quickjs]
 created: "2026-11-04T10:27:39"
-updated: "2026-11-04T11:21:42"
+updated: "2026-11-09T08:18:14"
 ---
 
 <!-- compiled_truth -->
@@ -54,3 +54,9 @@ updated: "2026-11-04T11:21:42"
   summary: "推翻中间结论「构造器名单内连普通调用也 construct，两档一致优先于 V8 的 Date() 返回字符串偏差」：改回各内建自身 [[Call]] 语义（Date(x)→字符串），new 形态改由发射端走独立原语 qz.new_builtin(nameId,n,…)；C 档死代码 qz_is_builtin_ctor_name 删除"
   source: "src/qzvm/{guest_entry.c,aot/qzvm.js,aot/emit/tagged.js} + c44 host-date-plain-call / host-array-undef-slot"
   affects: [aot-host-builtin-carrier, aot-cross-tier-semantics]
+
+- time: 2026-11-09T08:18:14
+  kind: decision
+  summary: "内建子类承载（JS 档）：class extends 内建（Map/Set/Date/RegExp/Error，合成 ctor + 无自有字段）→ 宿主真内建实例。新原语 qz.new_builtin_sub(clsId,parentNameId,n,a0..a3,ovf)：Reflect.construct(Bp,args,classObjImpl(clsId)) 作 newTarget → proto 链含类 prototype（instanceof 双路天然成立）。method_call isHostH 分支加类方法派发：沿 obj 原型链查 constructor.__qzClsId → classMeta 方法链 → 命中调 wasm 蹦床（self=宿主句柄），否则落真 JS 方法（继承的内建方法）。buildInstance 同改（动态路径）。classMeta 加 hostBacked 标志。emit: _emitNewCall 静态路径 hostBacked 走 new_builtin_sub，否则回落 bump 近似（Error 族 message/name 写回，既有行为）。排除 Array（ret 把数组转 wasm 0x7FFB 句柄丢类 identity）。test_aot runTagged 内建子类.* 三项（Map/Set/Date）钉住。C 档留账：clsmeta 二进制定长不传 hostBacked，需序列化扩展 + new_builtin_sub/method_call 宿主派发/buildInstance 平行实现。"
+  source: "emitter.js collectClasses(hostBacked) / tagged.js _emitNewCall / qzvm.js new_builtin_sub+method_call+buildInstance / consts.js"
+  affects: [aot-host-builtin-carrier, aot-roadmap]

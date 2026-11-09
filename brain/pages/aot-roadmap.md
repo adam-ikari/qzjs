@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-09T00:18:24"
+updated: "2026-11-09T08:18:22"
 ---
 
 <!-- compiled_truth -->
@@ -302,3 +302,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "num 函数作值修两崩：funcMode 加 knownFns 白名单（非静态直调目标→函数值调用→退 tagged，否则 num 路径 call 未定义编译崩）；fn_value 加第 4 参 isNum 选 f64 ABI（否则 f64 导出收 tagged 位型 BigInt 转换错）。test_aot runTagged 尾 fn值.* 三项钉住。新页 aot-fn-value-f64-abi。"
   source: emitter.js _emitFnValue / layout.js funcMode / qzvm.js fn_value
   affects: [aot-fn-value-f64-abi]
+
+- time: 2026-11-09T08:18:22
+  kind: decision
+  summary: "语义欠账清一项（JS 档）：内建子类承载结案——class extends Map/Set/Date/RegExp/Error（合成 ctor + 无自有实例字段）→ 宿主真内建实例 + 类 prototype（new_builtin_sub 用 Reflect.construct 第三参 newTarget=classObjImpl(clsId)）；method_call 宿主对象加类方法派发（原型链查 __qzClsId → classMeta 方法链）。instanceof 双路、继承方法原生、自有方法走 wasm 全通。test_aot 三项钉住。剩余欠账：① C 档内建子类（clsmeta 定长二进制不传 hostBacked，需序列化扩展 + new_builtin_sub/method_call 宿主派发/buildInstance 平行）② Array 子类（ret 转 wasm 数组句柄丢类 identity）③ 内建子类的自有实例字段/自定义构造器（仍 bump 近似，loud 于方法调用）④ C 档闭包 arguments。"
+  source: "src/qzvm/aot/{emitter.js,compile-ts.js,consts.js,emit/tagged.js,qzvm.js}"
+  affects: [aot-host-builtin-carrier]

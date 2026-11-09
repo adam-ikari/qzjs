@@ -2180,6 +2180,26 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     if (this._dynParentExpr(c)) this._emitStaticsGuard(cname);   // 动态父：构造前先建立运行时父链（statics guard 内）
     const args = e.arguments;
     if (args.length > 4) throw new Error("[tagged] new 最多 4 参");
+    if (c.builtinParentName && c.hostBacked) {              // 用户类 extends 内建（合成 ctor + 无自有字段）：宿主承载（真内建实例 + 类 prototype）；有字段/自定义 ctor 仍走下方 bump 近似（Error 族 message/name 写回）
+        const nargs = argSrc ? -1 : args.length;
+        M.i32Const(c.id); M.i32Const(this._strId(c.builtinParentName)); M.i32Const(nargs);
+        for (let i = 0; i < 4; i++) {
+            if (argSrc) argSrc(i);
+            else if (i < args.length) this.emitTaggedExpr(args[i]);
+            else this._emitUndefined();
+        }
+        {   // ovf：实参 3..（与 new_builtin 同约定）；未超出时为空数组
+            const ovfA = (!argSrc && args.length > 3) ? args.slice(3) : [];
+            if (ovfA.some(a2 => ts.isSpreadElement(a2))) throw new Error("[tagged] new 的溢出实参与展开混用暂不支持");
+            const lit = ts.factory.createArrayLiteralExpression(ovfA);
+            lit.pos = args.length ? args[0].pos : 0;
+            lit.end = args.length ? args[args.length - 1].end : 0;
+            this.emitTaggedExpr(lit);
+        }
+        M.call("qz.new_builtin_sub");
+        this._emitErrCheck();       // 构造失败（new Map(1)：非可迭代）/ 无 [[Call]] → 可捕获 TypeError
+        return;
+    }
     const te = this._expEnter();                            // 实例 off / ctor 实参用可重入槽（嵌套 new 不覆盖）
     { const argSlots = [te.w, te.x, te.y, te.z];   // self 占 te.v，实参用 w/x/y/z
       for (let i = 0; i < 4; i++) {

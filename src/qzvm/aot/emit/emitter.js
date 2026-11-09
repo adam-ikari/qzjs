@@ -2,7 +2,7 @@
  * emitter.js 拆分件；模块图见 ../emitter.js 顶部注释。 */
 "use strict";
 const ts = require("typescript");
-const { BUILTIN_GLOBALS, usesArguments, ctorName, symbolNameOf, methName, staticMethName } = require("./consts.js");
+const { BUILTIN_GLOBALS, EMITTER_BUILTIN_CTORS, usesArguments, ctorName, symbolNameOf, methName, staticMethName } = require("./consts.js");
 const { INMOD_TABLE_CAP, INMOD_HOST_LIMIT, emitBumpAlloc, numArrNames, funcMode, f64Bits } = require("./layout.js");
 
 class Emitter {
@@ -2106,7 +2106,8 @@ class Emitter {
                     throw new Error("[tagged] " + form + "的静态字段/静态块暂不支持（静态表按类名共享、只初始化一次，多次求值会串味/读不到初值）：" + cname + "；请改用模块顶层类声明，或把静态状态放到模块级变量/实例字段");
                 }
             }
-            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
+            const bpName = (parentName && !this.classes.has(parentName) && EMITTER_BUILTIN_CTORS.has(parentName)) ? parentName : null;
+            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && bpName !== "Array" && fields.length === 0 && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；

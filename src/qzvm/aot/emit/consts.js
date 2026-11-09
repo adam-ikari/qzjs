@@ -120,6 +120,7 @@ const QZ = {
   // 与 builtin 分开的理由：ABI 上 construct 与 call 必须可分（Map/Set/WeakMap/WeakSet/Proxy 无 [[Call]]），
   // 且 construct 需要 n —— new Array(undefined) 与 new Array() 语义不同。
   new_builtin: { params: ["i32", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },
+  new_builtin_sub: { params: ["i32", "i32", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 用户类 extends 内建：clsId + parentNameId + n + a0..a3 + ovf → 宿主内建实例（proto 链含类 prototype）
   class_value_dyn: { params: ["i32", "i64"], results: ["i64"] },             // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
   super_ctor: { params: ["i32", "i64", "i64", "i64", "i64", "i64"], results: [] },   // 动态父构造转发：clsId + self + a0..a3
   instanceof_dyn: { params: ["i64", "i64"], results: ["i64"] },                 // 运行时类值/内建值 instanceof：值 + 右值 → tagged bool
