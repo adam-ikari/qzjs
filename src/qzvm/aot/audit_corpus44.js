@@ -131,12 +131,12 @@ export function run() { const b: any = new B(); return b.f(); }`, args: [], unsu
 function mk(B: any) { return class extends B { m() { return super.v; } }; }
 class A { v: number = 7; }
 const C = mk(A);
-export function run() { const c: any = new C(); return c.m(); }`, args: [], unsupported: "动态父类下 super.<prop> 读取（父类运行期才解析）" },
+export function run() { const c: any = new C(); return c.m(); }`, args: [] },
   { name: "dynamic-parent-super-assign", fn: "run", ts: `
 function mk(B: any) { return class extends B { m() { super.v = 2; return 1; } }; }
 class A { v: number = 7; }
 const C = mk(A);
-export function run() { const c: any = new C(); return c.m(); }`, args: [], unsupported: "动态父类下 super.<prop> 赋值" },
+export function run() { const c: any = new C(); return c.m(); }`, args: [] },
   { name: "class-method-arguments", fn: "run", ts: `
 class C { m(a: number) { return arguments[0]; } }
 export function run() { return new C().m(3); }`, args: [] },

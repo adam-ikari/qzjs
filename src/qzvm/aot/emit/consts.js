@@ -115,6 +115,8 @@ const QZ = {
   method_spread: { params: ["i64", "i32", "i64"], results: ["i64"] },   // obj.m(...args)：实参数组 → method_call 分派
   super_method: { params: ["i64", "i32", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 对象字面量 super.m()：按 receiver 原型链解析               // 内建全局作值（String/Number/Array/… → 宿主句柄，缓存保证 ===）                  // 类名作值：clsId → 宿主构造器对象句柄
   super_method_dyn: { params: ["i64", "i32", "i32", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 动态父 super.m()：self + homeClsId + mid + a0..a3 → 按 home 的运行时父链查实例方法
+  super_prop_get_dyn: { params: ["i64", "i32", "i32"], results: ["i64"] },   // 动态父 super.v 读：self + homeClsId + mid → 沿运行时父链查 getter（调之）/方法(loud)/否则 undefined（数据字段不在原型上）
+  super_prop_set_dyn: { params: ["i64", "i32", "i32", "i64"], results: [] },   // 动态父 super.v = x 写：沿运行时父链查 setter（调之）/否则在接收者实例上建自有字段（JS [[Set]] 数据语义）
   new_dynamic: { params: ["i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // 运行时类值构造：类对象 + a0..a3 → 实例句柄
   // new 内建类（Reflect.construct 语义）：nameId, n=实参数（-1=展开实参，按未提供槽推断）, a0..a3, ovf → 宿主对象句柄。
   // 与 builtin 分开的理由：ABI 上 construct 与 call 必须可分（Map/Set/WeakMap/WeakSet/Proxy 无 [[Call]]），

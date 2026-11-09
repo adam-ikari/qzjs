@@ -1056,7 +1056,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const parent = this._curClassObj && this._curClassObj.parent;
         if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
         if (!this.classes.has(parent)) {
-            throw new Error("[tagged] 动态父类下的 super." + e.name.text + " 读取暂不支持（父类在运行期才能解析；仅支持 super." + e.name.text + "(...) 调用）");
+            if (this._inModuleLink) throw new Error("[tagged] in-module 档暂不支持动态父类下 super." + e.name.text + " 读取（父类运行期才解析）");
+            this._emitThisReceiver(); this.m.i32Const(this._curClassObj.id); this.m.i32Const(this._strId(e.name.text)); this.m.call("qz.super_prop_get_dyn"); this._emitErrCheck();
+            return;
         }
         // 实例访问器：沿父链找 get
         let owner = parent, acc = null;
@@ -1823,7 +1825,13 @@ Emitter.prototype._emitStoreProp = function (left) {
     if (ts.isPropertyAccessExpression(left) && ts.isSuperKeyword(left.expression)) {   // super.v = x：父类 setter 优先，否则在接收者上建自有字段（JS 普通 [[Set]] 语义）
         const parent = this._curClassObj && this._curClassObj.parent;
         if (!parent) throw new Error("[tagged] super.<prop> 仅在派生类方法内可用");
-        if (!this.classes.has(parent)) throw new Error("[tagged] 动态父类下的 super." + left.name.text + " 赋值暂不支持；请改用 this." + left.name.text + "（等价于在接收者上建自有字段）");
+        if (!this.classes.has(parent)) {
+            if (this._inModuleLink) throw new Error("[tagged] in-module 档暂不支持动态父类下 super." + left.name.text + " 赋值（父类运行期才解析）");
+            M.localSet(t.w);
+            this._emitThisReceiver(); M.i32Const(this._curClassObj.id); M.i32Const(this._strId(left.name.text)); M.localGet(t.w); M.call("qz.super_prop_set_dyn"); this._emitErrCheck(false);
+            M.localGet(t.w); this._expLeave();
+            return;
+        }
         M.localSet(t.w);
         let owner = parent, acc = null;
         while (owner && !acc) {

@@ -2517,6 +2517,41 @@ function makeQzvm(strings, opts) {
       throwValue(new TypeError("super." + name + " 不是函数"));
       return TAG;
     },
+    super_prop_get_dyn: (recv, homeId, mid) => {
+      const name = strings[mid];
+      const u = BigInt.asUintN(64, recv);
+      if ((u >> 48n) !== INST_HI) throw new Error("super_prop_get_dyn: 接收者不是类实例");
+      const home = classMeta && classMeta[homeId];
+      if (!home) throw new Error("super_prop_get_dyn: home 类不存在 " + homeId);
+      let c = chainNext(home);
+      while (c) {
+        const g = own(c.getters, name);
+        if (g) { const fn = exportsRef && exportsRef[g.name]; if (typeof fn !== "function") throw new Error("super_prop_get_dyn: getter 导出缺失 " + g.name); const out = fn(recv, TAG, TAG, TAG, TAG); return out === undefined ? TAG : out; }
+        if (own(c.methods, name)) { throwValue(new TypeError("super." + name + " 作值引用父类方法不支持")); return TAG; }   // 原型上的普通方法 → super.m 作值（loud）
+        c = chainNext(c);
+      }
+      return TAG;   // 数据字段只存实例、不在原型上 → undefined（JS Get(父原型, v, this)）
+    },
+    super_prop_set_dyn: (recv, homeId, mid, value) => {
+      const name = strings[mid];
+      const u = BigInt.asUintN(64, recv);
+      if ((u >> 48n) !== INST_HI) throw new Error("super_prop_set_dyn: 接收者不是类实例");
+      const off = Number(u & MASK32);
+      const home = classMeta && classMeta[homeId];
+      if (!home) throw new Error("super_prop_set_dyn: home 类不存在 " + homeId);
+      let c = chainNext(home);
+      while (c) {
+        const st = own(c.setters, name);
+        if (st) { const fn = exportsRef && exportsRef[st.name]; if (typeof fn !== "function") throw new Error("super_prop_set_dyn: setter 导出缺失 " + st.name); fn(recv, value, value, value, value); return; }   // 父原型 setter
+        c = chainNext(c);
+      }
+      // 无 setter → JS [[Set]] 数据语义：在接收者实例上建/写自有字段（与 prop_set INST_HI 一致）
+      if (mem) {
+        const e = fieldEntries.find(([n]) => n === name);
+        if (e && new DataView(mem.buffer).getInt32(off + 4, true) >= e[1] + 8) { new DataView(mem.buffer).setBigInt64(off + e[1], value, true); return; }
+        syncExtras(); extras.set(off + "|" + name, value);
+      }
+    },
     builtin_member: (id) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);

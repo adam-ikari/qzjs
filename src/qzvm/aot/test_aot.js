@@ -470,6 +470,21 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzF.bindClosures(iF.exports, rF.lamMeta); qzF.bindClasses(iF.exports, rF.classMeta);
         check("工厂类表达式.静态字段隔离+块+方法this", qzF._toJS(iF.exports.fac()), "7:5:9:7");
     }
+    // 动态父类（工厂形参）下 super.<prop> 读/写：读→数据字段不在原型上=undefined；写→JS [[Set]] 在接收者上建自有字段
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_dynp.ts"),
+            "function mk(B: any) { return class extends B { m(): any { return super.v; } w(): any { super.v = 2; } }; }\n"
+          + "class A { v: number = 7; }\n"
+          + "const C = mk(A); export function dpr(): any { const c: any = new C(); return c.m() + \":\" + (c as any).v; }\n"
+          + "export function dps(): any { const c: any = new C(); c.w(); return (c as any).v; }\n");
+        const rD = compileTS(path.join(os.tmpdir(), "qz_aot_dynp.ts"), path.join(os.tmpdir(), "qz_aot_dynp.wasm"), {});
+        const qzD = makeQzvm(rD.strings, { fields: rD.fields });
+        const { instance: iD } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_dynp.wasm")), { qz: qzD });
+        qzD.bindMem(iD.exports.memory); if (iD.exports.__bump) qzD.bindBump(iD.exports.__bump);
+        qzD.bindClosures(iD.exports, rD.lamMeta); qzD.bindClasses(iD.exports, rD.classMeta);
+        check("动态父 super.v 读(数据字段不在原型上=undefined)+实例字段仍 7", qzD._toJS(iD.exports.dpr()), "undefined:7");
+        check("动态父 super.v 写(JS [[Set]] → 实例自有字段=2)", qzD._toJS(iD.exports.dps()), 2);
+    }
     // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

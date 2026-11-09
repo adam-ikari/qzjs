@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-09T21:06:20"
+updated: "2026-11-10T00:09:26"
 ---
 
 <!-- compiled_truth -->
@@ -338,3 +338,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "语义欠账清一项（JS 档）：类表达式静态成员结案——工厂/对象属性/函数内别名形式的 class 表达式（每次求值克隆独立 clsId）现支持静态字段/静态块。机制：collectClasses 为这类类合成 __qz_sei 静态方法（this.x = <init> 语句，含 static 块原语句，TS factory 节点用 ts.setTextRange 补源位置否则 getStart 崩）；创建点在 qz.class_expr_value 返回 clone 后立即 call __qz_sei(clone)，写 clone 自有静态桶。宿主侧：class_expr_value 标 isClone、classObjImpl 给克隆 __qzStaticsName 加 \\u0000+clsId 后缀隔离静态桶、prop_get 的 HOST_HI 分支对类对象(name 未命中)回退查 statics 表（修动态 (C as any).x 读 undefined）。派发/读：this.x 于静态方法走 static_get_dyn/static_set_dyn（按运行时 clsId 查 clone 桶）。范围：仅独立档（JS 宿主）；in-module 档动态类值的静态访问端未接 → 仍 loud 拒绝；私有静态字段(#C#x 键空间不同)、动态父(class extends 形参，class_value_dyn 幂等不克隆)、函数/块内 class 声明(嵌套 decl 走提升路径)、静态初始化捕获工厂局部(env 创建点不可见) 均仍 loud。验证：audit_corpus45 23/23（5 例由 unsupported 转正）、test_aot「工厂类表达式.静态字段隔离+块+方法this」=7:5:9:7、全 46 批 0 diff、glue 5/5、m6b 13 组 PASS；stash 失败前复现 5 例 DIFF。剩余欠账：嵌套 class 声明静态、显式 ctor 内建子类、arguments 动态/ctor/accessor、ret 扁平化子类 identity、super.m 作值。"
   source: "src/qzvm/aot/emit/{emitter.js,tagged.js}, qzvm.js, audit_corpus45.js, test_aot.js"
   affects: [aot-roadmap]
+
+- time: 2026-11-10T00:09:26
+  kind: decision
+  summary: "动态父类（工厂形参/mixin）下 super.<prop> 读/写已支持（JS 档）：新增 qz.super_prop_get_dyn(recv,homeId,mid)→i64 与 qz.super_prop_set_dyn(recv,homeId,mid,value)→void。读沿运行时父链（chainNext）查 getter 调之/普通方法 loud/否则 undefined（数据字段不在原型上）；写查 setter 调之/否则 JS [[Set]] 在接收者实例上建自有字段（host 直写 mem 槽，与 prop_set INST_HI 一致）。emitter 用 _inModuleLink 保持 C 档 loud 拒绝（C 侧未实现该原语）。corpus44 dynamic-parent-super-read/assign 由 unsupported 转 supported（78/78,0 diff）。"
+  source: "session: aot dynamic-parent super.prop"
+  affects: [aot-roadmap, aot-host-builtin-carrier]
