@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, builtin, quickjs]
 created: "2026-11-04T10:27:39"
-updated: "2026-11-09T15:17:29"
+updated: "2026-11-09T16:03:31"
 ---
 
 <!-- compiled_truth -->
@@ -77,4 +77,10 @@ updated: "2026-11-09T15:17:29"
   kind: decision
   summary: "内建子类承载（C 档 / in-module）结案：免改 clsmeta 二进制格式——new_builtin_sub 的 clsId/parentNameId 全由 emitter 实参传入，字段初值由 emitter 随后调 __m_<C> ctor 完成（qz.object_set 写宿主属性）。guest_entry.c 增：① qz_guest_new_builtin_sub(clsId,parentNameId,n,a0..a3,ovf)：JS_CallConstructor(内建) 造真实例 + JS_SetPropertyStr(__qzClsId, clsId) 标记，返 0x7FFD 宿主句柄（proto=内建原型，继承方法原生可用）② method_call 宿主对象（0x7FFD）分支：读 __qzClsId → qz_clsmeta_method_chain → 蹦床；未命中落原生内建方法 ③ instanceof_op/instanceof_dyn 宿主（0x7FFD）分支：__qzClsId → classMeta.parent 链比对 ④ prop_get 宿主实例 .constructor 按 __qzClsId 回 class_value（否则原生取到 Map/Array）。验证：新 test/m6b-poc/e2e_bsub.mjs（Map/Array/Error：继承方法 get/set/push/索引/length + 自有方法 + 字段默认值 + instanceof 双路 + .constructor）4 项 PASS；libqzvm 增量构建（cmake --build build-inmod --target qzvm-guest）；全部 m6b e2e 无回归。"
   source: "src/qzvm/guest_entry.c new_builtin_sub+method_call+instanceof_op/dyn+prop_get / test/m6b-poc/e2e_bsub.mjs"
+  affects: [aot-host-builtin-carrier, aot-roadmap]
+
+- time: 2026-11-09T16:03:31
+  kind: note
+  summary: "显式 ctor 内建子类不能宿主承载（两档）：尝试把 hostBacked 放宽到「首句 super 原样转发形参」的显式 ctor，echte 但引入回归——class E1 extends Error { constructor(m){super(m); this.name=\"E1\"} } 一旦 hostBacked，则用户子类 class E2 extends E1（E2 的 builtinParentName=null → 走 bump）在 E2 的 bump 路径调 E1 ctor(self=E2 的 wasm POJO) 时，E1 的 hostBacked ctor 假定基类已由 new_builtin_sub 构造 → 真实 Error 基类缺失（message undefined、instanceof 失败）。audit_corpus31 error-handling-matrix / corpus38 error-cause-chain 立即抓出。结论：hostBacked 必须维持 !ctor——宿主承载类一旦被用户子类继承（bump 调其 ctor）即失效；要安全放宽需二次扫描「该类有无用户子类」（跨文件不可靠）。显式 ctor 内建子类保持 bump 近似（Error 族写 message/name，其余 loud）。"
+  source: "src/qzvm/aot/emit/{emitter.js,tagged.js}, audit_corpus31/38"
   affects: [aot-host-builtin-carrier, aot-roadmap]
