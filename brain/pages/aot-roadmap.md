@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-09T15:17:48"
+updated: "2026-11-09T18:14:19"
 ---
 
 <!-- compiled_truth -->
@@ -325,4 +325,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "语义欠账清一项（C 档 / in-module）：内建子类承载结案——免改 clsmeta 定长二进制（new_builtin_sub 实参含 clsId/parentNameId；字段初值走 emitter 后续 ctor 调用 + qz.object_set）。guest_entry.c 增 qz_guest_new_builtin_sub（JS_CallConstructor + __qzClsId 标记 + 0x7FFD 句柄）+ method_call/instanceof_op/instanceof_dyn/prop_get 的宿主（0x7FFD）__qzClsId 分支。e2e_bsub.mjs 4 项（Map/Array/Error 继承+自有+字段+instanceof+.constructor）PASS；m6b e2e 全绿。剩余欠账：① 内建子类自定义 ctor（含计算 super 参数，两档仍 bump 近似/loud）② C 档闭包 arguments ③ 类表达式静态字段逐次求值初始化（JS 档 unsupported 族）。"
   source: "src/qzvm/guest_entry.c, test/m6b-poc/e2e_bsub.mjs"
+  affects: [aot-host-builtin-carrier]
+
+- time: 2026-11-09T18:14:19
+  kind: decision
+  summary: "内建子类承载系列全部结案（JS+C 两档）：① 合成 ctor 内建子类宿主承载 ② Array 子类（tagHandle 保真数组+类 prototype）③ 自有实例字段（object_set 写宿主属性，hostBacked 跳过 super）④ C 档 new_builtin_sub + method_call/instanceof/prop_get 的 __qzClsId 派发 ⑤ super.method() 内建父方法（protoCls WeakMap 跳过用户类原型避免覆盖递归）。验证：test_aot 全绿（内建子类 8 项）+ 全 46 corpus 0 diff + 全 m6b e2e 绿 + glue 5/5。剩余欠账（均为 loud、非静默错值）：① 类表达式/函数内 class 静态字段逐次求值初始化（静态表按类名共享；需按 clsId 克隆 + 创建点静态初始化）② 内建子类显式 ctor + 用户子类继承宿主承载类（bump 调 host ctor 基类缺失；需 hostBacked 沿用户子类传播）③ arguments at 动态派发/构造器/访问器（无静态 provider）④ super.m 作值引用。"
+  source: "src/qzvm/aot/{emit/*,qzvm.js}, guest_entry.c, test/m6b-poc/e2e_bsub.mjs, audit_corpus*"
   affects: [aot-host-builtin-carrier]
