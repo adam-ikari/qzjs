@@ -73,28 +73,28 @@ export function run() { C.x = 10; E.x += 1; return C.m() + ":" + C.g + ":" + D.x
   { name: "top-named-class-expr-static", fn: "run", ts: `
 const C = class Inner { static x = 5; static m() { return this.x; } };
 export function run() { return C.x + ":" + C.m(); }`, args: [] },
-  { name: "factory-class-static-field-loud", fn: "run", ts: `
+  { name: "factory-class-static-field", fn: "run", ts: `
 function mk() { return class { static x = 5; }; }
 const C = mk();
-export function run() { return (C as any).x; }`, args: [], unsupported: "类表达式静态字段（动态访问读不到初值）" },
-  { name: "factory-class-static-block-loud", fn: "run", ts: `
+export function run() { return (C as any).x; }`, args: [] },
+  { name: "factory-class-static-block", fn: "run", ts: `
 function mk() { return class { static y: any; static { this.y = 9; } }; }
 const C = mk();
-export function run() { return (C as any).y; }`, args: [], unsupported: "类表达式静态块（动态访问读不到初值）" },
-  { name: "factory-class-static-method-this-loud", fn: "run", ts: `
+export function run() { return (C as any).y; }`, args: [] },
+  { name: "factory-class-static-method-this", fn: "run", ts: `
 function mk() { return class { static x = 5; static m() { return this.x; } }; }
 const C = mk();
-export function run() { return (C as any).m(); }`, args: [], unsupported: "类表达式静态字段 + 静态方法 this（守卫不触发）" },
-  { name: "alias-in-fn-static-loud", fn: "run", ts: `
+export function run() { return (C as any).m(); }`, args: [] },
+  { name: "alias-in-fn-static", fn: "run", ts: `
 function mk() { const K = class { static x = 5; }; return K.x; }
-export function run() { return mk(); }`, args: [], unsupported: "函数内 const K = class 的静态字段（多次求值共享静态）" },
+export function run() { return mk(); }`, args: [] },
   { name: "nested-class-static-field-loud", fn: "run", ts: `
 function mk() { class K { static x = 5; } return new K() && K.x; }
 export function run() { return mk(); }`, args: [], unsupported: "嵌套 class 声明的静态字段（每次进入定义点应重新初始化）" },
   { name: "nested-class-static-block-loud", fn: "run", ts: `
 function mk() { class K { static x: any; static { this.x = 5; } } return K.x; }
 export function run() { return mk(); }`, args: [], unsupported: "嵌套 class 声明的静态块（每次进入定义点应重新初始化）" },
-  { name: "object-prop-class-static-loud", fn: "run", ts: `
+  { name: "object-prop-class-static", fn: "run", ts: `
 const o: any = { C: class { static x = 5; } };
-export function run() { return o.C.x; }`, args: [], unsupported: "对象属性位置的类表达式静态字段（动态访问读不到初值）" },
+export function run() { return o.C.x; }`, args: [] },
 ];

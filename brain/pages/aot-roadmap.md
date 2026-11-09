@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-09T18:14:19"
+updated: "2026-11-09T21:06:20"
 ---
 
 <!-- compiled_truth -->
@@ -332,3 +332,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "内建子类承载系列全部结案（JS+C 两档）：① 合成 ctor 内建子类宿主承载 ② Array 子类（tagHandle 保真数组+类 prototype）③ 自有实例字段（object_set 写宿主属性，hostBacked 跳过 super）④ C 档 new_builtin_sub + method_call/instanceof/prop_get 的 __qzClsId 派发 ⑤ super.method() 内建父方法（protoCls WeakMap 跳过用户类原型避免覆盖递归）。验证：test_aot 全绿（内建子类 8 项）+ 全 46 corpus 0 diff + 全 m6b e2e 绿 + glue 5/5。剩余欠账（均为 loud、非静默错值）：① 类表达式/函数内 class 静态字段逐次求值初始化（静态表按类名共享；需按 clsId 克隆 + 创建点静态初始化）② 内建子类显式 ctor + 用户子类继承宿主承载类（bump 调 host ctor 基类缺失；需 hostBacked 沿用户子类传播）③ arguments at 动态派发/构造器/访问器（无静态 provider）④ super.m 作值引用。"
   source: "src/qzvm/aot/{emit/*,qzvm.js}, guest_entry.c, test/m6b-poc/e2e_bsub.mjs, audit_corpus*"
   affects: [aot-host-builtin-carrier]
+
+- time: 2026-11-09T21:06:20
+  kind: decision
+  summary: "语义欠账清一项（JS 档）：类表达式静态成员结案——工厂/对象属性/函数内别名形式的 class 表达式（每次求值克隆独立 clsId）现支持静态字段/静态块。机制：collectClasses 为这类类合成 __qz_sei 静态方法（this.x = <init> 语句，含 static 块原语句，TS factory 节点用 ts.setTextRange 补源位置否则 getStart 崩）；创建点在 qz.class_expr_value 返回 clone 后立即 call __qz_sei(clone)，写 clone 自有静态桶。宿主侧：class_expr_value 标 isClone、classObjImpl 给克隆 __qzStaticsName 加 \\u0000+clsId 后缀隔离静态桶、prop_get 的 HOST_HI 分支对类对象(name 未命中)回退查 statics 表（修动态 (C as any).x 读 undefined）。派发/读：this.x 于静态方法走 static_get_dyn/static_set_dyn（按运行时 clsId 查 clone 桶）。范围：仅独立档（JS 宿主）；in-module 档动态类值的静态访问端未接 → 仍 loud 拒绝；私有静态字段(#C#x 键空间不同)、动态父(class extends 形参，class_value_dyn 幂等不克隆)、函数/块内 class 声明(嵌套 decl 走提升路径)、静态初始化捕获工厂局部(env 创建点不可见) 均仍 loud。验证：audit_corpus45 23/23（5 例由 unsupported 转正）、test_aot「工厂类表达式.静态字段隔离+块+方法this」=7:5:9:7、全 46 批 0 diff、glue 5/5、m6b 13 组 PASS；stash 失败前复现 5 例 DIFF。剩余欠账：嵌套 class 声明静态、显式 ctor 内建子类、arguments 动态/ctor/accessor、ret 扁平化子类 identity、super.m 作值。"
+  source: "src/qzvm/aot/emit/{emitter.js,tagged.js}, qzvm.js, audit_corpus45.js, test_aot.js"
+  affects: [aot-roadmap]

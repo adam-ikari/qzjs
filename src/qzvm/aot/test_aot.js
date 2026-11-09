@@ -456,6 +456,20 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzSt.bindClosures(instSt.exports, rSt.lamMeta); qzSt.bindClasses(instSt.exports, rSt.classMeta);
         check("静态字段/方法序列", qzSt._toJS(instSt.exports.seq()), "1,2,2,3,8,200,101,102,aab");
     }
+    // 类表达式（工厂）静态成员：每次求值克隆独立静态桶（创建点按 clone 跑初始化）
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_facstatic.ts"),
+            "function mk() { return class { static x = 5; static y: any; static { this.y = 9; }\n"
+          + "  static m(): any { return this.x; } static bump(): any { this.x++; return this.x; } }; }\n"
+          + "export function fac(): any { const A = mk(); const B = mk(); (A as any).bump(); (A as any).bump();\n"
+          + "  return (A as any).x + \":\" + (B as any).x + \":\" + (A as any).y + \":\" + (A as any).m(); }\n");
+        const rF = compileTS(path.join(os.tmpdir(), "qz_aot_facstatic.ts"), path.join(os.tmpdir(), "qz_aot_facstatic.wasm"), {});
+        const qzF = makeQzvm(rF.strings, { fields: rF.fields });
+        const { instance: iF } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_facstatic.wasm")), { qz: qzF });
+        qzF.bindMem(iF.exports.memory); if (iF.exports.__bump) qzF.bindBump(iF.exports.__bump);
+        qzF.bindClosures(iF.exports, rF.lamMeta); qzF.bindClasses(iF.exports, rF.classMeta);
+        check("工厂类表达式.静态字段隔离+块+方法this", qzF._toJS(iF.exports.fac()), "7:5:9:7");
+    }
     // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

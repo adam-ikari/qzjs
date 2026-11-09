@@ -568,6 +568,19 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             else this.m.i64Const(0n);
             this.m.i32Const(this._strId("@@qzEnv"));
             this.m.call("qz.class_expr_value");
+            /* 类表达式静态成员：创建点按**本 clone** 立即初始化（合成 __qz_sei 静态方法，
+             * this ≡ clone，写 clone 自有静态桶）→ 多次求值各持一份、动态访问读得到初值。
+             * clone 句柄已在栈上；取出作 self，传 4 个 undefined 占位，收返回值丢弃，留 clone。 */
+            if (cnC.staticFields.length || cnC.staticBlocks.length) {
+                const t = this._expEnter();
+                this.m.localSet(t.v);
+                this.m.localGet(t.v);
+                for (let k = 0; k < 4; k++) this._emitUndefined();
+                this.m.call(staticMethName(cnC.name, "__qz_sei"));
+                this.m.drop();
+                this.m.localGet(t.v);
+                this._expLeave();
+            }
             return;
         }
         throw new Error("[tagged] 类表达式作值未实现");

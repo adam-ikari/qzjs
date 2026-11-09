@@ -697,7 +697,8 @@ function makeQzvm(strings, opts) {
     Object.setPrototypeOf(ctor, pc || bp || Function.prototype);
     // 静态表按**编译期类名**（meta.name）为键；JS 可见 `.name` 可能让位给名推断的显示名
     // （合成类表达式改名，见 clsJsNames）→ 两者分开存，否则静态字段读写会查错桶。
-    Object.defineProperty(ctor, "__qzStaticsName", { value: meta.name, configurable: true });
+    // 类表达式克隆（isClone）：每次求值须有独立静态桶 → 键加 clsId 后缀，避免同名克隆串味。
+    Object.defineProperty(ctor, "__qzStaticsName", { value: meta.isClone ? (meta.name + "\u0000" + clsId) : meta.name, configurable: true });
     Object.defineProperty(ctor, "name", { value: meta.jsName === undefined ? (meta.name || "C") : meta.jsName, configurable: true });
     const proto = Object.create(pc ? pc.prototype : (bp && bp.prototype ? bp.prototype : Object.prototype));
     Object.defineProperty(proto, "constructor", { value: ctor, enumerable: false, writable: true, configurable: true });
@@ -1303,7 +1304,7 @@ function makeQzvm(strings, opts) {
       const src = classMeta;
       const newId = src.length;
       const clone = Object.assign(Object.create(Object.getPrototypeOf(meta)), meta, {
-        id: newId, parent: clsId, name: meta.name,
+        id: newId, parent: clsId, name: meta.name, isClone: true,
       });
       src.push(clone);
       if (classHandles.size >= 0) classHandles.delete(newId);   // 确保不复用旧句柄
@@ -1526,7 +1527,14 @@ function makeQzvm(strings, opts) {
         return (cid >= 0 && classMeta && classMeta[cid]) ? classValueImpl(cid) : TAG;
       }
       if (hi === HOST_HI) {
-        const o = handles[off], hv = o == null ? undefined : o[name];
+        const o = handles[off];
+        let hv = o == null ? undefined : o[name];
+        // 类对象上的静态字段不在 JS 属性上（存 statics 表，键 __qzStaticsName），动态 `(C as any).x`
+        // 须查表回退，否则工厂/类表达式静态字段读 undefined（静态方法/原型属性照旧走 o[name]）。
+        if (hv === undefined && typeof o === "function") {
+          const sn = o.__qzStaticsName, so = typeof sn === "string" ? statics.get(sn) : undefined;
+          if (so && name in so) hv = so[name];
+        }
         return Array.isArray(hv) ? tagHandle(hv) : typeof hv === "bigint" ? hv : ret(hv);   // BigInt = 已打包句柄（如描述符里的 get/set 闭包句柄）→ 直通（保持 CLO_HI → typeof "function"）
       }
       if (hi === CLO_HI) {                                   // 闭包值：函数自身属性
