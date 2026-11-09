@@ -56,7 +56,7 @@ function f(a: number, ...r: number[]) { return arguments.length + ":" + a + ":" 
 export function run() { return f(...[1, 2, 3]); }`, args: [] },
   // 无静态直调点（宿主直接调导出函数）→ 入口哨兵 loud，绝不静默读残留。
   { name: "fn-args-host-direct", fn: "run", ts: `
-export function run() { return arguments.length; }`, args: [], unsupported: "导出入口由宿主直接调用，无静态直调点可写 __args" },
+export function run() { return arguments.length; }`, args: [] },
   // 展开实参到 num 被调（f64 ABI）：调用者 tagged → 槽位从数组回读后按位重解释。
   { name: "fn-spread-num", fn: "run", ts: `
 function f(a: number, b: number) { return a * 10 + b; }

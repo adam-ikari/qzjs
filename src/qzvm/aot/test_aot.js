@@ -578,6 +578,16 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzC.bindClosures(iC.exports, rC.lamMeta); qzC.bindClasses(iC.exports, rC.classMeta);
         check("类计算属性名方法(多 clone 各异)", qzC._toJS(iC.exports.cm()), "4:9");
     }
+    // 0 参导出函数由宿主直调：__args 未设 → arguments=[]（非 trap）
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_hostargs.ts"), "export function ha(): any { return arguments.length; }\n");
+        const rH = compileTS(path.join(os.tmpdir(), "qz_aot_hostargs.ts"), path.join(os.tmpdir(), "qz_aot_hostargs.wasm"), {});
+        const qzH = makeQzvm(rH.strings, { fields: rH.fields });
+        const { instance: iH } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_hostargs.wasm")), { qz: qzH });
+        qzH.bindMem(iH.exports.memory); if (iH.exports.__bump) qzH.bindBump(iH.exports.__bump);
+        qzH.bindClosures(iH.exports, rH.lamMeta); qzH.bindClasses(iH.exports, rH.classMeta);
+        check("0 参导出函数 arguments.length(=0)", qzH._toJS(iH.exports.ha()), 0);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

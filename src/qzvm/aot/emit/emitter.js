@@ -1583,7 +1583,9 @@ class Emitter {
             MA.globalGet(this._argGlobal); MA.localSet(this._argsLocal);
             MA.i64Const(0n); MA.globalSet(this._argGlobal);
             MA.localGet(this._argsLocal); MA.i64Const(0n); MA.i64Eq();
-            MA.ifBlock("void"); MA.unreachable(); MA.end();
+            MA.ifBlock("void");
+            if (f.parameters.length === 0) MA.call("qz.empty_array"); else MA.unreachable();   // 0 参函数由宿主直调（无 __args）→ arguments=[]；>0 参无 provider → loud
+            MA.localSet(this._argsLocal); MA.end();
             this.varMap.set("arguments", this._argsLocal);
         }
         if (capNames.length) {

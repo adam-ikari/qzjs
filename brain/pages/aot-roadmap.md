@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T05:42:07"
+updated: "2026-11-10T05:49:33"
 ---
 
 <!-- compiled_truth -->
@@ -409,4 +409,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "类计算属性名方法（运行期字符串名）已支持（JS 档）：collectClasses 对非 Symbol 的计算方法名分配合成名（$c<n>）并记录 {synth, expr}；ClassExpression/class 声明创建点在 clone 后发 qz.class_add_method_dyn(cloneVal, 运行期名, 合成名strId) —— host 深拷贝 meta.methods/staticMethods（_ownDyn）后注册 name→synth 条目，多 clone 各持不串味。C 档（in-module）保持 loud（collectClasses 内 throw）。corpus44 class-expr-computed-method-capture 转 supported（78/78,0 diff）。仍 loud：factory/closure static-block（TDZ 耦合）、fn-args-host-direct（embedder ABI）。"
   source: "session: aot computed method name"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T05:49:33
+  kind: decision
+  summary: "0 参导出函数由宿主直调时的 arguments 已支持：emitFunc 的 needsArgs 入口，__args 未设（=0）时——0 参函数缺省 qz.empty_array（arguments=[]），>0 参仍 unreachable（宿主 padding 使实参个数不可辨 → loud，绝不静默）。避免把 0 参导出函数的宿主调用 trap。corpus46 fn-args-host-direct 转 supported（18/18,0 diff）。仅剩 factory/closure static-block（TDZ 耦合）2 个 loud。"
+  source: "session: aot host-direct arguments"
   affects: [aot-roadmap]
