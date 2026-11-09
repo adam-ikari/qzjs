@@ -1216,7 +1216,8 @@ function compileTS(input, outWasm, opts = {}) {
             if (mth.accessor === "set") setters[mth.name] = { slot, nameStrId, name: en, n: mth.node.parameters.length };
             else if (mth.accessor === "get") getters[mth.name] = { slot, nameStrId, name: en, n: 0 };
             else methods[mth.name] = { slot, nameStrId, name: en, n: mth.node.parameters.length,
-                                       rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken) };
+                                       rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken),
+                                       usesArgs: em._methUsesArgs(mth.node) };
         }
         for (const smth of (c.staticMethods || [])) {
             const en = staticMethName(cname, smth.name + (smth.accessor === "set" ? "$set" : ""));

@@ -1511,6 +1511,7 @@ function makeQzvm(strings, opts) {
                 const a2 = args.filter(x => x !== undefined && x !== null).map(bitsOf);
                 while (a2.length < 4) a2.push(TAG);
                 const ovf1 = a2.length > 4 ? arrWriteback(a2.slice(3).map(toJS)) : TAG;   // >4 实参：溢出数组（ovf[0] = 实参 3，与 callee 的 ovf[i-3] 约定一致；此前恒传 TAG → 第 4+ 实参静默丢失）
+                if (m2.usesArgs && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arrWriteback(args));   // 被调方法体用 arguments：写 __args 全量实参（含 undefined→TAG）
                 return toJS(exportsRef[m2.name](selfH, ...a2.slice(0, 4), ovf1));
               });
             }

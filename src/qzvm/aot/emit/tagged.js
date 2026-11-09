@@ -927,7 +927,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     // 成员**取值为值**（`const g = c.m` / `arr.forEach(c.m)` / `C.create` 之类）：此后调用经
     // closure_call/call_value，两档宿主都不能为被调类方法提供实参个数 → 体内用 arguments 的方法
     // 必须编译期拒绝（否则 callee 读到哨兵 0 运行期 trap）。按名保守：同名数据成员也会被拒。
-    if (ts.isPropertyAccessExpression(e) && !ts.isPrivateIdentifier(e.name)) this._assertNoArgsProviderTarget(e.name.text, "把成员取成值再调用");
+    if (ts.isPropertyAccessExpression(e) && !ts.isPrivateIdentifier(e.name) && this._inModuleLink) this._assertNoArgsProviderTarget(e.name.text, "把成员取成值再调用");   // C 档取值为值仍无 provider（JS 档经 prop_get 绑定函数写 __args）
     // 可选链 `o?.x` / `o?.[i]` / `o?.length`：base 求值一次 → 若 null/undefined 则结果 undefined（短路，不求 index），否则按普通访问。
     if ((ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) && e.questionDotToken) {
         const M = this.m;

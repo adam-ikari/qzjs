@@ -186,7 +186,7 @@ function h(o: any) { return o.m(3); }
 export function run() { return h(new C()); }`, args: [] },
   { name: "class-args-extracted-value", fn: "run", ts: `
 class C { m(a: number) { return arguments[0]; } }
-export function run() { const c: any = new C(); const g = c.m; return g(3); }`, args: [], unsupported: "方法取成值再调用（经 closure_call/call_value，无实参个数）" },
+export function run() { const c: any = new C(); const g = c.m; return g(3); }`, args: [] },
   { name: "class-args-spread-call", fn: "run", ts: `
 class C { m(a: number) { return arguments[0]; } }
 export function run() { const c = new C(); const r = [3]; return c.m(...r); }`, args: [], unsupported: "展开实参调用（实参数组在宿主侧，两档宿主写不了产物 __args）" },

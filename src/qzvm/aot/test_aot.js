@@ -507,7 +507,9 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
           + "function h(o: any): any { return o.m(3); }\n"
           + "export function dv(): any { const c = new C(); c.m(1); return c.k; }\n"
           + "export function dd(): any { class D { m(a: number): any { return arguments[0]; } } return h(new D()); }\n"
-          + "export function dc(): any { class E { k: number; constructor(a: number) { this.k = arguments.length; } } return new E(1).k; }\n");
+          + "export function dc(): any { class E { k: number; constructor(a: number) { this.k = arguments.length; } } return new E(1).k; }\n"
+          + "class F { m(a: number): any { return arguments[0]; } }\n"
+          + "export function de(): any { const f: any = new F(); const g = f.m; return g(3); }\n");
         const rG = compileTS(path.join(os.tmpdir(), "qz_aot_dynargs.ts"), path.join(os.tmpdir(), "qz_aot_dynargs.wasm"), {});
         const qzG = makeQzvm(rG.strings, { fields: rG.fields });
         const { instance: iG } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_dynargs.wasm")), { qz: qzG });
@@ -516,6 +518,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         check("void 方法 arguments.length(动态派发)", qzG._toJS(iG.exports.dv()), 1);
         check("动态派发 arguments[0]", qzG._toJS(iG.exports.dd()), 3);
         check("ctor arguments.length", qzG._toJS(iG.exports.dc()), 1);
+        check("提取方法作值 arguments[0]", qzG._toJS(iG.exports.de()), 3);
     }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),

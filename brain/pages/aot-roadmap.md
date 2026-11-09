@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T03:19:45"
+updated: "2026-11-10T03:35:09"
 ---
 
 <!-- compiled_truth -->
@@ -361,4 +361,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "构造器内 arguments 已支持：_emitCtorBody 传 needsArgs=_methUsesArgs(ctor)；_emitNewCall 普通 ctor 直调路径在 ctor 体用 arguments 时，把全量实参一次求值成数组写 __args（全局），4 个实参槽从数组回读（免重求值，新增嵌套 _expEnter 槽）。arguments guard（tagged.js:506）因 needsArgs 已设 varMap['arguments'] 而正确绕过。corpus44 class-args-ctor 转 supported（78/78,0 diff）。仍 loud：getter/setter、extracted-value、spread-call 的 arguments（host 派发无 provider）。"
   source: "session: aot ctor arguments"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T03:35:09
+  kind: decision
+  summary: "提取方法作值再调用下 arguments 已支持（JS 档）：classMeta 方法项加 usesArgs 标志；prop_get 的绑定函数（c.m 作值）在被调方法 usesArgs 时先 exportsRef.qzs_setargs(arrWriteback(args)) 写 __args 全量实参（含 undefined→TAG）再调导出。tagged.js:930『成员取值为值』loud 降为仅 C 档（_inModuleLink）——C 档无绑定函数宿主 provider，保持编译期拒绝。corpus44 class-args-extracted-value 转 supported（78/78,0 diff）。仍 loud：spread-call、getter/setter 的 arguments。"
+  source: "session: aot extracted-value arguments"
   affects: [aot-roadmap]
