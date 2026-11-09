@@ -2096,6 +2096,17 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
             return (int64_t)((uint64_t)0x7FF9 << 48);   /* undefined 句柄 */
         }
     }
+    if ((uint16_t)((uint64_t)recv >> 48) == 0x7FFD) {   // 宿主承载实例：.constructor 应按 __qzClsId 回本类值（proto 链指向内建原型，原生取到 Map/Array…）
+        size_t cnlen = 0;
+        const char *cnn = qz_str_by_id(keyId, &cnlen);
+        if (cnn && cnlen == 11 && !memcmp(cnn, "constructor", 11)) {
+            JSValue cidv = JS_GetPropertyStr(ctx, o, "__qzClsId");
+            int32_t cid = -1;
+            if (JS_IsNumber(cidv)) { int32_t ci = -1; JS_ToInt32(ctx, &ci, cidv); cid = ci; }
+            JS_FreeValue(ctx, cidv);
+            if (cid >= 0) { JS_FreeValue(ctx, k); JS_FreeValue(ctx, o); return qz_guest_class_value(cid); }
+        }
+    }
     JSValue vr = JS_UNDEFINED;
     if (!JS_IsNull(o) && !JS_IsUndefined(o)) {
         size_t klen = 0;
@@ -3141,6 +3152,17 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
             return f(recv, a0, a1, a2, a3);
         }
     }
+    if ((uint16_t)(ru >> 48) == 0x7FFD && g_clsmeta_base) {  // 宿主承载实例（extends 内建）：__qzClsId → classMeta 方法链；未命中落下方内建/JS 方法（继承的 Map/Set/Date 方法）
+        JSValue o = qz_tojs(ctx, recv);
+        JSValue cidv = JS_GetPropertyStr(ctx, o, "__qzClsId");
+        int32_t cid = -1;
+        if (JS_IsNumber(cidv)) { int32_t ci = -1; JS_ToInt32(ctx, &ci, cidv); cid = ci; }
+        JS_FreeValue(ctx, cidv); JS_FreeValue(ctx, o);
+        if (cid >= 0) {
+            int32_t nn; int32_t slot = qz_clsmeta_method_chain(cid, mid, &nn, NULL);
+            if (slot) { qz_cls_fn f = (qz_cls_fn)(uintptr_t)(uint32_t)slot; return f(recv, a0, a1, a2, a3); }
+        }
+    }
     /* 数组 + 闭包回调（map/filter/forEach/reduce/find/findIndex/some/every）：
      * **不能**把回调交给 JS 内建。qz_tojs(闭包值) 不物化（C 侧回调 wasm 会崩），
      * 内建会收到 undefined 回调 → 静默错值（返回空数组/undefined）。
@@ -3945,6 +3967,61 @@ int64_t qz_guest_new_builtin(int32_t id, int32_t n, int64_t a0, int64_t a1,
     }
     return qz_host_obj_handle(ctx, res);   /* 取所有权，勿再 free */
 }
+/* new_builtin_sub(clsId, parentNameId, n, a0..a3, ovf) → i64：用户类 extends 内建
+ * （合成 ctor）→ 宿主真内建实例（proto 链含内建原型，继承方法原生可用）+ __qzClsId
+ * 标记（instanceof/method_call 据此沿 classMeta 查本类链）。字段默认值由 emitter 在其后
+ * 调 __m_<C> ctor 完成（object_set 写宿主属性）。免 clsmeta 格式扩展：所需信息全由实参给。*/
+__attribute__((export_name("new_builtin_sub")))
+int64_t qz_guest_new_builtin_sub(int32_t clsId, int32_t parentNameId, int32_t n,
+                                 int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t ovf)
+{
+    if (!g_current_rt) return 0;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return 0;
+    size_t nlen = 0;
+    const char *nm = qz_str_by_id(parentNameId, &nlen);
+    if (!nm || nlen >= 128) return 0;
+    char name[128];
+    memcpy(name, nm, nlen); name[nlen] = '\0';
+    JSValue fn = qz_builtin_lookup(ctx, name);
+    if (JS_IsException(fn)) { JS_FreeValue(ctx, fn); return ((int64_t)0x7FF9 << 48); }
+    if (!JS_IsFunction(ctx, fn)) {
+        JS_FreeValue(ctx, fn);
+        qz_set_throw(ctx, JS_NewTypeError(ctx, "Constructor %s requires 'new'", name));
+        return ((int64_t)0x7FF9 << 48);
+    }
+    JSValue sv[4] = { qz_tojs(ctx, a0), qz_tojs(ctx, a1), qz_tojs(ctx, a2), qz_tojs(ctx, a3) };
+    JSValue argv[16]; int argc = 0;
+    for (int i = 0; i < 4; i++) {
+        int keep = (n < 0) ? !JS_IsUndefined(sv[i]) : (n > i);
+        if (keep && argc < 16) argv[argc++] = sv[i];
+        else JS_FreeValue(ctx, sv[i]);
+    }
+    if (n > 4) {   /* 溢出实参：ovf[0] = 实参 3（已在 a3），故从 1 起 */
+        JSValue o = qz_tojs(ctx, ovf);
+        if (JS_IsArray(o)) {
+            JSValue lv = JS_GetPropertyStr(ctx, o, "length");
+            double f = 0; JS_ToFloat64(ctx, &f, lv); JS_FreeValue(ctx, lv);
+            uint32_t len = (uint32_t)f;
+            for (uint32_t i = 1; i < len && argc < 16 && argc < n; i++)
+                argv[argc++] = JS_GetPropertyUint32(ctx, o, i);
+        }
+        JS_FreeValue(ctx, o);
+    }
+    JSValue res = JS_CallConstructor(ctx, fn, argc, argv);
+    for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
+    JS_FreeValue(ctx, fn);
+    if (JS_IsException(res)) {
+        JS_FreeValue(ctx, res);
+        JSValue ex = JS_GetException(ctx);
+        if (!JS_IsException(ex)) qz_set_throw(ctx, ex);
+        else JS_FreeValue(ctx, ex);
+        return ((int64_t)0x7FF9 << 48);
+    }
+    /* 标记 clsId：instanceof_op/instanceof_dyn/method_call 在宿主对象上据此查 classMeta。*/
+    JS_SetPropertyStr(ctx, res, "__qzClsId", JS_NewInt32(ctx, clsId));
+    return qz_host_obj_handle(ctx, res);   /* 取所有权，勿再 free */
+}
 
 /* super_method(recv, mid, a0..a3, ovf) → i64：调父类方法。*/
 __attribute__((export_name("super_method")))
@@ -4152,6 +4229,23 @@ int64_t qz_guest_instanceof_dyn(int64_t x, int64_t rhs)
     if (rtag != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48);  /* 不是类值 → false */
     int32_t targetCls = (int32_t)(r & 0xFFFFFFFFu);
     uint64_t xu = (uint64_t)x;
+    if ((uint16_t)(xu >> 48) == 0x7FFD) {   // 宿主承载实例（extends 内建）：__qzClsId → classMeta 父链比对
+        JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+        if (!ctx) return (int64_t)((uint64_t)0x7FFC << 48);
+        JSValue o = qz_tojs(ctx, x);
+        JSValue cidv = JS_GetPropertyStr(ctx, o, "__qzClsId");
+        int32_t cid = -1;
+        if (JS_IsNumber(cidv)) { int32_t ci = -1; JS_ToInt32(ctx, &ci, cidv); cid = ci; }
+        JS_FreeValue(ctx, cidv); JS_FreeValue(ctx, o);
+        int32_t cur = cid, guard = 0;
+        while (cur >= 0 && guard++ < 64) {
+            if (cur == targetCls) return (int64_t)((uint64_t)0x7FFC << 48 | 1);
+            uint32_t moff = qz_clsmeta_item_off(cur);
+            if (!moff) break;
+            int32_t p; memcpy(&p, (const unsigned char *)(uintptr_t)moff + 4, 4); cur = p;
+        }
+        return (int64_t)((uint64_t)0x7FFC << 48);
+    }
     if ((uint16_t)(xu >> 48) != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48);
     uint32_t off = (uint32_t)(xu & 0xFFFFFFFFu);
     int32_t selfCls; memcpy(&selfCls, (const unsigned char *)(uintptr_t)off, 4);
@@ -4668,6 +4762,23 @@ __attribute__((export_name("instanceof_op")))
 int64_t qz_guest_instanceof_op(int64_t obj, int32_t clsId)
 {
     uint64_t u = (uint64_t)obj;
+    if ((uint16_t)(u >> 48) == 0x7FFD) {   // 宿主承载实例（extends 内建）：__qzClsId → classMeta 父链
+        JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+        if (!ctx) return (int64_t)((uint64_t)0x7FFC << 48);
+        JSValue o = qz_tojs(ctx, obj);
+        JSValue cidv = JS_GetPropertyStr(ctx, o, "__qzClsId");
+        int32_t cid = -1;
+        if (JS_IsNumber(cidv)) { int32_t ci = -1; JS_ToInt32(ctx, &ci, cidv); cid = ci; }
+        JS_FreeValue(ctx, cidv); JS_FreeValue(ctx, o);
+        int32_t cur = cid, guard = 0;
+        while (cur >= 0 && guard++ < 64) {
+            if (cur == clsId) return (int64_t)((uint64_t)0x7FFC << 48) | 1;
+            uint32_t moff = qz_clsmeta_item_off(cur);
+            if (!moff) break;
+            int32_t p; memcpy(&p, (const unsigned char *)(uintptr_t)moff + 4, 4); cur = p;
+        }
+        return (int64_t)((uint64_t)0x7FFC << 48);
+    }
     if ((u >> 48) != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48) | 0;
     int32_t cid = *(int32_t *)(uintptr_t)(uint32_t)(u & 0xFFFFFFFFu);
     return (int64_t)((uint64_t)0x7FFC << 48) | (cid == clsId ? 1 : 0);

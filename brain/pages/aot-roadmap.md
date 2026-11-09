@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-09T14:44:38"
+updated: "2026-11-09T15:17:48"
 ---
 
 <!-- compiled_truth -->
@@ -319,4 +319,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "语义欠账清一项（JS 档）：内建子类自有实例字段结案——hostBacked 放宽为 !!bpName && !ctor；带字段时基类由 Reflect.construct(new_builtin_sub) 构造、合成 ctor 只补本类字段默认值（hostBacked 跳过 super；字段默认值走 qz.object_set 写宿主属性，不直写 wasm 内存）；this.x 读写运行期派发；class_env_get 补 HOST_HI 使字段初值捕获外层变量可用。test_aot 六项钉住；46 corpus 全 0 diff；glue 5/5。corpus44 两处陈旧 unsupported 标记清理。剩余欠账：① C 档内建子类（含带字段；clsmeta 定长二进制不传 hostBacked，需序列化扩展 + new_builtin_sub/method_call 宿主派发/buildInstance 平行；libqzvm.wasm 可增量构建，m6b e2e 用 node WASI 跑）② 内建子类自定义 ctor（含计算 super 参数，仍需 bump 近似/loud）③ C 档闭包 arguments。"
   source: "src/qzvm/aot/{emit/emitter.js,emit/tagged.js,qzvm.js,test_aot.js,audit_corpus44.js}"
+  affects: [aot-host-builtin-carrier]
+
+- time: 2026-11-09T15:17:48
+  kind: decision
+  summary: "语义欠账清一项（C 档 / in-module）：内建子类承载结案——免改 clsmeta 定长二进制（new_builtin_sub 实参含 clsId/parentNameId；字段初值走 emitter 后续 ctor 调用 + qz.object_set）。guest_entry.c 增 qz_guest_new_builtin_sub（JS_CallConstructor + __qzClsId 标记 + 0x7FFD 句柄）+ method_call/instanceof_op/instanceof_dyn/prop_get 的宿主（0x7FFD）__qzClsId 分支。e2e_bsub.mjs 4 项（Map/Array/Error 继承+自有+字段+instanceof+.constructor）PASS；m6b e2e 全绿。剩余欠账：① 内建子类自定义 ctor（含计算 super 参数，两档仍 bump 近似/loud）② C 档闭包 arguments ③ 类表达式静态字段逐次求值初始化（JS 档 unsupported 族）。"
+  source: "src/qzvm/guest_entry.c, test/m6b-poc/e2e_bsub.mjs"
   affects: [aot-host-builtin-carrier]

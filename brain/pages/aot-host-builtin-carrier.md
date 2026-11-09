@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, builtin, quickjs]
 created: "2026-11-04T10:27:39"
-updated: "2026-11-09T14:43:47"
+updated: "2026-11-09T15:17:29"
 ---
 
 <!-- compiled_truth -->
@@ -71,4 +71,10 @@ updated: "2026-11-09T14:43:47"
   kind: decision
   summary: "内建子类承载扩展（JS 档）：允许自有实例字段（hostBacked 放宽为 !!bpName && !ctor，仍要求合成 ctor）。带字段时：① new_builtin_sub/Reflect.construct 完成基类构造（真 Map/Set/Date/Array/Error + 类 prototype）② 其后调用合成 ctor 只补本类字段默认值——_emitSuperCallForward 对 hostBacked 跳过 super（基类已造）、直接 _emitFieldDefaults；_emitFieldDefaults 对 hostBacked 走 qz.object_set（字段存宿主属性，绝不 i64Store 到 0x7FFD 句柄索引越界写内存）③ 方法内 this.x 读写经 _emitPropReadFromLocal/_emitStorePropValue 运行期派发（0x7FFD→prop_get/object_set）天然正确 ④ class_env_get 补 HOST_HI（经实例 constructor.__qzClsId 取类 env），字段初值捕获外层变量可用。buildInstance 同步（动态路径 Reflect.construct 后调 ctor 补字段）。验证：test_aot 内建子类.* 六项（Map/Array 带字段 this 引用+写+捕获）；全 46 corpus 差分审计 0 diff；glue 5/5。同时清理 corpus44 两处陈旧 unsupported 标记（builtin-subclass-array/map 已实现）。"
   source: "emitter.js hostBacked+_emitFieldDefaults / tagged.js _emitSuperCallForward+_emitNewCall / qzvm.js buildInstance+class_env_get"
+  affects: [aot-host-builtin-carrier, aot-roadmap]
+
+- time: 2026-11-09T15:17:29
+  kind: decision
+  summary: "内建子类承载（C 档 / in-module）结案：免改 clsmeta 二进制格式——new_builtin_sub 的 clsId/parentNameId 全由 emitter 实参传入，字段初值由 emitter 随后调 __m_<C> ctor 完成（qz.object_set 写宿主属性）。guest_entry.c 增：① qz_guest_new_builtin_sub(clsId,parentNameId,n,a0..a3,ovf)：JS_CallConstructor(内建) 造真实例 + JS_SetPropertyStr(__qzClsId, clsId) 标记，返 0x7FFD 宿主句柄（proto=内建原型，继承方法原生可用）② method_call 宿主对象（0x7FFD）分支：读 __qzClsId → qz_clsmeta_method_chain → 蹦床；未命中落原生内建方法 ③ instanceof_op/instanceof_dyn 宿主（0x7FFD）分支：__qzClsId → classMeta.parent 链比对 ④ prop_get 宿主实例 .constructor 按 __qzClsId 回 class_value（否则原生取到 Map/Array）。验证：新 test/m6b-poc/e2e_bsub.mjs（Map/Array/Error：继承方法 get/set/push/索引/length + 自有方法 + 字段默认值 + instanceof 双路 + .constructor）4 项 PASS；libqzvm 增量构建（cmake --build build-inmod --target qzvm-guest）；全部 m6b e2e 无回归。"
+  source: "src/qzvm/guest_entry.c new_builtin_sub+method_call+instanceof_op/dyn+prop_get / test/m6b-poc/e2e_bsub.mjs"
   affects: [aot-host-builtin-carrier, aot-roadmap]
