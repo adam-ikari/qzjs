@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T04:39:05"
+updated: "2026-11-10T05:23:06"
 ---
 
 <!-- compiled_truth -->
@@ -397,4 +397,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "num 展开调用缺参已支持为 NaN：emitSpreadCall 中对 num 被调，越界读（undefined）不再 unreachable trap，改填 f64 NaN（undefined 参与算术的 JS 结果，如 f(...[1]) 的 b 位 → a*10+NaN=NaN）。非展开路径仍编译期拒绝（能在编译期知实参<形参）。corpus46 fn-spread-num-missing 转 supported（18/18,0 diff）。"
   source: "session: aot num spread missing"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T05:23:06
+  kind: decision
+  summary: "嵌套 class 声明现每求值物化为动态 clone（JS 档），补齐 5 个 loud 边界：A) _collectLocals 把函数内 class 声明名并入局部；B) _classOfExpr/_isClassName 对局部/捕获类名返回动态（_isDynClsBinding）；C) class 声明语句发 class_expr_value(clone)+env+sei 静态初始化，存入局部；E) clsExprSupported 纳入 _isNestedDecl、放宽其 lostDecl/静态 loud、块引用并入 capSetC（嵌套类在函数体内执行无工厂 TDZ）；F) _emitNewCall 对被遮蔽类名走 new_dynamic（读局部 clone 值），并在 ctor 用 arguments 时于动态路径写 __args（编译期知实参个数）。C 档（in-module）全部 guard 保持旧行为（提升静态、捕获 loud）。corpus30/43/45 共 5 个 case 转 supported（全 0 diff）。"
+  source: "session: aot nested-class dynamic clone"
   affects: [aot-roadmap]

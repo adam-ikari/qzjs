@@ -84,7 +84,7 @@ export function f(): any {
   { name: "static-init-order-local-class", fn: "f", ts: `export function f(): any {
   class D { static s: any = []; static x: any = 1; }
   return D.s.length + D.x;
-}`, unsupported: "函数/块内 class 声明的静态字段（静态表按类名共享、只初始化一次，重新进入定义点应重新初始化）" },
+}`, args: [] },
   { name: "error-subclass-instanceof", fn: "f", ts: `class AppError extends Error { constructor(msg: any, public code: any) { super(msg); this.name = "AppError"; } }
 class NotFound extends AppError { constructor(msg: any) { super(msg, 404); this.name = "NotFound"; } }
 export function f(): any {

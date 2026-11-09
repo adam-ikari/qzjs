@@ -10,7 +10,26 @@ require("./tagged-core.js");   // 副作用：挂 _foldPropName/_fnArenaFree 等
 Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
 Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));
-    if (ts.isClassDeclaration(s) || ts.isFunctionDeclaration(s)) return;   // 已提升为模块级（见 collectDecls）
+    if (ts.isClassDeclaration(s)) {
+        const sn = s.name && s.name.text;
+        const cnC = sn && this.classes.get(sn);
+        if (cnC && this._isDynClsBinding(sn, sn)) {   // 函数内 class 声明：每求值物化为独立 clone（动态类值 + env + sei 静态初始化）
+            this.m.i32Const(cnC.id);
+            if (cnC.captured && cnC.captured.length) this._emitClassCaptureEnvValue(cnC); else this.m.i64Const(0n);
+            this.m.i32Const(this._strId("@@qzEnv"));
+            this.m.call("qz.class_expr_value");
+            if (cnC.staticFields.length || cnC.staticBlocks.length) {   // 创建点按 clone 立即跑静态初始化
+                const t = this._expEnter();
+                this.m.localSet(t.v); this.m.localGet(t.v);
+                for (let k = 0; k < 4; k++) this._emitUndefined();
+                this.m.call(staticMethName(cnC.name, "__qz_sei")); this.m.drop();
+                this.m.localGet(t.v); this._expLeave();
+            }
+            this._emitVarStore(sn, this.scratchB); this.m.drop();
+        }
+        return;   // 顶层类声明：已提升为模块级
+    }
+    if (ts.isFunctionDeclaration(s)) return;   // 已提升为模块级（见 collectDecls）
     if (ts.isVariableStatement(s)) {
         for (const d of s.declarationList.declarations) this._emitBindingDecl(d);
         return;
@@ -2161,7 +2180,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     }
     const cname = this._className(tgt.text);   // 导入类本地名 → 目标类名
     // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.new_builtin（construct 语义）；未登记者报错
-    if (!this.classes.has(cname)) {
+    if (!this.classes.has(cname) || this._isDynClsBinding(tgt.text, cname)) {   // 未登记 / 被局部（嵌套 class 声明 clone）遮蔽 → 动态构造
         if (EMITTER_BUILTIN_CTORS.has(tgt.text)) {
             /* new 内建类：qz.new_builtin —— construct 语义在 ABI 上必须与普通调用可分
              * （Map/Set/WeakMap/WeakSet/Proxy 无 [[Call]]，规范要 TypeError），且要带 n
@@ -2194,18 +2213,33 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
                 || (this.fnNames && this.fnNames.has(tgt.text));    // 顶层函数作类（JS function-as-class：Dog.prototype = …）
             if (resolvable) {
                 /* 类表达式/动态类值（new A()）：若 tgt 对应一个已知类（含捕获），
-                 * 先触发 statics guard 建立类捕获 env（_emitClassCaptureEnv 经 class_value）。
-                 * 否则类方法读捕获 env 拿到空（声明式类表达式的捕获缺口）。*/
+                 * 先触发 statics guard 建立类捕获 env（_emitClassCaptureEnv 经 class_value）。*/
                 const dynCn = this._className(tgt.text) || (this.classes.has(tgt.text) ? tgt.text : undefined);
                 const dynC = dynCn && this.classes.get(dynCn);
                 if (dynC) { this._emitStaticsGuard(dynC.name); }
+                /* 嵌套 class 声明 clone 的 ctor 用 arguments：编译期知实参个数 → 一次求值成数组写 __args，槽从数组回读（host new_dynamic 不知个数）。*/
+                const ctorNeedsArgs = !!(dynC && dynCn && this._isDynClsBinding(dynCn, dynCn) && dynC.ctor
+                    && this._methUsesArgs(dynC.ctor) && !e.arguments.some(a => ts.isSpreadElement(a)));
                 const M2 = this.m, tg2 = this._expEnter();
-                this.emitTaggedExpr(tgt); M2.localSet(tg2.w);        // 类对象 → 槽（先求值，避免嵌套副作用）
-                M2.localGet(tg2.w);                                  // 参数序：obj, a0..a3
-                for (let i = 0; i < 4; i++) {
-                    if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+                if (ctorNeedsArgs) {
+                    const ta = this._expEnter();
+                    const litA = ts.factory.createArrayLiteralExpression(e.arguments);
+                    litA.pos = e.arguments.length ? e.arguments[0].pos : tgt.pos; litA.end = e.arguments.length ? e.arguments[e.arguments.length - 1].end : tgt.end;
+                    this.emitTaggedExpr(litA); M2.localSet(ta.v);
+                    M2.localGet(ta.v); M2.globalSet(this._argGlobal);
+                    this.emitTaggedExpr(tgt); M2.localSet(tg2.w);
+                    M2.localGet(tg2.w);
+                    for (let i = 0; i < 4; i++) { if (i < e.arguments.length) this._emitElemOf(ta.v, ts.factory.createNumericLiteral(i)); else this._emitUndefined(); }
+                    M2.call("qz.new_dynamic");
+                    this._expLeave();
+                } else {
+                    this.emitTaggedExpr(tgt); M2.localSet(tg2.w);        // 类对象 → 槽（先求值，避免嵌套副作用）
+                    M2.localGet(tg2.w);                                  // 参数序：obj, a0..a3
+                    for (let i = 0; i < 4; i++) {
+                        if (i < e.arguments.length) this.emitTaggedExpr(e.arguments[i]); else this._emitUndefined();
+                    }
+                    M2.call("qz.new_dynamic");
                 }
-                M2.call("qz.new_dynamic");
                 this._expLeave();
                 return;
             }

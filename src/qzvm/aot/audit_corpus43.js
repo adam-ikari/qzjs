@@ -47,9 +47,9 @@ export function run() { return mk(); }`, args: [] },
   { name: "nested-class-no-capture", fn: "run", ts: `function mk() { class K { m() { return 8; } } return new K().m(); }
 export function run() { return mk(); }`, args: [] },
   { name: "nested-class-captures-outer-local", fn: "run", ts: `function mk(n: number) { class K { m() { return n; } } return new K().m(); }
-export function run() { return mk(7); }`, args: [], unsupported: "函数内 class 声明捕获外层局部（提升后无 env 槽）" },
+export function run() { return mk(7); }`, args: [] },
   { name: "nested-class-field-captures-outer-local", fn: "run", ts: `function mk(n: number) { class K { x: any = n; } return new K().x; }
-export function run() { return mk(7); }`, args: [], unsupported: "函数内 class 字段初值捕获外层局部（提升后无 env 槽）" },
+export function run() { return mk(7); }`, args: [] },
   { name: "alias-class-captures-outer-local", fn: "run", ts: `function mk(n: number) { const C = class { m() { return n; } }; return new C().m(); }
 export function run() { return mk(7); }`, args: [] },
   { name: "factory-static-init-captures-outer", fn: "run", ts: `function mk(n: number) { return class { static x = n; }; }

@@ -431,12 +431,15 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("工厂类捕获（字段/方法/同名 let 遮蔽）", callMs("clsFactory"), "6,14");
     check("对象方法内 let 不顶外层参数槽", callMs("objMethodScope"), 12);
     check("类型注解名不作闭包捕获", callMs("typeAnnClosure"), 9);
-    {   // 提升后的类读不到定义点外层局部 → 必须 loud（此前静默 undefined）
-        const p = path.join(os.tmpdir(), "qz_aot_loud_cap.ts");
+    {   // 函数内 class 声明：每求值物化为独立 clone（可捕获外层局部）
+        const p = path.join(os.tmpdir(), "qz_aot_nestedcap.ts");
         fs.writeFileSync(p, "function mk(n: number) { class K { m() { return n; } } return new K().m(); }\nexport function run() { return mk(7); }\n");
-        let msg = null;
-        try { compileTS(p, path.join(os.tmpdir(), "qz_aot_loud_cap.wasm"), {}); } catch (e) { msg = String(e && e.message || e); }
-        check("函数内 class 捕获外层局部 loud", !!(msg && msg.indexOf("捕获了外层局部变量") >= 0), true);
+        const rNC = compileTS(p, path.join(os.tmpdir(), "qz_aot_nestedcap.wasm"), {});
+        const qzNC = makeQzvm(rNC.strings, { fields: rNC.fields });
+        const { instance: iNC } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_nestedcap.wasm")), { qz: qzNC });
+        qzNC.bindMem(iNC.exports.memory); if (iNC.exports.__bump) qzNC.bindBump(iNC.exports.__bump);
+        qzNC.bindClosures(iNC.exports, rNC.lamMeta); qzNC.bindClasses(iNC.exports, rNC.classMeta);
+        check("函数内 class 捕获外层局部(每求值 clone)", qzNC._toJS(iNC.exports.run()), 7);
     }
     // 类静态字段（lazy 初始化 + 宿主表）与静态方法
     {

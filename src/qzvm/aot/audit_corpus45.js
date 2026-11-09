@@ -90,10 +90,10 @@ function mk() { const K = class { static x = 5; }; return K.x; }
 export function run() { return mk(); }`, args: [] },
   { name: "nested-class-static-field-loud", fn: "run", ts: `
 function mk() { class K { static x = 5; } return new K() && K.x; }
-export function run() { return mk(); }`, args: [], unsupported: "嵌套 class 声明的静态字段（每次进入定义点应重新初始化）" },
+export function run() { return mk(); }`, args: [] },
   { name: "nested-class-static-block-loud", fn: "run", ts: `
 function mk() { class K { static x: any; static { this.x = 5; } } return K.x; }
-export function run() { return mk(); }`, args: [], unsupported: "嵌套 class 声明的静态块（每次进入定义点应重新初始化）" },
+export function run() { return mk(); }`, args: [] },
   { name: "object-prop-class-static", fn: "run", ts: `
 const o: any = { C: class { static x = 5; } };
 export function run() { return o.C.x; }`, args: [] },

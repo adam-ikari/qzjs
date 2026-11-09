@@ -113,7 +113,8 @@ class Emitter {
             }
         };
         const walk = (n) => {
-            if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;   // 类体（方法/访问器/字段/静态块）是独立作用域：其 let/const 不属外层函数（否则同名会顶掉外层参数槽）
+            if (ts.isClassDeclaration(n)) { if (n.name && !this._inModuleLink) names.push(n.name.text); return; }   // 函数内 class 声明名是局部（JS 档每求值物化 clone；C 档仍提升）
+            if (ts.isClassExpression(n)) return;
             if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
                 || ts.isConstructorDeclaration(n)) return;                     // 对象字面量方法/访问器同理（各自编译为独立闭包）
             if (ts.isVariableDeclaration(n)) bindName(n.name);
@@ -2074,8 +2075,8 @@ class Emitter {
             const _dynNode = parent ? parent.expression : null;
             const _isDynParent = !!_dynNode && !(ts.isIdentifier(_dynNode)
                 && (this.classes.has(this._className(_dynNode.text)) || BUILTIN_GLOBALS.has(_dynNode.text) || EMITTER_BUILTIN_CTORS.has(_dynNode.text)));
-            const clsExprSupported = _isClsExpr && !_isTopAlias && !this._inModuleLink && !_isDynParent
-                && !staticFields.some(f => f.name.startsWith("#"));
+            const clsExprSupported = (_isClsExpr || _isNestedDecl) && !_isTopAlias && !this._inModuleLink && !_isDynParent
+                && !staticFields.some(f => f.name.startsWith("#"));   // 嵌套 class 声明与类表达式同：每求值 clone + env + sei 静态初始化
             /* 提升后的类读不到定义点外层绑定：函数/块内 class 声明（整树提升到模块级、定义点
              * 不建值）若实现体引用了非模块级局部名，运行时没有 env 槽 → 此前静默 undefined，改为 loud。
              * `const K = class` 别名形式只在**模块顶层**仍是纯类名别名（类值不物化）；非顶层的
@@ -2084,7 +2085,7 @@ class Emitter {
             if (this.declaredNames) {
                 const isTopLevelAlias = !!(this.aliasClsExprDecls && this.aliasClsExprDecls.has(st))
                     && !(this.nestedAliasClsDecls && this.nestedAliasClsDecls.has(st));
-                const lostDecl = isTopLevelAlias || !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
+                const lostDecl = isTopLevelAlias || (!clsExprSupported && !!(this.nestedClsDecls && this.nestedClsDecls.has(st)));
                 if (lostDecl) {
                     const lost = [];
                     for (const nm2 of capSetC) if (this.declaredNames.has(nm2)) lost.push(nm2);
@@ -2097,14 +2098,15 @@ class Emitter {
                  * 类表达式例外：静态**字段初值**的引用已并入捕获 env（sei 在创建点立即执行，env 可见）；
                  * 静态**块**执行点/TDZ 不可控（如 static { C2.x = n } 引用待赋值 const）→ 仍按块引用 loud。 */
                 const lostStatic = [];
-                const lostSrc = clsExprSupported ? staticBlockRefsC : [...staticRefsC, ...staticBlockRefsC];
+                const _mergeBlk = clsExprSupported && _isNestedDecl;
+                const lostSrc = clsExprSupported ? (_mergeBlk ? [] : staticBlockRefsC) : [...staticRefsC, ...staticBlockRefsC];
                 for (const nm2 of lostSrc) if (this.declaredNames.has(nm2)) lostStatic.push(nm2);
                 if (lostStatic.length) {
                     throw new Error("[tagged] class " + cname + " 的静态初始化捕获了非模块级变量（" + lostStatic.join(", ") + "）：静态初始化在首次静态访问点执行，读不到 class 定义点的局部绑定；请把变量提升到模块级，或改用实例字段/构造器参数");
                 }
             }
             /* 类表达式：静态**字段初值**引用的外层局部并入捕获 env（sei 在创建点执行 → env 可见）。 */
-            if (clsExprSupported) for (const nm2 of staticRefsC) capSetC.add(nm2);
+            if (clsExprSupported) { for (const nm2 of staticRefsC) capSetC.add(nm2); if (clsExprSupported && _isNestedDecl) for (const nm2 of staticBlockRefsC) capSetC.add(nm2); }
             /* 静态字段/静态块的静态表按类名共享，lazy 守卫只初始化一次；但类表达式每次
              * 求值、嵌套 class 声明每次进入定义点，JS 都会产生独立静态状态。模块顶层
              * `const C = class {…}` 只求值一次、类名稳定，是唯一可支持的类表达式形式。
@@ -2116,7 +2118,7 @@ class Emitter {
                  * 写 clone 自有静态桶）→ 多次求值各持一份，动态访问也能读到初值。私有静态字段
                  * 的名字（#C#x）与静态写路径键空间不同，暂仍 loud。in-module 档动态类值的静态
                  * 访问端未接，仍 loud。函数/块内 class 声明（isNestedDecl）走提升路径，另案。 */
-                if (_isNestedDecl || (_isClsExpr && !_isTopAlias && !clsExprSupported)) {
+                if (!clsExprSupported && (_isNestedDecl || (_isClsExpr && !_isTopAlias))) {
                     const form = _isClsExpr
                         ? "class 表达式（非模块顶层 `const C = class` 形式）"
                         : "函数/块内 class 声明（每次进入定义点应重新初始化静态）";
