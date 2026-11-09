@@ -18,13 +18,17 @@ Emitter.prototype.emitTaggedStmt = function (s) {
             if (cnC.captured && cnC.captured.length) this._emitClassCaptureEnvValue(cnC); else this.m.i64Const(0n);
             this.m.i32Const(this._strId("@@qzEnv"));
             this.m.call("qz.class_expr_value");
+            const td = this._expEnter();
+            this.m.localSet(td.v);                                       // clone 句柄入槽
+            if (cnC.computedMeths && cnC.computedMeths.length) {
+                for (const cm of cnC.computedMeths) { this.m.localGet(td.v); this.emitTaggedExpr(cm.expr); this.m.i32Const(this._strId(cm.synth)); this.m.call("qz.class_add_method_dyn"); }
+            }
             if (cnC.staticFields.length || cnC.staticBlocks.length) {   // 创建点按 clone 立即跑静态初始化
-                const t = this._expEnter();
-                this.m.localSet(t.v); this.m.localGet(t.v);
+                this.m.localGet(td.v);
                 for (let k = 0; k < 4; k++) this._emitUndefined();
                 this.m.call(staticMethName(cnC.name, "__qz_sei")); this.m.drop();
-                this.m.localGet(t.v); this._expLeave();
             }
+            this.m.localGet(td.v); this._expLeave();
             this._emitVarStore(sn, this.scratchB); this.m.drop();
         }
         return;   // 顶层类声明：已提升为模块级
@@ -587,6 +591,15 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             else this.m.i64Const(0n);
             this.m.i32Const(this._strId("@@qzEnv"));
             this.m.call("qz.class_expr_value");
+            if (cnC.computedMeths && cnC.computedMeths.length) {   // 运行期计算属性名方法：创建点把运行期名注册到 clone 自有 methods
+                const tc = this._expEnter();
+                this.m.localSet(tc.v);
+                for (const cm of cnC.computedMeths) {
+                    this.m.localGet(tc.v); this.emitTaggedExpr(cm.expr);
+                    this.m.i32Const(this._strId(cm.synth)); this.m.call("qz.class_add_method_dyn");
+                }
+                this.m.localGet(tc.v); this._expLeave();
+            }
             /* 类表达式静态成员：创建点按**本 clone** 立即初始化（合成 __qz_sei 静态方法，
              * this ≡ clone，写 clone 自有静态桶）→ 多次求值各持一份、动态访问读得到初值。
              * clone 句柄已在栈上；取出作 self，传 4 个 undefined 占位，收返回值丢弃，留 clone。 */

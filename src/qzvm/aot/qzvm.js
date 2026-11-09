@@ -1312,6 +1312,19 @@ function makeQzvm(strings, opts) {
       if (env && env !== 0n && envKey !== undefined) statics.set(newId + "|" + strings[envKey], env);
       return classValueImpl(newId);
     },
+    // 计算属性名方法：创建点把 clone 的 methods 深拷贝后注册「运行期名 → 合成方法」
+    class_add_method_dyn: (classVal, nameVal, synthId) => {
+      const u = BigInt.asUintN(64, classVal), hr = u >> 48n;
+      const obj = hr === CLO_HI ? cloWrap(classVal) : handles[idxOf(classVal)];
+      const cid = obj && obj.__qzClsId;
+      const meta = classMeta && classMeta[cid];
+      if (!meta) return;
+      if (!meta._ownDyn) { meta.methods = Object.assign({}, meta.methods); meta.staticMethods = Object.assign({}, meta.staticMethods); meta._ownDyn = true; }   // per-clone 自有 methods（避免与源类/其它 clone 串味）
+      const synth = strings[synthId], key = String(toJS(nameVal));
+      const map = (meta.methods && meta.methods[synth]) ? meta.methods : meta.staticMethods;
+      const entry = map && map[synth];
+      if (entry) map[key] = entry;
+    },
     instanceof_dyn: (x, rhs) => {                // 动态右值 instanceof：用户类值 → 运行时父链；内建函数值 → 按名回退；否则 loud
       // rhs 可能是闭包值（0x7FFF，`inst instanceof ctor`）——低 32 位是 cell 偏移，不是表索引。
       const ur = BigInt.asUintN(64, rhs), hr = ur >> 48n;

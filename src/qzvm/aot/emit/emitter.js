@@ -1938,6 +1938,7 @@ class Emitter {
             const parent = extClause && extClause.types.length ? extClause.types[0] : null;
             const parentName = parent ? this._className(parent.expression.text) : null;   // 类表达式绑定名/导入别名 → 真实类名（此前取原文 → ctorName 落空）
             const fields = [], methods = [], staticMethods = [], staticFields = [], staticBlocks = [], staticInits = [];
+            const computedMeths = [];   // 运行期计算属性名方法：{ synth, expr, isStatic }（创建点注册到 clone 的 classMeta）
             let ctor = null;
             const isStatic = (mem) => !!mem.modifiers && mem.modifiers.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
             for (const mem of st.members) {
@@ -1971,10 +1972,15 @@ class Emitter {
                 } else if (ts.isMethodDeclaration(mem) && (ts.isIdentifier(mem.name) || ts.isStringLiteral(mem.name) || ts.isNumericLiteral(mem.name))) {
                     (isStatic(mem) ? staticMethods : methods).push({ name: mem.name.text, node: mem });
                 } else if (ts.isMethodDeclaration(mem) && ts.isComputedPropertyName(mem.name)) {
-                    // [Symbol.iterator] / [Symbol.toPrimitive] …：编译为 @@<symbol 名> 方法；物化时挂到真 Symbol 上
-                    const sx = symbolNameOf(mem.name.expression) || (ts.isIdentifier(mem.name.expression) && this._modSymLit && this._modSymLit.get(mem.name.expression.text)) || null;   // Symbol.x 或持有它的模块级常量
-                    if (!sx) throw new Error("[tagged] 类计算属性名方法仅支持 Symbol.<well-known>（如 [Symbol.iterator]）或持有它的模块级常量");
-                    (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem });
+                    // [Symbol.iterator] → @@<sym>；运行期字符串名 → 合成名（创建点按实值注册到 clone 的 classMeta）
+                    const sx = symbolNameOf(mem.name.expression) || (ts.isIdentifier(mem.name.expression) && this._modSymLit && this._modSymLit.get(mem.name.expression.text)) || null;
+                    if (sx) { (isStatic(mem) ? staticMethods : methods).push({ name: "@@" + sx, node: mem }); }
+                    else {
+                        if (this._inModuleLink) throw new Error("[tagged] in-module 档类计算属性名方法（非 Symbol）暂不支持");
+                        const synth = "$c" + computedMeths.length;
+                        (isStatic(mem) ? staticMethods : methods).push({ name: synth, node: mem });
+                        computedMeths.push({ synth, expr: mem.name.expression, isStatic: isStatic(mem) });
+                    }
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && !mem.body) {
                     continue;   // 无 body 的访问器声明（declare/抽象）→ 忽略
                 } else if ((ts.isGetAccessorDeclaration(mem) || ts.isSetAccessorDeclaration(mem)) && ts.isComputedPropertyName(mem.name)) {
@@ -2148,7 +2154,7 @@ class Emitter {
                 }
             }
             const bpName = (parentName && !this.classes.has(parentName) && EMITTER_BUILTIN_CTORS.has(parentName)) ? parentName : null;
-            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });   // hostBacked：extends 内建 + 合成 ctor（允许自有字段；字段存宿主属性）
+            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, computedMeths, ctor });   // hostBacked：extends 内建 + 合成 ctor（允许自有字段；字段存宿主属性）
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；

@@ -118,7 +118,7 @@ export function run() { const m: any = new M(); m.set("a", 1); return m.get2("a"
   { name: "class-expr-computed-method-capture", fn: "run", ts: `
 function mk(name: string, n: number) { return class { [name]() { return n; } }; }
 const C = mk("go", 4);
-export function run() { const c: any = new C(); return c.go(); }`, args: [], unsupported: "类计算属性名方法（非 Symbol.<well-known>）" },
+export function run() { const c: any = new C(); return c.go(); }`, args: [] },
   { name: "closure-in-static-block-loud", fn: "run", ts: `
 function mk(n: number) { return class { static { const f = () => n; } }; }
 const C = mk(3);

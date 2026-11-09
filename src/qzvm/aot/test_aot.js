@@ -565,6 +565,19 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzN.bindClosures(iN.exports, rN.lamMeta); qzN.bindClasses(iN.exports, rN.classMeta);
         check("num 展开缺参=NaN", qzN._toJS(iN.exports.nsm()), NaN);
     }
+    // 类计算属性名方法：运行期名创建点注册到 clone 自有 methods（多 clone 各持）
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_cm.ts"),
+            "function mk(name: string, n: number) { return class { [name](): any { return n; } }; }\n"
+          + "const A = mk(\"go\", 4); const B = mk(\"run\", 9);\n"
+          + "export function cm(): any { return new (A as any)().go() + \":\" + new (B as any)().run(); }\n");
+        const rC = compileTS(path.join(os.tmpdir(), "qz_aot_cm.ts"), path.join(os.tmpdir(), "qz_aot_cm.wasm"), {});
+        const qzC = makeQzvm(rC.strings, { fields: rC.fields });
+        const { instance: iC } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_cm.wasm")), { qz: qzC });
+        qzC.bindMem(iC.exports.memory); if (iC.exports.__bump) qzC.bindBump(iC.exports.__bump);
+        qzC.bindClosures(iC.exports, rC.lamMeta); qzC.bindClasses(iC.exports, rC.classMeta);
+        check("类计算属性名方法(多 clone 各异)", qzC._toJS(iC.exports.cm()), "4:9");
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

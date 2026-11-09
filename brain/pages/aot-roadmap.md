@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T05:23:06"
+updated: "2026-11-10T05:42:07"
 ---
 
 <!-- compiled_truth -->
@@ -403,4 +403,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "嵌套 class 声明现每求值物化为动态 clone（JS 档），补齐 5 个 loud 边界：A) _collectLocals 把函数内 class 声明名并入局部；B) _classOfExpr/_isClassName 对局部/捕获类名返回动态（_isDynClsBinding）；C) class 声明语句发 class_expr_value(clone)+env+sei 静态初始化，存入局部；E) clsExprSupported 纳入 _isNestedDecl、放宽其 lostDecl/静态 loud、块引用并入 capSetC（嵌套类在函数体内执行无工厂 TDZ）；F) _emitNewCall 对被遮蔽类名走 new_dynamic（读局部 clone 值），并在 ctor 用 arguments 时于动态路径写 __args（编译期知实参个数）。C 档（in-module）全部 guard 保持旧行为（提升静态、捕获 loud）。corpus30/43/45 共 5 个 case 转 supported（全 0 diff）。"
   source: "session: aot nested-class dynamic clone"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T05:42:07
+  kind: decision
+  summary: "类计算属性名方法（运行期字符串名）已支持（JS 档）：collectClasses 对非 Symbol 的计算方法名分配合成名（$c<n>）并记录 {synth, expr}；ClassExpression/class 声明创建点在 clone 后发 qz.class_add_method_dyn(cloneVal, 运行期名, 合成名strId) —— host 深拷贝 meta.methods/staticMethods（_ownDyn）后注册 name→synth 条目，多 clone 各持不串味。C 档（in-module）保持 loud（collectClasses 内 throw）。corpus44 class-expr-computed-method-capture 转 supported（78/78,0 diff）。仍 loud：factory/closure static-block（TDZ 耦合）、fn-args-host-direct（embedder ABI）。"
+  source: "session: aot computed method name"
   affects: [aot-roadmap]

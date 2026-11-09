@@ -104,6 +104,7 @@ const QZ = {
   instanceof_op: { params: ["i64", "i32"], results: ["i64"] },
   class_value: { params: ["i32"], results: ["i64"] },
   class_expr_value: { params: ["i32", "i64", "i32"], results: ["i64"] },   // 类表达式作值：克隆 clsId + 该类专属 env（0=无捕获）+ "@@qzEnv" 键
+  class_add_method_dyn: { params: ["i64", "i64", "i32"], results: [] },   // (类值, 运行期名, 合成名 strId) → clone 自有 methods 注册 name→synth 方法（计算属性名方法）
   class_env_get: { params: ["i64", "i32"], results: ["i64"] },   // (self tagged, "@@qzEnv" strId) → 该类 env 索引；按实例**运行时 clsId** 查，克隆类各持一份
   class_env_get_static: { params: ["i64", "i32"], results: ["i64"] },   // 同上，但 self 是**类值**（静态方法）：宿主档函数句柄 / in-module 0x7FFE|clsId
   class_env_set: { params: ["i32", "i32", "i64"], results: [] },   // (clsId, "@@qzEnv" strId, env) → statics[clsId|envKey]=env（与 class_env_get 键一致）
