@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, builtin, quickjs]
 created: "2026-11-04T10:27:39"
-updated: "2026-11-09T18:34:39"
+updated: "2026-11-09T19:00:15"
 ---
 
 <!-- compiled_truth -->
@@ -95,4 +95,10 @@ updated: "2026-11-09T18:34:39"
   kind: evidence
   summary: "加固发现并修复：内建子类带静态字段（class S extends Map { static n = 0 }）编译崩溃——静态字段继承链遍历 for (x=cn; x; x=classes.get(x).parent) 把内建父类（Map）也当用户类，classes.get('Map')=undefined → 读 .parent 崩（tagged.js:1024）。修：链遍历条件加 this.classes.has(x)（内建父处停，静态字段只沿用户类链查）。回归：test_aot「内建子类.静态字段+for-of 条目」=2:1:1、e2e_bsub smTest=2。全 46 corpus 0 diff（静态字段继承未回归）。"
   source: "src/qzvm/aot/emit/tagged.js:1024, test_aot.js, test/m6b-poc/e2e_bsub.mjs"
+  affects: [aot-host-builtin-carrier]
+
+- time: 2026-11-09T19:00:15
+  kind: evidence
+  summary: "加固发现并修复：class A extends Array { twice(){ return this.map(x=>x*2) } } 结果 length=0/join 空（引擎 Array.prototype.map 的 species new A(len)）——classObjImpl 的 ctor 返回 tagged BigInt，JS new 视原始值丢弃 → 得到带 A.prototype 的 plain object 而非真数组。修：ctor 对各 buildInstance 返回的宿主句柄（HOST_HI 0x7FFD）返回 handles[idx] 真对象；非宿主（0x7FFE POJO 等）原样返 BigInt。修后 map 结果为可用真数组（length/索引/join/instanceof Array 全对）。残留（更深，已登记）：ret 对数组一律扁平成 0x7FFB → map/filter/slice 等返回的子类实例丢 A 身份（instanceof A false）。验证：test_aot「内建子类.Array map（species 结果可用）」=2:2:4:true:2,4；全 46 corpus 0 diff（ctor 改动无回归）。"
+  source: src/qzvm/aot/qzvm.js classObjImpl.ctor
   affects: [aot-host-builtin-carrier]

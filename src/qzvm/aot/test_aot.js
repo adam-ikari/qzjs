@@ -532,7 +532,9 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export class OS extends Map { set(k: any, v: any): any { return super.set(k, (v as number) * 10); } }\n"
       + "export function useOS(): any { const o = new OS(); o.set(\"k\", 3); return o.get(\"k\") + \":\" + o.size; }\n"
       + "export class SM extends Map { static n = 0; bump(): number { (SM as any).n++; return (SM as any).n; } total(): number { let s = 0; for (const [, v] of this as any) s += v; return s; } }\n"
-      + "export function useSM(): any { const a = new SM(); (a as any).set(\"x\", 1); a.bump(); a.bump(); return (SM as any).n + \":\" + a.size + \":\" + a.total(); }\n");
+      + "export function useSM(): any { const a = new SM(); (a as any).set(\"x\", 1); a.bump(); a.bump(); return (SM as any).n + \":\" + a.size + \":\" + a.total(); }\n"
+      + "export class AM extends Array { twice(): any { return (this as any).map((x: number) => x * 2); } }\n"
+      + "export function useAM(): any { const a = new AM(); a.push(1); a.push(2); const t = a.twice(); return t.length + \":\" + t[0] + \":\" + t[1] + \":\" + (t instanceof Array) + \":\" + (t as any).join(\",\"); }\n");
     const rBs = compileTS(path.join(os.tmpdir(), "qz_aot_bsub.ts"), path.join(os.tmpdir(), "qz_aot_bsub.wasm"), {});
     const qzBs = makeQzvm(rBs.strings, { fields: rBs.fields });
     const { instance: instBs } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_bsub.wasm")), { qz: qzBs });
@@ -548,6 +550,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("内建子类.super.set/get（内建父方法）", callBs("useMS"), "5:1");
     check("内建子类.super.set（覆盖后越过覆写）", callBs("useOS"), "30:1");
     check("内建子类.静态字段+for-of 条目", callBs("useSM"), "2:1:1");   // 静态字段链遍历须在内建父类处停（此前 classes.get("Map").parent 崩）
+    check("内建子类.Array map（species 结果可用）", callBs("useAM"), "2:2:4:true:2,4");   // classObjImpl.ctor 对宿主句柄返回真对象，引擎 species new A(len) 才得真数组
 }
 
 async function runClasses() {

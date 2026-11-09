@@ -688,7 +688,11 @@ function makeQzvm(strings, opts) {
     if (!meta) return null;
     const bp = (meta.builtinParent && typeof globalThis[meta.builtinParent] === "function") ? globalThis[meta.builtinParent] : null;   // 内建父类（Error 族/Array/Map…）：原型链须接真内建原型（err.toString → "Name: msg"）
     const pc = baseOv !== undefined ? baseOv : (meta.parent != null ? classObjImpl(meta.parent) : null);
-    const ctor = function (...as3) { return buildInstance(clsId, as3); };
+    const ctor = function (...as3) {   // 宿主承载类：返回真实 JS 对象（引擎 species 如 Array.prototype.map 的 new A(len) 需要对象；返回 tagged BigInt 会被 new 当原始值丢弃 → 造出 plain object 而非真数组）
+      const h = buildInstance(clsId, as3);
+      const u = BigInt.asUintN(64, h);
+      return (u >> 48n) === HOST_HI ? handles[Number(u & MASK32)] : h;
+    };
     Object.defineProperty(ctor, "__qzClsId", { value: clsId, configurable: true });
     Object.setPrototypeOf(ctor, pc || bp || Function.prototype);
     // 静态表按**编译期类名**（meta.name）为键；JS 可见 `.name` 可能让位给名推断的显示名
