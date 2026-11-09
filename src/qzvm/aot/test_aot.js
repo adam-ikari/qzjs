@@ -519,7 +519,9 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export class S extends Set { tag(): string { return \"S\"; } }\n"
       + "export function useS(): any { const s = new S(); s.add(1); s.add(2); return s.size + \":\" + s.has(2) + \":\" + (s instanceof S) + \":\" + (s instanceof Set) + \":\" + s.tag(); }\n"
       + "export class D extends Date { label(): string { return \"D:\" + (this as any).getFullYear(); } }\n"
-      + "export function useD(): any { const d = new D(2026, 0, 9); return d.getFullYear() + \":\" + (d instanceof D) + \":\" + (d instanceof Date) + \":\" + d.label(); }\n");
+      + "export function useD(): any { const d = new D(2026, 0, 9); return d.getFullYear() + \":\" + (d instanceof D) + \":\" + (d instanceof Date) + \":\" + d.label(); }\n"
+      + "export class A extends Array { tag(): string { return \"A\"; } first(): any { return this[0]; } }\n"
+      + "export function useA(): any { const a = new A(); a.push(10); a.push(20); let s = 0; for (const v of a) s = s + (v as number); return a.length + \":\" + a[0] + \":\" + a.first() + \":\" + s + \":\" + (a instanceof A) + \":\" + (a instanceof Array) + \":\" + a.tag(); }\n");
     const rBs = compileTS(path.join(os.tmpdir(), "qz_aot_bsub.ts"), path.join(os.tmpdir(), "qz_aot_bsub.wasm"), {});
     const qzBs = makeQzvm(rBs.strings, { fields: rBs.fields });
     const { instance: instBs } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_bsub.wasm")), { qz: qzBs });
@@ -529,6 +531,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("内建子类.Map 继承+自有+instanceof", callBs("useM"), "1:2:true:true:true:M");
     check("内建子类.Set 继承+自有+instanceof", callBs("useS"), "2:true:true:true:S");
     check("内建子类.Date 继承+自有+instanceof", callBs("useD"), "2026:true:true:D:2026");
+    check("内建子类.Array 继承+自有+for-of+instanceof", callBs("useA"), "2:10:10:30:true:true:A");   // Array 子类保留真数组 + 类 prototype（tagHandle 0x7FFD，不扁平为 0x7FFB）
 }
 
 async function runClasses() {

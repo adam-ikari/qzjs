@@ -2107,7 +2107,7 @@ class Emitter {
                 }
             }
             const bpName = (parentName && !this.classes.has(parentName) && EMITTER_BUILTIN_CTORS.has(parentName)) ? parentName : null;
-            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && bpName !== "Array" && fields.length === 0 && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && fields.length === 0 && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；

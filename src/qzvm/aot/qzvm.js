@@ -762,7 +762,7 @@ function makeQzvm(strings, opts) {
       const nt = classObjImpl(clsId);
       if (bp && nt) {
         const as4 = (args || []).slice(0, 4);
-        try { const r = Reflect.construct(bp, as4, nt); return typeof r === "bigint" ? r : ret(r); }
+        try { const r = Reflect.construct(bp, as4, nt); return typeof r === "bigint" ? r : Array.isArray(r) ? tagHandle(r) : ret(r); }
         catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }
       }
     }
@@ -1244,7 +1244,7 @@ function makeQzvm(strings, opts) {
       let flat = [a0, a1, a2, a3];
       if (ovf !== undefined && ovf !== TAG) flat = flat.concat((toJS(ovf) || []).slice(1).map(bitsOf));
       const list = (n >= 0 ? flat.slice(0, n) : flat.filter(x => BigInt.asUintN(64, x) !== TAG)).map(x => toJS(x));
-      try { const r = Reflect.construct(fn, list, nt); return typeof r === "bigint" ? r : ret(r); }
+      try { const r = Reflect.construct(fn, list, nt); return typeof r === "bigint" ? r : Array.isArray(r) ? tagHandle(r) : ret(r); }   // 数组子类：保留真 Array + 类 prototype（tagHandle 0x7FFD），不 ret（会扁平为 0x7FFB 丢 proto 链）
       catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }
     },
     class_value_dyn: (clsId, baseObj) => {          // 动态父类值：clsId + 父类对象 → 类对象（记录运行时父链）
