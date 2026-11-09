@@ -2198,6 +2198,15 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
         }
         M.call("qz.new_builtin_sub");
         this._emitErrCheck();       // 构造失败（new Map(1)：非可迭代）/ 无 [[Call]] → 可捕获 TypeError
+        if (c.fields && c.fields.length) {   // 自有字段：基类已由 new_builtin_sub 构造；ctor 只补本类字段默认值（写宿主属性，非 wasm 内存）
+            const th = this._expEnter();
+            M.localSet(th.v);                          // 宿主实例句柄
+            M.localGet(th.v);                          // self（合成 ctor 字段默认值不用实参）
+            for (let i = 0; i < 4; i++) this._emitUndefined();
+            M.call(ctorName(cname));
+            M.localGet(th.v);                          // 结果 = 实例句柄
+            this._expLeave();
+        }
         return;
     }
     const te = this._expEnter();                            // 实例 off / ctor 实参用可重入槽（嵌套 new 不覆盖）
@@ -2418,6 +2427,7 @@ Emitter.prototype._dynParentExpr = function (c) {          // 动态父：extend
 };
 Emitter.prototype._emitSuperCallForward = function (c) {
     const M = this.m;
+    if (c.hostBacked) { this._emitFieldDefaults(c); return; }   // 宿主承载：基类已由 qz.new_builtin_sub 构造（Reflect.construct 第三参 newTarget），ctor 只补本类字段默认值（对象属性）
     if (this._dynParentExpr(c)) {                           // 动态父（mixin）：宿主按运行时父链转发 ctor
         M.i32Const(c.id);
         for (let i = 0; i <= 4; i++) M.localGet(i);

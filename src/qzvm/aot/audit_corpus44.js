@@ -111,10 +111,10 @@ export function run() { o.x = 4; return o.x; }`, args: [] },
 export function run() { const o: any = { a: 2 }; const { a, b = a * 3 } = o; return a + b; }`, args: [] },
   { name: "builtin-subclass-array", fn: "run", ts: `
 class L extends Array<number> { sum() { let s = 0; for (let i = 0; i < this.length; i++) s += this[i]; return s; } }
-export function run() { const l: any = new L(); l.push(1); l.push(2); return l.sum() + ":" + l.length + ":" + (l instanceof L); }`, args: [], unsupported: "内建子类 Array 的元素/方法访问（实例不是真数组，push/length 走不通）" },
+export function run() { const l: any = new L(); l.push(1); l.push(2); return l.sum() + ":" + l.length + ":" + (l instanceof L); }`, args: [] },
   { name: "builtin-subclass-map", fn: "run", ts: `
 class M extends Map<string, number> { get2(k: string) { return this.get(k); } }
-export function run() { const m: any = new M(); m.set("a", 1); return m.get2("a") + ":" + (m instanceof Map); }`, args: [], unsupported: "内建子类 Map 的内建方法调用" },
+export function run() { const m: any = new M(); m.set("a", 1); return m.get2("a") + ":" + (m instanceof Map); }`, args: [] },
   { name: "class-expr-computed-method-capture", fn: "run", ts: `
 function mk(name: string, n: number) { return class { [name]() { return n; } }; }
 const C = mk("go", 4);

@@ -757,13 +757,22 @@ function makeQzvm(strings, opts) {
     dv.setInt32(off + 4, size, true);   // [4]=size（与 wasm 侧 _emitNewCall 一致；字段越界检查 + 内联读写都依赖此槽）
     for (let k = 8; k < size; k += 8) dv.setBigInt64(off + k, TAG, true);   // 字段槽 = undefined
     const self = (0x7ffen << 48n) | BigInt(off);
-    if (meta.hostBacked) {                       // 用户类 extends 内建（合成 ctor + 无自有字段）：宿主内建实例 + 类 prototype
+    if (meta.hostBacked) {                       // 用户类 extends 内建（合成 ctor）：宿主内建实例 + 类 prototype
       const bp = (meta.builtinParent && typeof globalThis[meta.builtinParent] === "function") ? globalThis[meta.builtinParent] : null;
       const nt = classObjImpl(clsId);
       if (bp && nt) {
         const as4 = (args || []).slice(0, 4);
-        try { const r = Reflect.construct(bp, as4, nt); return typeof r === "bigint" ? r : Array.isArray(r) ? tagHandle(r) : ret(r); }
-        catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }
+        try {
+          const r = Reflect.construct(bp, as4, nt);
+          const h = typeof r === "bigint" ? r : Array.isArray(r) ? tagHandle(r) : ret(r);
+          const fnC = exportsRef && meta.ctor && exportsRef[meta.ctor];
+          if (typeof fnC === "function" && h !== TAG) {   // 跑本类字段默认值（写宿主属性；基类已由 Reflect.construct 构造）
+            const a = as4.map(x => bitsOf(x));
+            while (a.length < 4) a.push(TAG);
+            fnC(h, a[0], a[1], a[2], a[3]);
+          }
+          return h;
+        } catch (e) { if (!(e instanceof Error)) throw e; throwValue(e); return TAG; }
       }
     }
     const fnC = exportsRef && meta.ctor && exportsRef[meta.ctor];
@@ -1397,8 +1406,13 @@ function makeQzvm(strings, opts) {
     // 读实例内存首 4 字节 clsId，查 statics[clsId|envKey]（与 C 侧 qz_clsmeta_* 一致）。
     class_env_get: (self, key) => {
       const u = BigInt.asUintN(64, self), hi = u >> 48n, off = Number(u & MASK32);
-      if (hi !== INST_HI || !mem || !off) return 0n;
-      const clsId = new DataView(mem.buffer).getInt32(off, true);
+      let clsId;
+      if (hi === INST_HI) { if (!mem || !off) return 0n; clsId = new DataView(mem.buffer).getInt32(off, true); }
+      else if (hi === HOST_HI) {   // 宿主承载实例（extends 内建）：构造器持 __qzClsId，类 env 挂在 clsId|key
+        const o = handles[off]; const f = o && o.constructor;
+        clsId = f && f.__qzClsId;
+      } else return 0n;
+      if (clsId === undefined || clsId === null) return 0n;
       const v = statics.get(String(clsId) + "|" + strings[key]);
       return v === undefined ? 0n : v;
     },

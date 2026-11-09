@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-09T14:00:43"
+updated: "2026-11-09T14:44:38"
 ---
 
 <!-- compiled_truth -->
@@ -313,4 +313,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "语义欠账清一项（JS 档）：Array 子类承载结案——去 hostBacked 的 Array 排除；new_builtin_sub/buildInstance 数组结果用 tagHandle（0x7FFD）保真 Array+类 prototype，不 ret（避免 arrWriteback 扁平 0x7FFB 丢 identity）。instanceof 双路、继承方法原生、自有方法走 wasm、索引/length/for-of 全通。test_aot 内建子类.Array 钉住。剩余欠账：① C 档内建子类（clsmeta 定长二进制不传 hostBacked，需序列化扩展 + new_builtin_sub/method_call 宿主派发/buildInstance 平行；Array 子类现也依赖 new_builtin_sub，C 档未实现）② 内建子类的自有实例字段/自定义构造器（仍 bump 近似）③ C 档闭包 arguments。"
   source: "src/qzvm/aot/{emitter.js,qzvm.js,test_aot.js}"
+  affects: [aot-host-builtin-carrier]
+
+- time: 2026-11-09T14:44:38
+  kind: decision
+  summary: "语义欠账清一项（JS 档）：内建子类自有实例字段结案——hostBacked 放宽为 !!bpName && !ctor；带字段时基类由 Reflect.construct(new_builtin_sub) 构造、合成 ctor 只补本类字段默认值（hostBacked 跳过 super；字段默认值走 qz.object_set 写宿主属性，不直写 wasm 内存）；this.x 读写运行期派发；class_env_get 补 HOST_HI 使字段初值捕获外层变量可用。test_aot 六项钉住；46 corpus 全 0 diff；glue 5/5。corpus44 两处陈旧 unsupported 标记清理。剩余欠账：① C 档内建子类（含带字段；clsmeta 定长二进制不传 hostBacked，需序列化扩展 + new_builtin_sub/method_call 宿主派发/buildInstance 平行；libqzvm.wasm 可增量构建，m6b e2e 用 node WASI 跑）② 内建子类自定义 ctor（含计算 super 参数，仍需 bump 近似/loud）③ C 档闭包 arguments。"
+  source: "src/qzvm/aot/{emit/emitter.js,emit/tagged.js,qzvm.js,test_aot.js,audit_corpus44.js}"
   affects: [aot-host-builtin-carrier]

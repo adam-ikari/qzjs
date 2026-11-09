@@ -2107,7 +2107,7 @@ class Emitter {
                 }
             }
             const bpName = (parentName && !this.classes.has(parentName) && EMITTER_BUILTIN_CTORS.has(parentName)) ? parentName : null;
-            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && fields.length === 0 && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });
+            this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, ctor });   // hostBacked：extends 内建 + 合成 ctor（允许自有字段；字段存宿主属性）
             this._classList.push(cname);
         }
         // 预登记所有类字段到 fieldMap（发射阶段任意时刻 _instSize 都要覆盖全部类字段）；
@@ -2220,6 +2220,15 @@ class Emitter {
     // 若 ctor 首句为 `super(...)`，则字段默认值改在 super 调用点写（子类字段不得覆写父类构造设置的字段）。
     _emitFieldDefaults(c) {
         const M = this.m;
+        if (c.hostBacked) {   // 宿主承载实例恒为 0x7FFD：字段写入 → 宿主属性（勿直 i64Store 到句柄索引，会越界写内存）
+            for (const f of c.fields) {
+                M.localGet(0); M.i32Const(this._strId(f.name));
+                if (f.init) this.emitTaggedExpr(f.init);
+                else this._emitUndefined();
+                M.call("qz.object_set");
+            }
+            return;
+        }
         if (this.usesKeyOrder && c.fields.length) {   // 实例字段插入序 = 类字段声明序（派生类在 super 之后登记）
             M.localGet(0); M.i32Const(this._strId(c.fields.map(f2 => f2.name).join("\u0000"))); M.call("qz.field_order_lit");
         }

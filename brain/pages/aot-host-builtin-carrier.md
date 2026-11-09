@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, builtin, quickjs]
 created: "2026-11-04T10:27:39"
-updated: "2026-11-09T14:00:38"
+updated: "2026-11-09T14:43:47"
 ---
 
 <!-- compiled_truth -->
@@ -65,4 +65,10 @@ updated: "2026-11-09T14:00:38"
   kind: decision
   summary: "Array 子类承载（JS 档）：去除 hostBacked 的 bpName!=='Array' 排除 → class extends Array（合成 ctor + 无自有字段）走宿主承载。关键：new_builtin_sub/buildInstance 对 Reflect.construct 结果为数组时用 tagHandle（0x7FFD 宿主句柄）而非 ret（ret 的 Array.isArray 分支会 arrWriteback 扁平为 0x7FFB 丢类 prototype）。宿主句柄保留真 Array + A.prototype → instanceof A/Array 双路（0x7FFD 走 o0 instanceof cP）、继承方法原生（push/map…经 isHostH→真数组方法）、自有方法走 wasm（classMeta）、索引/length/for-of 经 get_index/prop_get/宿主迭代。既有 wasm 数组（0x7FFB）不受影响；普通 new Array() 走 new_builtin 仍 0x7FFB。test_aot 加内建子类.Array 四项（继承+自有+for-of+instanceof）。"
   source: "emitter.js collectClasses(hostBacked) / qzvm.js new_builtin_sub+buildInstance"
+  affects: [aot-host-builtin-carrier, aot-roadmap]
+
+- time: 2026-11-09T14:43:47
+  kind: decision
+  summary: "内建子类承载扩展（JS 档）：允许自有实例字段（hostBacked 放宽为 !!bpName && !ctor，仍要求合成 ctor）。带字段时：① new_builtin_sub/Reflect.construct 完成基类构造（真 Map/Set/Date/Array/Error + 类 prototype）② 其后调用合成 ctor 只补本类字段默认值——_emitSuperCallForward 对 hostBacked 跳过 super（基类已造）、直接 _emitFieldDefaults；_emitFieldDefaults 对 hostBacked 走 qz.object_set（字段存宿主属性，绝不 i64Store 到 0x7FFD 句柄索引越界写内存）③ 方法内 this.x 读写经 _emitPropReadFromLocal/_emitStorePropValue 运行期派发（0x7FFD→prop_get/object_set）天然正确 ④ class_env_get 补 HOST_HI（经实例 constructor.__qzClsId 取类 env），字段初值捕获外层变量可用。buildInstance 同步（动态路径 Reflect.construct 后调 ctor 补字段）。验证：test_aot 内建子类.* 六项（Map/Array 带字段 this 引用+写+捕获）；全 46 corpus 差分审计 0 diff；glue 5/5。同时清理 corpus44 两处陈旧 unsupported 标记（builtin-subclass-array/map 已实现）。"
+  source: "emitter.js hostBacked+_emitFieldDefaults / tagged.js _emitSuperCallForward+_emitNewCall / qzvm.js buildInstance+class_env_get"
   affects: [aot-host-builtin-carrier, aot-roadmap]
