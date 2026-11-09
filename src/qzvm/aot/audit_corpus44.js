@@ -126,7 +126,7 @@ export function run() { new C(); return 1; }`, args: [], unsupported: "静态块
   { name: "super-method-as-value", fn: "run", ts: `
 class A { m() { return 1; } }
 class B extends A { f() { const g = super.m; return typeof g; } }
-export function run() { const b: any = new B(); return b.f(); }`, args: [], unsupported: "super.<method> 作值引用（父方法无法物化为可调用值）" },
+export function run() { const b: any = new B(); return b.f(); }`, args: [] },
   { name: "dynamic-parent-super-read", fn: "run", ts: `
 function mk(B: any) { return class extends B { m() { return super.v; } }; }
 class A { v: number = 7; }

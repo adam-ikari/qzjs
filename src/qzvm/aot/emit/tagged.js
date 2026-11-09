@@ -1073,7 +1073,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             const cl = this.classes.get(mc);
             if (!cl) break;
             if ((cl.methods || []).some(m => m.name === e.name.text && !m.accessor)) {
-                throw new Error("[tagged] super." + e.name.text + " 作值引用父类方法暂不支持；请改为 super." + e.name.text + "(...) 调用");
+                if (this._inModuleLink) throw new Error("[tagged] in-module 档 super." + e.name.text + " 作值引用父类方法暂不支持；请改为 super." + e.name.text + "(...) 调用");
+                this.m.i32Const(cl.id); this.m.i32Const(this._strId(e.name.text)); this.m.call("qz.method_value");   // 父方法物化为可调用值（未绑定 this）
+                return;
             }
         }
         this._emitUndefined();

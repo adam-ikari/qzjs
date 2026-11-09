@@ -2553,6 +2553,22 @@ function makeQzvm(strings, opts) {
         syncExtras(); extras.set(off + "|" + name, value);
       }
     },
+    // super.m 作值：返回该类实例方法的可调用值（未绑定 this；调用时按 call-time this 分派）
+    method_value: (ownerClsId, mid) => {
+      const name = strings[mid];
+      const c = classMeta && classMeta[ownerClsId];
+      const m = c && own(c.methods, name);
+      if (!m) { throwValue(new TypeError("super." + name + " 不是函数")); return TAG; }
+      const en = m.name, usesArgs = !!m.usesArgs;
+      return tagHandle(function (...args) {
+        const selfH = this === undefined ? TAG : this === null ? (TAG | 1n) : bitsOf(this);
+        const a = args.map(bitsOf);
+        const a4 = a.slice(0, 4); while (a4.length < 4) a4.push(TAG);
+        const ovf1 = a.length > 4 ? arrWriteback(a.slice(3).map(toJS)) : TAG;
+        if (usesArgs && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arrWriteback(args));   // 被调方法用 arguments → 写全量实参
+        return toJS(exportsRef[en](selfH, ...a4, ovf1));
+      });
+    },
     builtin_member: (id) => {
       const name = strings[id];
       if (Object.prototype.hasOwnProperty.call(BUILTIN_CONSTS, name)) return ret(BUILTIN_CONSTS[name]);

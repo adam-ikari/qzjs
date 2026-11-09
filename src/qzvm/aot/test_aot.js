@@ -537,6 +537,19 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzH.bindClosures(iH.exports, rH.lamMeta); qzH.bindClasses(iH.exports, rH.classMeta);
         check("工厂类静态字段捕获局部(每 clone 独立)", qzH._toJS(iH.exports.fcap()), "5:10:9");
     }
+    // super.m 作值：父方法物化为可调用值（未绑定 this；typeof 'function'）
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_superm.ts"),
+            "class A { m(): number { return 1; } }\n"
+          + "class B extends A { f(): any { const g: any = super.m; return typeof g + \":\" + g(); } }\n"
+          + "export function smv(): any { return new B().f(); }\n");
+        const rS = compileTS(path.join(os.tmpdir(), "qz_aot_superm.ts"), path.join(os.tmpdir(), "qz_aot_superm.wasm"), {});
+        const qzS = makeQzvm(rS.strings, { fields: rS.fields });
+        const { instance: iS } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_superm.wasm")), { qz: qzS });
+        qzS.bindMem(iS.exports.memory); if (iS.exports.__bump) qzS.bindBump(iS.exports.__bump);
+        qzS.bindClosures(iS.exports, rS.lamMeta); qzS.bindClasses(iS.exports, rS.classMeta);
+        check("super.m 作值(typeof function + 调用)", qzS._toJS(iS.exports.smv()), "function:1");
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

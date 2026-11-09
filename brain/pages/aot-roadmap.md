@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T04:15:23"
+updated: "2026-11-10T04:25:23"
 ---
 
 <!-- compiled_truth -->
@@ -385,4 +385,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "类表达式静态字段初值捕获工厂局部已支持（JS 档）：把 clsExprSupported 判定提前到 lostStatic 校验前；类表达式静态**字段**初值的引用并入 capSetC（sei 在创建点执行，env 可见 → 每 clone 各持初值）。静态**块**引用拆到独立 staticBlockRefsC，类表达式仍按块引用 loud（块执行点/TDZ 不可控，如 static { C2.x = n } 引用待赋值 const，AOT 侧不复制 TDZ）。corpus43 factory-static-init-captures-outer 转 supported；factory-static-block-captures-outer 保持 unsupported（loud）。20/20,0 diff。"
   source: "session: aot factory static field capture"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T04:25:23
+  kind: decision
+  summary: "super.<method> 作值已支持（JS 档）：新增 qz.method_value(ownerClsId, mid) → 该类实例方法的可调用值（未绑定 this；调用时按 call-time this 分派，支持 >4 实参/ 与 usesArgs→写 __args）。emitter 的 super.prop 读分支在父链找到非访问器方法时不再 throw，改为 emit method_value(cl.id, strId)；C 档保持 loud（in-module 无此原语）。corpus44 super-method-as-value 转 supported（78/78,0 diff；typeof g='function'，g() 调通）。"
+  source: "session: aot super.m as value"
   affects: [aot-roadmap]
