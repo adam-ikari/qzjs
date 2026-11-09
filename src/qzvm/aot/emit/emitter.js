@@ -2308,7 +2308,7 @@ class Emitter {
             .concat(realParams.length > 4 ? ["$ovf"] : []);            // 前 4 槽 + 可选 $ovf（实参 4.. 数组）
         this._inStaticMethod = false;                      // 须在 _mEnter 前复位：实例 env 取法依赖此标志
         this._mEnter(methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name), cname, params, mth.node.body, isVoid, mth.node.parameters,
-            undefined, !mth.accessor && this._methUsesArgs(mth.node));
+            undefined, this._methUsesArgs(mth.node) && !(mth.accessor && this._inModuleLink));   // 访问器 arguments 仅 JS 档（C 档 getter/setter 宿主派发写不了 __args → 保持 loud）
         this._emitOvfParamUnpack(mth.node.parameters, params);   // >4 形参：从 $ovf 数组解包到各自 local
         this._emitFnDeclClosures(mth.node.body);
         this.emitTaggedBlock(mth.node.body);

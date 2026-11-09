@@ -1489,7 +1489,7 @@ function makeQzvm(strings, opts) {
         let c = classMeta && classMeta[clsId];
         while (c) {
           const g = own(c.getters, name);
-          if (g) return exportsRef[g.name](recv, TAG, TAG, TAG, TAG);
+          if (g) { if (g.usesArgs && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arrWriteback([])); return exportsRef[g.name](recv, TAG, TAG, TAG, TAG); }   // getter 恒 0 实参 → arguments=[]
           c = chainNext(c);
         }
         const e = fieldEntries.find(([n]) => n === name);
@@ -1628,7 +1628,7 @@ function makeQzvm(strings, opts) {
         let c = classMeta && classMeta[clsId];
         while (c) {
           const st = own(c.setters, name);
-          if (st) { exportsRef[st.name](recv, v, v, v, v); return; }
+          if (st) { if (st.usesArgs && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arrWriteback([toJS(v)])); exportsRef[st.name](recv, v, v, v, v); return; }   // setter 恒 1 实参 → arguments=[v]
           c = c.parent != null ? classMeta[c.parent] : null;
         }
         if (protGuard(off, name)) return;
@@ -2543,7 +2543,7 @@ function makeQzvm(strings, opts) {
       let c = chainNext(home);
       while (c) {
         const st = own(c.setters, name);
-        if (st) { const fn = exportsRef && exportsRef[st.name]; if (typeof fn !== "function") throw new Error("super_prop_set_dyn: setter 导出缺失 " + st.name); fn(recv, value, value, value, value); return; }   // 父原型 setter
+        if (st) { const fn = exportsRef && exportsRef[st.name]; if (typeof fn !== "function") throw new Error("super_prop_set_dyn: setter 导出缺失 " + st.name); if (st.usesArgs && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arrWriteback([toJS(value)])); fn(recv, value, value, value, value); return; }   // 父原型 setter
         c = chainNext(c);
       }
       // 无 setter → JS [[Set]] 数据语义：在接收者实例上建/写自有字段（与 prop_set INST_HI 一致）

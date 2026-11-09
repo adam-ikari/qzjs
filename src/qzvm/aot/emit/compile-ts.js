@@ -1213,8 +1213,8 @@ function compileTS(input, outWasm, opts = {}) {
             const en = methName(cname, mth.accessor === "set" ? mth.name + "$set" : mth.name);
             const slot = mthToSlot(en);
             const nameStrId = em._strId(mth.name);
-            if (mth.accessor === "set") setters[mth.name] = { slot, nameStrId, name: en, n: mth.node.parameters.length };
-            else if (mth.accessor === "get") getters[mth.name] = { slot, nameStrId, name: en, n: 0 };
+            if (mth.accessor === "set") setters[mth.name] = { slot, nameStrId, name: en, n: mth.node.parameters.length, usesArgs: em._methUsesArgs(mth.node) };
+            else if (mth.accessor === "get") getters[mth.name] = { slot, nameStrId, name: en, n: 0, usesArgs: em._methUsesArgs(mth.node) };
             else methods[mth.name] = { slot, nameStrId, name: en, n: mth.node.parameters.length,
                                        rest: !!(mth.node.parameters.length && mth.node.parameters[mth.node.parameters.length - 1].dotDotDotToken),
                                        usesArgs: em._methUsesArgs(mth.node) };

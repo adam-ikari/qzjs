@@ -204,7 +204,7 @@ class C { k: number; constructor(a: number) { this.k = arguments.length; } }
 export function run() { return new C(1).k; }`, args: [] },
   { name: "class-args-getter", fn: "run", ts: `
 class C { get p() { return arguments.length; } }
-export function run() { const c = new C(); return (c as any).p; }`, args: [], unsupported: "访问器内的 arguments（无 provider）" },
+export function run() { const c = new C(); return (c as any).p; }`, args: [] },
   { name: "static-getter-factory-capture-alias", fn: "run", ts: `
 function mk(n: number) { const K = class { static get g() { return n; } }; return K; }
 const C = mk(9);

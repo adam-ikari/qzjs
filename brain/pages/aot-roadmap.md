@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T03:48:39"
+updated: "2026-11-10T03:59:57"
 ---
 
 <!-- compiled_truth -->
@@ -373,4 +373,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "展开实参调用下类方法 arguments 已支持（JS 档）：method_spread 宿主调 method_call 前写 __args=arr（arr 即全量实参数组句柄；非 arguments 方法不读，无副作用）。emitter 展开调用点的 _assertNoArgsProviderTarget 降为仅 C 档（_inModuleLink）——C 档 method_spread 宿主写不了 __args，保持编译期拒绝。corpus44 class-args-spread-call 转 supported（78/78,0 diff）。仍 loud：getter/setter 的 arguments。"
   source: "session: aot spread arguments"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T03:59:57
+  kind: decision
+  summary: "getter/setter 内 arguments 已支持（JS 档）：_emitMethodBody accessor 在 _methUsesArgs 时按 needsArgs 编译（仅 JS 档，!mth.accessor||!_inModuleLink）；classMeta getter/setter 项加 usesArgs；prop_get getter 派发写 __args=arrWriteback([])（getter 恒 0 实参）、prop_set/super_prop_set_dyn setter 派发写 __args=[v]（setter 恒 1 实参）。C 档访问器宿主派发写不了 __args → 保持 loud（guard 保留）。至此 corpus44 的 class-args-* 全族（dyn-dispatch/extracted/spread/void/getter/ctor/rest/many）均 supported。"
+  source: "session: aot getter/setter arguments"
   affects: [aot-roadmap]
