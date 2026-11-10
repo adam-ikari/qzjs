@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T11:11:44"
+updated: "2026-11-10T11:26:31"
 ---
 
 <!-- compiled_truth -->
@@ -469,4 +469,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "C 档（in-module）实例方法作值改为 loud：此前 const g = o.m 静默返回 undefined（JS 是函数值），且后续调用得 0。根因——实例为**所有全局字段**分配槽（emitter _instSize 按全局 fieldMap），方法名也有一槽（恒未赋值 undefined），C 宿主 prop_get 0x7FFE 字段分支读到该槽（界内）即返回 undefined，永不到方法判断。修：界内字段槽若为 undefined 哨兵（0x7FF9<<48）且该名在 classMeta 方法链 → qz_set_throw（C 侧无法把 wasm 蹦床物化成可调用闭包）；真实字段/普通未赋值字段原样返回。实测 typeof o.m / const g=o.m;g(...) 现 loud，o.v 字段、o.m(3,4) 正常调用、o.zzz 普通属性仍正确。e2e 全 PASS（无负载依赖提取方法）、全批 0 diff、glue 5/5。JS 档提取方法已支持（bound function 打包 rest + method_value），C 档按 loud-over-silent 原则拒绝。"
   source: "probe: const g=o.m; g(1,2,3) in-module → 0 vs JS 3；typeof o.m → undefined vs function"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T11:26:31
+  kind: decision
+  summary: "C 档静态顶层类值属性读修复：prop_get 的 0x7FFE 分支此前只认 qz_dyncls_cls（动态工厂类）→ 静态顶层类值（不在 dyn 表）落入实例逻辑读 memory[clsId] 垃圾，静默错值。改为 qz_clsvalue_of(recv)（静态+动态类值统一，低32位是 clsId；实例返回 -1）。静态访问器/静态字段（沿父链）正常返回；静态方法作值（const g=C.m）→ qz_clsmeta_static_chain 命中 → loud（C 侧无法物化蹦床）。实测：const g=C.m;g(3,4) 现 loud（原 0）、C.m(3,4) 调用仍 7、static get/set=20、static field=5、dyn 工厂类=8。typeof C.m 仍 \"number\"（emitter 静态读内联 + typeof 函数值已知限制，line 640，pre-existing）。全批 0 diff、glue 5/5、e2e PASS。"
+  source: "probe: const g=C.m;g(3,4) in-module → 0 vs JS 7；typeof C.m → number"
   affects: [aot-roadmap]

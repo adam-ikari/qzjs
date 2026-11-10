@@ -2047,20 +2047,22 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
       } }
     /* 类实例 getter：classMeta.accessors → 表槽 → 蹦床(self) */
     if ((uint16_t)((uint64_t)recv >> 48) == 0x7FFE) {
-        int32_t dynCls = qz_dyncls_cls((uint32_t)((uint64_t)recv & 0xFFFFFFFFu));
-        if (dynCls >= 0) {
-            /* 类值读属性 = 静态属性读：静态访问器 → 静态字段（沿父链）→ 否则 loud。
-             * 静态**方法**作为函数值取不出来（C 侧无法把表槽包成可调用句柄）→ 同样 loud。*/
+        int32_t clsVal = qz_clsvalue_of(recv);   // 类值（静态顶层 / 动态工厂）：低 32 位是 clsId；实例返回 -1（低 32 位是内存 offset）
+        if (clsVal >= 0) {
+            /* 类值读属性 = 静态属性读：静态访问器 → 静态字段（沿父链）→ 静态方法作值 loud。
+             * 此前只认 dynCls（工厂类表达式）→ 静态顶层类值落入实例逻辑读 memory[clsId] 垃圾（静默错值）。*/
             int32_t found = 0;
-            int32_t slot = qz_clsmeta_static_accessor_chain(dynCls, keyId, 0, &found);
+            int32_t slot = qz_clsmeta_static_accessor_chain(clsVal, keyId, 0, &found);
             if (found) {
                 JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
                 return slot > 0 ? ((qz_cls_fn)(uintptr_t)(uint32_t)slot)(recv, 0, 0, 0, 0)
                                 : (int64_t)((uint64_t)0x7FF9 << 48);   /* 只有 setter → undefined */
             }
             int32_t hit = 0;
-            int64_t sv = qz_static_chain_get(dynCls, keyId, &hit);
+            int64_t sv = qz_static_chain_get(clsVal, keyId, &hit);
             if (hit) { JS_FreeValue(ctx, k); JS_FreeValue(ctx, o); return sv; }
+            { int32_t mn = 0; int32_t mslot = qz_clsmeta_static_chain(clsVal, keyId, &mn);
+              if (mslot) { JS_FreeValue(ctx, k); JS_FreeValue(ctx, o); qz_set_throw(ctx, JS_NewTypeError(ctx, "C 档提取静态方法作值暂不支持")); return (int64_t)((uint64_t)0x7FF9 << 48); } }
             qz_dyncls_loud(ctx, "读取静态属性");
             JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
             return (int64_t)((uint64_t)0x7FF9 << 48);
