@@ -622,6 +622,16 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzE.bindClosures(iE.exports, rE.lamMeta); qzE.bindClasses(iE.exports, rE.classMeta);
         check("静态块定义点 eager 执行(无 new/静态访问)", qzE._toJS(iE.exports.eager()), 5);
         check("静态块副作用按源码序交错生效", qzE._toJS(iE.exports.seqv()), 11);
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_eager2.ts"),
+            "let c2: number = 0;\n"
+          + "const A = class { static { c2 = 4; } };\n"                     // 顶层别名类表达式：定义点跑 static 块
+          + "export function aliasEager(): any { return c2; }\n");
+        const rE2 = compileTS(path.join(os.tmpdir(), "qz_aot_eager2.ts"), path.join(os.tmpdir(), "qz_aot_eager2.wasm"), {});
+        const qzE2 = makeQzvm(rE2.strings, { fields: rE2.fields });
+        const { instance: iE2 } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_eager2.wasm")), { qz: qzE2 });
+        qzE2.bindMem(iE2.exports.memory); if (iE2.exports.__bump) qzE2.bindBump(iE2.exports.__bump);
+        qzE2.bindClosures(iE2.exports, rE2.lamMeta); qzE2.bindClasses(iE2.exports, rE2.classMeta);
+        check("顶层别名类表达式 static 块定义点执行", qzE2._toJS(iE2.exports.aliasEager()), 4);
     }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),

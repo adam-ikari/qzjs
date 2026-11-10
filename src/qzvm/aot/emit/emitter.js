@@ -164,7 +164,10 @@ class Emitter {
             if (d.initializer) {
                 if (ts.isClassExpression(d.initializer) && this.clsExprMap && this.clsExprMap.has(d.initializer)
                     && !(this.nestedAliasClsExpr && this.nestedAliasClsExpr.has(d.initializer))) {
-                    this._emitUndefined(); this._emitVarStore(name.text, this.scratchB); this.m.drop(); return;   // const C = class {…}（模块顶层）：C 仅作 new/instanceof 的类名
+                    this._emitUndefined(); this._emitVarStore(name.text, this.scratchB); this.m.drop();   // const C = class {…}（模块顶层）：C 仅作 new/instanceof 的类名
+                    const cn2 = this.clsExprMap.get(d.initializer);
+                    if (this._inModInit && cn2 && this.classes.has(cn2)) this._emitStaticsChainGuard(cn2);   // 定义点 eager 静态初始化（JS 语义）
+                    return;
                 }
                 if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
                     this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text);
