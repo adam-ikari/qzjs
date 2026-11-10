@@ -41,6 +41,8 @@ const LOADS = [
     ['truthyRun', [], 5],
     ['andAssignRun', [], 300],
     ['nestedArgRun', [], 3520],
+    // 静态块副作用在定义点 eager 执行（两档一致；new 即触发，无需静态访问）
+    ['staticBlkRun', [], 5],
     ['preFieldInc', [], 4043],
     ['postFieldInc', [], 3004],
     ['fieldIncLoop', [], 2508],
@@ -167,6 +169,10 @@ async function runInModule(file) {
   for (const im of WebAssembly.Module.imports(prod))
     if (im.module === 'qz' && im.kind === 'function') qz[im.name] = L[im.name];
   const P = new WebAssembly.Instance(prod, { qz, wasi_snapshot_preview1: wasi.wasiImport }).exports;
+  /* 模块初始化：镜像 JS 宿主 tryRunModuleInit —— 模块级语句/类定义（含 static 块 eager 执行）
+   * 只跑一次，并把 bump 高水位钉为永久基址。此前缺失 → 依赖模块初始化的用例在 C 档根本不执行。 */
+  if (P.__module_init) { try { P.__module_init(); } catch (e) { throw e; } }
+  if (P.__bump_seal) P.__bump_seal();
   return (name, a) => {
     const m = info.funcMeta.find(f => f.name === name);
     if (P.__bump_reset) P.__bump_reset();

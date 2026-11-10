@@ -84,3 +84,10 @@ function fieldIncLoop(): number {
     for (let i = 0; i < 5; i++) s += d.legs++;  // 3+4+5+6+7=25 → legs=8
     return s * 100 + d.legs;                 // 2508
 }
+
+// 静态块副作用在**定义点** eager 执行（JS 语义）：new 即触发，无需任何静态访问。
+let staticBlkCounter: number = 0;
+class StaticBlk {
+    static { staticBlkCounter = staticBlkCounter + 5; }
+}
+function staticBlkRun(): number { new StaticBlk(); return staticBlkCounter; }  // 5
