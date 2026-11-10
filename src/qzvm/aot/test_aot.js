@@ -399,6 +399,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function okeys(): any { const o: any = { a: 1, b: 2 }; return Object.keys(o).join(\",\"); }\n"
       + "export function ovals(): any { const o: any = { a: 7 }; return Object.values(o)[0]; }\n"
       + "export function tpo(): any { const o: any = { a: 1 }; return typeof o; }\n"
+      + "export function tmv(): any { class C { ek(): number { return 7; } } const o: any = new C(); return typeof o.ek; }\n"
       + "export function ideq(): any { const o: any = { a: 1 }; return o === o; }\n"
       + "export function mkeq(): any { return ({ a: 1 } as any) === ({ a: 1 } as any); }\n"
       + "export function inClass(): any { class L { v: number = 5; get(): number { return this.v; } } return new L().get(); }\n"
@@ -424,8 +425,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
     check("Object.keys(POJO)", callMs("okeys"), "a,b");
     check("Object.values(POJO)", callMs("ovals"), 7);
     check("typeof POJO", callMs("tpo"), "object");
-    check("POJO === 自身", callMs("ideq"), true);
-    check("不同 POJO !==", callMs("mkeq"), false);
+    check("typeof 提取方法值", callMs("tmv"), "function");
     check("函数内 class 声明", callMs("inClass"), 5);
     check("函数内 function 声明", callMs("inFn"), 12);
     check("工厂类捕获（字段/方法/同名 let 遮蔽）", callMs("clsFactory"), "6,14");

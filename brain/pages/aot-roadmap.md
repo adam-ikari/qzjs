@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T13:35:31"
+updated: "2026-11-10T16:49:40"
 ---
 
 <!-- compiled_truth -->
@@ -511,4 +511,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "C 宿主 env 槽改存**原始 tagged i64**（原存 qz_tojs 物化的 JSValue）：根因——捕获 instance（0x7FFE）经 qz_tojs 物化成 JS 对象，env_get 再 qz_ret 返回 0x7FF9 宿主句柄，丢失身份 → 类字段默认箭头捕获 this 后 this.a 读快照得 undefined（JS 档正确=3）。闭包值（0x7FFF）此前更是物化为 undefined。改：QzEnv.slots.val 由 JSValue 改 int64_t；env_def/env_set 存原始值、env_get/env_lookup 返回原始值、env 销毁去掉 JS_FreeValue（使用点仅这 5 处，集中）。修：字段箭头 m=()=>this.a 现两档=6；instance/闭包/字符串捕获身份全部保留（数字不变）。cls.ts 加 fieldArrowThisRun=6 双档回归。全量 e2e PASS（无回归）。"
   source: "probe: class C{a=3;m=()=>this.a} new (C as any)().m() in-module → undefined vs JS 3；env_def 存 qz_tojs(instance)"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T16:49:40
+  kind: decision
+  summary: "typeof 函数值类型**非 bug**（澄清）：移交原述「typeof <提取方法/host句柄> 报 object/number」是探针伪象——探针漏调 bindClasses，classMeta=null → 方法丢失 → 静默 undefined。正确初始化后：JS 档 typeof <提取方法值>=function、typeof <类名>=function、typeof <实例方法调用结果>=number，全对（0x7FFD 走 typeof_host 已正确；0x7FFF 闭包内联判 function 已正确）。C 档 typeof 分类同（typeofRun 双档一致 object/function/number/number/string）；唯 C 档**提取方法作值 loud throw**（无法物化 wasm 闭包为 JS 值，2e5b5be6 记录，与 typeof 无关）。新增双档回归 cls.ts typeofRun + test_aot tmv（typeof o.m=function）。副产：**复现同名方法跨类冲突**——clsFactory（方法 m,o）在模块内遇第二个 class 的 m 方法即派发错（m 返回 7 而非 6，捕获串槽）；tmv 方法改名 ek 避开。该冲突 bug 仍 pending（根因未定）。"
+  source: "probe /tmp/tp.ts: bindClasses 缺失 → classMeta null → methods undefined; 补 bindClasses 后 t1/t3/t4/t5 全=function"
   affects: [aot-roadmap]

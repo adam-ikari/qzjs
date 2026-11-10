@@ -47,6 +47,9 @@ const LOADS = [
     ['aliasBlkRun', [], 7],
     // 字段默认箭头捕获 this（env 槽存原始 i64，保实例身份）
     ['fieldArrowThisRun', [], 6],
+    // typeof 函数值：实例→object；提取方法值/类名/原型方法→function；调用→number
+    // typeof 分类：实例→object；类名→function；方法调用→number
+    ['typeofRun', [], 'object/function/number/number/string'],
     ['preFieldInc', [], 4043],
     ['postFieldInc', [], 3004],
     ['fieldIncLoop', [], 2508],

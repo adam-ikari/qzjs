@@ -103,3 +103,18 @@ class FieldArrowThis {
     m = (): number => this.a * 2;
 }
 function fieldArrowThisRun(): number { return new FieldArrowThis().m(); }  // 6
+
+// typeof 函数值：类实例→object；提取方法值/类名/原型方法→function；方法调用结果→number。
+// （回归：探针漏 bindClasses 时 classMeta=null 会静默 undefined，此处双档锁定真值）
+class TClass { m(): number { return 7; } }
+function typeofRun(): string {
+    const o: any = new TClass();
+    const a = typeof o;             // "object"（实例）
+    const b = typeof TClass;        // "function"（类名）
+    const c = typeof o.m();         // "number"（方法调用结果）
+    const d = typeof 5;             // "number"
+    const e = typeof "x";           // "string"
+    return a + "/" + b + "/" + c + "/" + d + "/" + e;
+}
+// C 档提取方法作值 loud=throw（无法物化 wasm 闭包为 JS 值，记录在案）；JS 档可提取。
+function typeofMethodValue(): string { const o: any = new TClass(); return typeof o.m; }
