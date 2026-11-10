@@ -690,6 +690,21 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         check("提取方法 固定+rest", qzX._toJS(iX.exports.extractedFixedRest()), 12);
         check("super.m 提取 rest", qzX._toJS(iX.exports.superExtractedRest()), 3);
     }
+    // 全 number 形状但带默认值的函数：须退 tagged（num f64 ABI 无 undefined），此前误选 num → 编译期 loud 拒绝。
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_numdflt.ts"),
+            "function nd(a: number, b: number = a * 2): number { return a + b; }\n"
+          + "function nr(a: number, ...xs: number[]): number { return a + xs.length; }\n"
+          + "export function numDefault(): any { return nd(3); }\n"        // 9
+          + "export function numRest(): any { return nr(5, 1, 2); }\n");   // 7
+        const rN = compileTS(path.join(os.tmpdir(), "qz_aot_numdflt.ts"), path.join(os.tmpdir(), "qz_aot_numdflt.wasm"), {});
+        const qzN = makeQzvm(rN.strings, { fields: rN.fields });
+        const { instance: iN } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_numdflt.wasm")), { qz: qzN });
+        qzN.bindMem(iN.exports.memory); if (iN.exports.__bump) qzN.bindBump(iN.exports.__bump);
+        qzN.bindClosures(iN.exports, rN.lamMeta); qzN.bindClasses(iN.exports, rN.classMeta);
+        check("num 形状默认参数退 tagged", qzN._toJS(iN.exports.numDefault()), 9);
+        check("num 形状 rest 参数退 tagged", qzN._toJS(iN.exports.numRest()), 7);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

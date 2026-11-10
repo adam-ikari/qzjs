@@ -424,7 +424,9 @@ function numArrNames(f) {
 function funcMode(f, argsFns, knownFns) {
     const rt = f.type;
     const rtOk = !rt || rt.kind === ts.SyntaxKind.NumberKeyword || rt.kind === ts.SyntaxKind.VoidKeyword;
-    const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword);
+    // 形参必须「纯 number + 标识符 + 无默认值 + 非 rest」：默认值/rest 需要 tagged（f64 ABI 无 undefined/数组），解构同理。
+    const allNum = f.parameters.every(p => p.type && p.type.kind === ts.SyntaxKind.NumberKeyword
+        && ts.isIdentifier(p.name) && !p.initializer && !p.dotDotDotToken);
     let unsafe = false;
     // Math.* 单参内建 + num 数组（number[] 用 push/[i]/[i]=/.length）→ num 安全。
     const MATH1 = new Set(["sqrt", "abs", "floor", "ceil", "trunc", "round"]);

@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T10:08:26"
+updated: "2026-11-10T10:28:51"
 ---
 
 <!-- compiled_truth -->
@@ -457,4 +457,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "两处 rest 转发修复：(1) super(...arr) 展开调用此前 loud 拒绝（SpreadElement）；_emitSuperCall 增分支：求值运行期数组按父 ctor 形参表拆到槽（rest 槽 slice），父 ctor 用 arguments 时令 __args=数组。(2) 提取方法 + rest 形参静默错值：JS 宿主 bound function（qzvm.js prop_get 原型方法绑定 line ~1527 与 method_value line ~2582）把单个实参传给 rest 槽 → xs.length=undefined；按 classMeta 的 n(总形参数)/rest，令 a[restIdx]=arrWriteback(args.slice(restIdx))（restIdx=n-1<4）。覆盖 o.m 提取、super.m 提取、.call/.apply/.bind。test_aot 加 super(...arr) 混合+arguments、提取 rest/固定+rest/super 提取 rest 回归。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: super(...ys) → 不支持的表达式 SpreadElement; g=o.m; g(1,2,3) rest 方法 → undefined"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T10:28:51
+  kind: decision
+  summary: "funcMode 选择修正：形参全 number 形状但**带默认值/rest/解构**的函数此前仍判为 num 模式（allNum 只看 type.kind===NumberKeyword），随后 _emitParamPrologue 在 num 模式 loud 拒绝（f64 ABI 无 undefined/数组）。修：allNum 额外要求 ts.isIdentifier(p.name) && !p.initializer && !p.dotDotDotToken → 这类函数退 tagged（默认值/rest 正常求值）。解构形参本因类型非 number 已退 tagged（无变化）。test_aot 加 num 形状默认参数=9、rest=7 回归。方法/箭头/构造器默认参数一并覆盖。全批 0 diff、glue 5/5、e2e PASS。"
+  source: "probe: function nd(a:number,b:number=a*2):number{return a+b} nd(3) → 编译期 [num] 形参默认值不支持"
   affects: [aot-roadmap]
