@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T12:42:57"
+updated: "2026-11-10T12:45:01"
 ---
 
 <!-- compiled_truth -->
@@ -487,4 +487,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "C 档（in-module）method_call 动态派发的实例方法 rest 形参修复：接收者为 any/接口类型时调用点不知道形参表 → method_call 传裸实参 a0..a3，C 宿主此前直接转发给蹦床 → rest 槽收标量、xs.length=undefined（JS 宿主 dispatchMethCls 会按 classMeta 的 n/rest 打包，故独立档正确）。修：加 qz_clsmeta_method_info(clsId,mid,&n,&rest) 沿链取方法 n/rest；加 qz_new_arr_from_js 从 QuickJS 数组构造 0x7FFB wasm 数组；method_call 实例分支在 restf 且 nFix=n-1<4 时，把 flat=[a0..a3]+ovf[1..] 的 flat[nFix..]（滤 undefined/null 占位）打包成数组落该槽，按 [recv, head..., restArr] 调蹦床。实测 m(1,2,3)=3、m(1,2,3,4,5)=5、内容 xs[0]*100+xs[2]=103、fixed+rest 1023。e2e cross-tier 加 argswork.ts methodRestDyn=135 / methodFixedRestDyn=7028（两档一致）。**副发现**：动态派发时若方法名与其它类同名（如 m 撞 Arrowed.m）不同签名，in-module 编译会按错签名派发（改唯一名规避）——独立 pre-existing 问题，暂记观察。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: class C{m(...xs){return xs.length}} new (C as any)().m(1,2,3,4,5) in-module → undefined vs JS 5"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T12:45:01
+  kind: evidence
+  summary: "补正上一条：动态方法名冲突假设未复现——最小复现（Arrowed.m 1 参 + DynamicRest.m rest，接口接收者动态调用 m(1,2,3,4,5)）两档均正确 5105。故 full argswork.ts 中 methodRestDyn 5 参丢第 5 个的根因不是简单同名冲突，具体触发条件未定（改名 dynRestM 后即正常）。当前以唯一方法名规避，不阻塞 rest 打包修复（该修复已由隔离测试 3/5/103/5135/1023 与 cross-tier e2e 135/7028 充分验证）。"
+  source: "minimal repro: Arrowed.m + DynamicRest.m both tiers = 5105"
   affects: [aot-roadmap]

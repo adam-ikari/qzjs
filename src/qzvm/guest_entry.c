@@ -4524,7 +4524,7 @@ void qz_guest_obj_accessor(int64_t obj, int32_t nameStrId, int64_t getClo, int64
 /* 对象字面量方法在 in-module 档无法承载：C 侧不能把 wasm 闭包包成可调用 JS 值，
  * 而旧实现是静默占位（方法凭空消失，`o.m()` 读 undefined）→ 改为构造期 loud。*/
 __attribute__((export_name("object_set_method")))
-void qz_guest_object_set_method(int64_t obj, int32_t nameStrId, int32_t slot)
+void qz_guest_object_set_method(int64_t obj, int32_t nameStrId, int64_t slot)
 {
     (void)obj; (void)nameStrId; (void)slot;
     JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
@@ -4534,7 +4534,7 @@ void qz_guest_object_set_method(int64_t obj, int32_t nameStrId, int32_t slot)
 }
 
 __attribute__((export_name("object_set_method_key")))
-void qz_guest_object_set_method_key(int64_t obj, int64_t key, int32_t slot)
+void qz_guest_object_set_method_key(int64_t obj, int64_t key, int64_t slot)
 {
     (void)obj; (void)key; (void)slot;
     JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
