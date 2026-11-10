@@ -92,3 +92,14 @@ function fnSpreadNum(): number { return fnum(...[1, 2]); }                    //
 function fnSpreadStatic(): number { return SpreadStatic.sm(...[3, 4]); }      // 304
 function fnSpreadStaticRest(): number { return SpreadStatic.sr(...[3, 4, 5]); } // 3024
 
+// 动态派发的实例方法 rest 形参：接收者用接口类型（非已知类）→ emitter 走 method_call，
+// 宿主按 classMeta 的 n/rest 把实参打包成数组落 rest 槽（C 侧此前不打包 → xs.length=undefined）。
+// as unknown as 只抹掉具体类身份、保留方法签名（不需要 any）。
+class DynamicRest {
+    dynRestM(...xs: number[]): number { return xs[0] * 100 + xs[2] * 10 + xs[4]; }
+    dynRestN(a: number, ...xs: number[]): number { return a * 1000 + xs.length * 10 + xs[0]; }
+}
+interface RestIface { dynRestM(...xs: number[]): number; dynRestN(a: number, ...xs: number[]): number; }
+function methodRestDyn(): number { const o = new DynamicRest() as unknown as RestIface; return o.dynRestM(1, 2, 3, 4, 5); }  // 135
+function methodFixedRestDyn(): number { const o = new DynamicRest() as unknown as RestIface; return o.dynRestN(7, 8, 9); }    // 7028
+

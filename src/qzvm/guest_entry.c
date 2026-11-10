@@ -572,6 +572,23 @@ static void qz_arr_writeback(uint32_t aoff, JSValue arr)
     }
 }
 
+/* 从 QuickJS 数组构造 wasm 数组句柄（0x7FFB|blockOff）：块头 malloc，元素由
+ * qz_arr_writeback 标签化写入。用于方法 rest 形参的动态打包（C 侧当调用点）。
+ * 块头/数据块不 free（与字符串句柄同口径的泄漏接受）。 */
+static int64_t qz_new_arr_from_js(JSContext *ctx, JSValue arr)
+{
+    (void)ctx;
+    void *hdr = malloc(16);
+    if (!hdr) return ((int64_t)0x7FF9 << 48);
+    uint32_t aoff = (uint32_t)(uintptr_t)hdr;
+    { int32_t z = 0; memcpy(hdr, &z, 4);
+      memcpy((void *)(uintptr_t)(aoff + 4), &z, 4);
+      memcpy((void *)(uintptr_t)(aoff + 8), &z, 4);
+      memcpy((void *)(uintptr_t)(aoff + 12), &z, 4); }
+    qz_arr_writeback(aoff, arr);
+    return ((int64_t)0x7FFB << 48) | aoff;
+}
+
 /* 块 → 既有 JS 数组：按块当前内容覆盖元素并把 length 改成 alen。
  * 与 qz_arr_writeback 反向配对。必须在数组**已存在**时也能重放（缓存命中走这条），
  * 故长度收缩要显式截掉尾部旧元素。 */
@@ -3060,6 +3077,27 @@ static int32_t qz_clsmeta_method_chain(int32_t clsId, int32_t nameStrId, int32_t
     return 0;
 }
 
+/* 沿继承链找方法槽 + n + rest（供 method_call 动态打包 rest 形参）。 */
+static int32_t qz_clsmeta_method_info(int32_t clsId, int32_t nameStrId, int32_t *n_out, int32_t *rest_out)
+{
+    int32_t cur = clsId, guard = 0;
+    while (cur >= 0 && guard++ < 64) {
+        uint32_t off = qz_clsmeta_item_off(cur);
+        if (!off) break;
+        const unsigned char *p = (const unsigned char *)(uintptr_t)off;
+        int32_t nMethods; memcpy(&nMethods, p + 16, 4);
+        const unsigned char *q = p + QZ_CLSMETA_HDR;
+        for (int32_t i = 0; i < nMethods; i++) {
+            int32_t nid, slot, n; int8_t rest;
+            memcpy(&nid, q, 4); memcpy(&slot, q+4, 4); memcpy(&n, q+8, 4); memcpy(&rest, q+12, 1);
+            if (nid == nameStrId) { if (n_out) *n_out = n; if (rest_out) *rest_out = rest; return slot; }
+            q += 16;
+        }
+        int32_t parent; memcpy(&parent, p + 4, 4); cur = parent;
+    }
+    return 0;
+}
+
 /* 在 classMeta 项的 statics 段按名字找静态方法槽。*/
 static int32_t qz_clsmeta_static_slot(int32_t clsId, int32_t nameStrId, int32_t *n_out)
 {
@@ -3162,9 +3200,42 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
         uint32_t ioff = (uint32_t)(ru & 0xFFFFFFFFu);
         int32_t clsId; memcpy(&clsId, (const unsigned char *)(uintptr_t)ioff, 4);
         /* mid 是 strId，classMeta 里 nameStrId 也是 strId（同表）→ 直接比对 */
-        int32_t n; int32_t slot = qz_clsmeta_method_chain(clsId, mid, &n, NULL);
+        int32_t n = 0, restf = 0;
+        int32_t slot = qz_clsmeta_method_info(clsId, mid, &n, &restf);
         if (slot) {
             qz_cls_fn f = (qz_cls_fn)(uintptr_t)(uint32_t)slot;
+            int32_t nFix = restf ? (n - 1) : -1;
+            if (nFix >= 0 && nFix < 4) {
+                /* 动态派发的 rest 形参：调用点不知道形参表，宿主按 classMeta 的 n/rest 把
+                 * args[nFix..] 打包成 wasm 数组（0x7FFB）落该槽（与 JS 宿主 dispatchMethCls 同语义）。 */
+                int64_t flat[16]; int32_t flen = 0;
+                flat[flen++] = a0; flat[flen++] = a1; flat[flen++] = a2; flat[flen++] = a3;
+                if (((uint64_t)ovf >> 48) == 0x7FFB) {
+                    uint32_t oo = (uint32_t)((uint64_t)ovf & 0xFFFFFFFFu);
+                    int32_t olen = 0, odo = 0;
+                    memcpy(&olen, (const void *)(uintptr_t)oo, 4);
+                    memcpy(&odo, (const void *)(uintptr_t)(oo + 8), 4);
+                    for (int32_t i = 1; i < olen && flen < 16; i++) {
+                        int64_t ev; memcpy(&ev, (const void *)(uintptr_t)((uint32_t)odo + (uint32_t)i * 8u), 8);
+                        flat[flen++] = ev;
+                    }
+                }
+                JSValue ra = JS_NewArray(ctx);
+                uint32_t rk = 0;
+                for (int32_t i = nFix; i < flen; i++) {
+                    uint64_t uv = (uint64_t)flat[i];
+                    if (uv == ((uint64_t)0x7FF9 << 48) || uv == (((uint64_t)0x7FF9 << 48) | 1)) continue;   /* undefined/null 占位 */
+                    JS_SetPropertyUint32(ctx, ra, rk++, qz_tojs(ctx, flat[i]));
+                }
+                int64_t rh = qz_new_arr_from_js(ctx, ra);
+                JS_FreeValue(ctx, ra);
+                int64_t call[5];
+                call[0] = recv;
+                for (int32_t i = 0; i < nFix; i++) call[i + 1] = flat[i];
+                call[nFix + 1] = rh;
+                for (int32_t i = nFix + 2; i < 5; i++) call[i] = (int64_t)((uint64_t)0x7FF9 << 48);
+                return f(call[0], call[1], call[2], call[3], call[4]);
+            }
             return f(recv, a0, a1, a2, a3);
         }
     }

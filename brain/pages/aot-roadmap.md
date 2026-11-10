@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T11:57:14"
+updated: "2026-11-10T12:42:57"
 ---
 
 <!-- compiled_truth -->
@@ -481,4 +481,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "funcMode 检测 try：全 number 形状但含 try/catch/finally 的函数此前误选 num 模式 → emitBlock 不支持 TryStatement → 编译期 loud 拒绝**合法代码**（两档都中）。修：funcMode 的 unsafe walk 加入 ts.isTryStatement → 退 tagged。实测 function f(): number { try{...throw...}catch{...}finally{...} } 现两档均 111。test_aot 加回归。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: function f(): number { let s=0; try{...}catch{...}finally{...} return s; } → 不支持的语句: TryStatement"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T12:42:57
+  kind: decision
+  summary: "C 档（in-module）method_call 动态派发的实例方法 rest 形参修复：接收者为 any/接口类型时调用点不知道形参表 → method_call 传裸实参 a0..a3，C 宿主此前直接转发给蹦床 → rest 槽收标量、xs.length=undefined（JS 宿主 dispatchMethCls 会按 classMeta 的 n/rest 打包，故独立档正确）。修：加 qz_clsmeta_method_info(clsId,mid,&n,&rest) 沿链取方法 n/rest；加 qz_new_arr_from_js 从 QuickJS 数组构造 0x7FFB wasm 数组；method_call 实例分支在 restf 且 nFix=n-1<4 时，把 flat=[a0..a3]+ovf[1..] 的 flat[nFix..]（滤 undefined/null 占位）打包成数组落该槽，按 [recv, head..., restArr] 调蹦床。实测 m(1,2,3)=3、m(1,2,3,4,5)=5、内容 xs[0]*100+xs[2]=103、fixed+rest 1023。e2e cross-tier 加 argswork.ts methodRestDyn=135 / methodFixedRestDyn=7028（两档一致）。**副发现**：动态派发时若方法名与其它类同名（如 m 撞 Arrowed.m）不同签名，in-module 编译会按错签名派发（改唯一名规避）——独立 pre-existing 问题，暂记观察。全批 0 diff、glue 5/5、e2e PASS。"
+  source: "probe: class C{m(...xs){return xs.length}} new (C as any)().m(1,2,3,4,5) in-module → undefined vs JS 5"
   affects: [aot-roadmap]

@@ -73,6 +73,9 @@ const LOADS = [
     ['fnSpreadNum', [], 12],
     ['fnSpreadStatic', [], 304],
     ['fnSpreadStaticRest', [], 3024],
+    // 动态派发（接口类型接收者 → method_call）的实例方法 rest：C 宿主动态打包 rest 槽
+    ['methodRestDyn', [], 135],
+    ['methodFixedRestDyn', [], 7028],
   ]],
   // 动态类值（工厂返回的类表达式）：类值接收者的成员访问按 clsId 反查 classMeta，
   // 两档同一份产物 ⇒ 静态方法/静态访问器/静态字段写读/字段删除都必须给 V8 值。
