@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T09:07:26"
+updated: "2026-11-10T09:21:53"
 ---
 
 <!-- compiled_truth -->
@@ -433,4 +433,16 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "顶层别名类表达式  的 static 初始化也在**定义点** eager 执行：此前该形式只把 C 当类名别名（_emitBindingDecl 存 undefined、类值不物化），静态初始化仍惰性 → 有副作用的 static 块永不跑（实测 AOT c=0 vs JS c=4）。修：_emitBindingDecl 的顶层别名类表达式分支在存 undefined 后调 _emitStaticsChainGuard(synthName)。赋值形式  本就走类表达式求值路径、已正确（实测 6）。加 test_aot 回归。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: const C=class{static{c=4}}; run(){return c} → AOT 0 vs JS 4"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T09:07:46
+  kind: evidence
+  summary: "补正上一条别名类表达式 summary 中被 shell 吞掉的两处：被修复形式为 const C = class { static {…} }（顶层别名类表达式）；已正确形式为 let C; C = class {…}（赋值，走类表达式求值路径）。"
+  source: correction for f3586659 brain entry
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T09:21:53
+  kind: decision
+  summary: "构造器 rest 形参修复：_emitNewCall 的静态 ctor 路径此前按槽逐个传单个实参，rest 槽收到标量 → xs.length 得 undefined（AOT undefined vs JS 3）。修：检测尾形参 dotDotDotToken（sRest），两分支（ctorNeedsArgs 用 arguments / 普通）在该槽分别用 args.slice(i) 数组字面量 或 ta.v.slice(i)（qz.method_call \"slice\"）打包。覆盖 constructor(...xs)、constructor(a,...xs)、ctor 同时用 arguments+rest。>4 实参仍按既有 loud 拒绝。test_aot 加两回归（9902、6）。全批 0 diff、glue 5/5、e2e PASS。"
+  source: "probe: class C{constructor(...xs:number[]){this.v=xs.length}} new C(1,2,3).v → AOT undefined vs JS 3"
   affects: [aot-roadmap]

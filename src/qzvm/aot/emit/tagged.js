@@ -2301,19 +2301,33 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     const te = this._expEnter();                            // 实例 off / ctor 实参用可重入槽（嵌套 new 不覆盖）
     const ctorNeedsArgs = !argSrc && c.ctor && this._methUsesArgs(c.ctor);
     { const argSlots = [te.w, te.x, te.y, te.z];   // self 占 te.v，实参用 w/x/y/z
+      /* ctor 尾形参为 rest（如 constructor(...xs)）：该槽应收到「从该位起的实参数组」，不是单个实参。
+       * 此前每槽只传单个实参 → rest 收到标量，xs.length 得 undefined。 */
+      const cpR = c.ctor ? c.ctor.parameters : null;
+      const sRest = (cpR && cpR.length > 0 && cpR[cpR.length - 1].dotDotDotToken) ? cpR.length - 1 : -1;
       if (ctorNeedsArgs) {   // ctor 体用 arguments：全量实参一次求值成数组 → 写 __args，槽从数组回读（免重求值）
         const ta = this._expEnter();
         const litA = ts.factory.createArrayLiteralExpression(args);
         litA.pos = args.length ? args[0].pos : 0; litA.end = args.length ? args[args.length - 1].end : 0;
         this.emitTaggedExpr(litA); M.localSet(ta.v);
-        for (let i = 0; i < 4; i++) { if (i < args.length) this._emitElemOf(ta.v, ts.factory.createNumericLiteral(i)); else this._emitUndefined(); M.localSet(argSlots[i]); }
+        for (let i = 0; i < 4; i++) {
+          if (i === sRest) { M.localGet(ta.v); M.i32Const(this._strId("slice")); M.i64ConstBits(...f64Bits(i)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined(); this._emitUndefined(); M.call("qz.method_call"); }
+          else if (i < args.length) this._emitElemOf(ta.v, ts.factory.createNumericLiteral(i)); else this._emitUndefined();
+          M.localSet(argSlots[i]);
+        }
         M.localGet(ta.v); M.globalSet(this._argGlobal);
         this._expLeave();
-      } else for (let i = 0; i < 4; i++) {
-        if (argSrc) argSrc(i);                                    // 实参来自运行期数组（new C(...args)）
-        else if (i < args.length) this.emitTaggedExpr(args[i]);
-        else this._emitUndefined();
-        M.localSet(argSlots[i]);
+      } else {
+        for (let i = 0; i < 4; i++) {
+          if (i === sRest) {
+            const lit = ts.factory.createArrayLiteralExpression(args.slice(i));
+            lit.pos = args.length ? args[Math.min(i, args.length - 1)].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+            this.emitTaggedExpr(lit);
+          } else if (argSrc) argSrc(i);                            // 实参来自运行期数组（new C(...args)）
+          else if (i < args.length) this.emitTaggedExpr(args[i]);
+          else this._emitUndefined();
+          M.localSet(argSlots[i]);
+        }
       } }
     // 内联 bump 分配（与 POJO/数组同款）：避免 qz.newobj 跨界 + BigInt 装箱（构造热路径）。
     // 布局：offset 8 对齐，[off]=clsId(i32)，字段槽由 ctor 写。

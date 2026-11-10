@@ -633,6 +633,21 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzE2.bindClosures(iE2.exports, rE2.lamMeta); qzE2.bindClasses(iE2.exports, rE2.classMeta);
         check("顶层别名类表达式 static 块定义点执行", qzE2._toJS(iE2.exports.aliasEager()), 4);
     }
+    // 构造器 rest 形参（constructor(...xs)）：rest 槽须收到 args 打包数组（此前收单个标量 → xs.length=undefined）。
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_ctorrest.ts"),
+            "class CR { v: number; w: number; constructor(a: number, ...xs: number[]) { this.v = a; this.w = xs.length; } }\n"
+          + "class CS { v: number; constructor(...xs: number[]) { this.v = xs.length + arguments.length; } }\n"
+          + "export function ctorRest(): any { const c: any = new CR(99, 1, 2); return c.v * 100 + c.w; }\n"           // 9902
+          + "export function ctorRestArgs(): any { return new (CS as any)(1, 2, 3).v; }\n");                          // 3+3=6
+        const rR = compileTS(path.join(os.tmpdir(), "qz_aot_ctorrest.ts"), path.join(os.tmpdir(), "qz_aot_ctorrest.wasm"), {});
+        const qzR = makeQzvm(rR.strings, { fields: rR.fields });
+        const { instance: iR } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_ctorrest.wasm")), { qz: qzR });
+        qzR.bindMem(iR.exports.memory); if (iR.exports.__bump) qzR.bindBump(iR.exports.__bump);
+        qzR.bindClosures(iR.exports, rR.lamMeta); qzR.bindClasses(iR.exports, rR.classMeta);
+        check("构造器 rest 形参(固定+rest)", qzR._toJS(iR.exports.ctorRest()), 9902);
+        check("构造器 rest + arguments", qzR._toJS(iR.exports.ctorRestArgs()), 6);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"
