@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T10:28:51"
+updated: "2026-11-10T11:11:44"
 ---
 
 <!-- compiled_truth -->
@@ -463,4 +463,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "funcMode 选择修正：形参全 number 形状但**带默认值/rest/解构**的函数此前仍判为 num 模式（allNum 只看 type.kind===NumberKeyword），随后 _emitParamPrologue 在 num 模式 loud 拒绝（f64 ABI 无 undefined/数组）。修：allNum 额外要求 ts.isIdentifier(p.name) && !p.initializer && !p.dotDotDotToken → 这类函数退 tagged（默认值/rest 正常求值）。解构形参本因类型非 number 已退 tagged（无变化）。test_aot 加 num 形状默认参数=9、rest=7 回归。方法/箭头/构造器默认参数一并覆盖。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: function nd(a:number,b:number=a*2):number{return a+b} nd(3) → 编译期 [num] 形参默认值不支持"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T11:11:44
+  kind: decision
+  summary: "C 档（in-module）实例方法作值改为 loud：此前 const g = o.m 静默返回 undefined（JS 是函数值），且后续调用得 0。根因——实例为**所有全局字段**分配槽（emitter _instSize 按全局 fieldMap），方法名也有一槽（恒未赋值 undefined），C 宿主 prop_get 0x7FFE 字段分支读到该槽（界内）即返回 undefined，永不到方法判断。修：界内字段槽若为 undefined 哨兵（0x7FF9<<48）且该名在 classMeta 方法链 → qz_set_throw（C 侧无法把 wasm 蹦床物化成可调用闭包）；真实字段/普通未赋值字段原样返回。实测 typeof o.m / const g=o.m;g(...) 现 loud，o.v 字段、o.m(3,4) 正常调用、o.zzz 普通属性仍正确。e2e 全 PASS（无负载依赖提取方法）、全批 0 diff、glue 5/5。JS 档提取方法已支持（bound function 打包 rest + method_value），C 档按 loud-over-silent 原则拒绝。"
+  source: "probe: const g=o.m; g(1,2,3) in-module → 0 vs JS 3；typeof o.m → undefined vs function"
   affects: [aot-roadmap]

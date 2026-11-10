@@ -2028,6 +2028,8 @@ void qz_guest_set_strtab(int32_t base)
 
 /* prop_get(recv:i64, keyId:i32) → i64：通用属性读（原型链/getter/装箱）。
  * 接收者为 null/undefined → undefined，由调用点 _emitErrCheck 转 TypeError。*/
+/* 前向：classMeta 方法链查找（定义于 classMeta 节）。*/
+static int32_t qz_clsmeta_method_chain(int32_t clsId, int32_t nameStrId, int32_t *n_out, int32_t *foundCls);
 __attribute__((export_name("prop_get")))
 int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
 {
@@ -2089,11 +2091,23 @@ int64_t qz_guest_prop_get(int64_t recv, int32_t keyId)
             uint32_t foff = (uint32_t)(fi + 1) * 8;
             if (inst >= 8 && foff + 8 <= (uint32_t)sz) {
                 int64_t v; memcpy(&v, (const void *)(uintptr_t)(inst + foff), 8);
+                /* 实例为所有全局字段分配槽，方法名也有一槽（恒未赋值 undefined）。槽未赋值
+                 * 且该名是方法（`o.m` 作值）→ C 侧无法物化蹦床为可调用闭包 → loud；
+                 * 真实字段（已赋值）或普通未赋值字段仍原样返回。 */
+                if ((uint64_t)v == ((uint64_t)0x7FF9 << 48)) {
+                    int32_t mn = 0; int32_t mslot = qz_clsmeta_method_chain(clsId, keyId, &mn, NULL);
+                    if (mslot) { JS_FreeValue(ctx, k); JS_FreeValue(ctx, o); qz_set_throw(ctx, JS_NewTypeError(ctx, "C 档提取实例方法作值暂不支持")); return (int64_t)((uint64_t)0x7FF9 << 48); }
+                }
                 JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
                 return v;
             }
+            /* 越界 = 该名不是本类实例的字段（字段槽从 clsId 后按本类布局排）。若它其实是
+             * 方法名（如 `o.m` 作值）→ C 侧无法把 wasm 蹦床物化成可调用闭包 → loud；
+             * 此前一律 return undefined，导致提取方法静默得 undefined（JS 是函数值）。*/
+            { int32_t mn = 0; int32_t mslot = qz_clsmeta_method_chain(clsId, keyId, &mn, NULL);
+              if (mslot) { JS_FreeValue(ctx, k); JS_FreeValue(ctx, o); qz_set_throw(ctx, JS_NewTypeError(ctx, "C 档提取实例方法作值暂不支持")); return (int64_t)((uint64_t)0x7FF9 << 48); } }
             JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
-            return (int64_t)((uint64_t)0x7FF9 << 48);   /* undefined 句柄 */
+            return (int64_t)((uint64_t)0x7FF9 << 48);   /* 既非字段也非方法 → undefined */
         }
     }
     if ((uint16_t)((uint64_t)recv >> 48) == 0x7FFD) {   // 宿主承载实例：.constructor 应按 __qzClsId 回本类值（proto 链指向内建原型，原生取到 Map/Array…）
