@@ -96,3 +96,10 @@ function staticBlkRun(): number { new StaticBlk(); return staticBlkCounter; }  /
 let aliasBlkCounter: number = 0;
 const AliasCls = class { static { aliasBlkCounter = 7; } }
 function aliasBlkRun(): number { void AliasCls; return aliasBlkCounter; }  // 7
+
+// 类字段默认箭头捕获 this：env 槽存原始 tagged i64（保实例身份），this.a 读到实例字段。
+class FieldArrowThis {
+    a: number = 3;
+    m = (): number => this.a * 2;
+}
+function fieldArrowThisRun(): number { return new FieldArrowThis().m(); }  // 6

@@ -2233,7 +2233,7 @@ typedef struct QzEnv {
     int32_t parent;
     uint32_t count;
     uint32_t cap;
-    struct { int32_t nameId; JSValue val; } *slots;
+    struct { int32_t nameId; int64_t val; } *slots;
 } QzEnv;
 
 static QzEnv *g_envs = NULL;
@@ -2245,7 +2245,7 @@ static void qz_env_release(void)
         QzEnv *e = &g_envs[i];
         if (e->slots) {
             JSContext *ctx = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
-            if (ctx) for (uint32_t k = 0; k < e->count; k++) JS_FreeValue(ctx, e->slots[k].val);
+            (void)ctx;   /* 槽存原始 tagged i64，无需 JS_FreeValue */
             free(e->slots);
         }
     }
@@ -2298,30 +2298,29 @@ void qz_guest_env_def(int32_t envIdx, int32_t nameId, int64_t val)
     if (!ctx) return;
     QzEnv *e = qz_env_at((uint32_t)envIdx, 0);
     if (!e) return;
-    JSValue v = qz_tojs(ctx, val);
     for (uint32_t k = 0; k < e->count; k++) {
-        if (e->slots[k].nameId == nameId) { JS_FreeValue(ctx, e->slots[k].val); e->slots[k].val = v; return; }
+        if (e->slots[k].nameId == nameId) { e->slots[k].val = val; return; }   /* 存原始 tagged i64，保 instance/闭包身份 */
     }
     if (e->count == e->cap) {
         uint32_t ncap = e->cap ? e->cap * 2 : 8;
         void *n = realloc(e->slots, (size_t)ncap * sizeof(*e->slots));
-        if (!n) { JS_FreeValue(ctx, v); return; }
+        if (!n) return;
         e->slots = n; e->cap = ncap;
     }
     e->slots[e->count].nameId = nameId;
-    e->slots[e->count].val = v;
+    e->slots[e->count].val = val;
     e->count++;
 }
 
 /* 沿 parent 链查名字；找到返回 1 并写出值。*/
-static int qz_env_lookup(JSContext *ctx, int32_t envIdx, int32_t nameId, JSValue *out)
+static int qz_env_lookup(JSContext *ctx, int32_t envIdx, int32_t nameId, int64_t *out)
 {
     int32_t i = envIdx;
     int guard = 0;
     while (i >= 0 && (uint32_t)i < g_envCount && guard++ < 4096) {
         QzEnv *e = &g_envs[i];
         for (uint32_t k = 0; k < e->count; k++) {
-            if (e->slots[k].nameId == nameId) { *out = JS_DupValue(ctx, e->slots[k].val); return 1; }
+            if (e->slots[k].nameId == nameId) { *out = e->slots[k].val; return 1; }
         }
         i = e->parent;
     }
@@ -2334,11 +2333,9 @@ int64_t qz_guest_env_get(int32_t envIdx, int32_t nameId)
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
-    JSValue v = JS_UNDEFINED;
+    int64_t v = 0;
     if (!qz_env_lookup(ctx, envIdx, nameId, &v)) return (int64_t)0x7FF9000000000000LL;
-    int64_t r = qz_ret(ctx, v);
-    JS_FreeValue(ctx, v);
-    return r;
+    return v;   /* 原始 tagged i64，保身份 */
 }
 
 __attribute__((export_name("env_set")))
@@ -2348,16 +2345,14 @@ void qz_guest_env_set(int32_t envIdx, int32_t nameId, int64_t val)
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return;
     int32_t i = envIdx, guard = 0;
-    JSValue v = qz_tojs(ctx, val);
     while (i >= 0 && (uint32_t)i < g_envCount && guard++ < 4096) {
         QzEnv *e = &g_envs[i];
         for (uint32_t k = 0; k < e->count; k++) {
-            if (e->slots[k].nameId == nameId) { JS_FreeValue(ctx, e->slots[k].val); e->slots[k].val = v; return; }
+            if (e->slots[k].nameId == nameId) { e->slots[k].val = val; return; }   /* 原始 tagged i64 */
         }
         i = e->parent;
     }
     /* 未找到：写进最内层（JS 语义上的隐式全局在 AOT 中即当前层）*/
-    JS_FreeValue(ctx, v);
     qz_guest_env_def(envIdx, nameId, val);
 }
 

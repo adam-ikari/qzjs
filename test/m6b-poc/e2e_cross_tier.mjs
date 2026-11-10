@@ -45,6 +45,8 @@ const LOADS = [
     ['staticBlkRun', [], 5],
     // 顶层别名类表达式 static 块定义点执行（两档一致）
     ['aliasBlkRun', [], 7],
+    // 字段默认箭头捕获 this（env 槽存原始 i64，保实例身份）
+    ['fieldArrowThisRun', [], 6],
     ['preFieldInc', [], 4043],
     ['postFieldInc', [], 3004],
     ['fieldIncLoop', [], 2508],

@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T13:23:23"
+updated: "2026-11-10T13:35:31"
 ---
 
 <!-- compiled_truth -->
@@ -505,4 +505,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "测试基建修复：e2e_cross_tier 的 runInModule 此前不调 __module_init → in-module 档的模块级语句/类定义（含 static 块 eager 执行）在整个 C 档交叉验证里从不执行，依赖模块初始化的逻辑零覆盖（我此前 416dd1e1 eager static init 修复在 C 档无回归）。修：runInModule 建实例后镜像 JS 宿主 tryRunModuleInit —— 调一次 __module_init + __bump_seal（钉永久基址）。cls.ts 加 staticBlkRun（static 块写模块 var，new 即触发无需静态访问）=5 双档一致回归。全量 e2e PASS（module_init 改动无回归）。"
   source: "e2e staticBlkRun in-module = 0（未调 __module_init）vs JS = 5"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T13:35:31
+  kind: decision
+  summary: "C 宿主 env 槽改存**原始 tagged i64**（原存 qz_tojs 物化的 JSValue）：根因——捕获 instance（0x7FFE）经 qz_tojs 物化成 JS 对象，env_get 再 qz_ret 返回 0x7FF9 宿主句柄，丢失身份 → 类字段默认箭头捕获 this 后 this.a 读快照得 undefined（JS 档正确=3）。闭包值（0x7FFF）此前更是物化为 undefined。改：QzEnv.slots.val 由 JSValue 改 int64_t；env_def/env_set 存原始值、env_get/env_lookup 返回原始值、env 销毁去掉 JS_FreeValue（使用点仅这 5 处，集中）。修：字段箭头 m=()=>this.a 现两档=6；instance/闭包/字符串捕获身份全部保留（数字不变）。cls.ts 加 fieldArrowThisRun=6 双档回归。全量 e2e PASS（无回归）。"
+  source: "probe: class C{a=3;m=()=>this.a} new (C as any)().m() in-module → undefined vs JS 3；env_def 存 qz_tojs(instance)"
   affects: [aot-roadmap]
