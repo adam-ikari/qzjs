@@ -705,6 +705,18 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         check("num 形状默认参数退 tagged", qzN._toJS(iN.exports.numDefault()), 9);
         check("num 形状 rest 参数退 tagged", qzN._toJS(iN.exports.numRest()), 7);
     }
+    // 全 number 形状但含 try/catch/finally：num 模式的 emitBlock 不支持 → 须退 tagged（此前误选 num → loud 拒绝合法代码）。
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_numtry.ts"),
+            "function nt(): number { let s = 0; try { s = 1; throw 0; } catch { s = s + 10; } finally { s = s + 100; } return s; }\n"
+          + "export function numTry(): any { return nt(); }\n");   // 111
+        const rT = compileTS(path.join(os.tmpdir(), "qz_aot_numtry.ts"), path.join(os.tmpdir(), "qz_aot_numtry.wasm"), {});
+        const qzT = makeQzvm(rT.strings, { fields: rT.fields });
+        const { instance: iT } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_numtry.wasm")), { qz: qzT });
+        qzT.bindMem(iT.exports.memory); if (iT.exports.__bump) qzT.bindBump(iT.exports.__bump);
+        qzT.bindClosures(iT.exports, rT.lamMeta); qzT.bindClasses(iT.exports, rT.classMeta);
+        check("num 形状 try/catch 退 tagged", qzT._toJS(iT.exports.numTry()), 111);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

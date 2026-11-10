@@ -505,7 +505,8 @@ function funcMode(f, argsFns, knownFns) {
             || ts.isClassExpression(n) || ts.isAwaitExpression(n) || ts.isYieldExpression(n)
             || ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)
             || ts.isTypeOfExpression(n) || ts.isVoidExpression(n) || ts.isDeleteExpression(n)
-            || (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword))
+            || (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword)
+            || ts.isTryStatement(n))   // num 模式的 emitBlock 不支持 try/catch/finally（此前误选 num → 编译期 loud 拒绝合法代码）
             unsafe = true;   // 注：as / x! / satisfies 为纯类型层构造（emit 恒等擦除），不列入
         ts.forEachChild(n, walk);
     };

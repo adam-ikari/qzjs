@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T11:26:31"
+updated: "2026-11-10T11:57:14"
 ---
 
 <!-- compiled_truth -->
@@ -475,4 +475,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "C 档静态顶层类值属性读修复：prop_get 的 0x7FFE 分支此前只认 qz_dyncls_cls（动态工厂类）→ 静态顶层类值（不在 dyn 表）落入实例逻辑读 memory[clsId] 垃圾，静默错值。改为 qz_clsvalue_of(recv)（静态+动态类值统一，低32位是 clsId；实例返回 -1）。静态访问器/静态字段（沿父链）正常返回；静态方法作值（const g=C.m）→ qz_clsmeta_static_chain 命中 → loud（C 侧无法物化蹦床）。实测：const g=C.m;g(3,4) 现 loud（原 0）、C.m(3,4) 调用仍 7、static get/set=20、static field=5、dyn 工厂类=8。typeof C.m 仍 \"number\"（emitter 静态读内联 + typeof 函数值已知限制，line 640，pre-existing）。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: const g=C.m;g(3,4) in-module → 0 vs JS 7；typeof C.m → number"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T11:57:14
+  kind: decision
+  summary: "funcMode 检测 try：全 number 形状但含 try/catch/finally 的函数此前误选 num 模式 → emitBlock 不支持 TryStatement → 编译期 loud 拒绝**合法代码**（两档都中）。修：funcMode 的 unsafe walk 加入 ts.isTryStatement → 退 tagged。实测 function f(): number { try{...throw...}catch{...}finally{...} } 现两档均 111。test_aot 加回归。全批 0 diff、glue 5/5、e2e PASS。"
+  source: "probe: function f(): number { let s=0; try{...}catch{...}finally{...} return s; } → 不支持的语句: TryStatement"
   affects: [aot-roadmap]
