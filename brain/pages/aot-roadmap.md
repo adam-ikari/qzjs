@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T12:45:01"
+updated: "2026-11-10T13:03:57"
 ---
 
 <!-- compiled_truth -->
@@ -493,4 +493,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "补正上一条：动态方法名冲突假设未复现——最小复现（Arrowed.m 1 参 + DynamicRest.m rest，接口接收者动态调用 m(1,2,3,4,5)）两档均正确 5105。故 full argswork.ts 中 methodRestDyn 5 参丢第 5 个的根因不是简单同名冲突，具体触发条件未定（改名 dynRestM 后即正常）。当前以唯一方法名规避，不阻塞 rest 打包修复（该修复已由隔离测试 3/5/103/5135/1023 与 cross-tier e2e 135/7028 充分验证）。"
   source: "minimal repro: Arrowed.m + DynamicRest.m both tiers = 5105"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T13:03:57
+  kind: decision
+  summary: "C 宿主 method_call 补「字段持闭包」分支：类字段默认箭头（如 handler = ()=>…）作方法调用 o.m() 时，m 是**字段**（持闭包 0x7FFF）不是方法 → C 宿主 method_call 只查 classMeta.methods → 未命中即落空静默 0。mirror JS 宿主 method_call 的字段分支：方法未命中后查 qz_field_index(mid)，字段槽为 0x7FFF 时 qz_guest_closure_call(fv, a0..a3, recv)。实测：字段箭头 ()=>5 现 5（原 0）、捕获局部 x 现 8（原 0）。**剩余缺口**：字段默认箭头捕获 this（m = ()=>this.a）仍 undefined —— lamMeta synthThis:false、this 走 env，C 侧该 env this 在字段默认初始化时未正确捕获（独立更深 emitter/host 问题；method 内返回的 arrow 捕获 this 已正常=3）。非闭包字段调用仍正确落空。e2e PASS、glue 5/5、test_aot ALL PASS。"
+  source: "probe: class C{m=()=>5} new (C as any)().m() in-module → 0 vs JS 5"
   affects: [aot-roadmap]

@@ -3238,6 +3238,18 @@ int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
             }
             return f(recv, a0, a1, a2, a3);
         }
+        /* 字段持闭包（类字段默认箭头 `m = ()=>…`）作方法调用：o.m() 里 m 是**字段**不是方法 →
+         * 直接调用字段槽里的闭包（mirror JS 宿主 method_call 的字段分支）。此前未命中方法即落空 → 静默 0。 */
+        { int32_t fi = qz_field_index(mid);
+          if (fi >= 0 && ioff >= 8) {
+              int32_t sz = 0; memcpy(&sz, (const void *)(uintptr_t)(ioff + 4), 4);
+              uint32_t foff = (uint32_t)(fi + 1) * 8;
+              if (foff + 8 <= (uint32_t)sz) {
+                  int64_t fv; memcpy(&fv, (const void *)(uintptr_t)(ioff + foff), 8);
+                  if (((uint64_t)fv >> 48) == 0x7FFF)
+                      return qz_guest_closure_call(fv, a0, a1, a2, a3, recv);
+              }
+          } }
     }
     if ((uint16_t)(ru >> 48) == 0x7FFD && g_clsmeta_base) {  // 宿主承载实例（extends 内建）：__qzClsId → classMeta 方法链；未命中落下方内建/JS 方法（继承的 Map/Set/Date 方法）
         JSValue o = qz_tojs(ctx, recv);
