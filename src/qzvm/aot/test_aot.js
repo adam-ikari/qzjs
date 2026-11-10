@@ -656,6 +656,40 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         check("构造器 rest 展开实参 new C(...a)", qzR._toJS(iR.exports.ctorRestSpread()), 5);
         check("构造器 spread + arguments", qzR._toJS(iR.exports.ctorSpreadArgs()), 6);
     }
+    // 构造器 super(...arr)：运行期数组按父形参表拆到槽（rest 槽 slice，父用 arguments 时 __args=数组）。
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_superspread.ts"),
+            "class SA { s: number; constructor(a: number, ...xs: number[]) { this.s = a + xs.length; } }\n"
+          + "class SB extends SA { constructor(...ys: number[]) { super(...ys); } }\n"
+          + "class SC { v: number; constructor(...xs: number[]) { this.v = arguments.length; } }\n"
+          + "class SD extends SC { constructor(...ys: number[]) { super(...ys); } }\n"
+          + "export function superSpreadMixed(): any { return new (SB as any)(10, 1, 2).s; }\n"   // 10+2=12
+          + "export function superSpreadArgs(): any { return new (SD as any)(1, 2, 3).v; }\n"); // 3（父用 arguments）
+        const rS = compileTS(path.join(os.tmpdir(), "qz_aot_superspread.ts"), path.join(os.tmpdir(), "qz_aot_superspread.wasm"), {});
+        const qzS = makeQzvm(rS.strings, { fields: rS.fields });
+        const { instance: iS } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_superspread.wasm")), { qz: qzS });
+        qzS.bindMem(iS.exports.memory); if (iS.exports.__bump) qzS.bindBump(iS.exports.__bump);
+        qzS.bindClosures(iS.exports, rS.lamMeta); qzS.bindClasses(iS.exports, rS.classMeta);
+        check("super(...arr) 混合固定+rest", qzS._toJS(iS.exports.superSpreadMixed()), 12);
+        check("super(...arr) 父用 arguments", qzS._toJS(iS.exports.superSpreadArgs()), 3);
+    }
+    // 提取方法 + rest 形参：bound function 须把 args[restIdx..] 打包进 rest 槽（此前收单个标量 → xs.length=undefined）。
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_extrest.ts"),
+            "class EA { m(...xs: number[]): number { return xs.length; } n(a: number, ...xs: number[]): number { return a + xs.length; } }\n"
+          + "class EB extends EA { f(): number { const g: any = super.m; return g(1, 2, 3); } }\n"
+          + "export function extractedRest(): any { const o: any = new (EA as any)(); const g: any = o.m; return g(1, 2, 3); }\n"      // 3
+          + "export function extractedFixedRest(): any { const o: any = new (EA as any)(); const g: any = o.n; return g(10, 1, 2); }\n"  // 12
+          + "export function superExtractedRest(): any { return new (EB as any)().f(); }\n");                                          // 3
+        const rX = compileTS(path.join(os.tmpdir(), "qz_aot_extrest.ts"), path.join(os.tmpdir(), "qz_aot_extrest.wasm"), {});
+        const qzX = makeQzvm(rX.strings, { fields: rX.fields });
+        const { instance: iX } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_extrest.wasm")), { qz: qzX });
+        qzX.bindMem(iX.exports.memory); if (iX.exports.__bump) qzX.bindBump(iX.exports.__bump);
+        qzX.bindClosures(iX.exports, rX.lamMeta); qzX.bindClasses(iX.exports, rX.classMeta);
+        check("提取方法 rest 打包", qzX._toJS(iX.exports.extractedRest()), 3);
+        check("提取方法 固定+rest", qzX._toJS(iX.exports.extractedFixedRest()), 12);
+        check("super.m 提取 rest", qzX._toJS(iX.exports.superExtractedRest()), 3);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

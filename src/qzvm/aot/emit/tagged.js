@@ -2471,10 +2471,25 @@ Emitter.prototype._emitAssignTargetFromStack = function (target) {
 Emitter.prototype._emitSuperCall = function (c, args) {
     const M = this.m;
     if (!c.parent) throw new Error("[tagged] " + c.name + " 无父类，super() 非法");
-    if (args.length > 4) throw new Error("[tagged] super 最多 4 参");
-    for (let i = 0; i < 4; i++) {
-        if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
-        M.localSet(this.cloArgs[i]);
+    if (args.length === 1 && ts.isSpreadElement(args[0])) {   // super(...arr)：运行期数组按父 ctor 形参表拆到槽（rest 槽 = slice），父 ctor 用 arguments 时令 __args=数组
+        const t = this._expEnter();
+        this.emitTaggedExpr(args[0].expression); M.localSet(t.v);
+        const pc = this.classes.get(c.parent);
+        const pparams = pc && pc.ctor ? pc.ctor.parameters : null;
+        const pRest = (pparams && pparams.length > 0 && pparams[pparams.length - 1].dotDotDotToken) ? pparams.length - 1 : -1;
+        for (let i = 0; i < 4; i++) {
+            if (i === pRest) { M.localGet(t.v); M.i32Const(this._strId("slice")); M.i64ConstBits(...f64Bits(i)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined(); this._emitUndefined(); M.call("qz.method_call"); }
+            else this._emitElemOf(t.v, ts.factory.createNumericLiteral(i));
+            M.localSet(this.cloArgs[i]);
+        }
+        if (pc && pc.ctor && this._methUsesArgs(pc.ctor)) { M.localGet(t.v); M.globalSet(this._argGlobal); }
+        this._expLeave();
+    } else {
+        if (args.length > 4) throw new Error("[tagged] super 最多 4 参");
+        for (let i = 0; i < 4; i++) {
+            if (i < args.length) this.emitTaggedExpr(args[i]); else this._emitUndefined();
+            M.localSet(this.cloArgs[i]);
+        }
     }
     M.localGet(0);
     for (let i = 0; i < 4; i++) M.localGet(this.cloArgs[i]);

@@ -1524,6 +1524,7 @@ function makeQzvm(strings, opts) {
                 const a2 = args.filter(x => x !== undefined && x !== null).map(bitsOf);
                 while (a2.length < 4) a2.push(TAG);
                 const ovf1 = a2.length > 4 ? arrWriteback(a2.slice(3).map(toJS)) : TAG;   // >4 实参：溢出数组（ovf[0] = 实参 3，与 callee 的 ovf[i-3] 约定一致；此前恒传 TAG → 第 4+ 实参静默丢失）
+                if (m2.rest && m2.n - 1 < 4) a2[m2.n - 1] = arrWriteback(args.slice(m2.n - 1));   // rest 尾形参：槽须收到「从该位起的实参数组」（此前收单个标量 → xs.length=undefined）
                 if (m2.usesArgs && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arrWriteback(args));   // 被调方法体用 arguments：写 __args 全量实参（含 undefined→TAG）
                 return toJS(exportsRef[m2.name](selfH, ...a2.slice(0, 4), ovf1));
               });
@@ -2578,6 +2579,7 @@ function makeQzvm(strings, opts) {
         const a = args.map(bitsOf);
         const a4 = a.slice(0, 4); while (a4.length < 4) a4.push(TAG);
         const ovf1 = a.length > 4 ? arrWriteback(a.slice(3).map(toJS)) : TAG;
+        if (m.rest && m.n - 1 < 4) a4[m.n - 1] = arrWriteback(args.slice(m.n - 1));   // rest 尾形参：槽须收到「从该位起的实参数组」
         if (usesArgs && exportsRef.qzs_setargs) exportsRef.qzs_setargs(arrWriteback(args));   // 被调方法用 arguments → 写全量实参
         return toJS(exportsRef[en](selfH, ...a4, ovf1));
       });

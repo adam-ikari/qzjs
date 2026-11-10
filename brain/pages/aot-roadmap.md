@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T09:44:54"
+updated: "2026-11-10T10:08:26"
 ---
 
 <!-- compiled_truth -->
@@ -451,4 +451,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "构造器展开实参 + rest 修复：new C(...a) 时 _emitNewCall 的 rest 段此前从空 args（=[]）构建数组 → rest 得空数组（AOT 0 vs JS 5）。修：new-spread 路径把运行期实参数组 t.y 作为第三参 spreadArr 传给 _emitNewCall，rest 槽改用 spreadArr.slice(i)（qz.method_call \"slice\"）；且当 argSrc 且 ctor 用 arguments 时令 __args=spreadArr（spreadArr 即全量实参数组，此前 ctor 读 __args 得残留 → unreachable trap）。另：rest 形参在槽 0..3 时 >4 实参合法（多余全进 rest 数组），放宽 new 最多 4 参 限制。test_aot 加 new C(...a) rest=5、spread+arguments=6 回归。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: class C{constructor(...xs){this.s=xs.length}} new C(...[1,2,3,4,5]).s → AOT 0 vs JS 5"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T10:08:26
+  kind: decision
+  summary: "两处 rest 转发修复：(1) super(...arr) 展开调用此前 loud 拒绝（SpreadElement）；_emitSuperCall 增分支：求值运行期数组按父 ctor 形参表拆到槽（rest 槽 slice），父 ctor 用 arguments 时令 __args=数组。(2) 提取方法 + rest 形参静默错值：JS 宿主 bound function（qzvm.js prop_get 原型方法绑定 line ~1527 与 method_value line ~2582）把单个实参传给 rest 槽 → xs.length=undefined；按 classMeta 的 n(总形参数)/rest，令 a[restIdx]=arrWriteback(args.slice(restIdx))（restIdx=n-1<4）。覆盖 o.m 提取、super.m 提取、.call/.apply/.bind。test_aot 加 super(...arr) 混合+arguments、提取 rest/固定+rest/super 提取 rest 回归。全批 0 diff、glue 5/5、e2e PASS。"
+  source: "probe: super(...ys) → 不支持的表达式 SpreadElement; g=o.m; g(1,2,3) rest 方法 → undefined"
   affects: [aot-roadmap]
