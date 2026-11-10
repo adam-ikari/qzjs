@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T09:21:53"
+updated: "2026-11-10T09:44:54"
 ---
 
 <!-- compiled_truth -->
@@ -445,4 +445,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "构造器 rest 形参修复：_emitNewCall 的静态 ctor 路径此前按槽逐个传单个实参，rest 槽收到标量 → xs.length 得 undefined（AOT undefined vs JS 3）。修：检测尾形参 dotDotDotToken（sRest），两分支（ctorNeedsArgs 用 arguments / 普通）在该槽分别用 args.slice(i) 数组字面量 或 ta.v.slice(i)（qz.method_call \"slice\"）打包。覆盖 constructor(...xs)、constructor(a,...xs)、ctor 同时用 arguments+rest。>4 实参仍按既有 loud 拒绝。test_aot 加两回归（9902、6）。全批 0 diff、glue 5/5、e2e PASS。"
   source: "probe: class C{constructor(...xs:number[]){this.v=xs.length}} new C(1,2,3).v → AOT undefined vs JS 3"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T09:44:54
+  kind: decision
+  summary: "构造器展开实参 + rest 修复：new C(...a) 时 _emitNewCall 的 rest 段此前从空 args（=[]）构建数组 → rest 得空数组（AOT 0 vs JS 5）。修：new-spread 路径把运行期实参数组 t.y 作为第三参 spreadArr 传给 _emitNewCall，rest 槽改用 spreadArr.slice(i)（qz.method_call \"slice\"）；且当 argSrc 且 ctor 用 arguments 时令 __args=spreadArr（spreadArr 即全量实参数组，此前 ctor 读 __args 得残留 → unreachable trap）。另：rest 形参在槽 0..3 时 >4 实参合法（多余全进 rest 数组），放宽 new 最多 4 参 限制。test_aot 加 new C(...a) rest=5、spread+arguments=6 回归。全批 0 diff、glue 5/5、e2e PASS。"
+  source: "probe: class C{constructor(...xs){this.s=xs.length}} new C(...[1,2,3,4,5]).s → AOT 0 vs JS 5"
   affects: [aot-roadmap]

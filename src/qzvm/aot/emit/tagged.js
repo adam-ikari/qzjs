@@ -1160,7 +1160,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         const lit = ts.factory.createArrayLiteralExpression(e.arguments);
         lit.pos = e.pos; lit.end = e.end;
         this.emitTaggedExpr(lit); M.localSet(t.y);                       // 实参数组（受保护）
-        this._emitNewCall({ expression: e.expression, arguments: [] }, (i) => this._emitElemOf(t.y, ts.factory.createNumericLiteral(i)));
+        this._emitNewCall({ expression: e.expression, arguments: [] }, (i) => this._emitElemOf(t.y, ts.factory.createNumericLiteral(i)), t.y);
         this._expLeave();
         return;
     }
@@ -2169,7 +2169,7 @@ Emitter.prototype._emitFillUndef = function (size) {
 Emitter.prototype._instSize = function () {
     return ((this.fieldMap ? this.fieldMap.size : 0) + 1) * 8;
 };
-Emitter.prototype._emitNewCall = function (e, argSrc) {
+Emitter.prototype._emitNewCall = function (e, argSrc, spreadArr) {
     const M = this.m;
     let tgt = e.expression;                                  // new (C as any)(…) / new (C)() 亦按类名解析
     while (tgt && (ts.isParenthesizedExpression(tgt) || ts.isAsExpression(tgt) || ts.isNonNullExpression(tgt)
@@ -2268,7 +2268,9 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
     const c = this.classes.get(cname);
     if (this._dynParentExpr(c)) this._emitStaticsGuard(cname);   // 动态父：构造前先建立运行时父链（statics guard 内）
     const args = e.arguments;
-    if (args.length > 4) throw new Error("[tagged] new 最多 4 参");
+    { const cpAll = c.ctor ? c.ctor.parameters : [];   // rest 形参在槽 0..3 → 多余实参全进 rest 数组，>4 合法；非 rest 仍 ≤4
+      const cRestIdx = (cpAll.length > 0 && cpAll[cpAll.length - 1].dotDotDotToken) ? cpAll.length - 1 : -1;
+      if (args.length > 4 && !(cRestIdx >= 0 && cRestIdx < 4)) throw new Error("[tagged] new 最多 4 参"); }
     if (c.builtinParentName && c.hostBacked) {              // 用户类 extends 内建（合成 ctor + 无自有字段）：宿主承载（真内建实例 + 类 prototype）；有字段/自定义 ctor 仍走下方 bump 近似（Error 族 message/name 写回）
         const nargs = argSrc ? -1 : args.length;
         M.i32Const(c.id); M.i32Const(this._strId(c.builtinParentName)); M.i32Const(nargs);
@@ -2318,11 +2320,16 @@ Emitter.prototype._emitNewCall = function (e, argSrc) {
         M.localGet(ta.v); M.globalSet(this._argGlobal);
         this._expLeave();
       } else {
+        if (argSrc && spreadArr !== undefined && c.ctor && this._methUsesArgs(c.ctor)) { M.localGet(spreadArr); M.globalSet(this._argGlobal); }   // new C(...a) 且 ctor 用 arguments：spreadArr 即全量实参数组
         for (let i = 0; i < 4; i++) {
           if (i === sRest) {
-            const lit = ts.factory.createArrayLiteralExpression(args.slice(i));
-            lit.pos = args.length ? args[Math.min(i, args.length - 1)].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
-            this.emitTaggedExpr(lit);
+            if (spreadArr !== undefined) {   // new C(...a)：rest 段 = 运行期数组 a.slice(i)（此前从空 args 构建 → 空数组）
+              M.localGet(spreadArr); M.i32Const(this._strId("slice")); M.i64ConstBits(...f64Bits(i)); this._emitUndefined(); this._emitUndefined(); this._emitUndefined(); this._emitUndefined(); M.call("qz.method_call");
+            } else {
+              const lit = ts.factory.createArrayLiteralExpression(args.slice(i));
+              lit.pos = args.length ? args[Math.min(i, args.length - 1)].pos : 0; lit.end = args.length ? args[args.length - 1].end : 0;
+              this.emitTaggedExpr(lit);
+            }
           } else if (argSrc) argSrc(i);                            // 实参来自运行期数组（new C(...args)）
           else if (i < args.length) this.emitTaggedExpr(args[i]);
           else this._emitUndefined();

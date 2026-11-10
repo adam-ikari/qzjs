@@ -639,7 +639,12 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
             "class CR { v: number; w: number; constructor(a: number, ...xs: number[]) { this.v = a; this.w = xs.length; } }\n"
           + "class CS { v: number; constructor(...xs: number[]) { this.v = xs.length + arguments.length; } }\n"
           + "export function ctorRest(): any { const c: any = new CR(99, 1, 2); return c.v * 100 + c.w; }\n"           // 9902
-          + "export function ctorRestArgs(): any { return new (CS as any)(1, 2, 3).v; }\n");                          // 3+3=6
+          + "export function ctorRestArgs(): any { return new (CS as any)(1, 2, 3).v; }\n"                          // 3+3=6
+          + "class CT { v: number; constructor(...xs: number[]) { this.v = xs.length; } }\n"
+          + "export function ctorRest5(): any { return new (CS as any)(1, 2, 3, 4, 5).v; }\n"                      // 5+5=10（rest 槽承载全部 >4 实参）
+          + "export function ctorRestSpread(): any { const a = [1, 2, 3, 4, 5]; return new (CT as any)(...a).v; }\n" // 5（new C(...a) rest 从运行期数组 slice）
+          + "class CU { v: number; constructor(...xs: number[]) { this.v = xs.length + arguments.length; } }\n"
+          + "export function ctorSpreadArgs(): any { const a = [1, 2, 3]; return new (CU as any)(...a).v; }\n");  // 3+3=6（spreadArr 即 __args）
         const rR = compileTS(path.join(os.tmpdir(), "qz_aot_ctorrest.ts"), path.join(os.tmpdir(), "qz_aot_ctorrest.wasm"), {});
         const qzR = makeQzvm(rR.strings, { fields: rR.fields });
         const { instance: iR } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_ctorrest.wasm")), { qz: qzR });
@@ -647,6 +652,9 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         qzR.bindClosures(iR.exports, rR.lamMeta); qzR.bindClasses(iR.exports, rR.classMeta);
         check("构造器 rest 形参(固定+rest)", qzR._toJS(iR.exports.ctorRest()), 9902);
         check("构造器 rest + arguments", qzR._toJS(iR.exports.ctorRestArgs()), 6);
+        check("构造器 rest 承载 >4 实参", qzR._toJS(iR.exports.ctorRest5()), 10);
+        check("构造器 rest 展开实参 new C(...a)", qzR._toJS(iR.exports.ctorRestSpread()), 5);
+        check("构造器 spread + arguments", qzR._toJS(iR.exports.ctorSpreadArgs()), 6);
     }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
