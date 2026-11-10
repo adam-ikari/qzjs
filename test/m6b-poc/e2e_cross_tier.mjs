@@ -43,6 +43,8 @@ const LOADS = [
     ['nestedArgRun', [], 3520],
     // 静态块副作用在定义点 eager 执行（两档一致；new 即触发，无需静态访问）
     ['staticBlkRun', [], 5],
+    // 顶层别名类表达式 static 块定义点执行（两档一致）
+    ['aliasBlkRun', [], 7],
     ['preFieldInc', [], 4043],
     ['postFieldInc', [], 3004],
     ['fieldIncLoop', [], 2508],

@@ -91,3 +91,8 @@ class StaticBlk {
     static { staticBlkCounter = staticBlkCounter + 5; }
 }
 function staticBlkRun(): number { new StaticBlk(); return staticBlkCounter; }  // 5
+
+// 顶层别名类表达式 `const X = class { static {...} }`：static 块定义点 eager 执行。
+let aliasBlkCounter: number = 0;
+const AliasCls = class { static { aliasBlkCounter = 7; } }
+function aliasBlkRun(): number { void AliasCls; return aliasBlkCounter; }  // 7
