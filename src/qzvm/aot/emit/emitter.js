@@ -1494,6 +1494,9 @@ class Emitter {
         // num 值 = f64；tagged 值 = i64（NaN-box，32/64 位统一）
         const vt = this.mode === "num" ? "f64" : "i64";
         const locals = this._collectLocals(f.body);
+        if (this._inModInit) {   // __module_init 里的**直接**顶层类声明已提升、非局部（不触发 dyn clone 分支）：剔除其名；嵌套在其它语句里的类声明仍走 clone
+            for (const st of f.body.statements) if (ts.isClassDeclaration(st) && st.name) { const ix = locals.indexOf(st.name.text); if (ix >= 0) locals.splice(ix, 1); }
+        }
         for (const p of f.parameters) {                                  // 解构形参的绑定名也要有 local
             if (ts.isIdentifier(p.name)) continue;
             for (const n of this._patternNames(p.name)) if (!locals.includes(n)) locals.push(n);

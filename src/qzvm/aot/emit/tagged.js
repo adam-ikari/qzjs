@@ -31,6 +31,10 @@ Emitter.prototype.emitTaggedStmt = function (s) {
             this.m.localGet(td.v); this._expLeave();
             this._emitVarStore(sn, this.scratchB); this.m.drop();
         }
+        /* 顶层类声明：静态块/字段初值在 JS 中于**类定义时**执行（可带副作用：写模块 var、调用函数）。
+         * 此前只在新静态访问点惰性初始化 → `new C()` 不触发则副作用永不发生（静默错值 0）。
+         * 这里在声明点补齐 eager 初始化；内部静态访问仍带惰性守卫（前向引用读 B.y 时按需初始化 B）。 */
+        if (sn && this.classes.has(sn)) this._emitStaticsChainGuard(sn);
         return;   // 顶层类声明：已提升为模块级
     }
     if (ts.isFunctionDeclaration(s)) return;   // 已提升为模块级（见 collectDecls）

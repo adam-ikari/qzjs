@@ -604,6 +604,25 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
         try { compileTS(path.join(os.tmpdir(), "qz_aot_sbw.ts"), path.join(os.tmpdir(), "qz_aot_sbw.wasm"), {}); } catch (e) { msg = String(e.message || e); }
         check("静态块写外部 const loud(TDZ)", !!(msg && msg.indexOf("静态初始化捕获") >= 0), true);
     }
+    // 顶层类 static 块/字段初值在**定义点** eager 执行（JS 语义）：new/静态访问都不需要，副作用即生效；
+    // 且按源码序交错（类定义之后的模块级语句能读到块写入的值）。
+    {
+        fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_eager.ts"),
+            "let counter: number = 0;\n"
+          + "class C { static { counter = 5; } }\n"
+          + "export function eager(): any { return counter; }\n"           // 无 new/静态访问 → 5（定义点已跑）
+          + "let seq: number = 0;\n"
+          + "class D { static { seq = 1; } }\n"
+          + "export const afterD: number = seq + 10;\n"                    // D 定义后读 → 11（交错顺序）
+          + "export function seqv(): any { return afterD; }\n");
+        const rE = compileTS(path.join(os.tmpdir(), "qz_aot_eager.ts"), path.join(os.tmpdir(), "qz_aot_eager.wasm"), {});
+        const qzE = makeQzvm(rE.strings, { fields: rE.fields });
+        const { instance: iE } = await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_eager.wasm")), { qz: qzE });
+        qzE.bindMem(iE.exports.memory); if (iE.exports.__bump) qzE.bindBump(iE.exports.__bump);
+        qzE.bindClosures(iE.exports, rE.lamMeta); qzE.bindClasses(iE.exports, rE.classMeta);
+        check("静态块定义点 eager 执行(无 new/静态访问)", qzE._toJS(iE.exports.eager()), 5);
+        check("静态块副作用按源码序交错生效", qzE._toJS(iE.exports.seqv()), 11);
+    }
      // for-in（改写为 for (k of Object.keys(o))）+ 动态字符串键 o[k]
     fs.writeFileSync(path.join(os.tmpdir(), "qz_aot_forin.ts"),
         "export function fi(): any { const o: any = { a: 1, b: 2, c: 3 }; let s = \"\"; for (const k in o) s = s + k; return s; }\n"

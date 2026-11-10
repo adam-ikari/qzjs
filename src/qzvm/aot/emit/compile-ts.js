@@ -271,6 +271,8 @@ function compileTS(input, outWasm, opts = {}) {
                     else if (ts.isPropertyAccessExpression(d.initializer)) { const sx0 = symbolNameOf(d.initializer); if (sx0) modSymLit.set(d.name.text, sx0); }   // const s = Symbol.iterator → 类计算属性名可静态解析
                 }
                 modStmts.push(st);
+            } else if (ts.isClassDeclaration(st)) {
+                modStmts.push(st);   // 顶层类声明纳入 __module_init（仅用于在定义点发射 eager 静态初始化，见 tagged.js class-decl 分支）
             } else if (!ts.isFunctionDeclaration(st) && !ts.isClassDeclaration(st) && !ts.isInterfaceDeclaration(st)
                 && !ts.isEnumDeclaration(st) && !ts.isEnumMember(st)
                 && !ts.isTypeAliasDeclaration(st) && !ts.isModuleDeclaration(st)
@@ -711,9 +713,19 @@ function compileTS(input, outWasm, opts = {}) {
         const modVarNames = mutableModNames;
         const touched = (root) => {                  // 该语法树里引用到的模块级变量名
             const hit = new Set();
+            const walk0 = (n) => { if (ts.isIdentifier(n) && modVarNames.has(n.text)) hit.add(n.text); ts.forEachChild(n, walk0); };
             const walk = (n) => {
-                if (ts.isIdentifier(n) && modVarNames.has(n.text)) hit.add(n.text);
-                ts.forEachChild(n, walk);
+                // 顶层类声明：定义点只执行静态块/静态字段初值——方法体/构造器是独立 wasm 函数（另经 fns 检查），不扫。
+                if (ts.isClassDeclaration(n)) {
+                    for (const mem of n.members) {
+                        const st = ts.getModifiers ? (ts.getModifiers(mem) || []) : ((mem.modifiers) || []);
+                        const isStatic = st.some(m => m.kind === ts.SyntaxKind.StaticKeyword);
+                        if (ts.isClassStaticBlockDeclaration(mem)) walk0(mem.body);
+                        else if (isStatic && (ts.isPropertyDeclaration(mem) || ts.isPropertyAssignment(mem)) && mem.initializer) walk0(mem.initializer);
+                    }
+                    return;
+                }
+                walk0(n);
             };
             walk(root);
             return hit;

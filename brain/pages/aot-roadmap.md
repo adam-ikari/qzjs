@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T06:04:58"
+updated: "2026-11-10T08:56:19"
 ---
 
 <!-- compiled_truth -->
@@ -421,4 +421,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "类表达式/嵌套声明的静态块捕获工厂局部：新增『写模块级外部绑定』检测——静态块若有赋值目标基名为 declaredNames 中但**非捕获名**（如 TDZ 的 C2.x = n，C2 是待赋值 const）→ 该块不并入捕获 env、保持 loud；否则（纯 lambda/局部声明块如 const f=()=>n）并入 capSetC，sei 在创建点执行 env 可见 → 支持。_mergeBlk = clsExprSupported && !_blkWriteOuter。C 档（clsExprSupported=false）仍 loud。corpus44 closure-in-static-block-loud 转 supported（78/78,0 diff），factory-static-block-captures-outer 仍 loud（检测命中）。至此仅剩 1 个 unsupported。"
   source: "session: aot static-block safe capture"
+  affects: [aot-roadmap]
+
+- time: 2026-11-10T08:56:19
+  kind: decision
+  summary: "顶层类 static 块/字段初值改为**定义点 eager 执行**（JS 语义），修复惰性静默错值：此前 statics 仅在新静态访问点惰性初始化，故 static 块若有副作用（写模块级 var/调用函数）而未被静态访问/仅被 new 触发 → 副作用永不发生（实测 AOT counter=0 vs JS=5）。做法：compile-ts.js 把顶层类声明纳入 modStmts（仅用于定义点发射），tagged.js class-decl 分支对非 dyn 顶层类调 _emitStaticsChainGuard（statics_ready 幂等，内部静态访问仍带惰性守卫——前向引用读 B.y 会按需初始化 B）；touched 对类声明只扫静态块/静态字段初值（方法体是独立 wasm 函数，另经 fns 检查，避免误判 interp 冲突）；emitFunc 对 __module_init 的直接顶层类声明名从 locals 剔除（已提升、非局部，避免误走 dyn clone 分支；嵌套在其它语句里的类声明仍 clone）。按源码序交错执行（类后模块语句能读到块副作用）。test_aot 加 eager + 交错顺序回归。全批 0 diff、glue 5/5、e2e PASS。C 档同一守卫（qz.statics_* 原语）亦生效。"
+  source: "probe: let counter=0; class C{static{counter=5}}; new C(); → AOT 0 vs JS 5"
   affects: [aot-roadmap]
