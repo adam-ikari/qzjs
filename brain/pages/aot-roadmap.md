@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-10T16:49:40"
+updated: "2026-11-11T08:14:11"
 ---
 
 <!-- compiled_truth -->
@@ -517,4 +517,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "typeof 函数值类型**非 bug**（澄清）：移交原述「typeof <提取方法/host句柄> 报 object/number」是探针伪象——探针漏调 bindClasses，classMeta=null → 方法丢失 → 静默 undefined。正确初始化后：JS 档 typeof <提取方法值>=function、typeof <类名>=function、typeof <实例方法调用结果>=number，全对（0x7FFD 走 typeof_host 已正确；0x7FFF 闭包内联判 function 已正确）。C 档 typeof 分类同（typeofRun 双档一致 object/function/number/number/string）；唯 C 档**提取方法作值 loud throw**（无法物化 wasm 闭包为 JS 值，2e5b5be6 记录，与 typeof 无关）。新增双档回归 cls.ts typeofRun + test_aot tmv（typeof o.m=function）。副产：**复现同名方法跨类冲突**——clsFactory（方法 m,o）在模块内遇第二个 class 的 m 方法即派发错（m 返回 7 而非 6，捕获串槽）；tmv 方法改名 ek 避开。该冲突 bug 仍 pending（根因未定）。"
   source: "probe /tmp/tp.ts: bindClasses 缺失 → classMeta null → methods undefined; 补 bindClasses 后 t1/t3/t4/t5 全=function"
+  affects: [aot-roadmap]
+
+- time: 2026-11-11T08:14:11
+  kind: note
+  summary: "同名方法跨类冲突——**已获可复现触发 + 根因方向**：test_aot misc 模块含 clsFactory（工厂类表达式 `function mk(n){return class{x:any=n;m(){let n=5;n=n+1;return n}o(){return this.x+n}}}`，m/o 捕获 n）+ 模块级 `class C{m(){return 7}}`（tmv）→ 工厂实例 c.m() 返回 **7（C 的 m 方法体）**而非 6。tmv 方法改名 ek 即恢复 6,14（已 committed ff3eda4e）。最小复现仍不触发（仅加 `class Sibling{m()}` 或提取 `typeof o.m` 均通过）——需完整 misc 上下文。根因方向：class_expr_value(qzvm.js:1302) clone 浅拷 `methods`（共享引用），但 method_call(2393) 按 clsId 派发应隔离；疑点在工厂类**捕获方法**的发射——m/o 捕获 n，可能以闭包槽（method_call 字段槽路径 2383-2392 CLO_HI）或 __m_<cname>$m 导出注册。c.m() 得 C 体 → exportsRef[m.name] 解析到 __m_C$m 或 clsId/内存撞。下一步：dump misc 失败源的 classMeta（工厂类 cname + m/o 是字段闭包还是导出）；对比 ek 通过态。"
+  source: "test_aot misc: clsFactory + tmv(class C{m}) → c.m()=7(C体); 改 ek → 6,14 通过"
   affects: [aot-roadmap]
