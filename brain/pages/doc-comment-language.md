@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [doc, comments, i18n, convention]
 created: "2026-10-12T06:43:13"
-updated: "2026-10-20T01:51:49"
+updated: "2026-11-13T00:05:19"
 ---
 
 <!-- compiled_truth -->
@@ -69,4 +69,10 @@ updated: "2026-10-20T01:51:49"
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: brain update-truth
+  affects: [doc-comment-language]
+
+- time: 2026-11-13T00:05:19
+  kind: note
+  summary: "Enforcement reminder (2026-11-13): this session added new code comments in Chinese, violating the rule below. All newly written comments in src/qzvm/aot/emit/emitter.js, tagged.js, audit_corpus47.js and the two new CHANGELOG entries have been rewritten in English. Going forward: new code comments, engineering docs and commit messages are English; existing Chinese content stays untouched. The brain timeline entries themselves are written in English for this session."
+  source: "agent session 2026-11-12/13 (AOT fixes ea4d3bd4, 0e00129f and follow-up)"
   affects: [doc-comment-language]

@@ -1,11 +1,15 @@
-// 差分审计语料（第四十七批）：**同名局部变量遮蔽**顶层类/函数/内建/模块全局时的闭包捕获。
-// 修复两类静默错值（旧实现按**文本名**判定"不是自由变量"，忽略遮蔽）：
-//   1) `_computeStaticVars` 把 `const C = mk(); const c = new C(); c.m()` 按类名 C 静态判成
-//      类 C 实例 → 直调 __m_C$m（静默 7 而非工厂类方法的 6）。改查符号身份（_isClassValueIdent）。
-//   2) `_capturesOf` / 类 env 捕获按名丢弃 `class/fnNames/BUILTIN_GLOBALS/moduleGlobals` 命中项，
-//      同名局部被遮蔽后闭包读到类对象/顶层函数/内建/模块全局（静默错值）。改为按 checker 符号判定：
-//      只有引用**确为**该类值/顶层函数/内建/模块顶层绑定时才丢弃，局部遮蔽一律捕获。
-// 覆盖：箭头/块/形参/循环局部、类方法/字段/静态字段/方法内嵌套箭头、模块级类方法、顶层 const 箭头。
+// Differential audit corpus (batch 47): closure capture when a same-named local shadows a top-level
+// class / function / builtin / module global.
+// Two silent-wrong-value bugs fixed (the old code decided "not a free variable" by *text name*):
+//   1) `_computeStaticVars` treated `const C = mk(); const c = new C(); c.m()` as an instance of class C
+//      and directly dispatched __m_C$m (silently 7 instead of the factory method's 6). Now symbol-based
+//      via _isClassValueIdent.
+//   2) `_capturesOf` / class-env capture dropped names hitting `class/fnNames/BUILTIN_GLOBALS/moduleGlobals`
+//      so a shadowing local read the class object / top-level function / builtin / module global instead.
+//      Now every exclusion is symbol-based: only a reference that really denotes that top-level binding is
+//      dropped; a local shadow is always captured.
+// Coverage: arrow/block/param/loop locals, class method/field/static-field/arrow-in-method, module class
+// method, top-level const arrow.
 module.exports = [
   { name: "shadow-class-arrow", fn: "f", args: [], ts: `class C { static v = 9; }
 export function f(): any { const C = 5; const g = () => C + 1; return g(); }` },
@@ -44,4 +48,16 @@ export function f(): any { const D = 7; class K { m() { return D + 1; } } return
 export function f(): any { let r = 0; { let D = 7; const g = () => D + 1; r = g(); } return r; }` },
   { name: "local-class-arrow", fn: "f", args: [], ts: `export function f(): any { class K { m() { return 5; } } const g = () => new K().m(); return g(); }` },
   { name: "local-class-block-arrow", fn: "f", args: [], ts: `export function f(): any { let r = 0; { class K { m() { return 5; } } const g = () => new K().m(); r = g(); } return r; }` },
+  { name: "shadow-inline-new-method", fn: "f", args: [], ts: `class C { v = 9; m() { return 9; } }
+function mk() { return class { v = 5; m() { return 5; } }; }
+export function f(): any { const C = mk(); return new C().m(); }` },
+  { name: "shadow-inline-new-field", fn: "f", args: [], ts: `class C { v = 9; }
+function mk() { return class { v = 5; }; }
+export function f(): any { const C = mk(); return new C().v; }` },
+  { name: "shadow-dyn-parent", fn: "f", args: [], ts: `class Base { m() { return 9; } }
+function mk() { return class { m() { return 5; } }; }
+export function f(): any { const Base = mk(); class K extends Base {} return new K().m(); }` },
+  { name: "shadow-dyn-parent-instanceof", fn: "f", args: [], ts: `class Base { m() { return 9; } }
+function mk() { return class { m() { return 5; } }; }
+export function f(): any { const Base = mk(); class K extends Base {} return new K() instanceof Base; }` },
 ];

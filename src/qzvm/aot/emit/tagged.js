@@ -2556,7 +2556,7 @@ Emitter.prototype._emitClassValue = function (c) {        // 类对象句柄：�
 Emitter.prototype._dynParentExpr = function (c) {          // 动态父：extends 非「已知类名/内建」→ 返回父表达式（否则 null）
     if (!c || !c.dynParentNode) return null;
     const n = c.dynParentNode;
-    if (ts.isIdentifier(n) && (this.classes.has(this._className(n.text)) || BUILTIN_GLOBALS.has(n.text) || EMITTER_BUILTIN_CTORS.has(n.text))) return null;
+    if (ts.isIdentifier(n) && ((this.classes.has(this._className(n.text)) && this._isClassValueIdent(n)) || BUILTIN_GLOBALS.has(n.text) || EMITTER_BUILTIN_CTORS.has(n.text))) return null;   // a shadowing local keeps it dynamic
     return n;
 };
 Emitter.prototype._emitSuperCallForward = function (c) {
@@ -2768,7 +2768,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         while (right && (ts.isParenthesizedExpression(right) || ts.isAsExpression(right) || ts.isNonNullExpression(right)
             || ts.isTypeAssertionExpression(right) || ts.isSatisfiesExpression(right))) right = right.expression;   // d instanceof (Animal as any)
         if (ts.isIdentifier(right) && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet|Proxy|File|Blob|URL|URLSearchParams|ArrayBuffer|SharedArrayBuffer|DataView|Uint8Array|Int8Array|Uint16Array|Int16Array|Uint32Array|Int32Array|Float32Array|Float64Array|BigInt64Array|BigUint64Array|FormData|AbortController|AbortSignal|ReadableStream|WritableStream|TransformStream)$/.test(right.text)
-            && !this.classes.has(this._className(right.text))) {
+            && !this.classes.has(this._className(right.text)) && this._isBuiltinIdent(right)) {   // a shadowing local -> dynamic
             // 内建类：宿主按 tag/物化判定（Array/Object/String/Number/Boolean/Function…）
             this.emitTaggedExpr(e.left);
             this.m.i32Const(this._strId(right.text));
@@ -2777,7 +2777,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
             return;
         }
         {   // 动态右值（类表达式变量 / mixin 结果 / 内建值）：运行时宿主判定（用户类 → 运行时父链；内建 → 按名回退）
-            const dynR = !this.classes.has(this._className(right.text))   // 已知类名 → 静态路径（模块级类亦会登记为 moduleGlobals，勿误判）
+            const rightStaticCls = ts.isIdentifier(right) && this.classes.has(this._className(right.text)) && this._isClassValueIdent(right);   // a shadowing local -> not static
+            const dynR = !rightStaticCls   // a known class name takes the static path (module-level classes are also in moduleGlobals; do not misjudge)
                 && (ts.isPropertyAccessExpression(right)
                     || ts.isCallExpression(right)
                     || (ts.isIdentifier(right) && (this._local(right.text) !== undefined || this.capMap.has(right.text)

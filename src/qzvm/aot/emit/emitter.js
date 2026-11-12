@@ -337,7 +337,8 @@ class Emitter {
     }
     // 闭包捕获分析：找 lambda 体内的自由标识符（非其参数/局部、非字符串/数字/对象属性名）。
     // 捕获的变量来自创建处（外层函数局部）。返回有序捕获名列表。
-    // nodeMap（可选）：捕获名 → 首次引用标识符节点，供调用方按符号身份区分「真类名引用」与「同名局部遮蔽」。
+    // nodeMap (optional): capture name -> first reference identifier node, so callers can tell a real
+    // class/function/builtin reference from a same-named local shadow via symbol identity.
     _capturesOf(lam, nodeMap) {
         const lambdaIsArrow = ts.isArrowFunction(lam);   // 箭头继承 this；function 表达式有自己的 this
         const fnLike = (n) => ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n)
@@ -382,10 +383,10 @@ class Emitter {
                 if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
                 if (n.parent && ts.isBindingElement(n.parent) && n.parent.propertyName === n) return;   // 解构属性名不是变量
                 const name = n.text;
-                const localShadow = this._identIsLocalBinding(n);   // 同名局部遮蔽：不能按名字命中顶层/内建丢弃
+                const localShadow = this._identIsLocalBinding(n);   // local shadow: do not drop by a top-level/builtin name hit
                 if (!isLocal(name) && !seen.has(name) && !(this.fnNames.has(name) && this._isFnValueIdent(n))
-                    && !(this.classes.has(this._className(name) || name) && this._isClassValueIdent(n))   // 类名不是自由变量（闭包内须走类对象路径）；同名局部变量遮蔽类时仍须捕获
-                    && !(this.moduleGlobals && this.moduleGlobals.has(name) && !localShadow)   // 模块级全局：闭包内改为调用时读全局（否则按创建时值捕获 → 自递归箭头 const 拿到 undefined）
+                    && !(this.classes.has(this._className(name) || name) && this._isClassValueIdent(n))   // class names are not free vars (closures use the class-object path); a shadowing local must still be captured
+                    && !(this.moduleGlobals && this.moduleGlobals.has(name) && !localShadow)   // module globals are read at call time inside closures (capturing at creation time breaks self-recursive arrow consts)
                     && !/^(undefined|null|NaN|Infinity)$/.test(name)) { seen.add(name); out.push(name); if (nodeMap && !nodeMap.has(name)) nodeMap.set(name, n); }
                 return;
             }
@@ -404,18 +405,18 @@ class Emitter {
     _synthCaptureArrow(body) {
         return ts.factory.createArrowFunction(undefined, undefined, [], undefined, undefined, body);
     }
-    // 标识符是否指称类值（类声明/类表达式别名/导入类）——静态接收者推断专用。
-    // 仅按文本查 classes.has 会把「同名局部变量遮蔽类」误判为静态实例：
-    // `class C{m(){…7}}` + `function f(){ const C = mk(); const c = new C(); c.m() }`
-    // 曾把 c 当类 C 实例 → 直调 __m_C$m（静默 7 而非工厂类的 m）。查符号身份消除歧义。
+    // Whether the identifier denotes a class value (class declaration / class-expression alias / imported
+    // class). Used for static-receiver inference. A text-only classes.has check misreads a same-named local
+    // variable that shadows a class as a static instance (e.g. class C{m(){...7}} plus
+    // `const C = mk(); const c = new C(); c.m()` dispatched to __m_C$m, silently 7). Symbol identity fixes it.
     _isClassValueIdent(idNode) {
         const ck = this.checker;
-        if (!ck || !idNode) return true;                 // 无 checker → 保持旧判据（调用方仍校验 classes.has）
+        if (!ck || !idNode) return true;                 // no checker -> keep the old rule (callers still check classes.has)
         let sym;
         try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return true; }
-        if (!sym) return true;                           // 节点被 transform 重建、查不到符号 → 不因新判据误伤
+        if (!sym) return true;                           // node rebuilt by a transform / no symbol -> avoid false negatives
         if (sym.flags & ts.SymbolFlags.Alias) {
-            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* 保持原符号 */ }
+            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* keep the original symbol */ }
         }
         const ds = sym.declarations || [];
         if (!ds.length) return true;
@@ -423,8 +424,9 @@ class Emitter {
             || ((ts.isVariableDeclaration(d) || ts.isPropertyAssignment(d) || ts.isBindingElement(d))
                 && d.initializer && ts.isClassExpression(d.initializer)));
     }
-    // 标识符是否指称顶层函数值（函数声明 / 模块顶层 const 箭头·函数表达式 / 导入函数）。
-    // 闭包捕获的「顶层函数名不是自由变量」判据须按符号：同名局部遮蔽时仍须捕获。
+    // Whether the identifier denotes a top-level function value (function declaration / module-level
+    // const arrow or function expression / imported function). The "top-level function names are not free
+    // vars" rule must be symbol-based: a same-named local shadow still has to be captured.
     _isFnValueIdent(idNode) {
         const ck = this.checker;
         if (!ck || !idNode) return true;
@@ -432,7 +434,7 @@ class Emitter {
         try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return true; }
         if (!sym) return true;
         if (sym.flags & ts.SymbolFlags.Alias) {
-            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* 保持原符号 */ }
+            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* keep the original symbol */ }
         }
         const ds = sym.declarations || [];
         if (!ds.length) return true;
@@ -441,7 +443,7 @@ class Emitter {
                 && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))
                 && d.parent && d.parent.parent && ts.isSourceFile(d.parent.parent.parent)));
     }
-    // 标识符是否指称宿主/语言内建全局（lib.d.ts 声明）——同名局部遮蔽时不按内建丢弃。
+    // Whether the identifier denotes a host/language builtin global (declared in lib.d.ts); a same-named local shadow must not be dropped as a builtin.
     _isBuiltinIdent(idNode) {
         const ck = this.checker;
         if (!ck || !idNode) return true;
@@ -449,25 +451,26 @@ class Emitter {
         try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return true; }
         if (!sym) return true;
         if (sym.flags & ts.SymbolFlags.Alias) {
-            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* 保持原符号 */ }
+            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* keep the original symbol */ }
         }
         const ds = sym.declarations || [];
         if (!ds.length) return true;
         return ds.every(d => { const sf = d.getSourceFile(); return !!(sf && sf.isDeclarationFile); });
     }
-    // 标识符是否绑定到本模块内的非顶层局部/形参（local shadow）——这类引用必须走捕获，
-    // 不能因「名字命中模块全局/内建」被丢弃。
+    // Whether the identifier binds to a non-top-level local/parameter in this module (a local shadow).
+    // Such references must be captured and cannot be dropped because the name also matches a module
+    // global or builtin.
     _identIsLocalBinding(idNode) {
         const ck = this.checker;
         if (!ck || !idNode) return false;
         let sym;
         try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return false; }
-        if (!sym || (sym.flags & ts.SymbolFlags.Alias)) return false;   // 导入绑定不是本函数局部
+        if (!sym || (sym.flags & ts.SymbolFlags.Alias)) return false;   // import bindings are not locals of this function
         const ds = sym.declarations || [];
         return ds.some(d => {
             if (ts.isParameter(d) || ts.isBindingElement(d)) return true;
             if (ts.isVariableDeclaration(d)) {
-                const stmt = d.parent && d.parent.parent;           // VariableDeclarationList → VariableStatement
+                const stmt = d.parent && d.parent.parent;           // VariableDeclarationList -> VariableStatement
                 return !(stmt && ts.isVariableStatement(stmt) && stmt.parent && ts.isSourceFile(stmt.parent));
             }
             return false;
@@ -567,7 +570,8 @@ class Emitter {
         // 直调点能写 __args → 方法体里的 arguments 只有走直调才拿得到实参个数。
         if (ts.isNewExpression(rx) && ts.isIdentifier(rx.expression)) {
             const cnN = this._className(rx.expression.text);
-            if (this.classes.has(cnN)) return cnN;
+            // A same-named local binding shadows the class -> runtime class value (same rule as the static-construction check in _emitNewCall); no static direct call.
+            if (this.classes.has(cnN) && !this._isDynClsBinding(rx.expression.text, cnN)) return cnN;
         }
         return null;
     }
@@ -2143,9 +2147,10 @@ class Emitter {
                         if (nestedParams.has(nm2)) continue;
                         if (/^(undefined|null|NaN|Infinity)$/.test(nm2)) continue;
                         const refN = refNodes.get(nm2);
-                        if (BUILTIN_GLOBALS.has(nm2) && (!refN || this._isBuiltinIdent(refN))) continue;   // 同名局部遮蔽内建 → 仍需捕获
-                        // 类名（含尚未登记的本类/后续类）不是捕获——但仅当该引用**确为类值**：
-                        // 同名局部变量遮蔽类时，闭包读的仍是外层局部（此前按名一律丢弃 → 读到类对象/NaN）。
+                        if (BUILTIN_GLOBALS.has(nm2) && (!refN || this._isBuiltinIdent(refN))) continue;   // a shadowing local must still be captured
+                        // Class names (including this or later classes not yet registered) are not captures,
+                        // but only when the reference really is a class value; a same-named local shadow still
+                        // reads the outer local (the old name-only drop returned the class object / NaN).
                         const clsRef = refN ? this._isClassValueIdent(refN) : true;
                         if (clsRef && this.classes.has(this._className(nm2))) continue;
                         if (clsRef && (allClsNames.has(this._className(nm2)) || allClsNames.has(nm2))) continue;
@@ -2165,7 +2170,7 @@ class Emitter {
             const _isNestedDecl = !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
             const _dynNode = parent ? parent.expression : null;
             const _isDynParent = !!_dynNode && !(ts.isIdentifier(_dynNode)
-                && (this.classes.has(this._className(_dynNode.text)) || BUILTIN_GLOBALS.has(_dynNode.text) || EMITTER_BUILTIN_CTORS.has(_dynNode.text)));
+                && ((this.classes.has(this._className(_dynNode.text)) && this._isClassValueIdent(_dynNode)) || BUILTIN_GLOBALS.has(_dynNode.text) || EMITTER_BUILTIN_CTORS.has(_dynNode.text)));   // a shadowing local -> runtime parent (dynamic)
             const clsExprSupported = (_isClsExpr || _isNestedDecl) && !_isTopAlias && !this._inModuleLink && !_isDynParent
                 && !staticFields.some(f => f.name.startsWith("#"));   // 嵌套 class 声明与类表达式同：每求值 clone + env + sei 静态初始化
             /* 静态块是否**写模块级外部绑定**（赋值目标基名在 declaredNames 但非捕获名，如 TDZ 的 `C2.x = n`）→ 该来源不安全。

@@ -4,18 +4,17 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
-### AOT: 闭包捕获按符号身份判遮蔽（同名局部不再读成类/函数/内建/模块全局）（2026-11-12）
-- **症状**：`class C{}`、顶层 `function h(){}`、内建 `Map`、模块级 `const D` 任一存在时，函数内同名局部（`const C=5` 等）遮蔽后，闭包读取被名字过滤器判为「非自由变量」→ 拿到**类对象 / 顶层函数 / 内建 / 模块全局**，静默错值。例：`const C = () => 9` 顶层 + 函数内 `const C = 5; () => C + 1` 返回函数拼接而非 6；模块 `const D=5` + 函数内 `const D=7; () => D+1` 返回 6 而非 8。类方法/字段初值/静态字段初值同样（走类 env 捕获路径）。
-- **修法**：`_capturesOf` 与类 env 捕获（`addRefs`）的排除项全部改为按 checker 符号身份：新增 `_isFnValueIdent`（顶层函数声明 / 模块顶层 const 箭头·函数表达式 / 导入函数）、`_isBuiltinIdent`（声明全在 lib.d.ts）、`_identIsLocalBinding`（绑定为本模块非顶层局部/形参），与既有 `_isClassValueIdent` 配合。只有引用**确为**顶层类/函数/内建/模块绑定时才判「不是自由变量」；局部遮蔽一律捕获。`_capturesOf` 增加可选 `nodeMap`（捕获名 → 首次引用节点）供调用方查符号。
-- **回归**：新增 `audit_corpus47.js` 20 例（类/函数/内建/模块全局 × 箭头·块·形参·循环局部 × 类方法/字段/静态字段/方法内箭头，含 `local-class-*` 对照）。
-- 结果：`test_aot` ALL PASS；`audit_diff` 47 批全量 0 diff（corpus47 20/20）；`glue_audit` corpus47 20/20。
+### AOT: symbol-based closure captures (a shadowing local no longer reads the class/function/builtin/module global) (2026-11-12)
+- **Symptom**: with a top-level `class C{}`, `function h(){}`, builtin `Map`, or module-level `const D` present, a same-named local (`const C = 5`, ...) inside a function was treated as "not a free variable" by name-only filters, so closures read the class object / top-level function / builtin / module global. E.g. top-level `const C = () => 9` plus `const C = 5; () => C + 1` returned function concatenation instead of 6; module `const D = 5` plus `const D = 7; () => D + 1` returned 6 instead of 8. Class methods, field initializers and static-field initializers had the same bug (class-env capture path).
+- **Fix**: every exclusion in `_capturesOf` and class-env capture (`addRefs`) is now symbol-based: added `_isFnValueIdent` (top-level function declaration / module-level const arrow or function expression / imported function), `_isBuiltinIdent` (all declarations in lib.d.ts) and `_identIsLocalBinding` (non-top-level local/parameter binding), together with the existing `_isClassValueIdent`. A reference is dropped only when it really denotes that top-level binding; a local shadow is always captured. `_capturesOf` takes an optional `nodeMap` (capture name -> first reference node) for symbol lookup.
+- **Regressions**: new `audit_corpus47.js` (24 cases: class/function/builtin/module global x arrow/block/param/loop local x class method/field/static field/arrow-in-method, plus inline `new C().m()`, dynamic `extends` parent and `instanceof` with a shadowed parent name; `local-class-*` controls).
+- Result: `test_aot` ALL PASS; `audit_diff` all 47 corpora 0 diff (corpus47 24/24); `glue_audit` corpus47 24/24.
 
-### AOT: 静态接收者推断按符号身份判类（同名局部变量遮蔽类不再串方法）（2026-11-12）
-- **症状**：`class C { m(){ return 7 } }` 与工厂类 `function mk(n){ return class { m(){…6} } }` 同模块，`const C = mk(7); const c = new C(); c.m()` 返回 **7（C 的方法体）**而非 6。`new C()` 本身走动态（局部绑定），但 `_computeStaticVars` 按**文本** `_className("C") + classes.has("C")` 把 `c` 误判为类 C 实例 → `c.m()` 直调 `__m_C$m`，静默错值。
-- **修法**：新增 `_isClassValueIdent(idNode)`，用 `checker.getSymbolAtLocation`（alias 先 `getAliasedSymbol`）确认标识符的声明确为类值（`ClassDeclaration` / `ClassExpression` / `const K = class {…}`），`_computeStaticVars` 只对类值绑定做静态映射。局部 `const C = mk(7)` 的声明是变量 → 退回动态派发；模块级/导入类与函数内 `class C`（clone）行为不变。checker 缺失或节点被 transform 重建查不到符号时保持旧判据，避免误伤。
-- **回归**：`test_aot` misc 的 `tmv` 方法名从规避用的 `ek` 还原为 `m`，与 `clsFactory` 同处一个模块即触发原冲突；`clsFactory` 断言 `6,14` 直接覆盖。
-- 结果：`test_aot` ALL PASS；`audit_diff` 47 批全量 0 diff（含 corpus42 26/26）；`glue_audit` corpus42 26/26。
-
+### AOT: symbol-based static receiver inference (a shadowing local no longer dispatches to the wrong class method) (2026-11-12)
+- **Symptom**: with `class C { m(){ return 7 } }` and factory class `function mk(n){ return class { m(){...6} } }` in one module, `const C = mk(7); const c = new C(); c.m()` returned **7 (C's method)** instead of 6. `new C()` itself was dynamic, but `_computeStaticVars` matched the class by **text** (`_className("C") + classes.has("C")`) and treated `c` as an instance of class C, so `c.m()` directly called `__m_C$m`.
+- **Fix**: added `_isClassValueIdent(idNode)`, which uses `checker.getSymbolAtLocation` (alias first via `getAliasedSymbol`) to confirm the declaration really is a class value (`ClassDeclaration` / `ClassExpression` / `const K = class {...}`); `_computeStaticVars` only maps class-valued bindings. A local `const C = mk(7)` falls back to dynamic dispatch; module-level/imported classes and function-local `class C` clones keep their behaviour. When the checker is missing or a node was rebuilt by a transform, the old rule applies to avoid false negatives.
+- **Regressions**: `test_aot` misc restores the `tmv` method name from the `ek` workaround to `m`, so it collides with `clsFactory` in the same module; the `clsFactory` assertion (`6,14`) covers it.
+- Result: `test_aot` ALL PASS; `audit_diff` all 47 corpora 0 diff (corpus42 26/26); `glue_audit` corpus42 26/26.
 
 ### AOT: 顶层函数 `arguments` 的展开实参 provider + 入口消费即清哨兵（两档一致）（2026-11-08）
 - **症状**：上一批只覆盖「静态直调」一种 provider 形态，其余调用点仍落到没有 `__args` 写入的路径。
