@@ -402,6 +402,25 @@ class Emitter {
     _synthCaptureArrow(body) {
         return ts.factory.createArrowFunction(undefined, undefined, [], undefined, undefined, body);
     }
+    // 标识符是否指称类值（类声明/类表达式别名/导入类）——静态接收者推断专用。
+    // 仅按文本查 classes.has 会把「同名局部变量遮蔽类」误判为静态实例：
+    // `class C{m(){…7}}` + `function f(){ const C = mk(); const c = new C(); c.m() }`
+    // 曾把 c 当类 C 实例 → 直调 __m_C$m（静默 7 而非工厂类的 m）。查符号身份消除歧义。
+    _isClassValueIdent(idNode) {
+        const ck = this.checker;
+        if (!ck || !idNode) return true;                 // 无 checker → 保持旧判据（调用方仍校验 classes.has）
+        let sym;
+        try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return true; }
+        if (!sym) return true;                           // 节点被 transform 重建、查不到符号 → 不因新判据误伤
+        if (sym.flags & ts.SymbolFlags.Alias) {
+            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* 保持原符号 */ }
+        }
+        const ds = sym.declarations || [];
+        if (!ds.length) return true;
+        return ds.some(d => ts.isClassDeclaration(d) || ts.isClassExpression(d)
+            || ((ts.isVariableDeclaration(d) || ts.isPropertyAssignment(d) || ts.isBindingElement(d))
+                && d.initializer && ts.isClassExpression(d.initializer)));
+    }
     // 静态接收者分析：返回 Map(变量名 → 类名)，仅收录静态类精确可判的变量——
     // `let/const x = new C(...)` 且 x 在全函数体内从未被写、也未被任何嵌套闭包引用（保守）。
     // 依据：new C 只会产出类 C 的实例（本编译器无跨类原型改写），故 x 的动态类恒为 C。
@@ -419,7 +438,8 @@ class Emitter {
         const walkDecl = (n) => {
             if (ts.isVariableDeclaration(n)) {
                 collectBinding(n.name);
-                if (ts.isIdentifier(n.name) && n.initializer && isNewIdent(n.initializer)) {
+                if (ts.isIdentifier(n.name) && n.initializer && isNewIdent(n.initializer)
+                    && this._isClassValueIdent(n.initializer.expression)) {
                     const cls = this._className(n.initializer.expression.text);
                     if (this.classes.has(cls)) {
                         const name = n.name.text;

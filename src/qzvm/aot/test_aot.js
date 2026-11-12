@@ -399,7 +399,7 @@ function closure(): number { const base = 100; const g = (x: any) => x + base; r
       + "export function okeys(): any { const o: any = { a: 1, b: 2 }; return Object.keys(o).join(\",\"); }\n"
       + "export function ovals(): any { const o: any = { a: 7 }; return Object.values(o)[0]; }\n"
       + "export function tpo(): any { const o: any = { a: 1 }; return typeof o; }\n"
-      + "export function tmv(): any { class C { ek(): number { return 7; } } const o: any = new C(); return typeof o.ek; }\n"
+      + "export function tmv(): any { class C { m(): number { return 7; } } const o: any = new C(); return typeof o.m; }\n"
       + "export function ideq(): any { const o: any = { a: 1 }; return o === o; }\n"
       + "export function mkeq(): any { return ({ a: 1 } as any) === ({ a: 1 } as any); }\n"
       + "export function inClass(): any { class L { v: number = 5; get(): number { return this.v; } } return new L().get(); }\n"

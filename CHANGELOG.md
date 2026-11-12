@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### AOT: 静态接收者推断按符号身份判类（同名局部变量遮蔽类不再串方法）（2026-11-12）
+- **症状**：`class C { m(){ return 7 } }` 与工厂类 `function mk(n){ return class { m(){…6} } }` 同模块，`const C = mk(7); const c = new C(); c.m()` 返回 **7（C 的方法体）**而非 6。`new C()` 本身走动态（局部绑定），但 `_computeStaticVars` 按**文本** `_className("C") + classes.has("C")` 把 `c` 误判为类 C 实例 → `c.m()` 直调 `__m_C$m`，静默错值。
+- **修法**：新增 `_isClassValueIdent(idNode)`，用 `checker.getSymbolAtLocation`（alias 先 `getAliasedSymbol`）确认标识符的声明确为类值（`ClassDeclaration` / `ClassExpression` / `const K = class {…}`），`_computeStaticVars` 只对类值绑定做静态映射。局部 `const C = mk(7)` 的声明是变量 → 退回动态派发；模块级/导入类与函数内 `class C`（clone）行为不变。checker 缺失或节点被 transform 重建查不到符号时保持旧判据，避免误伤。
+- **回归**：`test_aot` misc 的 `tmv` 方法名从规避用的 `ek` 还原为 `m`，与 `clsFactory` 同处一个模块即触发原冲突；`clsFactory` 断言 `6,14` 直接覆盖。
+- 结果：`test_aot` ALL PASS；`audit_diff` 47 批全量 0 diff（含 corpus42 26/26）；`glue_audit` corpus42 26/26。
+
 
 ### AOT: 顶层函数 `arguments` 的展开实参 provider + 入口消费即清哨兵（两档一致）（2026-11-08）
 - **症状**：上一批只覆盖「静态直调」一种 provider 形态，其余调用点仍落到没有 `__args` 写入的路径。

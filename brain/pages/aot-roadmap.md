@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-11T08:14:11"
+updated: "2026-11-12T23:04:53"
 ---
 
 <!-- compiled_truth -->
@@ -523,4 +523,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: note
   summary: "同名方法跨类冲突——**已获可复现触发 + 根因方向**：test_aot misc 模块含 clsFactory（工厂类表达式 `function mk(n){return class{x:any=n;m(){let n=5;n=n+1;return n}o(){return this.x+n}}}`，m/o 捕获 n）+ 模块级 `class C{m(){return 7}}`（tmv）→ 工厂实例 c.m() 返回 **7（C 的 m 方法体）**而非 6。tmv 方法改名 ek 即恢复 6,14（已 committed ff3eda4e）。最小复现仍不触发（仅加 `class Sibling{m()}` 或提取 `typeof o.m` 均通过）——需完整 misc 上下文。根因方向：class_expr_value(qzvm.js:1302) clone 浅拷 `methods`（共享引用），但 method_call(2393) 按 clsId 派发应隔离；疑点在工厂类**捕获方法**的发射——m/o 捕获 n，可能以闭包槽（method_call 字段槽路径 2383-2392 CLO_HI）或 __m_<cname>$m 导出注册。c.m() 得 C 体 → exportsRef[m.name] 解析到 __m_C$m 或 clsId/内存撞。下一步：dump misc 失败源的 classMeta（工厂类 cname + m/o 是字段闭包还是导出）；对比 ek 通过态。"
   source: "test_aot misc: clsFactory + tmv(class C{m}) → c.m()=7(C体); 改 ek → 6,14 通过"
+  affects: [aot-roadmap]
+
+- time: 2026-11-12T23:04:53
+  kind: decision
+  summary: "同名方法跨类冲突根因与修复（2026-11-12）：非『class_expr_value 浅拷 methods』也不是闭包捕获，而是 _computeStaticVars 的静态接收者推断按文本判类——class C{m()} 与 function mk(n){return class{m()…}} 同模块时，clsFactory 内 const C=mk(7); const c=new C() 被 _className('C')+classes.has('C') 误判为类 C 实例 → c.m() 直调 __m_C$m（静默 7 而非 6）。new C() 本身因 _isDynClsBinding 走动态构造是对的，只有接收者推断分叉。修：新增 _isClassValueIdent(idNode)，checker.getSymbolAtLocation（alias 先 getAliasedSymbol）确认声明确为类值（ClassDeclaration/ClassExpression/const K=class{}）；_computeStaticVars 仅对类值绑定做静态映射，局部变量/捕获遮蔽退回动态派发；checker 缺失或节点重建查不到符号时保持旧判据。验证：tmv 方法名 ek→m 复原冲突即回归（clsFactory 6,14），test_aot ALL PASS、audit_diff 47 批 0 diff、glue_audit corpus42 26/26。"
+  source: "src/qzvm/aot/emit/emitter.js _isClassValueIdent + _computeStaticVars; src/qzvm/aot/test_aot.js tmv/clsFactory"
   affects: [aot-roadmap]
