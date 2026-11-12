@@ -639,7 +639,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         //   注：0x7FF9 低 32 位对「宿主 handles 索引」与「POJO 内存 offset」同空间，
         //   function 值落此分支也得 "object"（JS 应为 "function"）——已知限制（函数作值少见）。
         const M = this.m;
-        if (ts.isIdentifier(e.expression)
+        if (ts.isIdentifier(e.expression) && this._local(e.expression.text) === undefined && !this.capMap.has(e.expression.text)
             && (this.fnNames.has(e.expression.text) || (this._fnVars && this._fnVars.has(e.expression.text)))) {
             this._emitStrLitHandle("function");   // 函数值（顶层函数名 / 持有闭包的变量）
             return;
@@ -649,7 +649,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             return;
         }
         // 内建全局：typeof Math/JSON → "object"；typeof Symbol/parseInt/… → "function"（JS 语义，免宿主调用）
-        if (ts.isIdentifier(e.expression) && BUILTIN_GLOBALS.has(e.expression.text)) {
+        if (this._isBuiltinRef(e.expression)) {
             const isObj = /^(Math|JSON|Reflect)$/.test(e.expression.text);
             this._emitStrLitHandle(isObj ? "object" : "function");
             return;
@@ -998,8 +998,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         if (nm === undefined) this._emitUndefined(); else this._emitStrLitHandle(nm);
         return;
     }
-    if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && ts.isIdentifier(e.expression)
-        && BUILTIN_GLOBALS.has(e.expression.text)) {
+    if (ts.isPropertyAccessExpression(e) && !e.questionDotToken && this._isBuiltinRef(e.expression)) {
         // 常量（Math.PI）→ 值；函数（Math.expm1 / JSON.stringify）→ 宿主函数句柄（truthy、typeof function）
         this.m.i32Const(this._strId(e.expression.text + "." + e.name.text));
         this.m.call("qz.builtin_member");
@@ -1276,15 +1275,15 @@ Emitter.prototype.emitTaggedExpr = function (e) {
     // 调用实参含展开 f(...a, x)：wasm 静态元数无法承载 → 实参先构造成数组，宿主按名/闭包动态派发
     // 内建全局/成员调用 >4 实参（Object.assign(a,b,c,d,e)）同样走此路径：宿主 builtin_spread 全量透传（直接路径只有 4 个实参槽）
     if (ts.isCallExpression(e) && (e.arguments.some(a => ts.isSpreadElement(a))
-        || (e.arguments.length > 4 && ((ts.isIdentifier(e.expression) && BUILTIN_GLOBALS.has(e.expression.text))
-            || (ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression) && BUILTIN_GLOBALS.has(e.expression.expression.text)))))) {
+        || (e.arguments.length > 4 && (this._isBuiltinRef(e.expression)
+            || (ts.isPropertyAccessExpression(e.expression) && this._isBuiltinRef(e.expression.expression)))))) {
         this._emitSpreadCall(e);
         return;
     }
     if (ts.isCallExpression(e)) {
         if (ts.isPropertyAccessExpression(e.expression)) {
             // 内建全局成员调用 Math.floor(x) / JSON.stringify(x) / Object.keys(o) → qz.builtin
-            if (ts.isIdentifier(e.expression.expression) && BUILTIN_GLOBALS.has(e.expression.expression.text)) {
+            if (this._isBuiltinRef(e.expression.expression)) {
                 this._emitBuiltinCall(e.expression.expression.text + "." + e.expression.name.text, e.arguments); return;
             }
             const rx = e.expression.expression, method = e.expression.name.text;
@@ -1372,7 +1371,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         const fn = e.expression.text;
         // 内建全局函数调用 String(x) / parseInt(s) / isNaN(x) / JSON… → qz.builtin
-        if (BUILTIN_GLOBALS.has(fn)) { this._emitBuiltinCall(fn, e.arguments); return; }
+        if (this._isBuiltinRef(e.expression)) { this._emitBuiltinCall(fn, e.arguments); return; }
         {   // 自递归直调：本 lambda 调自身 → 直接 call 自己的 wasm 函数（不经 closure_call，省宿主栈）
             const S = this._lamSelf;
             if (S && S.name === fn && !S.rest && S.n <= 4 && e.arguments.length <= 4 && !e.arguments.some((a2) => ts.isSpreadElement(a2))) {
@@ -2198,7 +2197,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc, spreadArr) {
     const cname = this._className(tgt.text);   // 导入类本地名 → 目标类名
     // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.new_builtin（construct 语义）；未登记者报错
     if (!this.classes.has(cname) || this._isDynClsBinding(tgt.text, cname)) {   // 未登记 / 被局部（嵌套 class 声明 clone）遮蔽 → 动态构造
-        if (EMITTER_BUILTIN_CTORS.has(tgt.text)) {
+        if (EMITTER_BUILTIN_CTORS.has(tgt.text) && this._isBuiltinIdent(tgt)) {
             /* new 内建类：qz.new_builtin —— construct 语义在 ABI 上必须与普通调用可分
              * （Map/Set/WeakMap/WeakSet/Proxy 无 [[Call]]，规范要 TypeError），且要带 n
              * （new Array(undefined) 得 length 1，与 new Array() 不同；未用的槽位是
@@ -2556,7 +2555,7 @@ Emitter.prototype._emitClassValue = function (c) {        // 类对象句柄：�
 Emitter.prototype._dynParentExpr = function (c) {          // 动态父：extends 非「已知类名/内建」→ 返回父表达式（否则 null）
     if (!c || !c.dynParentNode) return null;
     const n = c.dynParentNode;
-    if (ts.isIdentifier(n) && ((this.classes.has(this._className(n.text)) && this._isClassValueIdent(n)) || BUILTIN_GLOBALS.has(n.text) || EMITTER_BUILTIN_CTORS.has(n.text))) return null;   // a shadowing local keeps it dynamic
+    if (ts.isIdentifier(n) && ((this.classes.has(this._className(n.text)) && this._isClassValueIdent(n)) || this._isBuiltinIdent(n))) return null;   // a shadowing local keeps it dynamic
     return n;
 };
 Emitter.prototype._emitSuperCallForward = function (c) {

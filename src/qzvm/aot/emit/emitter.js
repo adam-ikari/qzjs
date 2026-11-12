@@ -457,6 +457,11 @@ class Emitter {
         if (!ds.length) return true;
         return ds.every(d => { const sf = d.getSourceFile(); return !!(sf && sf.isDeclarationFile); });
     }
+    // Whether the reference really denotes a builtin global. The text name alone is not enough: a
+    // same-named local shadow must dispatch as a value instead of the host builtin.
+    _isBuiltinRef(idNode) {
+        return ts.isIdentifier(idNode) && BUILTIN_GLOBALS.has(idNode.text) && this._isBuiltinIdent(idNode);
+    }
     // Whether the identifier binds to a non-top-level local/parameter in this module (a local shadow).
     // Such references must be captured and cannot be dropped because the name also matches a module
     // global or builtin.
@@ -1062,7 +1067,7 @@ class Emitter {
             this._expLeave();
             return;
         }
-        if (ts.isPropertyAccessExpression(cx) && ts.isIdentifier(cx.expression) && BUILTIN_GLOBALS.has(cx.expression.text)) {
+        if (ts.isPropertyAccessExpression(cx) && this._isBuiltinRef(cx.expression)) {
             M.i32Const(this._strId(cx.expression.text + "." + cx.name.text)); M.localGet(t.v);
             M.call("qz.builtin_spread");
             this._expLeave();
@@ -1078,7 +1083,10 @@ class Emitter {
         }
         if (!ts.isIdentifier(cx)) throw new Error("[tagged] 展开实参仅支持顶层函数/闭包/静态方法/内建调用");
         const name = this._fnName(cx.text);
-        if (this.m._funcIdx[name] !== undefined || this.fnNames.has(name)) {
+        // A same-named local/closure binding shadows the top-level function: take the closure path below
+        // instead of the direct call (the direct call would run the top-level body with the spread args).
+        const shadowCallee = this._local(cx.text) !== undefined || this.capMap.has(cx.text);
+        if (!shadowCallee && (this.m._funcIdx[name] !== undefined || this.fnNames.has(name))) {
             const ciS = this._calleeInfo(cx.text);
             const isNum = !!(ciS && ciS.mode === "num");
             const xtS = !!(ciS && ciS.mode !== this.mode);
@@ -2170,7 +2178,7 @@ class Emitter {
             const _isNestedDecl = !!(this.nestedClsDecls && this.nestedClsDecls.has(st));
             const _dynNode = parent ? parent.expression : null;
             const _isDynParent = !!_dynNode && !(ts.isIdentifier(_dynNode)
-                && ((this.classes.has(this._className(_dynNode.text)) && this._isClassValueIdent(_dynNode)) || BUILTIN_GLOBALS.has(_dynNode.text) || EMITTER_BUILTIN_CTORS.has(_dynNode.text)));   // a shadowing local -> runtime parent (dynamic)
+                && ((this.classes.has(this._className(_dynNode.text)) && this._isClassValueIdent(_dynNode)) || this._isBuiltinIdent(_dynNode)));   // a shadowing local -> runtime parent (dynamic)
             const clsExprSupported = (_isClsExpr || _isNestedDecl) && !_isTopAlias && !this._inModuleLink && !_isDynParent
                 && !staticFields.some(f => f.name.startsWith("#"));   // 嵌套 class 声明与类表达式同：每求值 clone + env + sei 静态初始化
             /* 静态块是否**写模块级外部绑定**（赋值目标基名在 declaredNames 但非捕获名，如 TDZ 的 `C2.x = n`）→ 该来源不安全。
@@ -2260,7 +2268,8 @@ class Emitter {
                     staticMethods.push({ name: "__qz_sei", node: seiNode });
                 }
             }
-            const bpName = (parentName && !this.classes.has(parentName) && EMITTER_BUILTIN_CTORS.has(parentName)) ? parentName : null;
+            const bpName = (parentName && !this.classes.has(parentName) && EMITTER_BUILTIN_CTORS.has(parentName)
+                && (!parent || this._isBuiltinIdent(parent.expression))) ? parentName : null;
             this.classes.set(cname, { id: this._classList.length, name: cname, jsName: this.clsJsNames && this.clsJsNames.get(cname), parent: parentName, builtinParentName: bpName, hostBacked: !!bpName && !ctor, captured: [...capSetC], dynParentNode: parent ? parent.expression : null, fields, methods, staticMethods, staticFields, staticBlocks, staticInits, computedMeths, ctor });   // hostBacked：extends 内建 + 合成 ctor（允许自有字段；字段存宿主属性）
             this._classList.push(cname);
         }

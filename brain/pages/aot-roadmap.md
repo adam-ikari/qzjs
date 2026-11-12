@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-12T23:28:50"
+updated: "2026-11-13T07:23:53"
 ---
 
 <!-- compiled_truth -->
@@ -535,4 +535,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "闭包捕获按符号身份判遮蔽（2026-11-12）：_capturesOf 与类 env 捕获（addRefs）此前按**文本名**丢弃 class/fnNames/BUILTIN_GLOBALS/moduleGlobals 命中项，同名局部遮蔽后闭包读到类对象/顶层函数/内建/模块全局（静默错值）：顶层 const C=()=>9 + 函数内 const C=5; ()=>C+1 → 函数拼接而非 6；模块 const D=5 + 函数内 const D=7; ()=>D+1 → 6 而非 8；类方法/字段/静态字段同病。修：新增 _isFnValueIdent（顶层函数声明/模块顶层 const 箭头/导入函数）、_isBuiltinIdent（声明全在 lib.d.ts）、_identIsLocalBinding（非顶层局部/形参），配合既有 _isClassValueIdent；只有引用确为顶层类/函数/内建/模块绑定才判非自由变量，局部遮蔽一律捕获。_capturesOf 增可选 nodeMap（捕获名→首次引用节点）供查符号。验证：audit_corpus47 20 例；test_aot ALL PASS；audit_diff 47 批全量 0 diff；glue_audit corpus47 20/20。"
   source: "src/qzvm/aot/emit/emitter.js _capturesOf/addRefs + _isFnValueIdent/_isBuiltinIdent/_identIsLocalBinding; src/qzvm/aot/audit_corpus47.js"
+  affects: [aot-roadmap]
+
+- time: 2026-11-13T07:23:53
+  kind: decision
+  summary: "Builtin/host dispatch must be symbol-gated like class dispatch. Name-only lookups (BUILTIN_GLOBALS.has / EMITTER_BUILTIN_CTORS.has on identifier text) silently dispatched a same-named local to the host: Math.floor member call, Number()/parseInt() calls, new Map(), typeof Math, extends <shadowed builtin>, spread calls and dynamic-parent detection. Added Emitter._isBuiltinRef(idNode) = identifier && BUILTIN_GLOBALS.has(text) && _isBuiltinIdent(idNode), and required _isBuiltinIdent on the new-ctor branch, _isDynParent/_dynParentExpr and builtinParentName. Fail-open on missing symbol. Regressions live in audit_corpus47.js (38 cases)."
+  source: "agent session 2026-11-13 (builtin dispatch shadowing)"
   affects: [aot-roadmap]
