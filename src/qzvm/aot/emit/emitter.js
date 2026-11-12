@@ -337,7 +337,8 @@ class Emitter {
     }
     // 闭包捕获分析：找 lambda 体内的自由标识符（非其参数/局部、非字符串/数字/对象属性名）。
     // 捕获的变量来自创建处（外层函数局部）。返回有序捕获名列表。
-    _capturesOf(lam) {
+    // nodeMap（可选）：捕获名 → 首次引用标识符节点，供调用方按符号身份区分「真类名引用」与「同名局部遮蔽」。
+    _capturesOf(lam, nodeMap) {
         const lambdaIsArrow = ts.isArrowFunction(lam);   // 箭头继承 this；function 表达式有自己的 this
         const fnLike = (n) => ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n)
             || ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
@@ -381,10 +382,11 @@ class Emitter {
                 if (n.parent && ts.isPropertyAssignment(n.parent) && n.parent.name === n) return;
                 if (n.parent && ts.isBindingElement(n.parent) && n.parent.propertyName === n) return;   // 解构属性名不是变量
                 const name = n.text;
-                if (!isLocal(name) && !seen.has(name) && !this.fnNames.has(name)
-                    && !(this.classes.has(this._className(name) || name))   // 类名不是自由变量（闭包内须走类对象路径）
-                    && !(this.moduleGlobals && this.moduleGlobals.has(name))   // 模块级全局：闭包内改为调用时读全局（否则按创建时值捕获 → 自递归箭头 const 拿到 undefined）
-                    && !/^(undefined|null|NaN|Infinity)$/.test(name)) { seen.add(name); out.push(name); }
+                const localShadow = this._identIsLocalBinding(n);   // 同名局部遮蔽：不能按名字命中顶层/内建丢弃
+                if (!isLocal(name) && !seen.has(name) && !(this.fnNames.has(name) && this._isFnValueIdent(n))
+                    && !(this.classes.has(this._className(name) || name) && this._isClassValueIdent(n))   // 类名不是自由变量（闭包内须走类对象路径）；同名局部变量遮蔽类时仍须捕获
+                    && !(this.moduleGlobals && this.moduleGlobals.has(name) && !localShadow)   // 模块级全局：闭包内改为调用时读全局（否则按创建时值捕获 → 自递归箭头 const 拿到 undefined）
+                    && !/^(undefined|null|NaN|Infinity)$/.test(name)) { seen.add(name); out.push(name); if (nodeMap && !nodeMap.has(name)) nodeMap.set(name, n); }
                 return;
             }
             ts.forEachChild(n, walk);
@@ -420,6 +422,56 @@ class Emitter {
         return ds.some(d => ts.isClassDeclaration(d) || ts.isClassExpression(d)
             || ((ts.isVariableDeclaration(d) || ts.isPropertyAssignment(d) || ts.isBindingElement(d))
                 && d.initializer && ts.isClassExpression(d.initializer)));
+    }
+    // 标识符是否指称顶层函数值（函数声明 / 模块顶层 const 箭头·函数表达式 / 导入函数）。
+    // 闭包捕获的「顶层函数名不是自由变量」判据须按符号：同名局部遮蔽时仍须捕获。
+    _isFnValueIdent(idNode) {
+        const ck = this.checker;
+        if (!ck || !idNode) return true;
+        let sym;
+        try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return true; }
+        if (!sym) return true;
+        if (sym.flags & ts.SymbolFlags.Alias) {
+            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* 保持原符号 */ }
+        }
+        const ds = sym.declarations || [];
+        if (!ds.length) return true;
+        return ds.some(d => ts.isFunctionDeclaration(d)
+            || (ts.isVariableDeclaration(d) && d.initializer
+                && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))
+                && d.parent && d.parent.parent && ts.isSourceFile(d.parent.parent.parent)));
+    }
+    // 标识符是否指称宿主/语言内建全局（lib.d.ts 声明）——同名局部遮蔽时不按内建丢弃。
+    _isBuiltinIdent(idNode) {
+        const ck = this.checker;
+        if (!ck || !idNode) return true;
+        let sym;
+        try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return true; }
+        if (!sym) return true;
+        if (sym.flags & ts.SymbolFlags.Alias) {
+            try { sym = ck.getAliasedSymbol(sym); } catch (_) { /* 保持原符号 */ }
+        }
+        const ds = sym.declarations || [];
+        if (!ds.length) return true;
+        return ds.every(d => { const sf = d.getSourceFile(); return !!(sf && sf.isDeclarationFile); });
+    }
+    // 标识符是否绑定到本模块内的非顶层局部/形参（local shadow）——这类引用必须走捕获，
+    // 不能因「名字命中模块全局/内建」被丢弃。
+    _identIsLocalBinding(idNode) {
+        const ck = this.checker;
+        if (!ck || !idNode) return false;
+        let sym;
+        try { sym = ck.getSymbolAtLocation(idNode); } catch (_) { return false; }
+        if (!sym || (sym.flags & ts.SymbolFlags.Alias)) return false;   // 导入绑定不是本函数局部
+        const ds = sym.declarations || [];
+        return ds.some(d => {
+            if (ts.isParameter(d) || ts.isBindingElement(d)) return true;
+            if (ts.isVariableDeclaration(d)) {
+                const stmt = d.parent && d.parent.parent;           // VariableDeclarationList → VariableStatement
+                return !(stmt && ts.isVariableStatement(stmt) && stmt.parent && ts.isSourceFile(stmt.parent));
+            }
+            return false;
+        });
     }
     // 静态接收者分析：返回 Map(变量名 → 类名)，仅收录静态类精确可判的变量——
     // `let/const x = new C(...)` 且 x 在全函数体内从未被写、也未被任何嵌套闭包引用（保守）。
@@ -2085,14 +2137,19 @@ class Emitter {
                         ts.forEachChild(n2, walkN);
                     };
                     walkN(node);
-                    for (const nm2 of this._capturesOf(node)) {
+                    const refNodes = new Map();
+                    for (const nm2 of this._capturesOf(node, refNodes)) {
                         if (nm2 === "this" || nm2 === "arguments") continue;   // 蹦床/宿主补，不是类 env 捕获
                         if (nestedParams.has(nm2)) continue;
-                        if (BUILTIN_GLOBALS.has(nm2)) continue;
                         if (/^(undefined|null|NaN|Infinity)$/.test(nm2)) continue;
-                        if (this.classes.has(this._className(nm2))) continue;
-                        if (allClsNames.has(this._className(nm2)) || allClsNames.has(nm2)) continue;   // 类名（含尚未登记的本类/后续类）不是捕获
-                        if (this.fnNames && this.fnNames.has(nm2)) continue;
+                        const refN = refNodes.get(nm2);
+                        if (BUILTIN_GLOBALS.has(nm2) && (!refN || this._isBuiltinIdent(refN))) continue;   // 同名局部遮蔽内建 → 仍需捕获
+                        // 类名（含尚未登记的本类/后续类）不是捕获——但仅当该引用**确为类值**：
+                        // 同名局部变量遮蔽类时，闭包读的仍是外层局部（此前按名一律丢弃 → 读到类对象/NaN）。
+                        const clsRef = refN ? this._isClassValueIdent(refN) : true;
+                        if (clsRef && this.classes.has(this._className(nm2))) continue;
+                        if (clsRef && (allClsNames.has(this._className(nm2)) || allClsNames.has(nm2))) continue;
+                        if (this.fnNames && this.fnNames.has(nm2) && (!refN || this._isFnValueIdent(refN))) continue;
                         set.add(nm2);
                     }
                 };

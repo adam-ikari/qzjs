@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 - 
+### AOT: 闭包捕获按符号身份判遮蔽（同名局部不再读成类/函数/内建/模块全局）（2026-11-12）
+- **症状**：`class C{}`、顶层 `function h(){}`、内建 `Map`、模块级 `const D` 任一存在时，函数内同名局部（`const C=5` 等）遮蔽后，闭包读取被名字过滤器判为「非自由变量」→ 拿到**类对象 / 顶层函数 / 内建 / 模块全局**，静默错值。例：`const C = () => 9` 顶层 + 函数内 `const C = 5; () => C + 1` 返回函数拼接而非 6；模块 `const D=5` + 函数内 `const D=7; () => D+1` 返回 6 而非 8。类方法/字段初值/静态字段初值同样（走类 env 捕获路径）。
+- **修法**：`_capturesOf` 与类 env 捕获（`addRefs`）的排除项全部改为按 checker 符号身份：新增 `_isFnValueIdent`（顶层函数声明 / 模块顶层 const 箭头·函数表达式 / 导入函数）、`_isBuiltinIdent`（声明全在 lib.d.ts）、`_identIsLocalBinding`（绑定为本模块非顶层局部/形参），与既有 `_isClassValueIdent` 配合。只有引用**确为**顶层类/函数/内建/模块绑定时才判「不是自由变量」；局部遮蔽一律捕获。`_capturesOf` 增加可选 `nodeMap`（捕获名 → 首次引用节点）供调用方查符号。
+- **回归**：新增 `audit_corpus47.js` 20 例（类/函数/内建/模块全局 × 箭头·块·形参·循环局部 × 类方法/字段/静态字段/方法内箭头，含 `local-class-*` 对照）。
+- 结果：`test_aot` ALL PASS；`audit_diff` 47 批全量 0 diff（corpus47 20/20）；`glue_audit` corpus47 20/20。
+
 ### AOT: 静态接收者推断按符号身份判类（同名局部变量遮蔽类不再串方法）（2026-11-12）
 - **症状**：`class C { m(){ return 7 } }` 与工厂类 `function mk(n){ return class { m(){…6} } }` 同模块，`const C = mk(7); const c = new C(); c.m()` 返回 **7（C 的方法体）**而非 6。`new C()` 本身走动态（局部绑定），但 `_computeStaticVars` 按**文本** `_className("C") + classes.has("C")` 把 `c` 误判为类 C 实例 → `c.m()` 直调 `__m_C$m`，静默错值。
 - **修法**：新增 `_isClassValueIdent(idNode)`，用 `checker.getSymbolAtLocation`（alias 先 `getAliasedSymbol`）确认标识符的声明确为类值（`ClassDeclaration` / `ClassExpression` / `const K = class {…}`），`_computeStaticVars` 只对类值绑定做静态映射。局部 `const C = mk(7)` 的声明是变量 → 退回动态派发；模块级/导入类与函数内 `class C`（clone）行为不变。checker 缺失或节点被 transform 重建查不到符号时保持旧判据，避免误伤。
