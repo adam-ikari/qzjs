@@ -341,15 +341,20 @@ struct qz_t {
 #endif /* !QZ_VM_GUEST */
 };
 
-/* Monotonic clock in milliseconds. Ignores clock_gettime failure (same
- * behavior the former per-file copies had): CLOCK_MONOTONIC cannot fail with
- * EINVAL, so worst case the caller sees a stale/zero timestamp. */
+#ifndef QZ_VM_GUEST
+/* Monotonic clock in milliseconds. Host-only: every caller lives under src/host/,
+ * plus src/ipc/ipc_process.c. Excluded from the guest because wasi-libc hides the
+ * clock_gettime declaration under feature-test macros that -std=c99 (strict
+ * ANSI) never defines. Ignores clock_gettime failure (same behavior the former
+ * per-file copies had): CLOCK_MONOTONIC cannot fail with EINVAL, so worst case
+ * the caller sees a stale/zero timestamp. */
 static inline int64_t qz_now_ms(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
+#endif /* !QZ_VM_GUEST */
 /* ── Cross-file small helpers (shared, header-inline in C99) ── */
 
 #ifndef QZ_VM_GUEST
