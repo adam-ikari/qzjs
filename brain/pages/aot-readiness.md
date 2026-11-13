@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-10-31T16:59:19"
+updated: "2026-11-13T15:58:46"
 ---
 
 <!-- compiled_truth -->
@@ -228,4 +228,16 @@ interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 i
   kind: evidence
   summary: "类/对象方法作用域边界修复 + 类捕获 loud 化后的回归基线（2026-10-31）：test_aot ALL PASS（新增 4 门禁：工厂类捕获、对象方法 let 不顶参数槽、类型注解不作捕获、函数内 class 捕获 loud）；audit_diff 43 批 949/949（新增 corpus43 20 例）；glue_audit c41/c42/c43 5/5、26/26、20/20；stress_aot 3 轮 2847 例 0 diff（577s，峰值 rss 453MiB）；zod 125/125，wasm 5945/21111 (28.2%) 与基线完全一致——作用域/捕获分析改动无覆盖回归。"
   source: "test_aot / audit_diff / glue_audit / stress_aot / coverage_real 实测"
+  affects: [aot-readiness]
+
+- time: 2026-11-13T15:40:00
+  kind: evidence
+  summary: "第 6 批（4f6cafe6 + fe24e5dd，C 档 in 静态链 + instanceof 措辞用例）覆盖对照：前后完全一致——125/125 编译成功，函数 20945，wasm 5875 (28.0%) / interp 15070 (72.0%)，整模块 interp 39 个，归因 module-suspend 15037 / async-self 33。结论：本批只修正确性（in/instanceof 静默错值），不动 interp 归因与发射通道，故 wasm 占比不动。"
+  source: "coverage_real.js zod 4.6.5 125 文件，e9ee046b 与 4f6cafe6 各跑一次"
+  affects: [aot-readiness]
+
+- time: 2026-11-13T15:58:46
+  kind: evidence
+  summary: "39 个整模块 interp 文件的归因分层（2026-11-13）：不是 39 个独立缺口，而是 4 个挂起源点 + 内联扇出 + 1 个 v3 孤岛。源点一 v4/core/parse.ts 模块级 const 里含 async 闭包（48/111/181/233/251/292/305 行），源点二 v4/core/checks.ts 1074 行同类，源点三 v4/core/schemas.ts 203 行同类——这三者各毒化 35 个 v4 文件、15003 个函数，必须三个都修才能让任一 v4 文件回到 wasm；源点四 v4/classic/schemas.ts 173 行顶层对象字面量里的 async 方法（300/306/328/331/340/343），额外挡住 11 个文件 5859 个函数；v3 孤岛 v3/types.ts 8 个 async 类方法 + v3/helpers/parseUtil.ts 静态 async 方法，挡住 4 个文件 67 个函数。分类：可修（非状态机）——模块级 async 绑定通道（约 1 天，解锁 35 文件/15003 函数）+ 顶层对象字面量同一通道（+0.5 天，解锁 11 文件/5859）+ 类级 interp 粒度（1-2 天，解锁 4 文件/67）；需状态机 0；其它 0（33 个 async-self 是顶层 async 函数按设计逐函数退 interp，非缺口）。"
+  source: "coverage_real.js + 自研 AST 扫描/可达性脚本，zod 4.6.5 125 文件"
   affects: [aot-readiness]
