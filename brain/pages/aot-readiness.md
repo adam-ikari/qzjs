@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-11-13T15:58:46"
+updated: "2026-11-13T20:09:57"
 ---
 
 <!-- compiled_truth -->
@@ -240,4 +240,10 @@ interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 i
   kind: evidence
   summary: "39 个整模块 interp 文件的归因分层（2026-11-13）：不是 39 个独立缺口，而是 4 个挂起源点 + 内联扇出 + 1 个 v3 孤岛。源点一 v4/core/parse.ts 模块级 const 里含 async 闭包（48/111/181/233/251/292/305 行），源点二 v4/core/checks.ts 1074 行同类，源点三 v4/core/schemas.ts 203 行同类——这三者各毒化 35 个 v4 文件、15003 个函数，必须三个都修才能让任一 v4 文件回到 wasm；源点四 v4/classic/schemas.ts 173 行顶层对象字面量里的 async 方法（300/306/328/331/340/343），额外挡住 11 个文件 5859 个函数；v3 孤岛 v3/types.ts 8 个 async 类方法 + v3/helpers/parseUtil.ts 静态 async 方法，挡住 4 个文件 67 个函数。分类：可修（非状态机）——模块级 async 绑定通道（约 1 天，解锁 35 文件/15003 函数）+ 顶层对象字面量同一通道（+0.5 天，解锁 11 文件/5859）+ 类级 interp 粒度（1-2 天，解锁 4 文件/67）；需状态机 0；其它 0（33 个 async-self 是顶层 async 函数按设计逐函数退 interp，非缺口）。"
   source: "coverage_real.js + 自研 AST 扫描/可达性脚本，zod 4.6.5 125 文件"
+  affects: [aot-readiness]
+
+- time: 2026-11-13T20:09:57
+  kind: evidence
+  summary: "A/B 改写前提被证伪：既有逐函数 interp 只支持按名直调，不支持 interp 函数作一等值。探针 7 例：alias-typeof/identity/assign/passarg 全 diff（'af is not defined' / '未知 funcidx 0'），gen-return/throw diff；直调探针 4 例：typeof af='function'、gen() 直接调用+迭代都正确，唯独 'return af'（函数名作值）报 'af is not defined'。结论：把模块级 const 绑 async 闭包机械 hoist 成顶层 async 函数声明+const 别名，别名正好命中缺失通道。A/B 需先建 'interp fn as first-class value' 通道（closure 句柄包宿主蹦床 + interpJs 按名取 fn 表 + 新原语 qz.interp_fn），约 1 天，且仍受既有 shared-state 整模块逃逸约束。估时由 '改动小' 上调为 '中等'。"
+  source: "探针 /tmp/probe_alias.js + /tmp/probe_direct.js，audit_diff 实测 2026-11-13"
   affects: [aot-readiness]
