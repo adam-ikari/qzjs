@@ -773,41 +773,20 @@ function compileTS(input, outWasm, opts = {}) {
             const isConst = !!list && !!(list.flags & ts.NodeFlags.Const);
             // `const` 只在**原始值**上无害：`const cache = {}` / `const arr = []` 两侧各有一份对象，
             // 一侧写字段另一侧读不到 → 同样是错值。故只有「const 且初值为原始字面量」才排除。
-            let init = v.initializer; while (init && (ts.isParenthesizedExpression(init) || ts.isAsExpression(init) || ts.isNonNullExpression(init) || ts.isSatisfiesExpression(init))) init = init.expression;
+            const init = v.initializer;
             const prim = !!init && (ts.isStringLiteral(init) || ts.isNumericLiteral(init)
                 || init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword
                 || init.kind === ts.SyntaxKind.NullKeyword
                 || ts.isPrefixUnaryExpression(init) && ts.isNumericLiteral(init.operand));
-            const isFn = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)
-                || ts.isConditionalExpression(init) && [init.whenTrue, init.whenFalse].every(b => ts.isArrowFunction(b) || ts.isFunctionExpression(b) || ts.isIdentifier(b) || ts.isPropertyAccessExpression(b)));
-            if (!isConst || (!prim && !isFn)) out.add(v.name.text);
+            const isFn = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)); if (!isConst || (!prim && !isFn)) out.add(v.name.text);
         }
         return out;
     })();
     if ((interpSet.size > 0 || modInterpBindings.size > 0) && mutableModNames.size > 0) {
         const modVarNames = mutableModNames;
-        const touched = (root) => {                  // 该语法树里引用到的模块级变量名（作用域感知：局部声明遮蔽同名模块变量，不算触碰）
+        const touched = (root) => {                  // 该语法树里引用到的模块级变量名
             const hit = new Set();
-            const opensScope = (n) => ts.isBlock(n) || ts.isSourceFile(n) || ts.isModuleBlock(n)
-                || ts.isCatchClause(n) || ts.isForStatement(n) || ts.isForOfStatement(n) || ts.isForInStatement(n)
-                || ts.isFunctionLike(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n);
-            const walkScoped = (n, scope) => {
-                let sc = scope;
-                if (opensScope(n)) {
-                    sc = new Set(scope);
-                    const collect = (m) => {
-                        if (m !== n && (ts.isFunctionLike(m) || ts.isBlock(m) || ts.isClassDeclaration(m) || ts.isClassExpression(m))) return;
-                        if (ts.isVariableDeclaration(m) && ts.isIdentifier(m.name)) sc.add(m.name.text);
-                        else if (ts.isParameter(m) && ts.isIdentifier(m.name)) sc.add(m.name.text);
-                        else if ((ts.isFunctionDeclaration(m) || ts.isClassDeclaration(m)) && m.name) sc.add(m.name.text);
-                        ts.forEachChild(m, collect);
-                    };
-                    ts.forEachChild(n, collect);
-                }
-                if (ts.isIdentifier(n) && modVarNames.has(n.text) && !sc.has(n.text)) hit.add(n.text);
-                ts.forEachChild(n, (c) => walkScoped(c, sc));
-            };
-            const walk0 = (n) => walkScoped(n, new Set());
+            const walk0 = (n) => { if (ts.isIdentifier(n) && modVarNames.has(n.text)) hit.add(n.text); ts.forEachChild(n, walk0); };
             const walk = (n) => {
                 // 顶层类声明：定义点只执行静态块/静态字段初值——方法体/构造器是独立 wasm 函数（另经 fns 检查），不扫。
                 if (ts.isClassDeclaration(n)) {
@@ -819,7 +798,7 @@ function compileTS(input, outWasm, opts = {}) {
                     }
                     return;
                 }
-                walkScoped(n, new Set());
+                walk0(n);
             };
             walk(root);
             return hit;
@@ -827,7 +806,7 @@ function compileTS(input, outWasm, opts = {}) {
         const interpSide = new Map();                // 变量名 → 首个触碰它的 interp 函数名
         for (const f of fns) {
             if (!interpSet.has(f.name.text) || !f.body) continue;
-            for (const name of touched(f)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
+            for (const name of touched(f.body)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
         }
         // modInterpBindings 的闭包跑 interp 副本：其初值体内引用的模块级可变变量与 wasm 侧共享 → 同 clash。
         for (const [name, decl] of modInterpBindings) {
@@ -837,7 +816,7 @@ function compileTS(input, outWasm, opts = {}) {
         const clash = [];
         for (const f of fns) {
             if (interpSet.has(f.name.text) || !f.body) continue;
-            for (const name of touched(f)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / ${f.name.text} wasm）`);
+            for (const name of touched(f.body)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / ${f.name.text} wasm）`);
         }
         for (const st of modStmts) {                 // __module_init 属 wasm 侧
             for (const name of touched(st)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / __module_init wasm）`);
