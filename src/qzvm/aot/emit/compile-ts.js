@@ -724,11 +724,11 @@ function compileTS(input, outWasm, opts = {}) {
                 || init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword
                 || init.kind === ts.SyntaxKind.NullKeyword
                 || ts.isPrefixUnaryExpression(init) && ts.isNumericLiteral(init.operand));
-            if (!isConst || !prim) out.add(v.name.text);
+            const isFn = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)); if (!isConst || (!prim && !isFn)) out.add(v.name.text);
         }
         return out;
     })();
-    if (interpSet.size > 0 && mutableModNames.size > 0) {
+    if ((interpSet.size > 0 || modInterpBindings.size > 0) && mutableModNames.size > 0) {
         const modVarNames = mutableModNames;
         const touched = (root) => {                  // 该语法树里引用到的模块级变量名
             const hit = new Set();
@@ -754,6 +754,11 @@ function compileTS(input, outWasm, opts = {}) {
             if (!interpSet.has(f.name.text) || !f.body) continue;
             for (const name of touched(f.body)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
         }
+        // modInterpBindings 的闭包跑 interp 副本：其初值体内引用的模块级可变变量与 wasm 侧共享 → 同 clash。
+        for (const [name, decl] of modInterpBindings) {
+            if (!decl.initializer) continue;
+            for (const nm of touched(decl.initializer)) if (!interpSide.has(nm)) interpSide.set(nm, name);
+        }
         const clash = [];
         for (const f of fns) {
             if (interpSet.has(f.name.text) || !f.body) continue;
@@ -764,6 +769,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         // 有冲突 → 整模块退 interp。mutating interpSet 后**必须重算**：此时无 wasm 侧函数，
         // 冲突自然消失（模块级变量只剩 interp 一份）。
+        if (clash.length && process.env.QZD_CLASH) console.error('CLASH:', clash.join(' | '));
         if (clash.length) tryWholeModuleInterp();
     }
     // TS→JS（去类型）供 glue 内联 interp 函数。
