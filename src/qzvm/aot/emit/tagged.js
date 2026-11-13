@@ -1300,7 +1300,9 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     }
                     const cn = this._calleeInfo(resolved);
                     const xn = cn && cn.mode !== this.mode;
+                    const cp = this._calleeParams(resolved) || (this.importAlias && this._calleeParams(this.importAlias.get(resolved)));
                     for (const a of e.arguments) { this.emitTaggedExpr(a); if (xn) this._argToCallee(resolved); }
+                    if (cp && !cp.some(p => p.dotDotDotToken)) for (let i = e.arguments.length; i < cp.length; i++) { this._emitUndefined(); if (xn) this._argToCallee(resolved); }
                     this.m.call(this._fnName(resolved));
                     this._retFromCallee(resolved); return;
                 }

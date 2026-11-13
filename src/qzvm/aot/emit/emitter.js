@@ -2866,6 +2866,8 @@ class Emitter {
             const ciNum = this._calleeInfo(fn);
             const xNum = ciNum && ciNum.mode !== this.mode;
             for (const a of e.arguments) { this.emitExpr(a); if (xNum) this._argToCallee(fn); }
+            const cpN = this._calleeParams(fn) || (this.importAlias && this._calleeParams(this.importAlias.get(fn)));
+            if (cpN && !cpN.some(p => p.dotDotDotToken)) for (let i = e.arguments.length; i < cpN.length; i++) { this._emitUndefined(); if (xNum) this._argToCallee(fn); }
             this.m.call(this._fnName(fn));
             this._retFromCallee(fn);
             return;
