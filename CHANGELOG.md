@@ -3,7 +3,12 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
-- 
+-
+### AOT: alias-aware local-shadow check for static class resolution (2026-11-13)
+- **Symptom (latent)**: `_isDynClsBinding` returned "not shadowed" whenever the resolved class name differed from the source text, i.e. for imported or aliased classes, without looking at local bindings. A function-local binding reusing the alias name was still treated as the class value, so static getter/setter lookups, `typeof` and spread method dispatch could bind to the class instead of the local.
+- **Fix**: `_isDynClsBinding` now resolves the local/captured binding before the old name comparison, so an alias-name local falls back to the dynamic path. The module-link (C tier) early return is unchanged.
+- **Regression**: `audit_corpus47.js` grows from 46 to 82 cases: property reads, static getters/setters/fields, `new` through a parameter, destructuring, `prototype` access, class shadowing across array/for-of/ternary/callback/nested-class/`super`/getter/`JSON`/`in`, builtin shadow through element access/call/apply/`in`, plus spread arity and void controls.
+- Result: `test_aot` ALL PASS; `audit_diff` all corpora 0 diff (corpus47 82/82, corpus30 21/21); `glue_audit` corpus47 82/82.
 ### AOT: symbol-based builtin dispatch (a shadowing local no longer calls the host builtin) (2026-11-13)
 - **Symptom**: a local binding whose name matched a builtin global/constructor was still dispatched by text: `const Math = { floor: () => 5 }; Math.floor(1.9)` returned 1; `const Number = (x) => x + 5; Number(1)` returned 1; `const Map = mk(); new Map().v` returned undefined; `typeof Math` after a shadow reported "object"; a shadowed builtin used as the `extends` parent resolved to the host builtin.
 - **Fix**: added `_isBuiltinRef(idNode)` (identifier + `BUILTIN_GLOBALS` + `_isBuiltinIdent` symbol check) and used it for call, member, spread-call and `typeof` dispatch; the `new` builtin-constructor branch, dynamic-parent detection (`_isDynParent` / `_dynParentExpr`) and `builtinParentName` now require `_isBuiltinIdent`. The `typeof` static table also skips local and captured bindings.

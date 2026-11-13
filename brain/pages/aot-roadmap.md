@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-13T07:23:53"
+updated: "2026-11-13T08:32:20"
 ---
 
 <!-- compiled_truth -->
@@ -541,4 +541,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "Builtin/host dispatch must be symbol-gated like class dispatch. Name-only lookups (BUILTIN_GLOBALS.has / EMITTER_BUILTIN_CTORS.has on identifier text) silently dispatched a same-named local to the host: Math.floor member call, Number()/parseInt() calls, new Map(), typeof Math, extends <shadowed builtin>, spread calls and dynamic-parent detection. Added Emitter._isBuiltinRef(idNode) = identifier && BUILTIN_GLOBALS.has(text) && _isBuiltinIdent(idNode), and required _isBuiltinIdent on the new-ctor branch, _isDynParent/_dynParentExpr and builtinParentName. Fail-open on missing symbol. Regressions live in audit_corpus47.js (38 cases)."
   source: "agent session 2026-11-13 (builtin dispatch shadowing)"
+  affects: [aot-roadmap]
+
+- time: 2026-11-13T08:32:20
+  kind: decision
+  summary: "_isDynClsBinding used to short-circuit on name !== resolvedClass, so imported/aliased class names were never checked against local/captured bindings; it now checks _local/capMap first (module-link tier unchanged) and takes only the name. Rejected: gating _classOfExpr/_isClassName with _isClassValueIdent — symbol lookup on transformer-rebuilt nodes broke mixin factories (class extends param) with 'X is not defined' in corpus30. audit_corpus47 extended 46 -> 82 cases (property reads, static getter/setter/field, destructuring, prototype, spread arity, builtin shadow shapes)."
+  source: "agent session 2026-11-13 (alias shadow / property-read scan)"
   affects: [aot-roadmap]

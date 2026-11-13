@@ -150,12 +150,13 @@ Emitter.prototype._classOfExpr = function (node) {
     if (!node || !ts.isIdentifier(node)) return null;
     const cn = this._className(node.text);
     if (!this.classes.has(cn)) return null;
-    if (this._isDynClsBinding(node.text, cn)) return null;   // 函数内嵌套 class 声明（局部/捕获名）→ 运行期类值，不走静态
+    if (this._isDynClsBinding(node.text)) return null;   // 函数内嵌套 class 声明（局部/捕获名）→ 运行期类值，不走静态
     return cn;
 };
-Emitter.prototype._isDynClsBinding = function (name, cn) {
-    if (name !== cn) return false;                    // 别名/导入名：保持静态解析（类名稳定）
+Emitter.prototype._isDynClsBinding = function (name) {
     if (this._inModuleLink) return false;             // C 档：嵌套 class 声明仍走提升静态路径
+    // A local/captured binding shadows the class whether the name is the class's own name or an alias
+    // (imported/renamed class). Resolve the binding first: text comparison alone missed the alias case.
     return this._local(name) !== undefined || !!(this.capMap && this.capMap.has(name));
 };
 Emitter.prototype._isClassName = function (node) {
@@ -165,7 +166,7 @@ Emitter.prototype._isClassName = function (node) {
     if (!node || !ts.isIdentifier(node)) return false;
     const cn = this._className(node.text);
     if (!this.classes.has(cn)) return false;
-    return !this._isDynClsBinding(node.text, cn);     // 与 _classOfExpr 一致
+    return !this._isDynClsBinding(node.text);     // 与 _classOfExpr 一致
 };
 // 字符串句柄 tag 测试：栈顶 i64 → i32（是字符串?）
 Emitter.prototype._emitIsStr = function () {
