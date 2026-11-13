@@ -1026,7 +1026,7 @@ class Emitter {
                 let fo = this._className(cx.expression.text);
                 while (fo && !(this.classes.get(fo).staticFields || []).some(s2 => s2.name === method)) fo = this.classes.get(fo).parent;
                 if (!fo) throw new Error(`[tagged] 静态方法 ${cx.expression.text}.${method}() 未定义`);
-                this._emitStaticsGuard(cx.expression.text);
+                this._emitStaticsChainGuard(this._className(cx.expression.text));   // 解析导入别名，且父链各层静态需初始化（与静态读路径一致）
                 this.emitTaggedExpr(cx.expression); M.localSet(t.w);
                 M.localGet(t.w); M.i32Const(this._strId(method)); M.localGet(t.v);
                 M.call("qz.method_spread");
