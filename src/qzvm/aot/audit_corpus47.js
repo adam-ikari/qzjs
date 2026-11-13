@@ -171,4 +171,8 @@ export function f(): any { const Base = mk(); class K extends Base {} return new
   { name: "shadow-builtin-map-ctor-local", fn: "f", args: [], ts: `export function f(): any { const Map = class { size: any = 7; }; return new Map().size; }` },
   { name: "shadow-builtin-regexp-local", fn: "f", args: [], ts: `export function f(): any { const RegExp = class { test(): any { return true; } }; return new RegExp().test("x"); }` },
 
+
+  { name: "shadow-instanceof-nonobj-proto-num", fn: "f", args: [], ts: `function F() { return 1; } export function f(): any { (F as any).prototype = 3; try { return ({} as any) instanceof (F as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
+  { name: "shadow-instanceof-nonobj-proto-undef", fn: "f", args: [], ts: `function F() { return 1; } export function f(): any { (F as any).prototype = undefined; try { return ({} as any) instanceof (F as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
+
 ];

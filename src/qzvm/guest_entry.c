@@ -4305,6 +4305,20 @@ int64_t qz_guest_instanceof_dyn(int64_t x, int64_t rhs)
         JSValue proto = JS_GetPropertyStr(ctx, obj, "constructor");
         (void)proto;
         JSValue fproto = JS_GetPropertyStr(ctx, f, "prototype");
+        if (!JS_IsObject(fproto)) {
+            /* JS [[HasInstance]]: a non-object `prototype` throws TypeError with the value's ToString
+             * (arrow functions have none). Without this the check fell through to a silent false. */
+            JSValue sval = JS_ToString(ctx, fproto);
+            const char *cs = JS_ToCString(ctx, sval);
+            JS_ThrowTypeError(ctx, "Function has non-object prototype '%s' in instanceof check", cs ? cs : "undefined");
+            if (cs) JS_FreeCString(ctx, cs);
+            JS_FreeValue(ctx, sval);
+            JSValue ex = JS_GetException(ctx);
+            if (!JS_IsException(ex)) qz_set_throw(ctx, ex); else JS_FreeValue(ctx, ex);
+            JS_FreeValue(ctx, fproto); JS_FreeValue(ctx, proto);
+            JS_FreeValue(ctx, obj); JS_FreeValue(ctx, f);
+            return (int64_t)((uint64_t)0x7FF9 << 48);
+        }
         /* 沿 obj 的原型链找 f.prototype */
         int hit = 0;
         JSValue cur = JS_GetPrototype(ctx, obj);

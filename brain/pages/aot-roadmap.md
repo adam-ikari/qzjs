@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-13T09:01:29"
+updated: "2026-11-13T09:34:05"
 ---
 
 <!-- compiled_truth -->
@@ -553,4 +553,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "Tagged-template folding of String.raw keyed on the text 'String' only; a function-local const String = { raw } was ignored and the raw text folded at compile time (silent wrong value). Fold now requires _isBuiltinIdent(tag.expression); shadowed locals fall through to the generic strings-object path. Also probed and found clean: top-level function shadows in value positions, static getter/setter/field/in/typeof/optional/param shadows, alias class values, super/private-static shapes, and shadowed builtins in call positions (Object.keys, JSON.stringify, Math.max, Array.from, Symbol.iterator, Promise.resolve, WeakMap, parseInt, isNaN, Map, RegExp). Known remaining silent gap:  returns false instead of V8's TypeError (JS tier wraps closures as constructable functions; C tier materializes them the same way), needs arrow metadata in lamMeta plus exception wiring at the instanceof_dyn call site. audit_corpus47: 82 -> 127 cases."
   source: "agent session 2026-11-13 (batch 2: String.raw shadow)"
+  affects: [aot-roadmap]
+
+- time: 2026-11-13T09:34:05
+  kind: decision
+  summary: "instanceof with a dynamic RHS returned a silent false when the right-hand value's prototype was not an object (V8 throws TypeError with the ToString of that value). Now the dyn path emits _emitErrCheck after qz.instanceof_dyn; qzvm.js catches the host instanceof, rewrites the host engine's wording (QuickJS says \"operand 'prototype' property is not an object\") to the V8/TC39 phrasing, and throwValue()s it; qz_guest_instanceof_dyn performs the same check in C with matching text. Remaining known gap: arrow values on the RHS still yield false because both tiers materialize closures as ordinary functions - closing it needs arrow metadata inside the guest wasm, and the existing __set_lamsynth channel is unused by production glue. audit_corpus47: 127 -> 129."
+  source: "agent session 2026-11-13 (batch 3: instanceof non-object prototype)"
   affects: [aot-roadmap]

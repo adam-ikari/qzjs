@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 -
+### AOT: instanceof with a non-object prototype raises instead of returning false (2026-11-13)
+- **Symptom**: `x instanceof F` where `F` is a function whose `prototype` is not an object (`F.prototype = 3`, arrow-like value) returned `false` in both tiers, while V8 throws `TypeError: Function has non-object prototype '<v>' in instanceof check`.
+- **Fix**: the dynamic-right-hand-side path now surfaces the error at the call site. `qz.instanceof_dyn` is followed by `_emitErrCheck`; the JS runtime wraps the native `instanceof` and rewords the host engine's message to the V8 phrasing; the guest primitive (`qz_guest_instanceof_dyn`) performs the same `prototype` check and stores a matching `TypeError`.
+- **Regression**: `audit_corpus47.js` 127 -> 129 cases (`prototype = 3` and `prototype = undefined`, both caught and compared by message).
+- Known gap: an arrow-function value used on the right-hand side still yields `false`, because both tiers materialize closures as ordinary functions; closing it needs arrow metadata inside the guest wasm, which has no live injection channel.
+- Result: `test_aot` ALL PASS; `audit_diff` all corpora 0 diff (corpus47 129/129); `glue_audit` corpus47 129/129.
+
 ### AOT: String.raw tag folding respects a shadowing local (2026-11-13)
 - **Symptom**: `` String.raw`a${b}c` `` was folded to the raw text at compile time purely from the text `String`, so a function-local `const String = { raw: … }` still produced the folded string instead of calling the local.
 - **Fix**: the fold now requires `_isBuiltinIdent(tag.expression)`; a shadowing local falls through to the generic tagged-template path (strings object + `call_value`).

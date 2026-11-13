@@ -1334,7 +1334,22 @@ function makeQzvm(strings, opts) {
       const cid = (c && typeof c === "function") ? c.__qzClsId : undefined;
       if (cid !== undefined) return instanceById(x, cid);
       if (typeof c === "function" && !(c.name && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(c.name))) {
-        return boxBool(toJS(x) instanceof c);     // 普通函数作类（function-as-class：Dog.prototype = Object.create(…)、Animal.prototype.m = …）
+        // Ordinary function used as a class (function-as-class: Dog.prototype = Object.create(…)). A non-object
+        // `prototype` (arrow-like value, F.prototype = 3) makes JS throw a TypeError; surface it to the call
+        // site's error check instead of returning a silent false.
+        let hit;
+        try { hit = toJS(x) instanceof c; }
+        catch (e) {
+          // The host engine words this check differently (QuickJS: "operand 'prototype' property is not an
+          // object"); reword to the V8/TC39 phrasing so both tiers and the oracle agree.
+          const pv = c.prototype;
+          if (e instanceof TypeError && (pv === null || (typeof pv !== "object" && typeof pv !== "function"))) {
+            throwValue(new TypeError("Function has non-object prototype '" + String(pv) + "' in instanceof check"));
+            return TAG;
+          }
+          throwValue(e); return TAG;
+        }
+        return boxBool(hit);
       }
       const nm = (c && typeof c === "function" && c.name) ? c.name : null;
       if (nm) {                                   // 内建函数值 → 按名判定（与 instanceof_builtin 同语义，内联以避免自引用）

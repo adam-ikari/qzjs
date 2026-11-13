@@ -2790,6 +2790,7 @@ Emitter.prototype.emitTaggedBinary = function (e) {
                 this.emitTaggedExpr(right); M2.localSet(t2.w);
                 M2.localGet(t2.v); M2.localGet(t2.w);
                 M2.call("qz.instanceof_dyn");
+                this._emitErrCheck();   // non-object prototype / non-callable RHS raises TypeError (V8 semantics)
                 this._expLeave();
                 return;
             }
