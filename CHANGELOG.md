@@ -4,6 +4,12 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 -
+### AOT: String.raw tag folding respects a shadowing local (2026-11-13)
+- **Symptom**: `` String.raw`a${b}c` `` was folded to the raw text at compile time purely from the text `String`, so a function-local `const String = { raw: … }` still produced the folded string instead of calling the local.
+- **Fix**: the fold now requires `_isBuiltinIdent(tag.expression)`; a shadowing local falls through to the generic tagged-template path (strings object + `call_value`).
+- **Regression**: `audit_corpus47.js` grows to 127 cases, adding top-level-function shadows in value positions (`const g = topfn`, `{ topfn }`, `[topfn]`, `bind`, `call`, `apply`, `map`, ternary, nested block), static getter/setter/field/`in`/`typeof`/optional/parameter shadows, alias values of classes, `super`/private-static/static-block-outer inheritance shapes, and shadowed builtins in call positions (`Object.keys`, `JSON.stringify`, `Math.max`, `Array.from`, `String.raw`, `Symbol.iterator`, `Promise.resolve`, `WeakMap`, `parseInt`, `isNaN`, `Map`, `RegExp`).
+- Result: `test_aot` ALL PASS; `audit_diff` all corpora 0 diff (corpus47 127/127); `glue_audit` corpus47 127/127.
+
 ### AOT: alias-aware local-shadow check for static class resolution (2026-11-13)
 - **Symptom (latent)**: `_isDynClsBinding` returned "not shadowed" whenever the resolved class name differed from the source text, i.e. for imported or aliased classes, without looking at local bindings. A function-local binding reusing the alias name was still treated as the class value, so static getter/setter lookups, `typeof` and spread method dispatch could bind to the class instead of the local.
 - **Fix**: `_isDynClsBinding` now resolves the local/captured binding before the old name comparison, so an alias-name local falls back to the dynamic path. The module-link (C tier) early return is unchanged.

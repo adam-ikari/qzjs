@@ -13,7 +13,7 @@ Emitter.prototype.emitTaggedStmt = function (s) {
     if (ts.isClassDeclaration(s)) {
         const sn = s.name && s.name.text;
         const cnC = sn && this.classes.get(sn);
-        if (cnC && this._isDynClsBinding(sn, sn)) {   // 函数内 class 声明：每求值物化为独立 clone（动态类值 + env + sei 静态初始化）
+        if (cnC && this._isDynClsBinding(sn)) {   // 函数内 class 声明：每求值物化为独立 clone（动态类值 + env + sei 静态初始化）
             this.m.i32Const(cnC.id);
             if (cnC.captured && cnC.captured.length) this._emitClassCaptureEnvValue(cnC); else this.m.i64Const(0n);
             this.m.i32Const(this._strId("@@qzEnv"));
@@ -436,7 +436,8 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             return txt;
         };
         // String.raw`…`：raw 文本 = 各段源码原文（去定界符）→ 直接按 ToString 拼接（无需 strings.raw 表）
-        if (ts.isPropertyAccessExpression(e.tag) && ts.isIdentifier(e.tag.expression) && e.tag.expression.text === "String" && e.tag.name.text === "raw") {
+        if (ts.isPropertyAccessExpression(e.tag) && ts.isIdentifier(e.tag.expression) && e.tag.expression.text === "String"
+            && e.tag.name.text === "raw" && this._isBuiltinIdent(e.tag.expression)) {   // a shadowing local String keeps the dynamic tag path
             const noSub = ts.isNoSubstitutionTemplateLiteral(e.template);
             const spans = noSub ? [] : e.template.templateSpans;
             this._emitStrLitHandle(noSub ? rawOf(e.template) : rawOf(e.template.head));   // 首段 raw
@@ -2196,7 +2197,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc, spreadArr) {
     }
     const cname = this._className(tgt.text);   // 导入类本地名 → 目标类名
     // 内建类（Error/Map/Set/Date/Array/RegExp/…）→ 宿主 qz.new_builtin（construct 语义）；未登记者报错
-    if (!this.classes.has(cname) || this._isDynClsBinding(tgt.text, cname)) {   // 未登记 / 被局部（嵌套 class 声明 clone）遮蔽 → 动态构造
+    if (!this.classes.has(cname) || this._isDynClsBinding(tgt.text)) {   // 未登记 / 被局部（嵌套 class 声明 clone）遮蔽 → 动态构造
         if (EMITTER_BUILTIN_CTORS.has(tgt.text) && this._isBuiltinIdent(tgt)) {
             /* new 内建类：qz.new_builtin —— construct 语义在 ABI 上必须与普通调用可分
              * （Map/Set/WeakMap/WeakSet/Proxy 无 [[Call]]，规范要 TypeError），且要带 n
@@ -2234,7 +2235,7 @@ Emitter.prototype._emitNewCall = function (e, argSrc, spreadArr) {
                 const dynC = dynCn && this.classes.get(dynCn);
                 if (dynC) { this._emitStaticsGuard(dynC.name); }
                 /* 嵌套 class 声明 clone 的 ctor 用 arguments：编译期知实参个数 → 一次求值成数组写 __args，槽从数组回读（host new_dynamic 不知个数）。*/
-                const ctorNeedsArgs = !!(dynC && dynCn && this._isDynClsBinding(dynCn, dynCn) && dynC.ctor
+                const ctorNeedsArgs = !!(dynC && dynCn && this._isDynClsBinding(dynCn) && dynC.ctor
                     && this._methUsesArgs(dynC.ctor) && !e.arguments.some(a => ts.isSpreadElement(a)));
                 const M2 = this.m, tg2 = this._expEnter();
                 if (ctorNeedsArgs) {

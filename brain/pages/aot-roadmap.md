@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-13T08:32:20"
+updated: "2026-11-13T09:01:29"
 ---
 
 <!-- compiled_truth -->
@@ -547,4 +547,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "_isDynClsBinding used to short-circuit on name !== resolvedClass, so imported/aliased class names were never checked against local/captured bindings; it now checks _local/capMap first (module-link tier unchanged) and takes only the name. Rejected: gating _classOfExpr/_isClassName with _isClassValueIdent — symbol lookup on transformer-rebuilt nodes broke mixin factories (class extends param) with 'X is not defined' in corpus30. audit_corpus47 extended 46 -> 82 cases (property reads, static getter/setter/field, destructuring, prototype, spread arity, builtin shadow shapes)."
   source: "agent session 2026-11-13 (alias shadow / property-read scan)"
+  affects: [aot-roadmap]
+
+- time: 2026-11-13T09:01:29
+  kind: decision
+  summary: "Tagged-template folding of String.raw keyed on the text 'String' only; a function-local const String = { raw } was ignored and the raw text folded at compile time (silent wrong value). Fold now requires _isBuiltinIdent(tag.expression); shadowed locals fall through to the generic strings-object path. Also probed and found clean: top-level function shadows in value positions, static getter/setter/field/in/typeof/optional/param shadows, alias class values, super/private-static shapes, and shadowed builtins in call positions (Object.keys, JSON.stringify, Math.max, Array.from, Symbol.iterator, Promise.resolve, WeakMap, parseInt, isNaN, Map, RegExp). Known remaining silent gap:  returns false instead of V8's TypeError (JS tier wraps closures as constructable functions; C tier materializes them the same way), needs arrow metadata in lamMeta plus exception wiring at the instanceof_dyn call site. audit_corpus47: 82 -> 127 cases."
+  source: "agent session 2026-11-13 (batch 2: String.raw shadow)"
   affects: [aot-roadmap]
