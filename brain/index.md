@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-13T15:03:38.617Z._
+_Auto-generated. Last updated 2026-11-13T15:20:05.777Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [agent-notify-protocol](pages/agent-notify-protocol.md) — category: concept | tags: [agent-ops, protocol] | 汇报协议（用户裁决 2026-11-13，绑定 agent-ops）：
@@ -39,6 +39,7 @@ _Auto-generated. Last updated 2026-11-13T15:03:38.617Z._
 - [dap-setbreakpoints-scope](pages/dap-setbreakpoints-scope.md) — category: decision | tags: [dap, debugger] | ## 决策：setBreakpoints 按文件作用域替换
 - [dap-variables-expansion](pages/dap-variables-expansion.md) — category: decision | tags: [dap, vscode, debugger, variables] | ## 现状（已实现，gtest 7/7 + e2e 8/8 绿）
 - [debugging-layering](pages/debugging-layering.md) — category: decision | tags: [decision, debug, dap, qzvm, aot, wasm, dwarf, gdb-rsp, debug-interp] | <!-- compiled_truth -->
+- [decision-authority-tiers](pages/decision-authority-tiers.md) — category: decision | tags: [process, decision, management] | <current best understanding — replace this with the real content>
 - [decision-principles](pages/decision-principles.md) — category: decision | tags: [decision, principles, methodology] | ## 决策三原则 + 极简哲学（用户拍板，项目级约束）
 - [doc-comment-language](pages/doc-comment-language.md) — category: decision | tags: [doc, comments, i18n, convention] | ## 文档与注释语言规范（项目级，用户 2026-10-12 决策；2026-10-20 追加 commit message）
 - [examples-tree](pages/examples-tree.md) — category: decision | tags: [build, examples] | - 示例程序放在根目录 examples/ 下，每个示例一个子目录（examples/hello, examples/worker），不再放根目录 example.c。
