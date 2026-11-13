@@ -1164,7 +1164,7 @@ async function runInterp() {
         "import { baseAdd } from './dep';\nimport { d1 } from './dup1';\nimport { d2 } from './dup2';\n" +
         "export async function slow(n: number): Promise<number> { return baseAdd(n); }\n" +
         "export function runI3(): string { return d1() + d2(); }\n");
-    const r3 = compileTS(i3, path.join(dir3, "i3.wasm"), { interp: ["slow"] });
+    const r3 = compileTS(i3, path.join(dir3, "i3.wasm"), { interp: ["slow", "runI3"] });
     check("interp.多文件跨文件函数进 interpJs", /function baseAdd\s*\(/.test(r3.interpJs), true);
     check("interp.多文件私有重名不撞车", new Function(r3.interpJs + "\nreturn runI3;")()(), "e1e2");
     // 类方法/构造器调用**已被拉进 interp** 的顶层函数 → 整模块退 interp（classMeta 为空），

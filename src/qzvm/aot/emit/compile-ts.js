@@ -2,6 +2,60 @@
  * emitter.js 拆分件；模块图见 ../emitter.js 顶部注释。 */
 "use strict";
 const ts = require("typescript");
+/* interpJs 死代码剔除：interpJs 原样拼接了整模块（含只走 wasm 的函数），运行时只按名取
+ * interp 根（interpSet ∪ modInterpBindings）。按名可达性剔除不可达顶层声明：
+ *  - 纯声明（函数/类/箭头·字面量初值的 const）可安全删（定义点无副作用）；
+ *  - 初值可能带副作用的 const/let/var、以及所有非声明语句一律保留。
+ * 按原文本 span 切片（getFullText），不重打印，避免改写。 */
+function dceInterpJs(src, roots) {
+    const sf = ts.createSourceFile("interp.dce.js", src, ts.ScriptTarget.ES2020, true, ts.ScriptKind.JS);
+    const declMap = new Map();
+    for (const st of sf.statements) {
+        if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) declMap.set(st.name.text, st);
+        else if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) declMap.set(d.name.text, st);
+    }
+    const declNames = (st) => {
+        if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) return [st.name.text];
+        if (ts.isVariableStatement(st)) return st.declarationList.declarations.map((d) => (ts.isIdentifier(d.name) ? d.name.text : null)).filter(Boolean);
+        return [];
+    };
+    const pureInit = (init) => !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)
+        || ts.isStringLiteral(init) || ts.isNumericLiteral(init)
+        || init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword || init.kind === ts.SyntaxKind.NullKeyword);
+    const safeDrop = (st) => {                     // 纯声明：定义点无副作用，可安全删
+        if (ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) return true;
+        if (ts.isVariableStatement(st)) return st.declarationList.declarations.every((d) => pureInit(d.initializer));
+        return false;                              // 非声明语句（表达式/循环…）不删
+    };
+    // 无论如何都保留的语句：非声明语句（可能带副作用）+ 带副作用初值的 const/let/var。
+    const alwaysKept = (st) => declNames(st).length === 0 || !safeDrop(st);
+    // 根 = interp 根 ∪ 所有 always-kept 语句里引用的声明（它们一定保留，其依赖也必须保留；
+    // 否则「保留了引用方却删了被引用声明」→ 运行期 ReferenceError）。
+    const baseRoots = [...roots];
+    for (const st of sf.statements) {
+        if (!alwaysKept(st)) continue;
+        const walk = (x) => { if (ts.isIdentifier(x) && declMap.has(x.text)) baseRoots.push(x.text); ts.forEachChild(x, walk); };
+        ts.forEachChild(st, walk);
+    }
+    const seen = new Set();
+    const stack = baseRoots.filter((r) => declMap.has(r));
+    while (stack.length) {
+        const n = stack.pop();
+        if (seen.has(n)) continue;
+        seen.add(n);
+        const st = declMap.get(n);
+        if (!st) continue;
+        const walk = (x) => { if (ts.isIdentifier(x) && declMap.has(x.text) && !seen.has(x.text)) stack.push(x.text); ts.forEachChild(x, walk); };
+        ts.forEachChild(st, walk);
+    }
+    let out = "";
+    for (const st of sf.statements) {
+        const keep = alwaysKept(st) || declNames(st).some((n) => seen.has(n));
+        if (keep) out += st.getFullText(sf);
+    }
+    return out;
+}
+
 const fs = require("fs");
 const path = require("path");
 const { Module } = require("../wasm-encoder.js");
@@ -990,6 +1044,8 @@ function compileTS(input, outWasm, opts = {}) {
             const text = emitted.get(sf2.fileName.replace(/\.ts$/, ".js"));
             if (text) interpJs += text + "\n";
         }
+        // DCE：只保留从 interp 根可达的顶层声明（详见 dceInterpJs）。
+        if (!process.env.QZD_NO_DCE) interpJs = dceInterpJs(interpJs, new Set([...interpSet, ...modInterpBindings.keys()]));
     }
     /* 函数体引用 arguments 的顶层函数名（真实编译名）。num 模式没有全量实参数组通道，
      * 故这些函数与其直调者都必须是 tagged（funcMode 第二参数）。import 别名要展开成
