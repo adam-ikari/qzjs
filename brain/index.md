@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-13T13:30:53.923Z._
+_Auto-generated. Last updated 2026-11-13T14:28:21.391Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [agent-notify-protocol](pages/agent-notify-protocol.md) — category: concept | tags: [agent-ops, protocol] | 汇报协议（用户裁决 2026-11-13，绑定 agent-ops）：
@@ -17,6 +17,7 @@ _Auto-generated. Last updated 2026-11-13T13:30:53.923Z._
 - [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
 - [aot-readiness](pages/aot-readiness.md) — category: decision | tags: [aot, readiness, wamr] | ## 当前状态（2026-10-30）
 - [aot-roadmap](pages/aot-roadmap.md) — category: reference | tags: [aot, roadmap, emitter, reference] | # AOT 主线路线（emitter.js 唯一主线）
+- [aot-shared-state-clash-design](pages/aot-shared-state-clash-design.md) — category: decision | tags: [aot, interp, clash, design] | <current best understanding — replace this with the real content>
 - [aot-sort-deterministic-merge](pages/aot-sort-deterministic-merge.md) — category: decision | tags: [aot, sort, audit] | ## 结论
 - [aot-wasm-tagged-backend](pages/aot-wasm-tagged-backend.md) — category: decision | tags: [aot, wasm, emitter, qzvm, perf] | # AOT tagged 后端（emitter.js → wasm）
 - [bc-reader-hardening](pages/bc-reader-hardening.md) — category: decision | tags: [fuzz, quickjs, bytecode, security] | ## 字节码读取器加固（untrusted stream 防御）

@@ -5,7 +5,7 @@ category: concept
 status: draft
 tags: [aot, interp, design]
 created: "2026-11-13T20:58:55"
-updated: "2026-11-13T20:59:17"
+updated: "2026-11-13T22:27:56"
 ---
 
 <!-- compiled_truth -->
@@ -52,4 +52,10 @@ return af / const g=af;g() / take(g) 三种形态：fnidx 语义（closure_call 
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: "实测实现 903e2e49 + 79846e53；用户裁决：设计先行审阅"
+  affects: [interp-fn-value-channel]
+
+- time: 2026-11-13T22:27:56
+  kind: evidence
+  summary: "parse.ts 翻通：__lam_52 根因=命名空间成员直调(ns.foo())不补齐可选参数→栈少一槽(finalizeIssue 2/3 i64→invalid wasm)；修 tagged.js+emitter.js 直调补 undefined 到 cp.length(无 rest)，ae2dd2f2。clash 精修：函数值条件 const(captureStackTrace)非可变状态 + touched 作用域感知(局部遮蔽不算触碰)，15ce047e。parse.ts interp 90→0，wasm 合法 268386B，qzjs E2E(interp_fn_value bound/module_init no throw/__call) 全 PASS。"
+  source: session 2026-11-13
   affects: [interp-fn-value-channel]
