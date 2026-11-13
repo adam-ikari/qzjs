@@ -1923,10 +1923,11 @@ function makeQzvm(strings, opts) {
       if (obj && typeof obj === "function" && obj.__qzClsId !== undefined && key !== null) {
         let c = classMeta && classMeta[obj.__qzClsId];
         while (c) {
-          if ((c.staticFields && c.staticFields.includes(key)) || own(c.staticMethods, key) || own(c.staticGetters, key) || own(c.staticSetters, key)) return boxBool(true);
+          if (own(c.staticFields, key) || own(c.staticMethods, key) || own(c.staticGetters, key) || own(c.staticSetters, key)) return boxBool(true);
           c = c.parent != null ? classMeta[c.parent] : null;
         }
-        return boxBool(false);
+        // 非静态成员：回落 `key in obj` —— 持有函数固有/继承属性（name/length/prototype/apply/…）。
+        return boxBool(key in obj);
       }
       // 箭头闭包无 prototype：own 属性已置 undefined 但 `in` 仍命中 → 特判对齐 V8。
       if (obj && typeof obj === "function" && obj.__qzArrow && key === "prototype") return boxBool(false);

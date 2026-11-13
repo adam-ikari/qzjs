@@ -205,4 +205,13 @@ export function f(): any { const Base = mk(); class K extends Base {} return new
   { name: "shadow-instanceof-array", fn: "f", args: [], ts: `export function f(): any { try { return ({} as any) instanceof ([] as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
   { name: "shadow-instanceof-string", fn: "f", args: [], ts: `export function f(): any { try { return ({} as any) instanceof ("x" as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
   { name: "shadow-instanceof-obj", fn: "f", args: [], ts: `export function f(): any { try { return ({} as any) instanceof ({ } as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
+  { name: "shadow-in-class-prototype", fn: "f", args: [], ts: "class C { static v: any = 1; } export function f(): any { return 'prototype' in C; }" },
+  { name: "shadow-in-class-name", fn: "f", args: [], ts: "class C { static v: any = 1; } export function f(): any { return 'name' in C; }" },
+  { name: "shadow-in-class-length", fn: "f", args: [], ts: "class C { static v: any = 1; } export function f(): any { return 'length' in C; }" },
+  { name: "shadow-in-class-apply", fn: "f", args: [], ts: "class C { static v: any = 1; } export function f(): any { return 'apply' in C; }" },
+  { name: "shadow-in-class-absent", fn: "f", args: [], ts: "class C { static v: any = 1; } export function f(): any { return 'zzz' in C; }" },
+  { name: "shadow-in-static-inherited-method", fn: "f", args: [], ts: "class B { static m(): any { return 1; } } class D extends B {} export function f(): any { return 'm' in D; }" },
+  { name: "shadow-in-static-not-on-instance", fn: "f", args: [], ts: "class C { static v: any = 1; } export function f(): any { return 'v' in new C(); }" },
+  { name: "shadow-in-instance-inherited-method", fn: "f", args: [], ts: "class B { m(): any { return 1; } } class D extends B {} export function f(): any { return 'm' in new D(); }" },
+  { name: "shadow-in-instance-ctor-prop", fn: "f", args: [], ts: "class C { v: any = 1; } export function f(): any { return 'constructor' in new C(); }" },
 ];

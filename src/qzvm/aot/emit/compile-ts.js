@@ -1241,7 +1241,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         const p = c.parent ? em.classes.get(c.parent) : null;
         const ctorSlot = em._inModuleLink ? mthToSlot(ctorName(cname)) : undefined;
-        return { id: c.id, name: cname, jsName: c.jsName, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, hostBacked: !!c.hostBacked, methods, getters, setters, staticMethods, staticGetters, staticSetters, staticFields: (c.staticFields || []).map(f => f.name), ctorSlot,
+        return { id: c.id, name: cname, jsName: c.jsName, parent: p ? p.id : null, builtinParent: (c.parent && !p) ? c.parent : null, hostBacked: !!c.hostBacked, methods, getters, setters, staticMethods, staticGetters, staticSetters, staticFields: Object.fromEntries((c.staticFields || []).map(f => [f.name, { nameStrId: em._strId(f.name) }])), ctorSlot,
                  ctor: ctorName(cname), size: ((em.fieldMap ? em.fieldMap.size : 0) + 1) * 8 };
     });
     em._clsMetaBuild = clsMetaBuild;

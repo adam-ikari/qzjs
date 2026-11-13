@@ -3,11 +3,12 @@
 //   [count:i32][clsId0_itemOff:i32]×count  索引表
 //   项数据紧密排列：
 //     [clsId:i32][parent:i32(-1)][instSize:i32][ctorSlot:i32(-1)]
-//     [nMethods:i32][nStatics:i32][nAccessors:i32][nStaticAccessors:i32]
+//     [nMethods:i32][nStatics:i32][nAccessors:i32][nStaticAccessors:i32][nStaticFields:i32]
 //     methods          × nMethods        : [nameStrId:i32][slot:i32][n:i32][rest:i8][pad×3]
 //     statics          × nStatics        : [nameStrId:i32][slot:i32][n:i32]
 //     accessors        × nAccessors      : [nameStrId:i32][getSlot:i32][setSlot:i32]
 //     staticAccessors  × nStaticAccessors: [nameStrId:i32][getSlot:i32][setSlot:i32]
+//     staticFields     × nStaticFields   : [nameStrId:i32]   (declared names; values live in the statics table)
 // nameStrId 必须与 emitter 的 strings 表对齐（emitter 已为每个方法名分配 strId）。
 export function serializeClassMeta(L, mem, classMeta) {
   if (!classMeta || !classMeta.length) return 0;
@@ -26,13 +27,15 @@ export function serializeClassMeta(L, mem, classMeta) {
       getSlot: (c.staticGetters[name] || {}).slot ?? -1,
       setSlot: (c.staticSetters[name] || {}).slot ?? -1
     }));
-    const hdr = 32;
+    const hdr = 36;
+    const staticFields = Object.values(c.staticFields || {}).map(f => ({ nameStrId: f.nameStrId }));
     const methodsBytes = methods.length * 16;
     const staticsBytes = statics.length * 12;
     const accessorsBytes = accessors.length * 12;
     const staticAccessorsBytes = staticAccessors.length * 12;
-    return { c, methods, statics, accessors, staticAccessors,
-             bytes: hdr + methodsBytes + staticsBytes + accessorsBytes + staticAccessorsBytes };
+    const staticFieldsBytes = staticFields.length * 4;
+    return { c, methods, statics, accessors, staticAccessors, staticFields,
+             bytes: hdr + methodsBytes + staticsBytes + accessorsBytes + staticAccessorsBytes + staticFieldsBytes };
   });
   const idxSize = 4 + items.length * 4;
   let total = idxSize + items.reduce((a, b) => a + b.bytes, 0);
@@ -53,7 +56,8 @@ export function serializeClassMeta(L, mem, classMeta) {
     v.setUint32(cur + 20, it.statics.length, true);
     v.setUint32(cur + 24, it.accessors.length, true);
     v.setUint32(cur + 28, it.staticAccessors.length, true);
-    let q = cur + 32;
+    v.setUint32(cur + 32, it.staticFields.length, true);
+    let q = cur + 36;
     for (const m of it.methods) {
       v.setUint32(q, m.nameStrId, true);
       v.setInt32(q + 4, m.slot, true);
@@ -78,6 +82,10 @@ export function serializeClassMeta(L, mem, classMeta) {
       v.setInt32(q + 4, sac.getSlot ?? -1, true);
       v.setInt32(q + 8, sac.setSlot ?? -1, true);
       q += 12;
+    }
+    for (const sf of it.staticFields) {
+      v.setUint32(q, sf.nameStrId, true);
+      q += 4;
     }
     cur += it.bytes;
   });

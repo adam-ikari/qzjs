@@ -59,6 +59,14 @@ export function keyedInc(): number { KeyedSub.setX(1); KeyedSub.x++; ++KeyedSub.
 export function privRead(): number { return Priv.get(); }
 export function privWriteRead(): number { Priv.set(8); return Priv.get(); }
 export function aliasClassExprRead(): number { KA.x = 6; return KA.get(); }
+class InBase { static sf: number = 1; static sm(): number { return 2; } static get sg(): number { return 3; } }
+class InSub extends InBase {}
+export function inStaticField(): number { return "sf" in InBase ? 1 : 0; }
+export function inStaticMethod(): number { return "sm" in InBase ? 1 : 0; }
+export function inStaticGetter(): number { return "sg" in InBase ? 1 : 0; }
+export function inStaticInherited(): number { return "sf" in InSub ? 1 : 0; }
+export function inStaticAbsent(): number { return "zzz" in InBase ? 1 : 0; }
+export function inFnInherent(): number { return ("prototype" in InBase && "name" in InBase && "length" in InBase) ? 1 : 0; }
 `);
 const info = compileTS(tsPath, wasmPath, { inModuleLink: true });
 {
@@ -97,6 +105,12 @@ chk('keyedInc() 派生类静态 this.x++', unbox(P.keyedInc()), 3);
 chk('privRead() this.#n 私有静态', unbox(P.privRead()), 5);
 chk('privWriteRead() this.#n 写后再读', unbox(P.privWriteRead()), 8);
 chk('aliasClassExprRead() 模块顶层类表达式静态', unbox(P.aliasClassExprRead()), 6);
+chk('inStaticField() "sf" in InBase', unbox(P.inStaticField()), 1);
+chk('inStaticMethod() "sm" in InBase', unbox(P.inStaticMethod()), 1);
+chk('inStaticGetter() "sg" in InBase', unbox(P.inStaticGetter()), 1);
+chk('inStaticInherited() "sf" in InSub', unbox(P.inStaticInherited()), 1);
+chk('inStaticAbsent() "zzz" in InBase', unbox(P.inStaticAbsent()), 0);
+chk('inFnInherent() prototype/name/length in C', unbox(P.inFnInherent()), 1);
 
 L.qz_destroy(rt);
 if (failed) { console.error(`FAIL: ${failed} 项`); process.exit(1); }

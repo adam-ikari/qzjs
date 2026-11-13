@@ -290,6 +290,7 @@ int qz_guest_result_len(void)
 static int64_t qz_ret(JSContext *ctx, JSValue r);
 static JSValue qz_tojs(JSContext *ctx, int64_t b);
 static const char *qz_str_by_id(int32_t id, size_t *out_len);
+static int32_t qz_str_id_of(const char *s, size_t len);
 
 __attribute__((export_name("add")))
 int64_t qz_guest_add(int64_t a, int64_t b)
@@ -789,6 +790,7 @@ static void qz_dyncls_loud(JSContext *ctx, const char *what);
 static int32_t qz_clsmeta_static_chain(int32_t clsId, int32_t nameStrId, int32_t *n_out);
 static int32_t qz_clsmeta_static_accessor_chain(int32_t clsId, int32_t nameStrId,
                                                int wantSet, int32_t *found);
+static int32_t qz_clsmeta_static_field_chain(int32_t clsId, int32_t nameStrId);
 static int64_t qz_static_chain_get(int32_t clsId, int32_t nameStrId, int32_t *hit);
 /* qz_guest_static_set 是导出原语（static_set），前向声明不可加 static——否则内部链接
  * 吞掉 export_name，产物 import qz.static_set 时链接失败。定义见 statics 节。*/
@@ -1251,7 +1253,37 @@ int64_t qz_guest_in_op(int64_t key, int64_t obj)
     if (!g_current_rt) return 0;
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
-    if (qz_clsvalue_of(obj) >= 0) { qz_clsval_loud(ctx, "属性存在性检查（k in C）"); return 0; }
+    {
+        int32_t clsVal = qz_clsvalue_of(obj);
+        if (clsVal >= 0) {
+            /* 类值：`k in C` = 固有函数属性 ∪ classMeta 静态链（访问器/已初始化字段/声明字段/静态方法）。
+             * 此前一律 loud；反查 strId 后即可按名字查表。*/
+            JSValue kc = qz_tojs(ctx, key);
+            size_t klen = 0;
+            const char *ks = JS_ToCStringLen(ctx, &klen, kc);
+            int found = 0;
+            if (ks) {
+                static const char *const fprops[] = { "prototype", "name", "length", "caller",
+                                                      "arguments", "constructor", "apply", "call", "bind", "toString" };
+                for (size_t i = 0; i < sizeof(fprops) / sizeof(fprops[0]); i++)
+                    if (strlen(fprops[i]) == klen && memcmp(fprops[i], ks, klen) == 0) { found = 1; break; }
+                if (!found) {
+                    int32_t sid = qz_str_id_of(ks, klen);
+                    if (sid >= 0) {
+                        int32_t f2 = 0;
+                        qz_clsmeta_static_accessor_chain(clsVal, sid, 0, &f2);
+                        if (f2) found = 1;
+                        if (!found) { int32_t hit = 0; qz_static_chain_get(clsVal, sid, &hit); if (hit) found = 1; }
+                        if (!found && qz_clsmeta_static_field_chain(clsVal, sid)) found = 1;
+                        if (!found) { int32_t mn = 0; if (qz_clsmeta_static_chain(clsVal, sid, &mn)) found = 1; }
+                    }
+                }
+                JS_FreeCString(ctx, ks);
+            }
+            JS_FreeValue(ctx, kc);
+            return (int64_t)(((uint64_t)0x7FFC << 48) | (found ? 1u : 0u));
+        }
+    }
     /* 箭头闭包无 prototype：cell [off+16] = arrow 标志 → "prototype" in arrow 为 false（对齐 V8）。 */
     if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFF) {
         int32_t arrow = 0;
@@ -1342,6 +1374,25 @@ static const char *qz_str_by_id(int32_t id, size_t *out_len)
     memcpy(&len, p + 8 + id * 8, 4);
     if (out_len) *out_len = (size_t)len;
     return (const char *)(uintptr_t)off;
+}
+
+/* 反查：UTF-8 名字 → strId（-1 = 表里没有）。线性扫；`in` 运算符需要按名字
+ * 查 classMeta（静态链），而调用点只有 JS 字符串值，没有 strId。*/
+static int32_t qz_str_id_of(const char *s, size_t len)
+{
+    extern uint32_t qz_strtab_base_addr(void);
+    uint32_t base = qz_strtab_base_addr();
+    if (!base || !s) return -1;
+    const unsigned char *p = (const unsigned char *)(uintptr_t)base;
+    int32_t count;
+    memcpy(&count, p, 4);
+    for (int32_t i = 0; i < count; i++) {
+        int32_t off, l;
+        memcpy(&off, p + 4 + i * 8, 4);
+        memcpy(&l, p + 8 + i * 8, 4);
+        if (l == (int32_t)len && (len == 0 || memcmp((const void *)(uintptr_t)off, s, len) == 0)) return i;
+    }
+    return -1;
 }
 
 /* qz_guest_str_id → JSValue：id → 共享内存 UTF-8 → 引擎字符串；无表时按偏移直读。*/
@@ -2916,7 +2967,7 @@ static uint32_t g_clsmeta_base = 0;
  * 项按 clsId 顺序紧密排列；索引表 = [count:i32][clsId0_itemOff:i32]×count，随后是项数据。
  * 静态访问器入表是后加的：类值（工厂类表达式）的 `C.gs` 只能按 clsId 反查表，
  * 早期只有序列化实例访问器，静态侧无从解析。*/
-#define QZ_CLSMETA_HDR 32
+#define QZ_CLSMETA_HDR 36   /* + [nStaticFields:i32] at offset 32; fields section after staticAccessors */
 
 /* __set_clsmeta(base:i32)：宿主注入 classMeta 表。*/
 __attribute__((export_name("__set_clsmeta")))
@@ -2998,8 +3049,9 @@ static int32_t qz_clsmeta_clone(int32_t srcClsId)
     int32_t nMethods, nStatics, nAccessors, nStaticAcc;
     memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4); memcpy(&nAccessors, p + 24, 4);
     memcpy(&nStaticAcc, p + 28, 4);
+    int32_t nStaticFields; memcpy(&nStaticFields, p + 32, 4);
     int32_t nbytes = QZ_CLSMETA_HDR + nMethods * 16 + nStatics * 12
-        + nAccessors * 12 + nStaticAcc * 12;
+        + nAccessors * 12 + nStaticAcc * 12 + nStaticFields * 4;
     unsigned char *dst = (unsigned char *)malloc((size_t)nbytes);
     if (!dst) return -1;
     memcpy(dst, p, (size_t)nbytes);
@@ -3185,6 +3237,31 @@ static int32_t qz_clsmeta_static_accessor_chain(int32_t clsId, int32_t nameStrId
         cur = parent;
     }
     return -1;
+}
+
+/* 沿继承链找静态**字段名**（declared，与是否已 lazy 初始化无关）。
+ * fields 段排在 staticAccessors 之后：[nameStrId:i32] × nStaticFields。*/
+static int32_t qz_clsmeta_static_field_chain(int32_t clsId, int32_t nameStrId)
+{
+    int32_t cur = clsId, guard = 0;
+    while (cur >= 0 && guard++ < 64) {
+        uint32_t off = qz_clsmeta_item_off(cur);
+        if (!off) break;
+        const unsigned char *p = (const unsigned char *)(uintptr_t)off;
+        int32_t nMethods, nStatics, nAccessors, nStaticAcc, nStaticFields;
+        memcpy(&nMethods, p + 16, 4); memcpy(&nStatics, p + 20, 4);
+        memcpy(&nAccessors, p + 24, 4); memcpy(&nStaticAcc, p + 28, 4);
+        memcpy(&nStaticFields, p + 32, 4);
+        const unsigned char *q = p + QZ_CLSMETA_HDR + nMethods * 16 + nStatics * 12
+                                  + nAccessors * 12 + nStaticAcc * 12;
+        for (int32_t i = 0; i < nStaticFields; i++) {
+            int32_t nid; memcpy(&nid, q + i * 4, 4);
+            if (nid == nameStrId) return 1;
+        }
+        int32_t parent; memcpy(&parent, p + 4, 4);
+        cur = parent;
+    }
+    return 0;
 }
 __attribute__((export_name("method_call")))
 int64_t qz_guest_method_call(int64_t recv, int32_t mid, int64_t a0, int64_t a1,
