@@ -778,7 +778,6 @@ function compileTS(input, outWasm, opts = {}) {
                 || init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword
                 || init.kind === ts.SyntaxKind.NullKeyword
                 || ts.isPrefixUnaryExpression(init) && ts.isNumericLiteral(init.operand));
-            // 函数值 const（含 `cond ? fnA : fnB`，如 util.captureStackTrace）不可变——不属可变模块状态。
             const isFn = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)
                 || ts.isConditionalExpression(init) && [init.whenTrue, init.whenFalse].every(b => ts.isArrowFunction(b) || ts.isFunctionExpression(b) || ts.isIdentifier(b) || ts.isPropertyAccessExpression(b)));
             if (!isConst || (!prim && !isFn)) out.add(v.name.text);
