@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-13T13:22:15.427Z._
+_Auto-generated. Last updated 2026-11-13T13:28:49.018Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [agent-notify-protocol](pages/agent-notify-protocol.md) — category: concept | tags: [agent-ops, protocol] | 汇报协议（用户裁决 2026-11-13，绑定 agent-ops）：
@@ -24,6 +24,7 @@ _Auto-generated. Last updated 2026-11-13T13:22:15.427Z._
 - [brand-display-name](pages/brand-display-name.md) — category: decision | tags: [brand, docs] | Qz.js 品牌显示名 = **Qz.js**（内部标识 qzjs）。
 - [bytecode-build-artifact](pages/bytecode-build-artifact.md) — category: decision | tags: [build, polyfill, bytecode, reproducibility] | ## 结论
 - [c-js-layering](pages/c-js-layering.md) — category: decision | tags: [arch, layering, policy] | # C/JS 分层原则与标准（判据摘要）
+- [checks-schemas-constructor-hoist](pages/checks-schemas-constructor-hoist.md) — category: concept | status: draft | tags: [aot, design, this-binding] | # 设计：$constructor 回调挂起 hoist（this 绑定三选一）
 - [ci-nightly-repair](pages/ci-nightly-repair.md) — category: decision | status: completed | tags: [ci, nightly, scheduling] | ## 完结状态（2026-09-09/10）
 - [code-quality-requirements](pages/code-quality-requirements.md) — category: decision | tags: [code-quality, readability, dry, review] | ## 代码质量硬性要求（项目级，用户 2026-09-13 追加，对全部产出生效）
 - [commit-workflow](pages/commit-workflow.md) — category: decision | tags: [git, workflow, commit] | ## 规则
