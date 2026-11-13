@@ -214,4 +214,7 @@ export function f(): any { const Base = mk(); class K extends Base {} return new
   { name: "shadow-in-static-not-on-instance", fn: "f", args: [], ts: "class C { static v: any = 1; } export function f(): any { return 'v' in new C(); }" },
   { name: "shadow-in-instance-inherited-method", fn: "f", args: [], ts: "class B { m(): any { return 1; } } class D extends B {} export function f(): any { return 'm' in new D(); }" },
   { name: "shadow-in-instance-ctor-prop", fn: "f", args: [], ts: "class C { v: any = 1; } export function f(): any { return 'constructor' in new C(); }" },
+  { name: "shadow-instanceof-map-rhs", fn: "f", args: [], ts: "export function f(): any { try { return ({} as any) instanceof (new Map() as any); } catch (e: any) { return 'T:' + (e as any).message; } }" },
+  { name: "shadow-instanceof-undefined-rhs", fn: "f", args: [], ts: "export function f(): any { try { return ({} as any) instanceof (undefined as any); } catch (e: any) { return 'T:' + (e as any).message; } }" },
+  { name: "shadow-instanceof-instance-rhs", fn: "f", args: [], ts: "class C { v: any = 1; } export function f(): any { try { return ({} as any) instanceof (new C() as any); } catch (e: any) { return 'T:' + (e as any).message; } }" },
 ];
