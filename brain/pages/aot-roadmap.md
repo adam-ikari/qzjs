@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-14T00:15:38"
+updated: "2026-11-14T00:23:59"
 ---
 
 <!-- compiled_truth -->
@@ -1112,4 +1112,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: Rewrote compiled_truth to the new best understanding
   source: main Tier3 ruling 2026-11-13
+  affects: [aot-roadmap]
+
+- time: 2026-11-14T00:23:59
+  kind: reversal
+  summary: "parse.ts flip rolled back: wasm finalizeIssue crashes under repeated calls + tagged wasm 25-92x slower than interp; bench/aot-product built (3 workloads, p50/p95+payload); G2 <1.5x => interp=90"
+  source: bench/aot-product host run 2026-11-14
   affects: [aot-roadmap]
