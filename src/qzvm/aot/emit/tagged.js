@@ -1281,6 +1281,7 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         this._emitSpreadCall(e);
         return;
     }
+    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.questionDotToken && ts.isIdentifier(e.expression.expression)) { const M0 = this.m; this.emitTaggedExpr(e.expression.expression); M0.call("qz.is_nullish"); M0.ifBlock("i64"); this._emitUndefined(); M0.else_(); this._emitDynMethod(e.expression.expression, e.expression.name.text, e.arguments); M0.end(); return; }
     if (ts.isCallExpression(e)) {
         if (ts.isPropertyAccessExpression(e.expression)) {
             // 内建全局成员调用 Math.floor(x) / JSON.stringify(x) / Object.keys(o) → qz.builtin
