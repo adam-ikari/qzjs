@@ -80,7 +80,10 @@ function genGlue(prefix, mainCalls, wasmOnly) {
     const lams = metaObj.lams || {};
     const classes = metaObj.classes || [];
     // interp 回退：列在 funcMeta.mode === "interp" 的函数不编 wasm，跑 transpile 出的 JS。
-    const interpNames = meta.filter(m => m.mode === "interp").map(m => m.name);
+    // modInterpBindings：模块级 const 绑挂起闭包——函数留 wasm，闭包值走 interp_fn_value，
+    // 故 interpJs 副本须暴露这些名供 bindInterp 注入。
+    const modInterpBindings = metaObj.modInterpBindings || [];
+    const interpNames = [...new Set([...meta.filter(m => m.mode === "interp").map(m => m.name), ...modInterpBindings])];
     const interpFile = prefix + ".interp.js";
     const interpJs = (interpNames.length && fs.existsSync(interpFile)) ? fs.readFileSync(interpFile, "utf8") : "";
     const makeQzvm = extractMakeQzvm();
@@ -118,6 +121,7 @@ ${load}
     if (__ex.memory) qz.bindMem(__ex.memory);   // 全 interp 产物无内存（空 wasm 模块）
     if (__ex.__bump) qz.bindBump(__ex.__bump);
     qz.bindClosures(__ex, __lams);
+    qz.bindInterp(__interp);        // 先于 bindClasses：__module_init 里的 interp_fn_value 需要表已注入
     qz.bindClasses(__ex, __classes);
     // __call(name, args)：按 funcMeta 自动转换 num(裸) vs tagged(_fromJS/_toJS)。
     // wasm 帧存活期间 qz.gc 会抛错（局部句柄不可扫描，见 qzvm.js 的 inWasm）。
@@ -173,7 +177,7 @@ if (cmd === "build") {
     const interp = interpIdx >= 0 ? process.argv[interpIdx + 1].split(",").filter(Boolean) : [];
     const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp, ...memOpt() });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd, fields: r.fields || [] }));
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd, fields: r.fields || [], modInterpBindings: r.modInterpBindings || [] }));
     if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
     const nInterp = r.funcMeta.filter(m => m.mode === "interp").length;
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp ? ` interp=${nInterp}` : ""}`);
@@ -200,7 +204,7 @@ if (cmd === "build") {
     const interp2 = interpIdx2 >= 0 ? process.argv[interpIdx2 + 1].split(",").filter(Boolean) : [];
     const r = compileTS(src, prefix + ".wasm", { debug: process.argv.includes("--debug"), interp: interp2, ...memOpt() });
     fs.writeFileSync(prefix + ".strings.json", JSON.stringify(r.strings));
-    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd, fields: r.fields || [] }));
+    fs.writeFileSync(prefix + ".meta.json", JSON.stringify({ funcs: r.funcMeta, lams: r.lamMeta || {}, classes: r.classMeta || [], arena: r.arenaEnd, fields: r.fields || [], modInterpBindings: r.modInterpBindings || [] }));
     if (r.interpJs) fs.writeFileSync(prefix + ".interp.js", r.interpJs);
     const nInterp2 = r.funcMeta.filter(m => m.mode === "interp").length;
     console.log(`compile ok: ${prefix}.wasm (${fs.statSync(prefix + ".wasm").size} B) strings=${r.strings.length} funcs=${r.funcMeta.length}${nInterp2 ? ` interp=${nInterp2}` : ""}`);
