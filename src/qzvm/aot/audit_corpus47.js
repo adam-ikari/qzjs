@@ -175,4 +175,11 @@ export function f(): any { const Base = mk(); class K extends Base {} return new
   { name: "shadow-instanceof-nonobj-proto-num", fn: "f", args: [], ts: `function F() { return 1; } export function f(): any { (F as any).prototype = 3; try { return ({} as any) instanceof (F as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
   { name: "shadow-instanceof-nonobj-proto-undef", fn: "f", args: [], ts: `function F() { return 1; } export function f(): any { (F as any).prototype = undefined; try { return ({} as any) instanceof (F as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
 
+
+  { name: "shadow-instanceof-arrow-local", fn: "f", args: [], ts: `class K { m(): any { return 1; } } export function f(): any { const F = () => 1; try { return (new K()) instanceof (F as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
+  { name: "shadow-instanceof-arrow-nested", fn: "f", args: [], ts: `class K { m(): any { return 1; } } export function f(): any { const make = () => { const G = () => 2; try { return (new K()) instanceof (G as any); } catch (e: any) { return "T:" + (e as any).message; } }; return make(); }` },
+  { name: "shadow-instanceof-fnexpr-ok", fn: "f", args: [], ts: `class K { m(): any { return 1; } } export function f(): any { const F = function () { return 1; }; return (new K()) instanceof (F as any); }` },
+  { name: "shadow-instanceof-arrow-call", fn: "f", args: [], ts: `class K { m(): any { return 1; } } export function f(): any { const get = () => () => 3; const F = get(); try { return (new K()) instanceof (F as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
+  { name: "shadow-instanceof-arrow-pojo", fn: "f", args: [], ts: `export function f(): any { const F = () => 1; try { return ({} as any) instanceof (F as any); } catch (e: any) { return "T:" + (e as any).message; } }` },
+
 ];

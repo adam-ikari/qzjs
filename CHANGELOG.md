@@ -4,6 +4,13 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 -
+### AOT: arrow functions are not constructable RHS for instanceof (2026-11-13)
+- **Symptom**: `x instanceof arrowFn` returned `false` in both tiers. V8 throws `TypeError: Function has non-object prototype 'undefined' in instanceof check`, because arrows carry no `prototype`.
+- **Fix**: the closure cell gains a fifth field (`[off+16]` = arrow flag) written by the emitter, so both runtimes see it without new host plumbing. The JS runtime drops the wrapper's `prototype` (plain assignment; the property is non-configurable) and the guest primitive throws the same `TypeError` before touching the prototype chain.
+- **Regression**: `audit_corpus47.js` 129 -> 134 cases (arrow local, nested arrow, arrow returned from a call, `function`-expression control, plain-object left operand). `typeof F.prototype` on an arrow wrapper now reports `undefined`.
+- Known gap: `"prototype" in arrowFn` still reports `true` (the wrapper keeps an own property set to `undefined`).
+- Result: `test_aot` ALL PASS; `audit_diff` all corpora 0 diff (corpus47 134/134); `glue_audit` corpus47 134/134.
+
 ### AOT: instanceof with a non-object prototype raises instead of returning false (2026-11-13)
 - **Symptom**: `x instanceof F` where `F` is a function whose `prototype` is not an object (`F.prototype = 3`, arrow-like value) returned `false` in both tiers, while V8 throws `TypeError: Function has non-object prototype '<v>' in instanceof check`.
 - **Fix**: the dynamic-right-hand-side path now surfaces the error at the call site. `qz.instanceof_dyn` is followed by `_emitErrCheck`; the JS runtime wraps the native `instanceof` and rewords the host engine's message to the V8 phrasing; the guest primitive (`qz_guest_instanceof_dyn`) performs the same `prototype` check and stores a matching `TypeError`.

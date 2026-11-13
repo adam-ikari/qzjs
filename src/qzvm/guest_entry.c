@@ -4301,6 +4301,19 @@ int64_t qz_guest_instanceof_dyn(int64_t x, int64_t rhs)
         if (!ctx) return (int64_t)((uint64_t)0x7FFC << 48);
         JSValue f = qz_tojs(ctx, rhs);
         if (!JS_IsFunction(ctx, f)) { JS_FreeValue(ctx, f); return (int64_t)((uint64_t)0x7FFC << 48); }
+        /* Arrow closures carry a flag in the closure cell ([off+16]); like a real arrow they have no
+         * `prototype`, so `x instanceof arrow` must throw (mirrors the non-object-prototype path). */
+        if (rtag == 0x7FFF) {
+            int32_t arrow = 0;
+            memcpy(&arrow, (const unsigned char *)(uintptr_t)((uint32_t)r + 16), 4);
+            if (arrow == 1) {
+                JS_ThrowTypeError(ctx, "Function has non-object prototype 'undefined' in instanceof check");
+                JSValue ex = JS_GetException(ctx);
+                if (!JS_IsException(ex)) qz_set_throw(ctx, ex); else JS_FreeValue(ctx, ex);
+                JS_FreeValue(ctx, f);
+                return (int64_t)((uint64_t)0x7FF9 << 48);
+            }
+        }
         JSValue obj = qz_tojs(ctx, x);
         JSValue proto = JS_GetPropertyStr(ctx, obj, "constructor");
         (void)proto;

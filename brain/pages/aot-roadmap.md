@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-13T09:34:05"
+updated: "2026-11-13T11:58:48"
 ---
 
 <!-- compiled_truth -->
@@ -559,4 +559,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "instanceof with a dynamic RHS returned a silent false when the right-hand value's prototype was not an object (V8 throws TypeError with the ToString of that value). Now the dyn path emits _emitErrCheck after qz.instanceof_dyn; qzvm.js catches the host instanceof, rewrites the host engine's wording (QuickJS says \"operand 'prototype' property is not an object\") to the V8/TC39 phrasing, and throwValue()s it; qz_guest_instanceof_dyn performs the same check in C with matching text. Remaining known gap: arrow values on the RHS still yield false because both tiers materialize closures as ordinary functions - closing it needs arrow metadata inside the guest wasm, and the existing __set_lamsynth channel is unused by production glue. audit_corpus47: 127 -> 129."
   source: "agent session 2026-11-13 (batch 3: instanceof non-object prototype)"
+  affects: [aot-roadmap]
+
+- time: 2026-11-13T11:58:48
+  kind: decision
+  summary: "Arrow functions now behave as non-constructable RHS for instanceof in both tiers. Data channel: the closure cell grew from 16 to 20 bytes with [off+16] = arrow flag, written by _emitLambdaNew; no host injection needed, so the guest reads it straight from linear memory (qz_guest_instanceof_dyn) and the JS runtime reads it in cloWrap (drops wrapper.prototype via plain assignment - the property is non-configurable, so defineProperty throws and must not be used). Consequence: typeof F.prototype on an arrow reports undefined; \"prototype\" in arrow still true (own property set to undefined), recorded as a remaining gap. audit_corpus47: 129 -> 134."
+  source: "agent session 2026-11-13 (batch 4: arrow instanceof)"
   affects: [aot-roadmap]

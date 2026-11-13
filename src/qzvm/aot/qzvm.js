@@ -180,6 +180,13 @@ function makeQzvm(strings, opts) {
       const fi0 = mem ? new DataView(mem.buffer).getUint32(off0, true) : -1;
       const src0 = lamMeta && lamMeta[fi0] && lamMeta[fi0].src;
       if (src0) Object.defineProperty(f, "toString", { value: () => src0, configurable: true });
+      // cell [off+16] = arrow flag: arrows have no `prototype`, so `x instanceof arrow` must throw
+      // (V8) instead of returning false. A plain wrapper function always carries one.
+      if (mem && off0 + 20 <= mem.buffer.byteLength && new DataView(mem.buffer).getInt32(off0 + 16, true) === 1) {
+        // `prototype` on a function object is non-configurable, so plain assignment is the only way to
+        // drop it; mirrors an arrow's "no prototype" for instanceof checks.
+        f.prototype = undefined;
+      }
     } catch (_) {}
     return f;
   };

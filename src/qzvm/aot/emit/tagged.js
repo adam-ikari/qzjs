@@ -2127,14 +2127,16 @@ Emitter.prototype._emitLambdaNew = function (lam, selfName) {
         meta = this._lamById.get(lam);
     }
     const fidx = this.m._funcIdx[meta.fname];
-    // 闭包值 = [funcidx:i32][envIdx:i32][arity:i32][nameStrId:i32]（envIdx=0 表示无捕获）；捕获值不再拷贝（共享环境）。
-    emitBumpAlloc(M, () => M.i32Const(16));           // → off(i32)（越界 trap）
+    // 闭包值 = [funcidx:i32][envIdx:i32][arity:i32][nameStrId:i32][arrow:i32]（envIdx=0 表示无捕获）；
+    // 捕获值不再拷贝（共享环境）。arrow 供 instanceof_dyn 复现「箭头函数无 prototype」的 V8 语义。
+    emitBumpAlloc(M, () => M.i32Const(20));           // → off(i32)（越界 trap）
     M.localSet(this.cloOff);
     /* [off] = 蹦床表槽（C 侧 closure_call 经 call_indirect 分派）；无蹦床时退回 funcidx */
     M.localGet(this.cloOff); M.i32Const(meta.tableSlot !== undefined ? meta.tableSlot : fidx); M.i32Store(2, 0);
     M.localGet(this.cloOff); (this.envRef !== undefined ? M.localGet(this.envRef) : M.i32Const(0)); M.i32Store(2, 4);
     M.localGet(this.cloOff); M.i32Const(lam.parameters ? lam.parameters.length : 0); M.i32Store(2, 8);
     M.localGet(this.cloOff); M.i32Const(lam.name && ts.isIdentifier(lam.name) ? this._strId(lam.name.text) : -1); M.i32Store(2, 12);
+    M.localGet(this.cloOff); M.i32Const(ts.isArrowFunction(lam) ? 1 : 0); M.i32Store(2, 16);
     M.localGet(this.cloOff); M.i64ExtendI32U();
     M.i64ConstBits(0, 0x7fff0000); M.i64Or();
 };
