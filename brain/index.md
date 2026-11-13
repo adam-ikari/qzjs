@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-13T12:55:58.749Z._
+_Auto-generated. Last updated 2026-11-13T12:59:17.466Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [agent-notify-protocol](pages/agent-notify-protocol.md) — category: concept | tags: [agent-ops, protocol] | 汇报协议（用户裁决 2026-11-13，绑定 agent-ops）：
@@ -51,6 +51,7 @@ _Auto-generated. Last updated 2026-11-13T12:55:58.749Z._
 - [httpserver-ws-fixes](pages/httpserver-ws-fixes.md) — category: decision | tags: [http-server, websocket, uvhttp, llhttp] | uvhttp 在 qzjs 中的底层修复（均改 deps/uvhttp 源码）：1) HPE_PAUSED_UPGRADE 时 llhttp 暂停未恢复——分发前显式 llhttp_resume；2) WS 握手 101 后 uvhttp 仍尝试 HTTP 解析导致状态错乱——升
 - [httpserver-ws-protocol](pages/httpserver-ws-protocol.md) — category: decision | tags: [http-server, websocket, protocol] | polyfill/src/http-server.js（纯 JS 层 WS 协议）：
 - [in-module-design](pages/in-module-design.md) — category: decision | tags: [decision, build, wasm, in-module, aot] | ## 结论
+- [interp-fn-value-channel](pages/interp-fn-value-channel.md) — category: concept | status: draft | tags: [aot, interp, design] | # 设计：interp 函数作一等值通道
 - [interrupt-teardown-fixed](pages/interrupt-teardown-fixed.md) — category: project | status: archived | ## 本页说明
 - [interrupt-teardown-leak](pages/interrupt-teardown-leak.md) — category: project | status: archived | tags: [quickjs-ng, ctl, interrupt, teardown, leak] | ## 结论（2026-10-03 根因定案并根治：qzjs 侧漏释放 JS_GetException 的返回值）
 - [libuv-io-uring-workaround](pages/libuv-io-uring-workaround.md) — category: decision | tags: [libuv, io-uring, linux, workaround] | ## 现状（2026-09-20 更新）
