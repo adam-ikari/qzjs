@@ -31,6 +31,15 @@ function jsFn(src, fn) {
       if (instance.exports.memory) qz.bindMem(instance.exports.memory);
       if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
       qz.bindClosures(instance.exports, r.lamMeta);
+      // interp 函数作值通道：须在 bindClasses（触发 __module_init）之前注入——
+      // __module_init 里 `const g = af` 会调 qz.interp_fn_value 取 interpJs 副本句柄。
+      if (r.interpJs) {
+        const iNames = (r.funcMeta || []).filter(f => f.mode === "interp").map(f => f.name);
+        if (iNames.length) {
+          const imap = new Function(r.interpJs + "\nreturn { " + iNames.map(n => n + ": typeof " + n + ' === "function" ? ' + n + " : undefined").join(", ") + " };")();
+          qz.bindInterp(imap);
+        }
+      }
       qz.bindClasses(instance.exports, r.classMeta);
       const m = (r.funcMeta || []).find(f => f.name === c.fn);
       if (m && m.mode === "interp") {

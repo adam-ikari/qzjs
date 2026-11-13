@@ -606,10 +606,10 @@ class Emitter {
                     : (this.moduleGlobals ? this.moduleGlobals.get(tgt) : undefined);
                 if (g2 !== undefined) { M.globalGet(g2); return; }
             }
-            if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
-                // 顶层函数作值（回调/别名/属性宿主）→ 包装为宿主函数句柄
-                this._emitFnValue(name);
-                return;
+            if (this.fnNames && this.fnNames.has(name)) {
+                if (this.m._funcIdx[this._fnName(name)] !== undefined) { this._emitFnValue(name); return; }
+                // interp 函数（async/generator，无 wasm 导出）作值 → interp_fn_value 取 interpJs 副本句柄
+                M.i32Const(this._strId(name)); M.call("qz.interp_fn_value"); this._emitErrCheck(); return;
             }
             if (BUILTIN_GLOBALS.has(name)) { M.i32Const(this._strId(name)); M.call("qz.builtin_member"); return; }   // 内建全局作值（Symbol/Math/JSON…）
             // 未声明标识符：运行期查全局（lib 全局如 URL/console 有值 → 宿主句柄）；不存在 →
@@ -635,9 +635,9 @@ class Emitter {
                     : (this.moduleGlobals ? this.moduleGlobals.get(tgt) : undefined);
                 if (g2 !== undefined) { this.m.globalGet(g2); return; }
             }
-            if (this.fnNames && this.fnNames.has(name) && this.m._funcIdx[this._fnName(name)] !== undefined) {
-                this._emitFnValue(name);
-                return;
+            if (this.fnNames && this.fnNames.has(name)) {
+                if (this.m._funcIdx[this._fnName(name)] !== undefined) { this._emitFnValue(name); return; }
+                M.i32Const(this._strId(name)); M.call("qz.interp_fn_value"); this._emitErrCheck(); return;
             }
             if (BUILTIN_GLOBALS.has(name)) { this.m.i32Const(this._strId(name)); this.m.call("qz.builtin_member"); return; }
             this.m.i32Const(this._strId(name)); this.m.call("qz.ref_get");   // 未声明名：运行期查全局，缺失 → ReferenceError（loud）

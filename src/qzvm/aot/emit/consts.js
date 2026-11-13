@@ -155,6 +155,7 @@ const QZ = {
   bigint_lit: { params: ["i32"], results: ["i64"] },              // BigInt 字面量（字符串 id）→ BIG_HI 句柄
   bigint_binop: { params: ["i32", "i64", "i64"], results: ["i64"] },   // BigInt 二元运算（op, a, b）；op: 0+ 1- 2* 3/ 4% 5=== 6!== 7< 8<= 9> 10>=
   fn_value: { params: ["i32", "i32", "i32", "i32"], results: ["i64"] },   // 顶层函数作值：包装为宿主函数句柄（arity = 形参数；第 4 参 = 目标 f64 ABI）
+  interp_fn_value: { params: ["i32"], results: ["i64"] },   // interp 回退函数作值：按名取 interpJs 副本函数的宿主句柄
   builtin_spread: { params: ["i32", "i64"], results: ["i64"] },        // 内建函数 + 展开实参
   spread_into: { params: ["i64", "i64"], results: ["i64"] },    // [...x]：按迭代协议并入数组
   call_value: { params: ["i64", "i64", "i64", "i64", "i64", "i64", "i64"], results: ["i64"] },   // v, a0..a3, 溢出实参数组, recv   // 值调用（闭包/宿主函数）

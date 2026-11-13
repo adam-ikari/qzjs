@@ -203,6 +203,7 @@ function makeQzvm(strings, opts) {
   // wasm 原生数组（0x7FFB）：header[0]=len，header[2]=dataOff，data = i64×len（元素解引用递归）。
   const arrOf = new WeakMap();   // JS 数组 → 原 wasm 数组句柄（往返还原，保持别名）
   let fnCacheMap = null;         // 顶层函数名 → 宿主包装句柄（fn_value：同一函数名恒等同一句柄）
+  let interpFns = null;          // interp 回退函数表 name → JS fn（bindInterp 注入；interp_fn_value 取句柄）
   const arrOfHost = new WeakMap();   // **宿主来源**的 JS 数组 → {h, bump}：同一 bump 世代内同一数组恒同一句柄
                                      // （否则 `h.c` 每次读都新建 box → `h.c[0]=v` 写入丢失；见 ASSESSMENT 已知静默项）
   const arrRead = (b) => {
@@ -2707,6 +2708,20 @@ function makeQzvm(strings, opts) {
       fnCacheMap.set(nm, hv);
       return hv;
     },
+    // interp 回退函数作值：interpJs 副本（去类型 JS）里的 async/generator 没有 wasm 导出，
+    // 不能走 fn_value（exportsRef 查不到）→ 直接从 bindInterp 注入的表取裸 JS 函数包宿主句柄。
+    // closure_call 的 HOST 分支已做 JS 转换，句柄即函数本身；同名恒等同一句柄（与 fn_value 一致）。
+    interp_fn_value: (sid) => {
+      const nm = strings[sid];
+      fnCacheMap = fnCacheMap || new Map();
+      const hit = fnCacheMap.get(nm);
+      if (hit !== undefined) return hit;
+      const f = interpFns && interpFns[nm];
+      if (typeof f !== "function") { throwValue(new Error("interp_fn_value: 未注册 interp 函数 " + nm)); return TAG; }
+      const hv = tagHandle(f);
+      fnCacheMap.set(nm, hv);
+      return hv;
+    },
     builtin_spread: (id, arr) => {
       const name = strings[id];
       if (name === "Object.assign") {   // >4 源（直接路径仅 4 实参槽）：合并语义（POJO 目标就地合并由直接路径覆盖）
@@ -2749,6 +2764,7 @@ function makeQzvm(strings, opts) {
       return numToBits(want);
     },
     bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; tryRunModuleInit(); },   // 最后一次 bind → 触发模块初始化
+    bindInterp: (m) => { interpFns = m; },
     bindFields,
     bindBump,
     setInWasm: (v) => { inWasm = !!v; },   // glue 的 __call 在进入/退出 wasm 时置位，供 gc 拒绝不安全的时机
