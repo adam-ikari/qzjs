@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-13T11:58:48"
+updated: "2026-11-13T12:50:13"
 ---
 
 <!-- compiled_truth -->
@@ -565,4 +565,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: decision
   summary: "Arrow functions now behave as non-constructable RHS for instanceof in both tiers. Data channel: the closure cell grew from 16 to 20 bytes with [off+16] = arrow flag, written by _emitLambdaNew; no host injection needed, so the guest reads it straight from linear memory (qz_guest_instanceof_dyn) and the JS runtime reads it in cloWrap (drops wrapper.prototype via plain assignment - the property is non-configurable, so defineProperty throws and must not be used). Consequence: typeof F.prototype on an arrow reports undefined; \"prototype\" in arrow still true (own property set to undefined), recorded as a remaining gap. audit_corpus47: 129 -> 134."
   source: "agent session 2026-11-13 (batch 4: arrow instanceof)"
+  affects: [aot-roadmap]
+
+- time: 2026-11-13T12:50:13
+  kind: decision
+  summary: "in operator: (a) class value static fields were invisible (\"k\" in C false) - staticFields added to runtime classMeta and in_op walks the static chain (fields use .includes since the list is an array, not a map); (b) \"prototype\" in arrowFn was true - both tiers report false via __qzArrow marker (JS) and cell arrow flag (guest); (c) symbol keys lost via String() and null RHS threw uncaught - in_op uses the raw key and wraps the host  in try/catch -> throwValue, emitter adds _emitErrCheck after qz.in_op. instanceof non-callable RHS (undefined/null/number/array/object) was a compile-time error - emitter now routes every non-class RHS through instanceof_dyn + _emitErrCheck; instanceof_dyn tail throws V8-worded TypeError (\"not an object\" primitives / \"not callable\" non-callable objects) and materialises non-closure RHS via toJS so POJO/arrays classify correctly. C-tier instanceof_dyn tail does the same throw; C-tier \"k in C\" still loud (no reverse string-id lookup for the static chain), recorded as gap. audit_corpus47: 134 -> 157."
+  source: "agent session 2026-11-13 (batch 5: in operator + instanceof non-callable RHS)"
   affects: [aot-roadmap]

@@ -2797,15 +2797,22 @@ Emitter.prototype.emitTaggedBinary = function (e) {
                 return;
             }
         }
-        if (!ts.isIdentifier(right) || !this.classes.has(this._className(right.text))) {
-            throw new Error(right && BUILTIN_GLOBALS.has(right.text)
-                ? `[tagged] 内建类 ${right.text} 的 instanceof 未实现`
-                : "[tagged] instanceof 右操作数须为用户类");
+        if (ts.isIdentifier(right) && this.classes.has(this._className(right.text))) {
+            this.emitTaggedExpr(e.left);
+            this.m.i32Const(this.classes.get(this._className(right.text)).id);
+            this.m.call("qz.instanceof_op");
+            return;
         }
-        this.emitTaggedExpr(e.left);
-        this.m.i32Const(this.classes.get(this._className(right.text)).id);
-        this.m.call("qz.instanceof_op");
-        return;
+        // 非类右值（字面量/未声明/非可调用）：运行期 instanceof_dyn 抛 V8 文案的 TypeError。
+        {   const M2 = this.m, t2 = this._expEnter();
+            this.emitTaggedExpr(e.left); M2.localSet(t2.v);
+            this.emitTaggedExpr(right); M2.localSet(t2.w);
+            M2.localGet(t2.v); M2.localGet(t2.w);
+            M2.call("qz.instanceof_dyn");
+            this._emitErrCheck();
+            this._expLeave();
+            return;
+        }
     }
     if (op === ts.SyntaxKind.InKeyword) {
         if (ts.isPrivateIdentifier(e.left)) {   // 私有名 in o → 品牌检查：非对象 → TypeError；否则 o 是否为声明该私有名的类的实例
@@ -2814,8 +2821,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
             this._emitErrCheck();
             return;
         }
-        // k in o → qz.in_op（宿主语义；POJO/实例由 toJS 物化）
-        this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this.m.call("qz.in_op"); return;
+        // k in o → qz.in_op（宿主语义；POJO/实例由 toJS 物化）；null/primitive RHS 抛 TypeError（V8）→ 调用点 catch
+        this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right); this.m.call("qz.in_op"); this._emitErrCheck(); return;
     }
     if (op === ts.SyntaxKind.CommaToken) { this.emitTaggedExpr(e.left); this.m.drop(); this.emitTaggedExpr(e.right); return; }
     if (op === ts.SyntaxKind.FirstAssignment) {

@@ -1252,6 +1252,18 @@ int64_t qz_guest_in_op(int64_t key, int64_t obj)
     JSContext *ctx = qz_get_active_jsctx(g_current_rt);
     if (!ctx) return 0;
     if (qz_clsvalue_of(obj) >= 0) { qz_clsval_loud(ctx, "属性存在性检查（k in C）"); return 0; }
+    /* 箭头闭包无 prototype：cell [off+16] = arrow 标志 → "prototype" in arrow 为 false（对齐 V8）。 */
+    if ((uint16_t)((uint64_t)obj >> 48) == 0x7FFF) {
+        int32_t arrow = 0;
+        memcpy(&arrow, (const unsigned char *)(uintptr_t)((uint32_t)(uint64_t)obj + 16), 4);
+        if (arrow == 1) {
+            JSValue k2 = qz_tojs(ctx, key);
+            const char *ks2 = JS_ToCString(ctx, k2);
+            if (ks2 && strcmp(ks2, "prototype") == 0) { JS_FreeCString(ctx, ks2); JS_FreeValue(ctx, k2); return 0; }
+            if (ks2) JS_FreeCString(ctx, ks2);
+            JS_FreeValue(ctx, k2);
+        }
+    }
     JSValue k = qz_tojs(ctx, key), o = qz_tojs(ctx, obj);
     int found = 0;
     if (JS_IsObject(o)) {
@@ -1261,6 +1273,18 @@ int64_t qz_guest_in_op(int64_t key, int64_t obj)
             if (atom != JS_ATOM_NULL) { found = JS_HasProperty(ctx, o, atom); JS_FreeAtom(ctx, atom); }
             JS_FreeCString(ctx, ks);
         }
+    } else {
+        /* 原始值右操作数：V8 抛 TypeError（宿主引擎文案不同 → 用 V8 措辞）。 */
+        JSValue ks2 = JS_ToString(ctx, k), os2 = JS_ToString(ctx, o);
+        const char *kc = JS_ToCString(ctx, ks2), *oc = JS_ToCString(ctx, os2);
+        JS_ThrowTypeError(ctx, "Cannot use 'in' operator to search for '%s' in %s", kc ? kc : "", oc ? oc : "");
+        if (kc) JS_FreeCString(ctx, kc);
+        if (oc) JS_FreeCString(ctx, oc);
+        JS_FreeValue(ctx, ks2); JS_FreeValue(ctx, os2);
+        JSValue ex = JS_GetException(ctx);
+        if (!JS_IsException(ex)) qz_set_throw(ctx, ex); else JS_FreeValue(ctx, ex);
+        JS_FreeValue(ctx, k); JS_FreeValue(ctx, o);
+        return (int64_t)((uint64_t)0x7FF9 << 48);
     }
     JSValue vr = JS_NewBool(ctx, found);
     int64_t r = qz_ret(ctx, vr);
@@ -4347,7 +4371,20 @@ int64_t qz_guest_instanceof_dyn(int64_t x, int64_t rhs)
         JS_FreeValue(ctx, obj); JS_FreeValue(ctx, f);
         return (int64_t)(((uint64_t)0x7FFC << 48) | (hit ? 1u : 0u));
     }
-    if (rtag != 0x7FFE) return (int64_t)((uint64_t)0x7FFC << 48);  /* 不是类值 → false */
+    if (rtag != 0x7FFE) {
+        /* 非类值、非函数右值：V8 抛 TypeError（对象 → not callable；原始值 → not an object）。 */
+        JSContext *ctx2 = g_current_rt ? qz_get_active_jsctx(g_current_rt) : NULL;
+        if (ctx2) {
+            JSValue rv = qz_tojs(ctx2, rhs);
+            const char *msg = JS_IsObject(rv) ? "Right-hand side of 'instanceof' is not callable"
+                                              : "Right-hand side of 'instanceof' is not an object";
+            JS_FreeValue(ctx2, rv);
+            JS_ThrowTypeError(ctx2, "%s", msg);
+            JSValue ex = JS_GetException(ctx2);
+            if (!JS_IsException(ex)) qz_set_throw(ctx2, ex); else JS_FreeValue(ctx2, ex);
+        }
+        return (int64_t)((uint64_t)0x7FF9 << 48);
+    }
     int32_t targetCls = (int32_t)(r & 0xFFFFFFFFu);
     uint64_t xu = (uint64_t)x;
     if ((uint16_t)(xu >> 48) == 0x7FFD) {   // 宿主承载实例（extends 内建）：__qzClsId → classMeta 父链比对

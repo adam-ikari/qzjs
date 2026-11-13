@@ -4,6 +4,16 @@ All notable changes to qzjs.
 
 ## [Unreleased]
 -
+### AOT: `in` operator and non-callable instanceof RHS match V8 (2026-11-13)
+- **`in` operator**
+  - **Class value**: `"k" in C` returned `false` for static fields (stored in wasm memory, invisible to the JS class object). `in_op` now walks the classMeta static chain (fields/methods/getters/setters); `staticFields` is added to the runtime class metadata.
+  - **Arrow closure**: `"prototype" in arrowFn` returned `true` because the wrapper keeps an own `prototype` slot set to `undefined`. Both tiers now report `false` (JS: `__qzArrow` marker; guest: cell arrow flag).
+  - **Symbol keys / null RHS**: the generic path stringified the key (losing Symbols) and let the host `in` throw uncaught. It now uses the raw key and surfaces TypeError ("Cannot use 'in' operator to search for 'v' in null") through `_emitErrCheck`.
+- **`instanceof` non-callable RHS**: `x instanceof undefined|null|number|[]|{}` was a compile-time error. The emitter now routes every non-class RHS through `instanceof_dyn` + `_emitErrCheck`; the runtime raises the V8-worded TypeError (`not an object` for primitives, `not callable` for non-callable objects). Class-value RHS keeps the handle lookup (`handles[idx]`), other handle kinds are materialised via `toJS` so arrays/strings are classified correctly.
+- **Regression**: `audit_corpus47.js` 134 -> 157 cases.
+- Known gap: C-tier `"k" in C` still raises a loud "属性存在性检查" error (no reverse string-id lookup for the static chain); documented.
+- Result: `test_aot` ALL PASS; `audit_diff` all corpora 0 diff (corpus47 157/157); `glue_audit` corpus47 157/157.
+
 ### AOT: arrow functions are not constructable RHS for instanceof (2026-11-13)
 - **Symptom**: `x instanceof arrowFn` returned `false` in both tiers. V8 throws `TypeError: Function has non-object prototype 'undefined' in instanceof check`, because arrows carry no `prototype`.
 - **Fix**: the closure cell gains a fifth field (`[off+16]` = arrow flag) written by the emitter, so both runtimes see it without new host plumbing. The JS runtime drops the wrapper's `prototype` (plain assignment; the property is non-configurable) and the guest primitive throws the same `TypeError` before touching the prototype chain.

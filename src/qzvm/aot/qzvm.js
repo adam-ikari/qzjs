@@ -186,6 +186,7 @@ function makeQzvm(strings, opts) {
         // `prototype` on a function object is non-configurable, so plain assignment is the only way to
         // drop it; mirrors an arrow's "no prototype" for instanceof checks.
         f.prototype = undefined;
+        Object.defineProperty(f, "__qzArrow", { value: true, configurable: true, enumerable: false });
       }
     } catch (_) {}
     return f;
@@ -1337,7 +1338,7 @@ function makeQzvm(strings, opts) {
       const ur = BigInt.asUintN(64, rhs), hr = ur >> 48n;
       const c = hr === CLO_HI
         ? (() => { const o2 = Number(ur & MASK32); let f2 = cloProps.get(o2); if (!f2) { f2 = cloWrap(rhs); cloProps.set(o2, f2); } return f2; })()
-        : handles[idxOf(rhs)];
+        : hr === HOST_HI ? handles[idxOf(rhs)] : toJS(rhs);
       const cid = (c && typeof c === "function") ? c.__qzClsId : undefined;
       if (cid !== undefined) return instanceById(x, cid);
       if (typeof c === "function" && !(c.name && /^(Array|Object|String|Number|Boolean|Function|Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|RegExp|Date|Map|Set|Promise|WeakMap|WeakSet)$/.test(c.name))) {
@@ -1381,7 +1382,11 @@ function makeQzvm(strings, opts) {
             }
         }
       }
-      throw new Error("instanceof: 右操作数不是类或内建类");
+      // V8: non-callable object RHS -> "not callable"; primitive RHS -> "not an object".
+      throwValue(new TypeError(typeof c === "object" && c !== null
+        ? "Right-hand side of 'instanceof' is not callable"
+        : "Right-hand side of 'instanceof' is not an object"));
+      return TAG;
     },
     brand_check: (obj, clsId) => {   // 私有名 in o：非对象 → TypeError（与 JS 同文案）；对象 → 是否该类实例
       const u = BigInt.asUintN(64, obj), hi = u >> 48n;
@@ -1911,7 +1916,31 @@ function makeQzvm(strings, opts) {
         let c = classMeta[new DataView(mem.buffer).getInt32(Number(u0 & MASK32), true)];
         while (c) { if (own(c.getters, key) || own(c.setters, key) || own(c.methods, key)) return boxBool(true); c = c.parent != null ? classMeta[c.parent] : null; }
       }
-      return boxBool(toJS(k) in toJS(o));
+      const obj = toJS(o);
+      const keyRaw = toJS(k);
+      const key = typeof keyRaw === "string" ? keyRaw : null;
+      // 类值（宿主句柄裹类构造器）：静态字段驻 wasm 内存，JS 对象上不可见 → 沿 classMeta 静态链判定。
+      if (obj && typeof obj === "function" && obj.__qzClsId !== undefined && key !== null) {
+        let c = classMeta && classMeta[obj.__qzClsId];
+        while (c) {
+          if ((c.staticFields && c.staticFields.includes(key)) || own(c.staticMethods, key) || own(c.staticGetters, key) || own(c.staticSetters, key)) return boxBool(true);
+          c = c.parent != null ? classMeta[c.parent] : null;
+        }
+        return boxBool(false);
+      }
+      // 箭头闭包无 prototype：own 属性已置 undefined 但 `in` 仍命中 → 特判对齐 V8。
+      if (obj && typeof obj === "function" && obj.__qzArrow && key === "prototype") return boxBool(false);
+      // null/primitive RHS raises TypeError (V8); surface via __err so the call-site catch sees it.
+      try { return boxBool(keyRaw in obj); }
+      catch (e) {
+        // Host engine words this differently (QuickJS: "invalid 'in' operand"); reword to V8's phrasing.
+        if (e instanceof TypeError) {
+          const shown = obj === null ? "null" : obj === undefined ? "undefined" : String(obj);
+          throwValue(new TypeError("Cannot use 'in' operator to search for '" + String(keyRaw) + "' in " + shown));
+          return TAG;
+        }
+        throwValue(e); return TAG;
+      }
     },   // tagged bool（不可经 ret：BigInt 会被当宿主句柄）
     // delete o.k：宿主对象真删；POJO/实例由 emitter 直接把槽写成 undefined sentinel（本函数仅宿主）。
     object_delete: (o, kid) => { const obj = handles[idxOf(o)]; if (obj !== null && typeof obj === "object") delete obj[strings[kid]]; },
