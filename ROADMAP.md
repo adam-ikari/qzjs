@@ -174,7 +174,22 @@ fetch 拦截 + Cache + update，2026-09 合入 master，见 D6）。
 - **不引入**系统库依赖（全部 `add_subdirectory` 源码构建，严格 C99）。
 - **不做** 设备原语（GPIO / BLE / serial 类硬件抽象——属宿主层职责，qzjs 聚焦 JS 运行时 + 连接性）
 
-## 七、参考
+## 七、AOT 实验线（`experiment/aot-v2`）
+
+> 目标口径见 brain `aot-roadmap`（G1–G5）。**覆盖率只是诊断指标，不是工作目标。**
+
+| 目标 | 口径 |
+|---|---|
+| G1 热点加速（主指标） | 无挂起语义热点计算路径，C1 Slim 真机相对 interp ≥ 3×（p50） |
+| G2 翻转准入 | 翻转须带该模块代表性负载前后 p50，≥ 1.5× 才保留，否则回退；只翻热点 top-N 且不含 async/generator |
+| G3 体积预算 | 应用总 JS 载荷（wasm+interpJs）相对 interp-only ≤ +10%（超则须该模块 ≥ 2× 才可例外） |
+| G4 正确性闸门 | glue_audit 5/5、audit_diff 全量 0 diff、clash 绿；双状态 = 发布阻塞 |
+| G5 启动不退化 | 冷启动到首次 JS 执行 ≤ 80ms（基线 60–70ms） |
+
+决策：先做 P2（M4 单模块合并）可行性评估；G1 仍达不到则收缩为「热点计算模块专用」，含挂起语义代码永久留 interp。
+验收台：`bench/aot-product`（zod 校验 / JSON→对象 / 纯计算，输出 p50/p95 + 载荷字节）。
+
+## 八、参考
 
 - `README.md` — 项目定位 / API / WinterTC 模块表 / 构建选项
 - `brain/pages/` — 各领域决策（worker-transferable、wintertc-byob-streams、wasm-engine-integration、service-worker-stack 等 36 页）
