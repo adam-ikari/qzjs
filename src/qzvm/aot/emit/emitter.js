@@ -576,7 +576,7 @@ class Emitter {
         if (ts.isNewExpression(rx) && ts.isIdentifier(rx.expression)) {
             const cnN = this._className(rx.expression.text);
             // A same-named local binding shadows the class -> runtime class value (same rule as the static-construction check in _emitNewCall); no static direct call.
-            if (this.classes.has(cnN) && !this._isDynClsBinding(rx.expression.text, cnN)) return cnN;
+            if (this.classes.has(cnN) && !this._isDynClsBinding(rx.expression.text)) return cnN;
         }
         return null;
     }
