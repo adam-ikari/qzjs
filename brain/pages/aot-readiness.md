@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-11-13T20:09:57"
+updated: "2026-11-13T20:55:58"
 ---
 
 <!-- compiled_truth -->
@@ -246,4 +246,10 @@ interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 i
   kind: evidence
   summary: "A/B 改写前提被证伪：既有逐函数 interp 只支持按名直调，不支持 interp 函数作一等值。探针 7 例：alias-typeof/identity/assign/passarg 全 diff（'af is not defined' / '未知 funcidx 0'），gen-return/throw diff；直调探针 4 例：typeof af='function'、gen() 直接调用+迭代都正确，唯独 'return af'（函数名作值）报 'af is not defined'。结论：把模块级 const 绑 async 闭包机械 hoist 成顶层 async 函数声明+const 别名，别名正好命中缺失通道。A/B 需先建 'interp fn as first-class value' 通道（closure 句柄包宿主蹦床 + interpJs 按名取 fn 表 + 新原语 qz.interp_fn），约 1 天，且仍受既有 shared-state 整模块逃逸约束。估时由 '改动小' 上调为 '中等'。"
   source: "探针 /tmp/probe_alias.js + /tmp/probe_direct.js，audit_diff 实测 2026-11-13"
+  affects: [aot-readiness]
+
+- time: 2026-11-13T20:55:58
+  kind: evidence
+  summary: "interp-fn-as-value 通道 + 模块级挂起闭包 hoist 落地：v4/core/parse.ts 从 90/90 整模块 interp 翻成 0/90 wasm（7 个 const 绑含挂起闭包 _parseAsync/_safeParseAsync/validateAsync/_encodeAsync/_decodeAsync/_safeEncodeAsync/_safeDecodeAsync 走 interp_fn_value）。机制：modInterpBindings 收集模块级 const 绑「直接 async/gen 闭包 或 体内含嵌套挂起的闭包」；_collectLambdas 跳过、hasSuspendOutsideFn 跳过、_emitBindingDecl 发 qz.interp_fn_value、interpJs 含同名绑定。zod 整模块 interp 39→38（仅 parse.ts 解放；其余 34 文件仍因 checks/schemas 未翻）。剩余阻塞：checks.ts(88 fn)/schemas.ts(142 fn)/classic/schemas.ts(527 fn) 是 core.$constructor(name,(inst,def)=>{...挂起...}) 回调参数形态——挂起在 call 的箭头实参里，非 const 绑初值，当前检测不覆盖；且 (inst,def) 用 inst 涉 this 绑定，与 classic/schemas 对象字面量 async 方法同类（用户已标 this 绑定单独确认）。运行期待办：build.js glue 未加 bindInterp（运行期需补）；modInterpBindings 绕过既有 shared-state clash 检查（interp 副本与 wasm 侧模块变量漂移风险未测）。"
+  source: "本轮实测 2026-11-13（79846e53）"
   affects: [aot-readiness]
