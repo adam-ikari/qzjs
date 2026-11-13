@@ -155,6 +155,18 @@ function compileTS(input, outWasm, opts = {}) {
     const modConstLit = new Map();   // 模块级字面量 const（名字 → 字符串/数值），供计算属性名折叠
     const modVars = [];          // 模块级变量声明（含初值）
     const modStmts = [];         // 模块级变量语句（合成 __module_init 的函数体）
+    // 模块级 `const f = <async/generator 闭包>`：wasm 无挂起通道，此前触发整模块 interp。
+    // 改走 interp_fn_value 通道——f 作宿主句柄包 interpJs 副本里的同名绑定，模块留在 wasm。
+    const modInterpBindings = new Map();   // 绑定名 → VariableDeclaration
+    // 闭包体内任意深度出现 async/generator → wasm 无挂起通道（与 containsSuspend 同形，
+    // 提前到此供 collectDecls 识别模块级 const 绑「含挂起的闭包」）。
+    const containsSuspendFn = (root) => {
+        let hit = false;
+        const w = (n) => { if (hit) return;
+            if (ts.isFunctionLike(n) && ((!!n.modifiers && n.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)) || !!n.asteriskToken)) { hit = true; return; }
+            ts.forEachChild(n, w); };
+        w(root); return hit;
+    };
     const checker = program.getTypeChecker();   // 收集阶段就要解析符号身份（see `export namespace` 展平）
     const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)；收集阶段就要写（see `export namespace`）
     const nsAliasByFile = {};        // 文件名 → (命名空间本地名 → 成员表)：跨文件同名导入隔离
@@ -269,6 +281,11 @@ function compileTS(input, outWasm, opts = {}) {
                     if (ts.isStringLiteral(d.initializer)) modConstLit.set(d.name.text, d.initializer.text);   // 字面量 const → 计算属性名可折叠
                     else if (ts.isNumericLiteral(d.initializer)) modConstLit.set(d.name.text, Number(d.initializer.text.replace(/_/g, "")));
                     else if (ts.isPropertyAccessExpression(d.initializer)) { const sx0 = symbolNameOf(d.initializer); if (sx0) modSymLit.set(d.name.text, sx0); }   // const s = Symbol.iterator → 类计算属性名可静态解析
+                    else if ((ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))
+                        && (((!!d.initializer.modifiers && d.initializer.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)) || !!d.initializer.asteriskToken)
+                            || (d.initializer.body && containsSuspendFn(d.initializer.body)))) {
+                        modInterpBindings.set(d.name.text, d);   // 模块级 const 绑含挂起的闭包 → 走 interp_fn_value，不毒化整模块
+                    }
                 }
                 modStmts.push(st);
             } else if (ts.isClassDeclaration(st)) {
@@ -368,6 +385,8 @@ function compileTS(input, outWasm, opts = {}) {
             if (hasSuspendOutsideFn) return;
             if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;   // 已由 clsStmts 覆盖
             if (ts.isFunctionDeclaration(n) && hoistedFns.has(n)) return;      // 顶层函数：containsSuspend 负责
+            // 模块级 const 绑 async/generator 闭包：走 interp_fn_value 通道，不在此判据内（避免整模块退 interp）
+            if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && modInterpBindings.has(n.name.text)) return;
             if (isSuspendFnLike(n)) { hasSuspendOutsideFn = true; return; }
             ts.forEachChild(n, walk);
         };
@@ -763,7 +782,7 @@ function compileTS(input, outWasm, opts = {}) {
     //  就地补过合成名 `__default_N`（写在节点上），重新解析会得到无名的声明 → tsc transform
     //  直接 `Debug Failure`；且 strip 里的 import 改名依赖同一符号表。故用自定义 host 返回旧节点。
     let interpJs = "";
-    if (interpSet.size > 0) {
+    if (interpSet.size > 0 || modInterpBindings.size > 0) {   // interp 函数 或 模块级 const 绑 async/generator 闭包（interp_fn_value 取同名绑定）
         const sfByFile = new Map(sfs.map(f => [path.resolve(f.fileName), f]));
         const baseHost = ts.createCompilerHost({ strict: true, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None, moduleResolution: ts.ModuleResolutionKind.NodeJs });
         const host = {
@@ -1002,6 +1021,7 @@ function compileTS(input, outWasm, opts = {}) {
         em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
         em.modConstLit = modConstLit;    // 模块级字面量 const（计算属性名折叠用）
         em._modSymLit = modSymLit;       // 模块级 Symbol.<well-known> 常量
+        em._modInterpBindings = modInterpBindings;   // 模块级 const 绑 async/generator 闭包（走 interp_fn_value）
         em.nsAliasByFile = nsAliasByFile;   // 跨文件同名 namespace 导入隔离表（_nsMember 按 em.sf 查）
         em.checker = checker;            // 符号身份（TDZ 判据：同名遮蔽必须按符号区分，不能按文本）
         em.protNameId = (n) => em._strId(n);
@@ -1272,7 +1292,8 @@ function compileTS(input, outWasm, opts = {}) {
     }
     const classMeta = em._clsMetaBuild || [];
     return { dbgInterp, module: m, strings: em.strings || [], fields: em.fieldMap ? [...em.fieldMap.keys()] : [], funcMeta, lamMeta, classMeta, interpJs, trampSlots: em._trampSlots || new Map(),
-             arenaEnd: opts.inModuleLink ? null : memLayout(opts).arenaEnd };
+             arenaEnd: opts.inModuleLink ? null : memLayout(opts).arenaEnd,
+             modInterpBindings: [...modInterpBindings.keys()] };   // 模块级 const 绑 async/generator 闭包的名（interp 映射须含）
 }
 
 

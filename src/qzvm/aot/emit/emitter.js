@@ -173,6 +173,12 @@ class Emitter {
                     this._fnVars = this._fnVars || new Set(); this._fnVars.add(name.text);
                     this._fnNodes = this._fnNodes || new Map(); this._fnNodes.set(name.text, d.initializer);
                 }
+                // 模块级 const 绑 async/generator 闭包：wasm 无挂起通道 → 宿主句柄包 interpJs 副本同名绑定
+                if (this._modInterpBindings && this._modInterpBindings.has(name.text)) {
+                    M.i32Const(this._strId(name.text)); M.call("qz.interp_fn_value"); this._emitErrCheck();
+                    this._emitVarStore(name.text, this.scratchB); M.drop();
+                    return;
+                }
                 if (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) {
                     this._emitLambdaNew(d.initializer, name.text);   // 传绑定名 → 自递归可直调 wasm 函数
                     this._emitVarStore(name.text, this.scratchB); this.m.drop();
@@ -294,9 +300,12 @@ class Emitter {
 
     // 收集函数体内所有箭头函数/函数表达式（含嵌套），按源序。返回节点列表。
     _collectLambdas(node, out = []) {
+        const isModInterpInit = (n) => ts.isVariableDeclaration(n.parent) && n.parent.initializer === n
+            && ts.isIdentifier(n.parent.name) && this._modInterpBindings && this._modInterpBindings.has(n.parent.name.text);
         const walk = (n) => {
-            if (ts.isArrowFunction(n)) { out.push(n); }
+            if (ts.isArrowFunction(n)) { if (isModInterpInit(n)) return; out.push(n); }
             else if (ts.isFunctionExpression(n)) {
+                if (isModInterpInit(n)) return;   // 模块级 const 绑 async/generator 闭包 → 走 interp_fn_value，不收 lambda
                 // 对象属性值位置且体内用 `this`（`parse: function _parse(){ …this… }`）：
                 // 运行时 this = receiver，须走合成 self 形参的闭包，否则无 `this` 槽位。
                 const isPropVal = ts.isPropertyAssignment(n.parent) && n.parent.initializer === n;
