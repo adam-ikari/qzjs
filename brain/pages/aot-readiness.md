@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-11-13T21:22:15"
+updated: "2026-11-13T21:30:53"
 ---
 
 <!-- compiled_truth -->
@@ -258,4 +258,10 @@ interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 i
   kind: evidence
   summary: "interp-fn-value 通道运行期闭合的 E2E 发现两处缺口。①build.js glue 已补 bindInterp：genGlue 读 .meta.json 的 modInterpBindings→扩 interp name set→interpJs 暴露这些名→qz.bindInterp(__interp) 早于 bindClasses；小模块 E2E 通过（interp_fn_value bound + typeOfAf()==='function'）。②parse.ts 全量 wasm 产物无效：wasm2wat 报 'type mismatch in call, expected [i64,i64,i64] but got [i64,i64]'，定位 __lam_52 = _parse 内 (iss)=>util.finalizeIssue(iss,ctx,core.config())——emit 器在 call finalizeIssue（3×i64）前多压 local.get 0（lambda 句柄 i32），3×i64 只拿到 2×i64+1×i32。这是 emit 器 codegen bug（captured lambda + 导入命名空间成员调用），被『改写把 _parse 编到 wasm』首次暴露，非通道引入（通道只加 interp_fn_value 发射+modInterpBinding skip，未碰 _parse）。③shared-state 漂移复现：src/qzvm/aot/test_interp_shared_clash.js —— 模块级 let counter 被 wasm inc() 突变、被 async modInterpBinding readAsync() 读；编译期 partial（clash 被绕过），运行期 wasm counter=3 vs interp readAsync()=0。结论：parse 阶段『真跑』未达，需先修 __lam_52 emit 器 bug；modInterpBindings 需接入 clash 检查以消漂移。"
   source: "E2E 验证 2026-11-13（cdfcd6d2）"
+  affects: [aot-readiness]
+
+- time: 2026-11-13T21:30:53
+  kind: evidence
+  summary: "parse.ts 翻转后体积量化：interpJs 58921B 构成 util 36846(62.5%)/errors 14040(23.8%)/core 348(0.6%)/parse 7660(13.0%)——util/errors 被 namespace import 整模块内联，但 7 个闭包实际只需 6367B（parse 10 声明转译 3888 + util.finalizeIssue/captureStackTrace 2046 + errors.$ZodRealError 208 + core.config/$ZodAsyncError 225），DCE 可省 52554B(89%)。但 net=wasm 268364+interpJs 6367=274731 vs 基线 interp-only 58929 → 净增 215802B(211KiB)，仍为正（wasm 主导）。只剔已翻转 parse 函数、不树摇导入：interpJs 55181，净增 264616B。结论：interpJs 低效主因是内联 util/errors 全模块（预存在，非翻转引入），DCE 大头是树摇导入；AOT parse.ts 至少 +211KiB，50MiB 设备应只翻热点而非能翻就翻。另：checks/schemas/classic-schemas 实测均只 1-2 个 core.$constructor call 拖垮整模块，同构，设计推荐 A（整表达式 hoist + inst 闭包捕获）。"
+  source: "量化 2026-11-13"
   affects: [aot-readiness]
