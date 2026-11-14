@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-14T10:06:09"
+updated: "2026-11-14T20:07:25"
 ---
 
 <!-- compiled_truth -->
@@ -1131,3 +1131,21 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "M6b 合并模块 bench 终值(host): computeWork 6.11x(G1✓ 纯num f64内联); validationWork 1.2x(G2✗ tagged call_indirect ~54ns/op 持平 qzjs tagged interp); jsonWork 受阻(JSON.parse host对象); 边界税 20ns(内联)/54ns(非内联) ≤100ns✓. 洞见: qzjs 本是 tagged 解释器, tagged op 它已快→AOT 只在纯num大赢→实证原则#2 AOT=计算热点专用, tagged/alloc/suspension 留 interp."
   source: bench/aot-product/run_inmod.mjs 2026-11-14
   affects: [aot-roadmap]
+
+- time: 2026-11-14T10:49:29
+  kind: evidence
+  summary: "WAMR 验收数字(3x3): computeWork AOT 7.53x G1达标; jsonWork 0.17x+arena限N<=100 G2不适用(需GC); validationWork 0.52x 非AOT目标回退interp(tagged负载原则#2实证). WAMR interp全慢于qzjs interp. ext_wamr加WASI libc(LIBC_WASI=1)+qz_host始终注册+box-by-mode. 正确性全OK(257423/7150/4500)"
+  source: "run_wamr.js bench wamrc 2.4.5 ext_wamr fast-interp+AOT"
+  affects: [aot-gc-rc-allocator, aot-zod-hotspot-measurement]
+
+- time: 2026-11-14T18:41:00
+  kind: evidence
+  summary: "Handle table per-iter reset (save_handles/restore_handles in guest_entry.c + emitter _arenaLoopEnter/Leave) fixed jsonWork overflow: N 100→50000 OK (1251075000 correct). Host bridge for JSON.parse impractical (wasm embeds separate QuickJS, host objects unreachable, arbitrary strings unrepresentable as POJO). Final 3x3 (N=50k): computeWork AOT 7.92x G1✓; jsonWork AOT 0.51x G2 N/A (tagged, non-AOT target); validationWork AOT 0.54x G2 N/A (tagged, non-AOT target, no rollback). WAMR interp all slower than qzjs interp (tagged bytecode via wasm fast-interp << native C interp)."
+  source: run_wamr.js handle-reset build
+  affects: [aot-gc-rc-allocator, aot-zod-hotspot-measurement]
+
+- time: 2026-11-14T20:07:25
+  kind: decision
+  summary: "M7 sub-function extraction landed (ce09b959): mixedWork (tagged obj setup + hot numeric loop) WAMR AOT 8.46x vs qzjs-interp (check 257423); QZ_NO_M7=1 A/B 1.88x -> 4.5x from num-fragment extraction. computeWork 8.94x, jsonWork 0.53x, validationWork 0.57x unchanged. Bench validationWork N 50k->20k (64MiB in-module ceiling headroom; pre-existing, not M7)."
+  source: commit ce09b959
+  affects: [aot-m7-ast-analysis]
