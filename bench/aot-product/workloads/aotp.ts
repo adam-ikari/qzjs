@@ -56,3 +56,17 @@ function tagLoop(n: number): number {
   for (let i = 0; i < n; i++) { const o: any = { x: i }; t = t + o.x; }
   return t;
 }
+
+// 4) mixed: tagged setup (object literal / property access) outside a hot numeric loop.
+//    M7 target: the loop is pure-numeric → extract to a num AOT fragment; tagged setup stays.
+function mixedWork(n: number): number {
+  const cfg = { mul: 3 };
+  const base = cfg.mul;
+  let s = 0;
+  for (let i = 0; i < n; i++) {
+    const a = i % 1000;
+    const v = a * a;
+    s = (s + v - ((v / 7) | 0) + ((i * 3) % 13)) % 1000003;
+  }
+  return s + (base > 0 ? 0 : 1);
+}

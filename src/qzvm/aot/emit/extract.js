@@ -216,18 +216,19 @@ function findNumericFragments(f, checker) {
     if (!f.body || !ts.isBlock(f.body)) return fragments;
     const stmts = f.body.statements;
 
-    // Scan top-level statements + loops
     let i = 0;
     while (i < stmts.length) {
         const stmt = stmts[i];
 
-        // Loop with pure-numeric body → extract entire loop
         if (ts.isForStatement(stmt) || ts.isWhileStatement(stmt) || ts.isDoStatement(stmt)) {
             const loopNumeric = isLoopNumeric(stmt, numericVars, checker);
             if (loopNumeric.numeric) {
                 fragments.push({
                     type: "loop",
                     node: stmt,
+                    parentBlock: f.body,
+                    startIdx: i,
+                    endIdx: i + 1,
                     freeVars: loopNumeric.freeVars,
                     loopCarried: loopNumeric.loopCarried,
                     opCount: loopNumeric.opCount,
@@ -240,7 +241,7 @@ function findNumericFragments(f, checker) {
             if (stmt.statement && ts.isBlock(stmt.statement)) {
                 const bodyFrags = findNumericBlocksInBody(stmt.statement.statements, numericVars, checker);
                 for (const bf of bodyFrags) {
-                    fragments.push({ ...bf, type: "block", inLoop: true, parentLoop: stmt });
+                    fragments.push({ ...bf, type: "block", inLoop: true, parentBlock: stmt.statement, parentLoop: stmt });
                 }
             }
             i++;
@@ -253,11 +254,14 @@ function findNumericFragments(f, checker) {
             while (j < stmts.length && !ts.isForStatement(stmts[j]) && !ts.isWhileStatement(stmts[j]) &&
                    !ts.isDoStatement(stmts[j]) && isNumericStmt(stmts[j], numericVars, checker))
                 j++;
-            if (j > i + 1) {   // need ≥ 2 statements (or ≥ 3 ops) for top-level extraction
+            if (j > i + 1) {
                 const block = Array.from(stmts.slice(i, j));
                 fragments.push({
                     type: "block",
                     stmts: block,
+                    parentBlock: f.body,
+                    startIdx: i,
+                    endIdx: j,
                     freeVars: analyzeFreeVars(block, numericVars),
                     opCount: countOps(block, numericVars),
                     inLoop: false,
@@ -406,3 +410,137 @@ function countOps(nodes, numericVars) {
 }
 
 module.exports = { isNumericExpr, isNumericStmt, buildNumericVars, findNumericFragments, countOps };
+
+// ── Extraction: synthetic num functions + original rewrite ──────────
+
+/** Find the variable assigned inside a block that is declared outside (output). */
+function analyzeBlockOutput(blockStmts, freeVars) {
+    const freeSet = new Set(freeVars);
+    const assigned = new Set();
+    const collectAssign = (n) => {
+        if (!n) return;
+        if (ts.isBinaryExpression(n) && ts.isAssignmentExpression(n) && ts.isIdentifier(n.left))
+            assigned.add(n.left.text);
+        ts.forEachChild(n, collectAssign);
+    };
+    for (const s of blockStmts) collectAssign(s);
+    // Output = assigned vars that are also free (read from outside)
+    return [...assigned].filter(a => freeSet.has(a));
+}
+
+/** Build a synthetic num-mode function declaration for a fragment. */
+function buildSyntheticFunction(frag, fname) {
+    const srcPos = frag.type === "loop" ? frag.node : (frag.stmts && frag.stmts[0]);
+    const carried = frag.type === "loop"
+        ? (frag.loopCarried || [])
+        : analyzeBlockOutput(frag.stmts || [], frag.freeVars || []);
+    const freeVars = frag.freeVars || [];
+    const paramNames = [...new Set([...freeVars, ...carried])];
+    const numType = () => withPos(ts.factory.createKeywordTypeNode(ts.SyntaxKind.NumberKeyword), srcPos);
+    const params = paramNames.map(nm =>
+        withPos(ts.factory.createParameterDeclaration(
+            undefined, undefined, nm, undefined, numType(), undefined), srcPos));
+    const bodyStmts = frag.type === "loop" ? [frag.node] : (frag.stmts || []);
+    const retVar = carried[0] || null;
+    const stmts = [...bodyStmts];
+    if (retVar) {
+        stmts.push(withPos(ts.factory.createReturnStatement(
+            withPos(ts.factory.createIdentifier(retVar), srcPos)), srcPos));
+    }
+    const body = withPos(ts.factory.createBlock(stmts, true), srcPos);
+    const retType = retVar ? numType() : withPos(ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword), srcPos);
+    return withPos(ts.factory.createFunctionDeclaration(
+        [withPos(ts.factory.createModifier(ts.SyntaxKind.ExportKeyword), srcPos)],
+        undefined, withPos(ts.factory.createIdentifier(fname), srcPos), undefined, params, retType, body), srcPos);
+}
+
+/** Set a real source position on a synthetic node (emitter _line needs it). */
+function withPos(node, src) {
+    if (src) ts.setTextRange(node, src);
+    return node;
+}
+
+/** Build the call statement replacing a fragment: [out =] __aot_frag_N(args). */
+function buildCallStatement(frag, fname) {
+    const carried = frag.type === "loop"
+        ? (frag.loopCarried || [])
+        : analyzeBlockOutput(frag.stmts || [], frag.freeVars || []);
+    const freeVars = frag.freeVars || [];
+    const paramNames = [...new Set([...freeVars, ...carried])];
+    const srcPos = frag.type === "loop" ? frag.node : (frag.stmts && frag.stmts[0]);
+    const args = paramNames.map(nm => withPos(ts.factory.createIdentifier(nm), srcPos));
+    const callee = withPos(ts.factory.createIdentifier(fname), srcPos);
+    const call = withPos(ts.factory.createCallExpression(callee, undefined, args), srcPos);
+    if (carried.length === 1) {
+        const lhs = withPos(ts.factory.createIdentifier(carried[0]), srcPos);
+        const assign = withPos(ts.factory.createBinaryExpression(lhs, ts.SyntaxKind.EqualsToken, call), srcPos);
+        return withPos(ts.factory.createExpressionStatement(assign), srcPos);
+    }
+    return withPos(ts.factory.createExpressionStatement(call), srcPos);
+}
+
+/**
+ * Extract numeric fragments from f: create synthetic num functions + rewrite f's body.
+ * Returns { syntheticFunctions: [FunctionDeclaration], rewrittenFunction, fragments }.
+ * Only extracts within a single parent block level (function body + top-level loops).
+ * counter: { n } mutable counter for unique fragment names.
+ */
+function extractFragments(f, checker, counter) {
+    const fragments = findNumericFragments(f, checker);
+    if (fragments.length === 0) return { syntheticFunctions: [], rewrittenFunction: f, fragments };
+
+    const syntheticFunctions = [];
+    // Group edits by parentBlock
+    const editsByBlock = new Map();
+    // Filter: skip fragments without a clear output? Keep loops (carried) + blocks (output).
+    const kept = [];
+    for (const frag of fragments) {
+        const carried = frag.type === "loop" ? (frag.loopCarried || [])
+            : analyzeBlockOutput(frag.stmts || [], frag.freeVars || []);
+        if (carried.length === 0) continue;   // no output → skip (e.g. pure void computation)
+        const fname = "__aot_frag_" + (counter.n++);
+        syntheticFunctions.push(buildSyntheticFunction(frag, fname));
+        const rep = buildCallStatement(frag, fname);
+        if (!editsByBlock.has(frag.parentBlock)) editsByBlock.set(frag.parentBlock, []);
+        editsByBlock.get(frag.parentBlock).push({ startIdx: frag.startIdx, endIdx: frag.endIdx, replacement: rep });
+        kept.push({ frag, fname });
+    }
+    if (kept.length === 0) return { syntheticFunctions: [], rewrittenFunction: f, fragments };
+
+    // Apply edits: for each parent block, build new statement list
+    const newBodies = new Map();
+    for (const [block, edits] of editsByBlock) {
+        const stmts = [...block.statements];
+        edits.sort((a, b) => b.startIdx - a.startIdx);   // reverse to preserve indices
+        for (const e of edits) stmts.splice(e.startIdx, e.endIdx - e.startIdx, e.replacement);
+        newBodies.set(block, stmts);
+    }
+
+    // Recursively rebuild the function body, replacing loop-body blocks that have edits
+    const rebuildBlock = (block) => {
+        let stmts = block.statements;
+        if (newBodies.has(block)) stmts = newBodies.get(block);
+        // Also rebuild nested loop bodies that had edits
+        const newStmts = stmts.map(stmt => {
+            if ((ts.isForStatement(stmt) || ts.isWhileStatement(stmt) || ts.isDoStatement(stmt)) &&
+                stmt.statement && ts.isBlock(stmt.statement) && newBodies.has(stmt.statement)) {
+                const newLoopBody = rebuildBlock(stmt.statement);
+                if (ts.isForStatement(stmt))
+                    return ts.factory.updateForStatement(stmt, stmt.initializer, stmt.condition, stmt.incrementor, newLoopBody);
+                if (ts.isWhileStatement(stmt))
+                    return ts.factory.updateWhileStatement(stmt, stmt.expression, newLoopBody);
+                return ts.factory.updateDoStatement(stmt, newLoopBody, stmt.expression);
+            }
+            return stmt;
+        });
+        return ts.factory.updateBlock(block, newStmts);
+    };
+
+    const newBody = rebuildBlock(f.body);
+    const newFn = ts.factory.updateFunctionDeclaration(
+        f, f.modifiers, f.asteriskToken, f.name, f.typeParameters,
+        f.parameters, f.type, newBody);
+    return { syntheticFunctions, rewrittenFunction: newFn, fragments: kept.map(k => k.frag) };
+}
+
+module.exports.__extractFragments = extractFragments;

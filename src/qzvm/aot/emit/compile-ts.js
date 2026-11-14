@@ -62,6 +62,7 @@ const { Module } = require("../wasm-encoder.js");
 const { registerQz, stripTsTypes, usesArguments, ctorName, symbolNameOf, methName, staticMethName } = require("./consts.js");
 const { SCRATCH, STR_BASE, STR_BUMP, INMOD_HOST_LIMIT, INMOD_STR_BUMP, INMOD_TABLE_CAP, INMOD_STR_BASE, INMOD_PAGES, memLayout, emitBumpAlloc, emitMemHelpers, emitStringHelpers, emitNumArrHelpers, numArrNames, funcMode, aotWorthiness } = require("./layout.js");
 const { Emitter } = require("./emitter.js");
+const { __extractFragments: extractFragments } = require("./extract.js");
 require("./tagged.js");   // 副作用：挂上 Emitter.prototype 的 tagged 发射方法
 
 function compileTS(input, outWasm, opts = {}) {
@@ -1168,12 +1169,32 @@ function compileTS(input, outWasm, opts = {}) {
             emitStringHelpers(m);
             emitNumArrHelpers(m);
         }
+        // M7：提取纯数值子树（合成 __aot_frag_N num 函数 + 重写原函数）——须在声明循环前
+        //   QZ_NO_M7=1 关闭提取（A/B 对照用）
+        const fragCounter = { n: 0 };
+        const extractionResults = new Map();
+        if (!process.env.QZ_NO_M7) for (const st of fns) {
+            if (interpSet.has(st.name.text)) continue;
+            // 纯 num 函数已是最优（无 tagged 部分可拆）→ 跳过；只提取 mixed（tagged）函数
+            if (funcMode(st, argsFnNames, fnNamesAll) === "num") continue;
+            const r = extractFragments(st, checker, fragCounter);
+            extractionResults.set(st, r);
+            // 合成片段恒为 num 模式（f64 ABI）→ 注册到 fnMode，跨模式调用点据此插入重解释
+            for (const syn of r.syntheticFunctions) {
+                em.fnMode.set(syn.name.text, { mode: "num", void: !!syn.type && syn.type.kind === ts.SyntaxKind.VoidKeyword });
+            }
+        }
         for (const st of fns) {
             if (interpSet.has(st.name.text)) continue;   // interp 函数不进 wasm
             const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
             const isNum = funcMode(st, argsFnNames, fnNamesAll) === "num";
             const vt = isNum ? "f64" : "i64";   // num=f64；tagged=i64（NaN-box）
             m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
+            const r = extractionResults.get(st);
+            if (r) for (const syn of r.syntheticFunctions) {
+                const synVoid = !!syn.type && syn.type.kind === ts.SyntaxKind.VoidKeyword;
+                m.declareFunc(syn.name.text, syn.parameters.map(() => "f64"), synVoid ? [] : ["f64"]);
+            }
         }
         // 阶段1.5：收集类（登记方法/构造器签名）——须在发射体前
         if (emitClassesToWasm) em.collectClasses(clsStmts);
@@ -1191,7 +1212,19 @@ function compileTS(input, outWasm, opts = {}) {
             // 才能把 `this`（ctor 的 local 0）纳入捕获集；否则 this 在闭包内为 undefined（运行时错）。
         }
         // 阶段2：逐个发射 body（顶层函数 + lambda + 类方法/构造器）
-        for (const st of fns) { if (interpSet.has(st.name.text)) continue; em.sf = fnSf.get(st) || sf; em.emitFunc(st); }
+        const emitList = [];
+        for (const st of fns) {
+            if (interpSet.has(st.name.text)) continue;
+            const osf = fnSf.get(st) || sf;
+            const r = extractionResults.get(st);
+            if (r) {
+                for (const syn of r.syntheticFunctions) emitList.push({ fn: syn, sf: osf });
+                emitList.push({ fn: r.rewrittenFunction, sf: osf });
+            } else {
+                emitList.push({ fn: st, sf: osf });
+            }
+        }
+        for (const { fn, sf: fsf } of emitList) { em.sf = fsf; em.emitFunc(fn); }
         em.emitLambdaBodies();
         if (emitClassesToWasm) em.emitClassBodies();
         em.emitLambdaBodies();   // 类体发射期间惰性登记的闭包（对象字面量访问器/方法）
