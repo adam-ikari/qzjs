@@ -693,19 +693,14 @@ function compileTS(input, outWasm, opts = {}) {
     // 类体/模块级语句里有 async/generator → 整模块退 interp（无函数级 interp 通道，见 hasClasses 判定）。
     // 声明侧已算出 hasSuspendOutsideFn（含被 inline 的所有源文件），这里直接复用。
     if (hasSuspendOutsideFn) for (const f of fns) if (f.name) markI(f.name.text, "module-suspend");
-    // M7: AST auto-analysis — mark tagged-heavy / no-loop functions as interp.
-    // Only analyze functions NOT already semantically marked (semantic marks take precedence).
-    // Runs BEFORE call-propagation so tagged-heavy marks propagate to callers.
+    // M7 v2: sub-function extraction (not whole-function ratio).
+    // aotWorthiness stats still collected per-function for diagnostic funcMeta,
+    // but NO markI based on ratio. Numeric subtree extraction happens later
+    // (findNumericFragments) at the statement/loop level.
     const _aotStats = new Map();
     for (const f of fns) {
         if (!f.name || !f.body) continue;
-        if (interpSet.has(f.name.text)) {   // already semantically marked
-            _aotStats.set(f.name.text, { arithOps: 0, taggedOps: 0, arithRatio: 0, loopScore: 0, aot: false });
-            continue;
-        }
-        const w = aotWorthiness(f);
-        _aotStats.set(f.name.text, w);
-        if (!w.aot) markI(f.name.text, w.loopScore < 1 ? "no-loop" : "tagged-heavy:ratio=" + w.arithRatio);
+        _aotStats.set(f.name.text, aotWorthiness(f));
     }
     if (interpSet.size > 0) {
         // 调用图：顶层函数 → 它调用的顶层函数集

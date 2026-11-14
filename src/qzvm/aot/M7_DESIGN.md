@@ -1,92 +1,204 @@
-# M7: AST Auto-Analysis — AOT Target Identification
+# M7: Sub-Function Arithmetic Subtree Extraction
 
 ## Goal
-Compiler automatically decides which functions → AOT (wasm) vs interp (JS).
-No manual annotation. Based on arithmetic-vs-tagged op ratio + loop density.
+Extract pure-numeric code fragments from ANY function (interp or wasm) into
+standalone AOT-compiled wasm functions. Granularity = code fragment, not function.
+No ratio threshold, no manual annotation — extract whatever is extractable.
 
-## Existing Infrastructure
-- `interpSet` (compile-ts.js:673): functions in this set skip wasm emit (line 1185),
-  stay in `interpJs`. Currently populated by SEMANTIC reasons (async/generator/
-  shared-state/call-propagation). M7 adds PERFORMANCE reasons.
-- `funcMode` (layout.js:424): classifies num vs tagged ABI (crash prevention, not perf).
-- `markI(name, why)`: adds to interpSet + records reason.
+## Core Concept: Numeric Subtree
 
-## AST Op Classification
+A **numeric subtree** is a maximal connected region of the AST where:
+- Every leaf is a NumericLiteral, a numeric-typed Identifier, or a numeric
+  variable declared within the subtree.
+- Every internal node is an arithmetic op: `+ - * / % ** | & ^ << >> >>>`,
+  `++ --`, compound assign, unary `- + ~`, `Math.*`, `| 0` coercion.
+- Control flow (for/while/do/if) is included IF its condition + all branches
+  are numeric.
+- **Hard boundary** = any tagged op: property access (`.x`), element access
+  (`[i]` on non-number[]), method calls, host API calls (`JSON.parse`,
+  `Object.keys`, ...), object/array literals, string literals, `new`,
+  `typeof`, string-concat `+`.
 
-### Arithmetic ops (weight +1, NumericLiteral +0.5)
-- `BinaryExpression` with operator: `+ - * / % ** | & ^ << >> >>>`
-  - Exception: `+` where either operand is `StringLiteral` or `TemplateExpression`
-    → tagged (string concat).
-- Compound assignment (`+= -= *= /= %= **= |= &= ^= <<= >>=`) → arithmetic.
-- `UpdateExpression` (`++ --`) → arithmetic.
-- `UnaryExpression` with `- + ~` (numeric) → arithmetic.
-- `CallExpression` to `Math.*` (sqrt/abs/floor/ceil/round/pow/min/max/log/exp/sin/cos/...) → arithmetic.
-- `NumericLiteral` → +0.5.
+When a tagged op is encountered, the numeric subtree ENDS. The tagged op's
+result (if numeric) becomes a boundary value — a param to the next numeric
+subtree.
 
-### Tagged ops (weight +1)
-- `PropertyAccessExpression` (`.x`) — property read on object.
-- `ElementAccessExpression` (`[x]`) — element access.
-- `CallExpression` where callee is builtin global member:
-  `JSON.parse/JSON.stringify/Object.keys/Object.values/Object.entries/Object.assign/
-   Object.freeze/Array.from/Array.isArray/String(x)/parseInt/parseFloat/...` → tagged.
-- `CallExpression` where callee is `PropertyAccessExpression` (method call: `x.indexOf/
-  x.split/x.map/x.push/x.length/...`) → tagged.
-- `ObjectLiteralExpression` `{...}` → tagged.
-- `ArrayLiteralExpression` `[...]` → tagged (non-empty).
-- `StringLiteral` / `TemplateExpression` / `NoSubstitutionTemplateLiteral` → tagged.
-- `NewExpression` → tagged.
-- `TypeOfExpression` → tagged.
-- `BinaryExpression` `+` with string operand → tagged (see above).
+## Extraction Granularity
 
-### Neutral (weight 0)
-- `Identifier`, `VariableDeclaration`, control flow (`If/For/While/Return/Block`).
-- `AssignmentExpression` with `=` (RHS classified separately).
-- `CallExpression` to user-defined functions (depends on callee's own classification).
-- `AsExpression` / type assertions / `ParenthesizedExpression` (unwrap, classify inner).
-- `TrueKeyword` / `FalseKeyword` / `NullKeyword` / `UndefinedKeyword`.
+### Level 1: Pure-numeric loop (best case)
+Loop where condition + increment + entire body are pure-numeric.
+→ Extract the **entire loop** as one AOT function.
+Example: `computeWork` — whole for-loop is numeric → `__aot_loop_0(n, s_init) → s_final`.
 
-### Loop density
-- `loopCount`: For/While/Do/ForOf/ForIn statements in function.
-- `maxLoopDepth`: max nesting (depth tracked via recursion).
+### Level 2: Numeric statement block within a loop
+Loop body has tagged statements + numeric statements. Consecutive numeric
+statements form a block.
+→ Extract the **block** as one AOT function, called per iteration.
+Example: loop reads `item.x`/`item.y` (tagged, interp) then does heavy math
+(x*x+y*y, sqrt, ...) → extract the math block as `__aot_frag_0(x, y, result) → result`.
 
-## Scoring Formula
+### Level 3: Top-level numeric statement block
+Consecutive pure-numeric statements at function top level (not in a loop).
+→ Extract as AOT function. Less impactful (one-shot call) but still extracted.
+
+### NOT extracted (stays in interp/wasm as-is)
+- Single tagged statements (property reads, method calls, object literals).
+- Mixed expressions where arithmetic is interleaved with tagged ops at the
+  expression level (e.g., `t + m.id + m.total` — the `+` chain depends on
+  tagged property reads; the arithmetic is too small to extract).
+- If a numeric block has < 3 arithmetic ops AND is not in a loop → skip
+  (call overhead exceeds benefit).
+
+## Split Boundary Rules
+
 ```
-totalOps   = arithOps + taggedOps
-arithRatio = arithOps / max(totalOps, 1)
-loopScore  = loopCount + maxLoopDepth * 2
+function jsonWork(n) {
+  const src = '{"id":7,...}';          // tagged (string literal) → BOUNDARY
+  let t = 0;                            // numeric (assignment) → could be numeric
+  for (let i = 0; i < n; i++) {         // loop — check body
+    const o = JSON.parse(src);          // tagged (host API) → BOUNDARY
+    const m = {id:o.id+i, ...};         // tagged (object literal + prop access) → BOUNDARY
+    t = t + m.id + m.total + m.name.length;  // mixed — tagged operands (m.id etc.)
+                                         // + arithmetic (+) but operands are tagged → NOT extractable
+  }
+  return t;                             // numeric (return identifier)
+}
+```
+→ jsonWork: NO numeric subtrees worth extracting (all arithmetic depends on
+tagged property reads, blocks are < 3 ops). Entire function stays interp.
+
+```
+function computeWork(n) {
+  let s = 0;
+  for (let i = 0; i < n; i++) {         // loop — body is pure-numeric
+    const a = i % 1000;                 // numeric (% on number + literal)
+    const v = a * a;                    // numeric (* on numbers)
+    s = (s+v-((v/7)|0)+((i*3)%13))%1000003;  // numeric (all arithmetic)
+  }
+  return s;
+}
+```
+→ computeWork: entire loop is a pure-numeric subtree → extract as
+`__aot_loop_0(n, s_init) → s_final`. Original function becomes:
+```js
+function computeWork(n) { let s = 0; s = __aot_loop_0(n, s); return s; }
 ```
 
-### Decision
-- **AOT-worthy**: `arithRatio >= 0.5 AND loopScore >= 1`
-- **Interp**: otherwise → `markI(name, "tagged-heavy:ratio=" + arithRatio)`
+## Extracted Function Calling Convention
 
-### Threshold Rationale (from WAMR bench data)
-| Function | arithRatio | loopScore | AOT ratio | Decision |
-|---|---|---|---|---|
-| computeWork | ~1.0 | 1 | 7.92× | AOT ✓ |
-| jsonWork | ~0.29 | 1 | 0.51× | interp ✓ |
-| validationWork | ~0.30 | 1 | 0.54× | interp ✓ |
-| validate | ~0.38 | 0 | — | interp (no loop) ✓ |
+### Signature
+```
+__aot_frag_N(p0: f64, p1: f64, ...) → f64   (or void if no return value)
+```
+- All params are f64 (number). The interp passes numeric values.
+- Return is f64 (the computed result) or void.
+- The fragment is compiled in **num mode** (f64 ABI, no NaN-boxing).
+- The fragment is **pure**: no side effects on tagged state, no property
+  access, no host API calls. Same inputs → same output.
 
-- `arithRatio >= 0.5`: computeWork (pure arithmetic) gets 7.92× AOT. Tagged-heavy
-  loads (<0.4 ratio) get <1×. 0.5 is the break-even point — below it AOT loses.
-- `loopScore >= 1`: AOT only wins in hot loops (amortizes wasm call overhead).
-  Non-looped functions with arithmetic get no AOT benefit (one-shot call overhead
-  dominates).
+### Free variable analysis
+- Variables **read** within the fragment but **not declared** inside → free vars.
+  These become params.
+- Variables **declared** within the fragment + **read after** the fragment →
+  return values. If > 1, pack into a single f64 return via a small struct
+  in wasm memory (or split into multiple fragments — TBD).
 
-## Call Propagation (existing, unchanged)
-If function A calls interp-marked function B → A also interp (line 746).
-This ensures validate()→interp propagates to validationWork()→interp.
+### Loop-carried variables
+For a pure-numeric loop extraction:
+- Variables modified inside the loop + used after the loop → loop-carried.
+- Each loop-carried variable: input param (value before loop) + return value
+  (value after loop).
+- Common case: single accumulator (one param + one return) — clean.
+- Multiple accumulators: return a struct, or the loop is split.
 
-## Integration Point
-New function `aotWorthiness(f)` in layout.js (alongside `funcMode`).
-Called in compile-ts.js after semantic interpSet is populated (line ~691),
-before call-propagation loop (line ~746). Adds performance-based marks.
+### Interp → AOT call mechanism
+The interp JS calls the AOT fragment via the wasm module's exports:
+```js
+// In interpJs (modified by the extractor):
+function jsonWork(n) {
+  // ... tagged parts in JS ...
+  result = __wasm.__aot_frag_N(v0, v1, ...);  // calls wasm export
+}
+```
+The glue/host provides `__wasm` = the wasm module instance's exports.
+For in-module (merged wasm): the interp JS runs in the host (qzjs), which
+has the wasm instance loaded via ext_wamr. The exports are accessible.
 
-## funcMeta Extension
-Add to funcMeta entries:
-- `arithOps`: number
-- `taggedOps`: number
-- `arithRatio`: 0..1
-- `loopScore`: number
-- `aotDecision`: "aot" | "interp:tagged-heavy" | "interp:no-loop" | "interp:semantic"
+### Wasm → AOT call (internal)
+If the original function is itself in wasm (not interp), the extracted
+fragment is an internal wasm function call — no boundary crossing, zero
+overhead. This is the case for functions that are fully numeric (like
+computeWork) — but those are already entirely in wasm, so extraction is
+moot (the whole function is already AOT).
+
+Extraction is most impactful for **interp functions with numeric inner loops**.
+
+## Extraction Pass Algorithm
+
+```
+for each function f in the module:
+  fragments = findNumericFragments(f.body)
+  for each fragment in fragments:
+    if fragment.size < MIN_OPS and not inLoop: skip
+    freeVars = analyzeFreeVars(fragment)
+    loopCarried = analyzeLoopCarried(fragment)  // if fragment is a loop
+    create wasm function __aot_frag_N(freeVars + loopCarried.inputs) → loopCarried.outputs
+    emit fragment body in num mode
+    replace fragment in f.body with call(__aot_frag_N, freeVars + loopCarried.inputs)
+  if f had any fragments extracted:
+    mark f as "partial-aot" (stays in interp if it has tagged parts,
+    or in wasm if fully numeric post-extraction)
+```
+
+### MIN_OPS = 3
+Minimum arithmetic operations for a standalone extraction (outside a loop).
+Inside a loop, any numeric block ≥ 1 statement is extractable (call overhead
+amortized over iterations).
+
+## Variable Type Inference (TypeChecker)
+
+The analysis uses the TypeScript TypeChecker (`checker.getTypeAtLocation`) to
+determine variable types, not just syntax. This is critical for mixed code:
+```js
+const x = item.v;    // item.v is a property ACCESS (tagged op) but its static
+                     // type is number → x is numeric → subsequent x*x is extractable
+```
+Without the checker, `x` would be classified tagged (because `item.v` is a
+property access), and the numeric block `x*x+x*3` would be missed. With the
+checker, `x` is known-number → the block is extracted. The `item.v` access
+itself stays in interp (it's a runtime tagged op); only the arithmetic after
+it is lifted to AOT.
+
+Verified: mixedWork's loop body `{const item={v:i}; const x=item.v; const
+a=x*x+x*3; const b=(a%7)+Math.sqrt(a*4); result=result+b;}` → finds ONE block
+fragment (a/b/result, opCount=9.5, freeVars=[x,result]) + leaves item/x in interp.
+
+## Extraction Integration (next step — mixed wasm+interp model)
+
+Current architecture: either "all wasm" (merged) or "all interp" (interpJs).
+M7 needs MIXED: a function splits into wasm fragments (numeric) + interp
+fragments (tagged).
+
+Integration plan:
+1. For each fragment, create a synthetic FunctionDeclaration:
+   `__aot_frag_N(p0:number, p1:number, ...): number { <fragment body>; return <carried>; }`
+2. Add synthetic functions to fns → emitted to wasm in num mode (f64 ABI).
+3. Rewrite the original function's interpJs: replace the fragment source text
+   with a call `result = __aot_frag_N(x, result)`.
+4. The interp JS (qzjs host) calls the wasm export via the module instance
+   (host exposes wasm exports as a global, e.g. `__wasm.__aot_frag_N`).
+5. The fragment is pure (no tagged state) — safe to call from interp.
+
+Remaining: (a) AST parent pointers for splice (ts.setParentRecursive),
+(b) interpJs text-level rewrite, (c) host wasm-export global for interp calls.
+
+## What Changes from M7 v1 (whole-function)
+
+- **Removed**: `aotWorthiness` ratio-based whole-function classification.
+  No more `arithRatio >= 0.5` threshold, no more marking entire functions
+  as interp based on ratio.
+- **Kept**: semantic interpSet (async/generator/shared-state) — these are
+  hard constraints (can't compile to wasm regardless of arithmetic content).
+- **New**: sub-function extraction applies to ALL functions (including those
+  in interpSet for semantic reasons). Even an async function can have its
+  inner numeric loop extracted to AOT.
