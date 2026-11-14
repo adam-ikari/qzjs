@@ -41,3 +41,28 @@ QZJS=/path/to/qzjs node bench/aot-product/run.js   # 真机二进制
 - 纯 num 幅度超 i32 时 wasm `integer overflow` trap（G4 隐患）。
 
 结论：**parse.ts 翻转未达 1.5×（wasm 侧 finalizeIssue 崩溃 + tagged 整体慢）→ 已回退（回 interp）。** AOT 提升必须靠 P2（M4 单模块合并）消除跨界，而非翻更多模块。
+
+## M6b 合并模块路径（`run_inmod.mjs`）
+
+`run_inmod.mjs` 把同一负载编成 `{inModuleLink:true}` 产品 wasm，与 `libqzvm.wasm`（C 侧 qzvm guest）共享 memory + funcref 表链接，`qz.*` 变模块内 `call_indirect`（非 JS shim）。host 跑在 node WebAssembly（V8 JIT ≈ 原生 wasm）。
+
+2026-11-14 host 终值：
+
+| 负载 | N | inmod p50(ms) | qzjs-interp p50(ms) | 比值 | 闸门 |
+|---|---|---|---|---|---|
+| computeWork | 200000 | 2.73 | 16.68 | **6.11×** | G1 ✓ |
+| validationWork | 5000 | 1.28 | 1.54 | 1.20× | G2 ✗ |
+| jsonWork | — | — | — | — | 受阻：JSON.parse 返回 host 对象，wasm 读属性 NaN（需 wasm 侧 JSON 解析器） |
+| tagLoop（POJO alloc+read） | 1M | 20.4 ns/op | — | — | 边界税 ✓（非内联 qz.* call PoC ~54ns ≤ 100ns） |
+
+载荷字节（产品 wasm）：22531 B。
+
+**洞见（实证原则 #2）**：qzjs 本就是 tagged-value 解释器，tagged 操作它已很快；wasm tagged 每 op 走 `call_indirect` ~54ns，持平/略慢于 qzjs interp。**只有纯 num（f64 内联 vs qzjs num 装箱）大赢（6×）**。结论：AOT = 计算热点专用；tagged/alloc/suspension 代码留 interp。alloc-bearing 负载还受 no-GC bump arena 天花板（16MiB，无 per-call 复位）限制——需 GC（brain `aot-gc-rc-allocator`）才能放开。
+
+用法：
+```sh
+node bench/aot-product/run_inmod.mjs            # 默认 build-inmod/.../libqzvm.wasm + build-master/qzjs
+node bench/aot-product/run_inmod.mjs --libqzvm <path>
+QZJS=<真机 qzjs> node bench/aot-product/run_inmod.mjs   # 真机同口径
+```
+依赖：`cmake -B build-inmod -DQZ_IN_MODULE=ON -DCMAKE_TOOLCHAIN_FILE=cmake/wasm32.cmake && cmake --build build-inmod --target qzvm-guest`。

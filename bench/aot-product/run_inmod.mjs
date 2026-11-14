@@ -1,64 +1,88 @@
 #!/usr/bin/env node
-// bench/aot-product/run_inmod.mjs — M6b 合并模块 bench：同批负载经 libqzvm（C 侧）端到端。
-// 与 run.js 同口径：3 负载 × 5 次计时 → p50/p95（p95 取最大值）；载荷字节 = 产品 wasm。
-// 依赖：build-inmod/src/qzvm/libqzvm.wasm（QZ_IN_MODULE 构建，cmake/wasm32.cmake）。
-// 用法：node bench/aot-product/run_inmod.mjs [--libqzvm <path>]
-import { readFileSync, statSync } from 'node:fs';
+// bench/aot-product/run_inmod.mjs — M6b 合并模块 bench：负载经 libqzvm（C 侧）端到端。
+// 同口径：每负载 inmod(wasm) vs qzjs-interp，5 次计时 p50/p95；载荷字节 = 产品 wasm。
+// 依赖：build-inmod/src/qzvm/libqzvm.wasm（QZ_IN_MODULE，cmake/wasm32.cmake）。
+//   QZJS=<qzjs>   默认 build-master/qzjs（解释器基线）
+//   --libqzvm <path>
+import { readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { WASI } from 'node:wasi';
+import { fileURLToPath } from 'node:url';
 
-const LIB = process.argv.find((_, i) => process.argv[i - 1] === '--libqzvm')
-  ?? new URL('../../build-inmod/src/qzvm/libqzvm.wasm', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const QZJS = process.env.QZJS || ROOT + 'build-master/qzjs';
+const LIB = (process.argv.find((_, i) => process.argv[i - 1] === '--libqzvm'))
+  ?? ROOT + 'build-inmod/src/qzvm/libqzvm.wasm';
 
-const { compileTS } = await import('../../src/qzvm/aot/emitter.js');
-const src = new URL('./workloads/aotp.ts', import.meta.url).pathname;
-const prodPath = new URL('./workloads/aotp_inmod.wasm', import.meta.url).pathname;
-console.error('compile inModuleLink...');
+const { compileTS } = await import(ROOT + 'src/qzvm/aot/emitter.js');
+const src = fileURLToPath(new URL('./workloads/aotp.ts', import.meta.url));
+const prodPath = fileURLToPath(new URL('./workloads/aotp_inmod.wasm', import.meta.url));
 compileTS(src, prodPath, { inModuleLink: true });
-console.error('product wasm:', statSync(prodPath).size, 'B');
 
 const wasi = new WASI({ version: 'preview1' });
 const li = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(LIB)),
   { wasi_snapshot_preview1: wasi.wasiImport, qz_host: { fs_read: () => 0, drain: () => 0 } });
 wasi.initialize(li);
-const L = li.exports;
-const rt = L.qz_create(0, 0);
-const mem = L.memory;
-
+const L = li.exports; const rt = L.qz_create(0, 0); const mem = L.memory;
 const prod = new WebAssembly.Module(readFileSync(prodPath));
 const qz = { memory: mem, __indirect_function_table: L.__indirect_function_table };
 const missing = [];
-for (const im of WebAssembly.Module.imports(prod)) {
-  if (im.module !== 'qz' || im.kind !== 'function') continue;
-  if (typeof L[im.name] === 'function') qz[im.name] = L[im.name];
-  else missing.push(im.name);
-}
+for (const im of WebAssembly.Module.imports(prod)) { if (im.module === 'qz' && im.kind === 'function') { if (typeof L[im.name] === 'function') qz[im.name] = L[im.name]; else missing.push(im.name); } }
 if (missing.length) { console.error('MISSING_PRIMS', missing.join(' ')); process.exit(1); }
 const P = new WebAssembly.Instance(prod, { qz, wasi_snapshot_preview1: wasi.wasiImport }).exports;
-
-const view = () => new DataView(mem.buffer);
 const box = (x) => { const d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, x); return d.getBigInt64(0); };
 const unbox = (b) => { const d = new DataView(new ArrayBuffer(8)); d.setBigInt64(0, BigInt.asIntN(64, b)); return d.getFloat64(0); };
-// 探测 ABI：纯 num 函数 f64（普通 number）；触碰对象的函数 tagged i64（BigInt）。
-function callFn(name, arg) {
-  try { return P[name](arg); }
-  catch (e) { if (/BigInt/.test(String(e))) return P[name](box(arg)); throw e; }
-}
+const callFn = (name, arg) => { try { return P[name](arg); } catch (e) { if (/BigInt/.test(String(e))) return P[name](box(arg)); throw e; } };
 const norm = (r) => (typeof r === 'bigint') ? unbox(r) : r;
 
-const LOADS = [['computeWork', 200000], ['jsonWork', 30000], ['validationWork', 200000]];
-for (const [name, arg] of LOADS) {
-  let w = null;
-  try { w = norm(callFn(name, arg)); } catch (e) { console.log('RESULT', JSON.stringify({ load: name, err: String(e && e.message || e) })); continue; }
-  const ts = [];
-  for (let r = 0; r < 5; r++) { const t = performance.now(); callFn(name, arg); ts.push(performance.now() - t); }
-  ts.sort((a, b) => a - b);
-  console.log('RESULT', JSON.stringify({ load: name, p50_ms: +ts[2].toFixed(3), p95_ms: +(ts[4]).toFixed(3), ret: w }));
+// qzjs 解释器基线（同语义 JS，同 N）
+function interpSrc(loads) {
+  return `
+function computeWork(n){ let s=0; for(let i=0;i<n;i++){ const a=i%1000; const v=a*a; s=(s+v-((v/7)|0)+((i*3)%13))%1000003; } return s; }
+function validate(v){ if(v===null||typeof v!=="object") return -1; let e=0;
+  if(typeof v.name!=="string") e=e+1; else if(v.name.length<2) e=e+1;
+  if(typeof v.age!=="number") e=e+1; else if(v.age<0) e=e+1;
+  if(typeof v.email!=="string") e=e+1; else if(v.email.indexOf("@")<0) e=e+1; return e; }
+function validationWork(n){ const good={name:"Alice",age:30,email:"a@b.com"}; const bad={name:"",age:200,email:"nope"}; let t=0;
+  for(let i=0;i<n;i++){ if((i%2)===0) t=t+validate(good); else t=t+validate(bad); } return t; }
+const L = ${JSON.stringify(loads)};
+const FN = { computeWork, validationWork };
+const out = [];
+for (const [name, arg] of L) { if (!FN[name]) { out.push({ load: name, skip: true }); continue; } FN[name](arg);
+  const ts=[]; for(let r=0;r<5;r++){ const t=performance.now(); FN[name](arg); ts.push(performance.now()-t); }
+  ts.sort((a,b)=>a-b); out.push({ load: name, p50_ms:+ts[2].toFixed(3), p95_ms:+ts[4].toFixed(3) }); }
+console.log("INTERP " + JSON.stringify(out));
+`;
 }
-const N1 = 1000000;
-try {
-  const w0 = norm(callFn('tagLoop', N1));
-  const tb = []; for (let r=0;r<5;r++){ const t=performance.now(); callFn('tagLoop', N1); tb.push(performance.now()-t); }
-  tb.sort((a,b)=>a-b);
-  console.log('RESULT', JSON.stringify({ load: 'tagLoop(alloc+read)', n: N1, p50_ms: +tb[2].toFixed(3), ns_per_op: +((tb[2]*1e6/N1)).toFixed(1), ret: w0 }));
-} catch(e){ console.log('RESULT', JSON.stringify({ load:'tagLoop', err:String(e.message) })); }
+
+function benchInterp(loads) {
+  const f = '/tmp/aotp_interp.js';
+  writeFileSync(f, interpSrc(loads));
+  const r = spawnSync(QZJS, [f], { encoding: 'utf8', timeout: 120000 });
+  const m = (r.stdout || '').match(/INTERP (\[.*\])/);
+  return m ? JSON.parse(m[1]) : [];
+}
+
+const LOADS = [['computeWork', 200000], ['validationWork', 5000]]; // jsonWork: JSON.parse 返回 host 对象，wasm 读属性 NaN → 结构性缺口
+const rows = [];
+for (const [name, arg] of LOADS) {
+  let inP50 = null, ret = null, err = null;
+  try { ret = norm(callFn(name, arg)); const ts = []; for (let r = 0; r < 5; r++) { const t = performance.now(); callFn(name, arg); ts.push(performance.now() - t); } ts.sort((a, b) => a - b); inP50 = +ts[2].toFixed(3); }
+  catch (e) { err = String(e && e.message || e); }
+  rows.push({ load: name, N: arg, inmod_p50_ms: inP50 ?? err, ret });
+}
+const interp = benchInterp(LOADS);
+for (const r of rows) { const il = interp.find(x => x.load === r.load); r.interp_p50_ms = il ? il.p50_ms : null; r.ratio = (r.inmod_p50_ms && il && il.p50_ms) ? +(il.p50_ms / r.inmod_p50_ms).toFixed(2) : null; }
+rows.push({ load: 'jsonWork', note: 'BLOCKED: JSON.parse 返回 host 对象，wasm 读属性 NaN（需 wasm 侧 JSON 解析器）' });
+
+// 边界税：tagLoop（POJO alloc+read 内联）per-op
+let taxNs = null;
+try { const N1 = 1000000; norm(callFn('tagLoop', N1)); const tb = []; for (let r = 0; r < 5; r++) { const t = performance.now(); callFn('tagLoop', N1); tb.push(performance.now() - t); } tb.sort((a, b) => a - b); taxNs = +(tb[2] * 1e6 / N1).toFixed(1); } catch (e) { taxNs = 'ERR:' + e.message; }
+
 L.qz_destroy(rt);
+console.log('\n=== bench/aot-product (M6b 合并模块, host) ===');
+console.table(rows);
+console.log(`载荷字节(产品 wasm): ${statSync(prodPath).size} B`);
+console.log(`边界税 tagLoop(POJO 内联 alloc+read): ${taxNs} ns/op（非内联 qz.* call PoC ~54ns ≤ 100ns）`);
+console.log('G1(热点计算≥3×): computeWork ' + (rows[0].ratio ?? '?') + '× ' + ((rows[0].ratio ?? 0) >= 3 ? '✓ 达标' : '✗'));
+console.log('G2(翻转≥1.5×): validationWork ' + (rows[1].ratio ?? '?') + '× ' + ((rows[1].ratio ?? 0) >= 1.5 ? '✓ 达标' : '✗'));

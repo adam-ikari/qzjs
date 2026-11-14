@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-14T10:01:25"
+updated: "2026-11-14T10:06:09"
 ---
 
 <!-- compiled_truth -->
@@ -1123,5 +1123,11 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
 - time: 2026-11-14T10:01:25
   kind: decision
   summary: "M6b 合并模块端到端跑通(host V8-JIT wasm): computeWork 2.7ms vs interp 15.6ms = 5.8x → G1 达标(≥3x); tagLoop(POJO alloc+read 内联) 18.9ns/op 正确; 边界税 非内联 qz.* ~54ns(PoC) ≤100ns 达标. 缺口: JSON.parse 返回 host 对象→wasm 读属性 NaN(jsonWork 不可用); validationWork 全量编译 trap 但复刻 t10 单独跑通→co-compilation/string-table; indexOf 返回 0(pos bug)."
+  source: bench/aot-product/run_inmod.mjs 2026-11-14
+  affects: [aot-roadmap]
+
+- time: 2026-11-14T10:06:09
+  kind: decision
+  summary: "M6b 合并模块 bench 终值(host): computeWork 6.11x(G1✓ 纯num f64内联); validationWork 1.2x(G2✗ tagged call_indirect ~54ns/op 持平 qzjs tagged interp); jsonWork 受阻(JSON.parse host对象); 边界税 20ns(内联)/54ns(非内联) ≤100ns✓. 洞见: qzjs 本是 tagged 解释器, tagged op 它已快→AOT 只在纯num大赢→实证原则#2 AOT=计算热点专用, tagged/alloc/suspension 留 interp."
   source: bench/aot-product/run_inmod.mjs 2026-11-14
   affects: [aot-roadmap]
