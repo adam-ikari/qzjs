@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-14T00:23:59"
+updated: "2026-11-14T10:01:25"
 ---
 
 <!-- compiled_truth -->
@@ -1118,4 +1118,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: reversal
   summary: "parse.ts flip rolled back: wasm finalizeIssue crashes under repeated calls + tagged wasm 25-92x slower than interp; bench/aot-product built (3 workloads, p50/p95+payload); G2 <1.5x => interp=90"
   source: bench/aot-product host run 2026-11-14
+  affects: [aot-roadmap]
+
+- time: 2026-11-14T10:01:25
+  kind: decision
+  summary: "M6b 合并模块端到端跑通(host V8-JIT wasm): computeWork 2.7ms vs interp 15.6ms = 5.8x → G1 达标(≥3x); tagLoop(POJO alloc+read 内联) 18.9ns/op 正确; 边界税 非内联 qz.* ~54ns(PoC) ≤100ns 达标. 缺口: JSON.parse 返回 host 对象→wasm 读属性 NaN(jsonWork 不可用); validationWork 全量编译 trap 但复刻 t10 单独跑通→co-compilation/string-table; indexOf 返回 0(pos bug)."
+  source: bench/aot-product/run_inmod.mjs 2026-11-14
   affects: [aot-roadmap]

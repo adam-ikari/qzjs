@@ -49,3 +49,10 @@ function validationWork(n: number): number {
   }
   return t;
 }
+
+// boundary tax probe: 每 iter 对象 alloc + 属性读（tagged qz.* call_indirect）。
+function tagLoop(n: number): number {
+  let t = 0;
+  for (let i = 0; i < n; i++) { const o: any = { x: i }; t = t + o.x; }
+  return t;
+}
