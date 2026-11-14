@@ -68,6 +68,10 @@ QZJS=<真机 qzjs> node bench/aot-product/run_inmod.mjs --merge   # 真机同口
 ```
 **终态 = 静态单模块**（`--merge`）：`wasm-merge`（Binaryen）把 emitter 产物 + libqzvm 编译期合并成一个 wasm，qz.* 变模块内调用（合并后 import 仅剩 `qz_host.*` + WASI，无 qz.*）。multi-module（无 `--merge`）只作量税中间里程碑。
 
-`--merge` 终态 host 结果（2026-11-14）：computeWork **6.19×（G1 ✓）**、validationWork 1.44×（G2 ✗，比 multi-module 1.2× 好——内化消 import 编解码）、tagLoop 15.1 ns/op、合并单 wasm 1.26 MiB。
+`--merge` 终态 host 结果（2026-11-14，V8 JIT = 机制验证，**非验收**——验收须 WAMR）：computeWork 6.36×、validationWork 0.22×（N=500，tagged 路径慢于 qzjs interp）、tagLoop 15 ns/op、合并单 wasm 1.26 MiB。
+
+**strtab 注入（必修）**：产物 strId→名字须经宿主写共享内存 + `L.__set_strtab(base)`（见 `run_inmod.mjs` 的 `setStrTab`）。未注入则 `qz_str_by_id` 按无表返回 NULL → JSON.parse/属性名/方法名（indexOf）静默 0。注入后 jsonWork/validationWork 正确性修复（jsonWork(50)=2325、validationWork(50)=75 ✓）。
+
+**剩余阻塞（验收前）**：① alloc 负载（jsonWork 每 iter JSON.parse+对象字面量）填满 bump arena + handle table，无 GC → N 受限（jsonWork 500 仍溢出）；需 GC（brain `aot-gc-rc-allocator`）或 per-call 复位。② WAMR 验收路径：libqzvm import WASI，qzjs ext_wamr 是 `LIBC_WASI=0` → 合并/multi-module 经 ext_wamr 加载需 non-WASI libqzvm 或 WASI natives。③ wamrc 未装 → AOT 模式数字待装。
 
 依赖：`cmake -B build-inmod -DQZ_IN_MODULE=ON -DCMAKE_TOOLCHAIN_FILE=cmake/wasm32.cmake && cmake --build build-inmod --target qzvm-guest`；`wasm-merge`（Binaryen，`WASM_MERGE=<path>` 覆盖）。
