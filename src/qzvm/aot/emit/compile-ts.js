@@ -1393,7 +1393,6 @@ function compileTS(input, outWasm, opts = {}) {
             taggedOps: fm ? fm.taggedOps : 0,
             arithRatio: fm ? fm.arithRatio : 0,
             loopScore: fm ? fm.loopScore : 0,
-            aotDecision: interpSet.has(f.name.text) ? "interp" : "aot",
         };
     });
     const lamMeta = {};
