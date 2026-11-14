@@ -514,9 +514,113 @@ function funcMode(f, argsFns, knownFns) {
     return (allNum && rtOk && !unsafe && (f.parameters.length > 0 || (rt && rt.kind === ts.SyntaxKind.NumberKeyword))) ? "num" : "tagged";
 }
 
+/* ── M7: AST auto-analysis — AOT target identification ──────────────
+ * Counts arithmetic vs tagged ops + loop density per function.
+ * Returns { arithOps, taggedOps, arithRatio, loopScore, aot }.
+ * aot = true → function benefits from AOT (wasm); false → leave in interp.
+ * See M7_DESIGN.md for classification rules + threshold rationale. */
+const ARITH_BINOPS = new Set([
+    ts.SyntaxKind.PlusToken, ts.SyntaxKind.MinusToken, ts.SyntaxKind.AsteriskToken,
+    ts.SyntaxKind.SlashToken, ts.SyntaxKind.PercentToken, ts.SyntaxKind.AsteriskAsteriskToken,
+    ts.SyntaxKind.BarToken, ts.SyntaxKind.AmpersandToken, ts.SyntaxKind.CaretToken,
+    ts.SyntaxKind.LessThanLessThanToken, ts.SyntaxKind.GreaterThanGreaterThanToken,
+    ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken,
+]);
+const ARITH_COMPOUND = new Set([
+    ts.SyntaxKind.PlusEqualsToken, ts.SyntaxKind.MinusEqualsToken, ts.SyntaxKind.AsteriskEqualsToken,
+    ts.SyntaxKind.SlashEqualsToken, ts.SyntaxKind.PercentEqualsToken, ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+    ts.SyntaxKind.BarEqualsToken, ts.SyntaxKind.AmpersandEqualsToken, ts.SyntaxKind.CaretEqualsToken,
+    ts.SyntaxKind.LessThanLessThanEqualsToken, ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+    ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+]);
+const MATH_FNS = new Set(["sqrt","abs","floor","ceil","trunc","round","pow","min","max",
+    "log","log2","log10","exp","sin","cos","tan","asin","acos","atan","atan2",
+    "sign","cbrt","hypot","fround","clz32","random"]);
+const BUILTIN_GLOBAL_MEMBERS = new Set(["JSON","Object","Array","String","Number","Boolean",
+    "Math","Reflect","parseInt","parseFloat","isNaN","isFinite"]);
+
+function aotWorthiness(f) {
+    let arith = 0, tagged = 0, loopCount = 0, maxDepth = 0;
+
+    const isStringOperand = (n) => n && (
+        ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) ||
+        ts.isTemplateExpression(n));
+
+    const walk = (n, depth) => {
+        if (!n) return;
+        // Loop tracking
+        const isLoop = ts.isForStatement(n) || ts.isWhileStatement(n) || ts.isDoStatement(n) ||
+            ts.isForOfStatement(n) || ts.isForInStatement(n);
+        if (isLoop) { loopCount++; maxDepth = Math.max(maxDepth, depth); }
+
+        // Arithmetic ops
+        if (ts.isBinaryExpression(n)) {
+            // + with string operand → tagged (string concat), else arithmetic
+            if (n.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+                (isStringOperand(n.left) || isStringOperand(n.right))) {
+                tagged++;
+            } else if (ARITH_BINOPS.has(n.operatorToken.kind)) {
+                arith++;
+            }
+        }
+        if (ts.isAssignmentExpression(n) && ARITH_COMPOUND.has(n.operatorToken.kind)) {
+            arith++;
+        }
+        // ++x --x (prefix) / x++ x-- (postfix)
+        if (ts.isPrefixUnaryExpression(n) && (n.operator === ts.SyntaxKind.PlusPlusToken ||
+            n.operator === ts.SyntaxKind.MinusMinusToken)) arith++;
+        if (ts.isPostfixUnaryExpression(n)) arith++;
+        // Unary - + ~ (numeric, NOT typeof/void/delete/!)
+        if (ts.isPrefixUnaryExpression(n) && (n.operator === ts.SyntaxKind.MinusToken ||
+            n.operator === ts.SyntaxKind.PlusToken || n.operator === ts.SyntaxKind.TildeToken)) {
+            arith++;
+        }
+        if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) &&
+            ts.isIdentifier(n.expression.expression) && n.expression.expression.text === "Math" &&
+            MATH_FNS.has(n.expression.name.text)) {
+            arith++;
+        }
+        if (ts.isNumericLiteral(n)) arith += 0.5;
+
+        // Tagged ops
+        if (ts.isPropertyAccessExpression(n)) {
+            // Math.* handled above as arith; .length/.push on num[] handled by funcMode
+            // — here conservatively count as tagged unless Math.*
+            if (!(ts.isIdentifier(n.expression) && n.expression.text === "Math")) tagged++;
+        }
+        if (ts.isElementAccessExpression(n)) tagged++;
+        if (ts.isObjectLiteralExpression(n)) tagged++;
+        if (ts.isArrayLiteralExpression(n) && n.elements.length > 0) tagged++;
+        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) ||
+            ts.isTemplateExpression(n)) tagged++;
+        if (ts.isNewExpression(n)) tagged++;
+        if (ts.isTypeOfExpression(n)) tagged++;
+        // Method calls: x.method(...) where x is not Math/global
+        if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+            const obj = n.expression.expression;
+            if (!(ts.isIdentifier(obj) && BUILTIN_GLOBAL_MEMBERS.has(obj.text))) tagged++;
+        }
+        // Builtin global member calls: JSON.parse/Object.keys/...
+        if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) &&
+            ts.isIdentifier(n.expression.expression) && BUILTIN_GLOBAL_MEMBERS.has(n.expression.expression.text)) {
+            tagged++;
+        }
+
+        ts.forEachChild(n, (c) => walk(c, isLoop ? depth + 1 : depth));
+    };
+
+    if (f.body) walk(f.body, 1);
+
+    const total = arith + tagged;
+    const arithRatio = total > 0 ? arith / total : 0;
+    const loopScore = loopCount + maxDepth * 2;
+    const aot = arithRatio >= 0.5 && loopScore >= 1;
+    return { arithOps: arith, taggedOps: tagged, arithRatio: +arithRatio.toFixed(3), loopScore, aot };
+}
+
 
 // f64 位型拆分（i64ConstBits 用）：[lo, hi]
 const _fbuf = Buffer.alloc(8);
 function f64Bits(v) { _fbuf.writeDoubleLE(v); return [_fbuf.readUInt32LE(0), _fbuf.readUInt32LE(4)]; }
 
-module.exports = { f64Bits, STR_TAG_HI, ARR_TAG_HI, RC_HDR, K_PLAIN, K_POJO, K_ARR, SCRATCH, STR_BASE, STR_BUMP, INMOD_HOST_LIMIT, INMOD_STR_BUMP, INMOD_TABLE_CAP, INMOD_TABLE_RESERVE, INMOD_STR_BASE, INMOD_PAGES, memLayout, emitBumpGrow, emitBumpAlloc, emitBumpSet, emitMemHelpers, emitStringHelpers, emitNumArrHelpers, numArrNames, funcMode };
+module.exports = { f64Bits, STR_TAG_HI, ARR_TAG_HI, RC_HDR, K_PLAIN, K_POJO, K_ARR, SCRATCH, STR_BASE, STR_BUMP, INMOD_HOST_LIMIT, INMOD_STR_BUMP, INMOD_TABLE_CAP, INMOD_TABLE_RESERVE, INMOD_STR_BASE, INMOD_PAGES, memLayout, emitBumpGrow, emitBumpAlloc, emitBumpSet, emitMemHelpers, emitStringHelpers, emitNumArrHelpers, numArrNames, funcMode, aotWorthiness };

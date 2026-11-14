@@ -60,7 +60,7 @@ const fs = require("fs");
 const path = require("path");
 const { Module } = require("../wasm-encoder.js");
 const { registerQz, stripTsTypes, usesArguments, ctorName, symbolNameOf, methName, staticMethName } = require("./consts.js");
-const { SCRATCH, STR_BASE, STR_BUMP, INMOD_HOST_LIMIT, INMOD_STR_BUMP, INMOD_TABLE_CAP, INMOD_STR_BASE, INMOD_PAGES, memLayout, emitBumpAlloc, emitMemHelpers, emitStringHelpers, emitNumArrHelpers, numArrNames, funcMode } = require("./layout.js");
+const { SCRATCH, STR_BASE, STR_BUMP, INMOD_HOST_LIMIT, INMOD_STR_BUMP, INMOD_TABLE_CAP, INMOD_STR_BASE, INMOD_PAGES, memLayout, emitBumpAlloc, emitMemHelpers, emitStringHelpers, emitNumArrHelpers, numArrNames, funcMode, aotWorthiness } = require("./layout.js");
 const { Emitter } = require("./emitter.js");
 require("./tagged.js");   // 副作用：挂上 Emitter.prototype 的 tagged 发射方法
 
@@ -693,6 +693,20 @@ function compileTS(input, outWasm, opts = {}) {
     // 类体/模块级语句里有 async/generator → 整模块退 interp（无函数级 interp 通道，见 hasClasses 判定）。
     // 声明侧已算出 hasSuspendOutsideFn（含被 inline 的所有源文件），这里直接复用。
     if (hasSuspendOutsideFn) for (const f of fns) if (f.name) markI(f.name.text, "module-suspend");
+    // M7: AST auto-analysis — mark tagged-heavy / no-loop functions as interp.
+    // Only analyze functions NOT already semantically marked (semantic marks take precedence).
+    // Runs BEFORE call-propagation so tagged-heavy marks propagate to callers.
+    const _aotStats = new Map();
+    for (const f of fns) {
+        if (!f.name || !f.body) continue;
+        if (interpSet.has(f.name.text)) {   // already semantically marked
+            _aotStats.set(f.name.text, { arithOps: 0, taggedOps: 0, arithRatio: 0, loopScore: 0, aot: false });
+            continue;
+        }
+        const w = aotWorthiness(f);
+        _aotStats.set(f.name.text, w);
+        if (!w.aot) markI(f.name.text, w.loopScore < 1 ? "no-loop" : "tagged-heavy:ratio=" + w.arithRatio);
+    }
     if (interpSet.size > 0) {
         // 调用图：顶层函数 → 它调用的顶层函数集
         const calls = new Map();
@@ -1340,12 +1354,20 @@ function compileTS(input, outWasm, opts = {}) {
     }
     fs.writeFileSync(outWasm, m.build());
     // funcMeta: 每导出函数 {name, mode(num/tagged), params}
-    const funcMeta = fns.map(f => ({
-        name: f.name.text,
-        mode: interpSet.has(f.name.text) ? "interp" : funcMode(f, argsFnNames, fnNamesAll),   // interp = 不编 wasm，glue 走宿主 JS
-        params: f.parameters.length,
-        async: !!(f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)),
-    }));
+    const funcMeta = fns.map(f => {
+        const fm = _aotStats.get(f.name.text);
+        return {
+            name: f.name.text,
+            mode: interpSet.has(f.name.text) ? "interp" : funcMode(f, argsFnNames, fnNamesAll),
+            params: f.parameters.length,
+            async: !!(f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)),
+            arithOps: fm ? fm.arithOps : 0,
+            taggedOps: fm ? fm.taggedOps : 0,
+            arithRatio: fm ? fm.arithRatio : 0,
+            loopScore: fm ? fm.loopScore : 0,
+            aotDecision: interpSet.has(f.name.text) ? "interp" : "aot",
+        };
+    });
     const lamMeta = {};
     for (const [lamNode, meta] of em._lamById.entries()) {
         let src = null;
