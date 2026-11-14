@@ -591,7 +591,10 @@ if(QZ_WITH_WAMR)
     endif()
     set(WAMR_BUILD_WASM_C_API 1)
     set(WAMR_BUILD_LIBC_BUILTIN 1)
-    set(WAMR_BUILD_LIBC_WASI 0)
+    # WASI libc: needed so merged single-module wasm (libqzvm imports
+    # wasi_snapshot_preview1) resolves WASI via WAMR's own wasi_native.c
+    # (correct signatures, real clock_gettime) instead of hand-written stubs.
+    set(WAMR_BUILD_LIBC_WASI 1)
     # M6b PoC: multi-module 让 emitter 产物经 import 链接到 libqzvm.wasm（共享 memory，
     # NaN-box 句柄跨模块有效，验无 marshalling）。默认 OFF 不破现有 profile；PoC 时
     # -DQZ_WAMR_MULTI_MODULE=ON 开。reader callback 见 ext_wamr.c wamr_ensure_runtime。

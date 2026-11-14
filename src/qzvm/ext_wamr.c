@@ -120,12 +120,12 @@ qz_module_destroyer(uint8_t *buffer, uint32_t size)
     (void)size;
     free(buffer);
 }
-/* M6b PoC: libqzvm（guest wasm）import "qz_host" "drain"/"fs_read"（宿主 API）。
- * multi-module 下 libqzvm 作 submodule，其 import 需全局 native registration
- * （wasm_runtime_register_natives 按 module name 匹配，host_bench3.c:56 先例）。
- * PoC 用 stub：drain 返回 0（无事件）、fs_read 返回 -1（失败）。后续接真
- * qzjs host 事件循环（in-module 形态 host 侧工程）。签名匹配 wasm import
- * (i32,i32)->i32（drain(void*,i32)->i32 / fs_read(void*,i32)->i32）。 */
+#endif /* WASM_ENABLE_MULTI_MODULE */
+
+/* qz_host stub natives — libqzvm (guest wasm) imports "qz_host" "drain"/
+ * "fs_read". Registered always (merged single-module wasm imports qz_host
+ * regardless of multi-module). Stub: drain=0 (no events), fs_read=-1 (fail).
+ * Signature (i32,i32)->i32 — drain(void*,i32) / fs_read(void*,i32). */
 static int32_t
 qz_host_stub_drain(void *buf, int32_t max)
 {
@@ -156,7 +156,6 @@ qz_register_qz_host_natives(void)
                                            sizeof(qz_host_stub_natives[0]))))
         fprintf(stderr, "[qzvm] qz_host natives registration failed\n");
 }
-#endif /* WASM_ENABLE_MULTI_MODULE */
 
 static int wamr_ensure_runtime(void)
 {
@@ -170,12 +169,14 @@ static int wamr_ensure_runtime(void)
                                  __ATOMIC_RELEASE);   /* 回滚：后续实例可重试 */
                 return -1;
             }
+            /* qz_host natives: always registered — merged single-module wasm
+             * imports qz_host regardless of multi-module mode. */
+            qz_register_qz_host_natives();
 #if WASM_ENABLE_MULTI_MODULE != 0
             /* M6b PoC: 注册 multi-module reader，WAMR 按 import module name
              * 自动加载 submodule（emitter 产物 import "qz" 链接 libqzvm.wasm）。*/
             wasm_runtime_set_module_reader((module_reader)qz_module_reader,
                                            (module_destroyer)qz_module_destroyer);
-            qz_register_qz_host_natives();
 #endif
             __atomic_store_n(&g_wamr_state.initialized, 1, __ATOMIC_RELEASE);
         } else {
