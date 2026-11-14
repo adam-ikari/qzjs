@@ -17,19 +17,42 @@ const LIB = (process.argv.find((_, i) => process.argv[i - 1] === '--libqzvm'))
 const { compileTS } = await import(ROOT + 'src/qzvm/aot/emitter.js');
 const src = fileURLToPath(new URL('./workloads/aotp.ts', import.meta.url));
 const prodPath = fileURLToPath(new URL('./workloads/aotp_inmod.wasm', import.meta.url));
+const mergedPath = '/tmp/aotp_merged.wasm';
 compileTS(src, prodPath, { inModuleLink: true });
 
+const MERGE = process.argv.includes('--merge');
+const WASM_MERGE = process.env.WASM_MERGE || '/home/gem/emsdk/upstream/bin/wasm-merge';
+
 const wasi = new WASI({ version: 'preview1' });
-const li = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(LIB)),
-  { wasi_snapshot_preview1: wasi.wasiImport, qz_host: { fs_read: () => 0, drain: () => 0 } });
-wasi.initialize(li);
-const L = li.exports; const rt = L.qz_create(0, 0); const mem = L.memory;
-const prod = new WebAssembly.Module(readFileSync(prodPath));
-const qz = { memory: mem, __indirect_function_table: L.__indirect_function_table };
-const missing = [];
-for (const im of WebAssembly.Module.imports(prod)) { if (im.module === 'qz' && im.kind === 'function') { if (typeof L[im.name] === 'function') qz[im.name] = L[im.name]; else missing.push(im.name); } }
-if (missing.length) { console.error('MISSING_PRIMS', missing.join(' ')); process.exit(1); }
-const P = new WebAssembly.Instance(prod, { qz, wasi_snapshot_preview1: wasi.wasiImport }).exports;
+let L, P, mem, rt;
+if (MERGE) {
+  // 终态：静态单模块——emitter 产物 + libqzvm 合并，qz.* 内化为模块内调用（无 import）。
+  const { spawnSync: ss } = await import('node:child_process');
+  const r = ss(WASM_MERGE, [LIB, 'qz', prodPath, 'prod', '--rename-export-conflicts', '-o', mergedPath], { encoding: 'utf8' });
+  if (r.status !== 0) { console.error('wasm-merge FAIL:', r.stderr); process.exit(1); }
+  const inst = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(mergedPath)),
+    { wasi_snapshot_preview1: wasi.wasiImport, qz_host: { fs_read: () => 0, drain: () => 0 } });
+  wasi.initialize(inst);
+  L = inst.exports;
+  if (!L.qz_create) { console.error('merged: qz_create missing'); process.exit(1); }
+  rt = L.qz_create(0, 0);
+  if (!rt) { console.error('merged: qz_create FAIL'); process.exit(1); }
+  mem = L.memory;
+  P = L; // 同一模块：产品函数与 qzvm 内部直调
+  console.error('merged single-module ok (qz.* internalized)');
+} else {
+  // 中间态：multi-module 动态链接（量税用途，非交付形态）
+  const li = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(LIB)),
+    { wasi_snapshot_preview1: wasi.wasiImport, qz_host: { fs_read: () => 0, drain: () => 0 } });
+  wasi.initialize(li);
+  L = li.exports; rt = L.qz_create(0, 0); mem = L.memory;
+  const prod = new WebAssembly.Module(readFileSync(prodPath));
+  const qz = { memory: mem, __indirect_function_table: L.__indirect_function_table };
+  const missing = [];
+  for (const im of WebAssembly.Module.imports(prod)) { if (im.module === 'qz' && im.kind === 'function') { if (typeof L[im.name] === 'function') qz[im.name] = L[im.name]; else missing.push(im.name); } }
+  if (missing.length) { console.error('MISSING_PRIMS', missing.join(' ')); process.exit(1); }
+  P = new WebAssembly.Instance(prod, { qz, wasi_snapshot_preview1: wasi.wasiImport }).exports;
+}
 const box = (x) => { const d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, x); return d.getBigInt64(0); };
 const unbox = (b) => { const d = new DataView(new ArrayBuffer(8)); d.setBigInt64(0, BigInt.asIntN(64, b)); return d.getFloat64(0); };
 const callFn = (name, arg) => { try { return P[name](arg); } catch (e) { if (/BigInt/.test(String(e))) return P[name](box(arg)); throw e; } };
@@ -82,7 +105,7 @@ try { const N1 = 1000000; norm(callFn('tagLoop', N1)); const tb = []; for (let r
 L.qz_destroy(rt);
 console.log('\n=== bench/aot-product (M6b 合并模块, host) ===');
 console.table(rows);
-console.log(`载荷字节(产品 wasm): ${statSync(prodPath).size} B`);
+console.log(`载荷字节: ${MERGE ? '合并单 wasm ' + statSync(mergedPath).size + ' B' : '产品 wasm ' + statSync(prodPath).size + ' B'}`);
 console.log(`边界税 tagLoop(POJO 内联 alloc+read): ${taxNs} ns/op（非内联 qz.* call PoC ~54ns ≤ 100ns）`);
 console.log('G1(热点计算≥3×): computeWork ' + (rows[0].ratio ?? '?') + '× ' + ((rows[0].ratio ?? 0) >= 3 ? '✓ 达标' : '✗'));
 console.log('G2(翻转≥1.5×): validationWork ' + (rows[1].ratio ?? '?') + '× ' + ((rows[1].ratio ?? 0) >= 1.5 ? '✓ 达标' : '✗'));

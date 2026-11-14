@@ -61,8 +61,13 @@ QZJS=/path/to/qzjs node bench/aot-product/run.js   # 真机二进制
 
 用法：
 ```sh
-node bench/aot-product/run_inmod.mjs            # 默认 build-inmod/.../libqzvm.wasm + build-master/qzjs
-node bench/aot-product/run_inmod.mjs --libqzvm <path>
-QZJS=<真机 qzjs> node bench/aot-product/run_inmod.mjs   # 真机同口径
+node bench/aot-product/run_inmod.mjs --merge       # 终态：wasm-merge 静态合并单模块（qz.* 内化，验收口径）
+node bench/aot-product/run_inmod.mjs               # 中间态：multi-module 动态链接（量税用途，非交付）
+node bench/aot-product/run_inmod.mjs --merge --libqzvm <path>
+QZJS=<真机 qzjs> node bench/aot-product/run_inmod.mjs --merge   # 真机同口径
 ```
-依赖：`cmake -B build-inmod -DQZ_IN_MODULE=ON -DCMAKE_TOOLCHAIN_FILE=cmake/wasm32.cmake && cmake --build build-inmod --target qzvm-guest`。
+**终态 = 静态单模块**（`--merge`）：`wasm-merge`（Binaryen）把 emitter 产物 + libqzvm 编译期合并成一个 wasm，qz.* 变模块内调用（合并后 import 仅剩 `qz_host.*` + WASI，无 qz.*）。multi-module（无 `--merge`）只作量税中间里程碑。
+
+`--merge` 终态 host 结果（2026-11-14）：computeWork **6.19×（G1 ✓）**、validationWork 1.44×（G2 ✗，比 multi-module 1.2× 好——内化消 import 编解码）、tagLoop 15.1 ns/op、合并单 wasm 1.26 MiB。
+
+依赖：`cmake -B build-inmod -DQZ_IN_MODULE=ON -DCMAKE_TOOLCHAIN_FILE=cmake/wasm32.cmake && cmake --build build-inmod --target qzvm-guest`；`wasm-merge`（Binaryen，`WASM_MERGE=<path>` 覆盖）。
