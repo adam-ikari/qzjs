@@ -1641,7 +1641,7 @@ class Emitter {
         this.scratchObj = this.cloArgs[3] + 1;                 // ++/-- 成员接收者句柄临时（i64）
         // 循环 arena 回滚槽（仅 tagged）：每个嵌套循环层一个 i32，存循环入口的 bump 值。
         // 深度按最外层循环嵌套数静态上界；不足时（极少见）退回不复位。
-        const nLoopSave = this.mode === "tagged" ? this._countLoops(f.body) + 1 : 0;
+        const nLoopSave = this.mode === "tagged" ? (this._countLoops(f.body) + 1) * 2 : 0;
         const loopSaveDecls = new Array(nLoopSave).fill("i32");
         this._loopSaveBase = this.scratchObj + 1;
         this._loopSaveCount = nLoopSave;
@@ -1942,7 +1942,7 @@ class Emitter {
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
         this._fnArenaFreeThis = false;      // lambda 体布局与 emitFunc 不同，不复位
-        this._loopSaveBase = this.scratchObj + 1; this._loopSaveCount = this._countLoops(lam.body) + 1; this._loopSaveDepth = 0;
+        this._loopSaveBase = this.scratchObj + 1; this._loopSaveCount = (this._countLoops(lam.body) + 1) * 2; this._loopSaveDepth = 0;
         const lamLoopSaveDecls = new Array(this._loopSaveCount).fill("i32");
         // 本 lambda 的局部若被（嵌套）lambda 捕获 → 建自身 env（__parent 链到 blk）
         // 箭头不自建 arguments（JS：继承外层函数的）；合成 self 形参的箭头源自方法/函数表达式 → 自有。
@@ -2508,7 +2508,7 @@ class Emitter {
         this.cloArgs = [this.cloHandle + 4, this.cloHandle + 5, this.cloHandle + 6, this.cloHandle + 7];
         this.scratchObj = this.cloArgs[3] + 1;
         this._fnArenaFreeThis = false;      // 方法体不复位（布局同上，槽位号不同）
-        this._loopSaveBase = this.scratchObj + 1; this._loopSaveCount = this._countLoops(body) + 1; this._loopSaveDepth = 0;
+        this._loopSaveBase = this.scratchObj + 1; this._loopSaveCount = (this._countLoops(body) + 1) * 2; this._loopSaveDepth = 0;
         const mthLoopSaveDecls = new Array(this._loopSaveCount).fill("i32");
         this.cloSlotsLen = cloSlots.length;
         // 方法体内被（嵌套）lambda 捕获的 this/参数/局部 → 共享环境（同 emitFunc）

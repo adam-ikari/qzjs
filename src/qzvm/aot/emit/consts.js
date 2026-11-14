@@ -167,6 +167,8 @@ const QZ = {
   obj_assign: { params: ["i32", "i64", "i64", "i64", "i64"], results: ["i64"] },
   oom: { params: [], results: [] },   // bump arena 越界：宿主抛 RangeError（替代 unreachable trap，让宿主可 catch）
   take_err: { params: [], results: ["i64"] },   // 取 C 侧 pending throw（reduce 空数组/冻结写入）→ 写 __err，errcheck 转 catch
+  save_handles:    { params: [], results: ["i32"] },   // loop-level handle table save (for per-iter QuickJS object free)
+  restore_handles: { params: ["i32"], results: [] },   // loop-level handle table restore (free handles above saved count)
 };
 
 // JS 内建全局（未实现；命中时给明确错误而非误导性「未定义捕获变量/函数」）。

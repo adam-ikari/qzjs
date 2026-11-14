@@ -420,11 +420,17 @@ Emitter.prototype._arenaLoopEnter = function (body) {
     if (!this._loopArenaFree(body)) return undefined;
     const slot = this._loopSaveBase + this._loopSaveDepth;
     this.m.globalGet(0); this.m.localSet(slot); this._loopSaveDepth++;
+    /* also save handle table count — frees QuickJS objects (JSON.parse etc.)
+     * allocated within the iteration, alongside the POJO bump reset. */
+    const hslot = this._loopSaveBase + this._loopSaveDepth;
+    this.m.call("qz.save_handles"); this.m.localSet(hslot); this._loopSaveDepth++;
     return slot;
 };
 Emitter.prototype._arenaLoopLeave = function (slot) {
     if (slot === undefined) return;
     this.m.localGet(slot); this.m.globalSet(0); this._loopSaveDepth--;
+    const hslot = this._loopSaveBase + this._loopSaveDepth;
+    this.m.localGet(hslot); this.m.call("qz.restore_handles"); this._loopSaveDepth--;
 };
 // 函数级 arena 回滚：函数返回时把 bump 复位到入口，本次调用内的分配一并回收。
 // 适用于「函数内造临时对象、只读字段、返回标量」的形态——被循环反复调用时，否则每次调用

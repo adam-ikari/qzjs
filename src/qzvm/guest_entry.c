@@ -2090,6 +2090,29 @@ int32_t qz_guest_alloc(int32_t size)
     return (int32_t)(uintptr_t)p;
 }
 
+/* Loop-level handle table reset: emitter saves g_handle_count at loop entry
+ * and restores at loop exit, freeing QuickJS objects (e.g. JSON.parse results)
+ * allocated within the iteration — same pattern as the bump arena reset for
+ * POJOs. Without this, JSON.parse handles leak → heap exhausts at ~200 iters. */
+__attribute__((export_name("save_handles")))
+int32_t qz_save_handles(void)
+{
+    return (int32_t)g_handle_count;
+}
+
+__attribute__((export_name("restore_handles")))
+void qz_restore_handles(int32_t saved)
+{
+    if (!g_current_rt) return;
+    JSContext *ctx = qz_get_active_jsctx(g_current_rt);
+    if (!ctx) return;
+    int s = (int)saved;
+    if (s < 2) s = 2;   /* never free undefined/null slots */
+    for (int i = s; i < g_handle_count; i++)
+        JS_FreeValue(ctx, g_handles[i]);
+    g_handle_count = s;
+}
+
 
 __attribute__((export_name("object_delete")))
 void qz_guest_object_delete(int64_t obj, int32_t keyId)

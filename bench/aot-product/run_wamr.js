@@ -18,8 +18,8 @@ const AOT = '/tmp/aotp_merged.aot';
 
 const LOADS = [
   ['computeWork', 200000, 'num'],
-  ['jsonWork', 100, 'tagged'],
-  ['validationWork', 3000, 'tagged'],
+  ['jsonWork', 50000, 'tagged'],
+  ['validationWork', 50000, 'tagged'],
 ];
 
 // 1. compile product + merge
