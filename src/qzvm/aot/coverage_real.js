@@ -124,3 +124,15 @@ for (const [kind, n] of sorted) {
   console.log(`  ${String(n).padStart(5)}  ${kind}`);
   console.log(`         e.g. ${samples.get(kind)}`);
 }
+
+// 机器可读汇总（供 brain/aot-readiness 记录 wasm 占比）
+if (argv.includes("--json")) {
+  console.log(JSON.stringify({
+    corpus: path.resolve(target),
+    files: total, compiled: ok, failed: bad,
+    funcs, wasmFuncs, interpFuncs,
+    wasmRatio: funcs ? +(wasmFuncs / funcs * 100).toFixed(1) : 0,
+    wholeInterp,
+    interpReasons: Object.fromEntries(reasonSorted),
+  }));
+}

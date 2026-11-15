@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-14T12:07:25.966Z._
+_Auto-generated. Last updated 2026-11-15T04:39:58.713Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [agent-notify-protocol](pages/agent-notify-protocol.md) — category: concept | tags: [agent-ops, protocol] | 汇报协议（用户裁决 2026-11-13，绑定 agent-ops）：
@@ -17,7 +17,7 @@ _Auto-generated. Last updated 2026-11-14T12:07:25.966Z._
 - [aot-m4-feasibility](pages/aot-m4-feasibility.md) — category: decision | tags: [aot, m4, p2, feasibility] | <current best understanding — replace this with the real content>
 - [aot-m7-ast-analysis](pages/aot-m7-ast-analysis.md) — category: decision | tags: [aot, m7, ast, analysis] | ## M7: Sub-Function Numeric Subtree Extraction (no annotation)
 - [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
-- [aot-readiness](pages/aot-readiness.md) — category: decision | tags: [aot, readiness, wamr] | ## 当前状态（2026-10-30）
+- [aot-readiness](pages/aot-readiness.md) — category: decision | tags: [aot, readiness, wamr] | ## 当前状态（2026-11-15 重测）
 - [aot-roadmap](pages/aot-roadmap.md) — category: reference | tags: [aot, roadmap, emitter, reference] | ## 验收口径 G1–G5（2026-11-13 主 agent 定）
 - [aot-shared-state-clash-design](pages/aot-shared-state-clash-design.md) — category: decision | tags: [aot, interp, clash, design] | <current best understanding — replace this with the real content>
 - [aot-sort-deterministic-merge](pages/aot-sort-deterministic-merge.md) — category: decision | tags: [aot, sort, audit] | ## 结论

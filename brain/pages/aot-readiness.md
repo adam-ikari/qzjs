@@ -5,21 +5,28 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-11-13T21:30:53"
+updated: "2026-11-15T12:39:58"
 ---
 
 <!-- compiled_truth -->
-## 当前状态（2026-10-30）
+## 当前状态（2026-11-15 重测）
 
-zod 125 个非测试 .ts：**编译成功 125/125**。函数 21111 个，其中 wasm **5945（28.2%）** /
-interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 interp。
+zod 125 个非测试 .ts（`report_mcp/node_modules/zod/src`）：**编译成功 125/125**。
+函数 20945 个，其中 wasm **5875（28.0%）** / interp **15070（72.0%）**；
+含 interp 的文件 39 个，全部为整模块 interp。
+
+interp 归因：module-suspend 14947（38 文件）、shared-state 90（1 文件）、async-self 33（33 文件）。
 
 **口径**：编译成功 ≠ AOT 覆盖。async/generator 等无 wasm 通道的代码按设计退 interp；指标必须
-同时看 wasm 函数占比（`coverage_real.js` 已内置该输出）。
+同时看 wasm 函数占比。`coverage_real.js --json` 输出机器可读汇总（wasmRatio/wholeInterp/
+interpReasons），供 brain 记录 + 趋势追踪。
 
 **已消解（累计）**：
 - 匿名默认导出 131、`export *` 145、TS 重载 115、跨文件同名私有 107、`new` 属性访问 86、
   `Proxy` 75、`instanceof` 内建族 75、命名空间声明 7、类成员/rest 解构 8/5 → 全部 0。
+- **instanceof 措辞**（2026-11-15）：quickjs.c JS_IsInstanceOf 分两种——非对象右值→
+  "Right-hand side of 'instanceof' is not an object"，非函数对象右值→"not callable"
+  （V8 实测确认；AOT 路径 guest_entry.c:4475 已有相同逻辑）。
 - **async（原 87 例）**：顶层 async（含任意深度嵌套 async 闭包）按函数退 interp；
   类体/字段初值/模块级语句里的 async 无函数级通道 → 整模块退 interp（单域，无双状态）。
   设计裁决：不实现状态机（见 aot-wasm-tagged-backend）。
@@ -31,8 +38,9 @@ interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 i
   改沿运行时导入边求闭包：zod 函数 48639→21111，interp 100%→71.8%，整模块 interp 115→39。
 
 **剩余大项**：
-- 真实 wasm 占比：挂起语义密集库（zod 即典型）绝大部分函数仍是 interp。要拿 AOT 收益，
+- 真实 wasm 占比（28.0%）：挂起语义密集库（zod 即典型）绝大部分函数仍是 interp。要拿 AOT 收益，
   要么热点路径无 async/generator，要么实现状态机（大工程，当前明确不做）。
+- 39 个整模块 interp 的缺口排序见 [[aot-m7-ast-analysis]] timeline + 专项清单。
 - re-export 聚合同名值（历史 19 例）已随跨文件改名/整模块回退消失，保留观察。
 
 ## 结构性事实
@@ -264,4 +272,10 @@ interp **15166（71.8%）**；含 interp 的文件 39 个，全部为整模块 i
   kind: evidence
   summary: "parse.ts 翻转后体积量化：interpJs 58921B 构成 util 36846(62.5%)/errors 14040(23.8%)/core 348(0.6%)/parse 7660(13.0%)——util/errors 被 namespace import 整模块内联，但 7 个闭包实际只需 6367B（parse 10 声明转译 3888 + util.finalizeIssue/captureStackTrace 2046 + errors.$ZodRealError 208 + core.config/$ZodAsyncError 225），DCE 可省 52554B(89%)。但 net=wasm 268364+interpJs 6367=274731 vs 基线 interp-only 58929 → 净增 215802B(211KiB)，仍为正（wasm 主导）。只剔已翻转 parse 函数、不树摇导入：interpJs 55181，净增 264616B。结论：interpJs 低效主因是内联 util/errors 全模块（预存在，非翻转引入），DCE 大头是树摇导入；AOT parse.ts 至少 +211KiB，50MiB 设备应只翻热点而非能翻就翻。另：checks/schemas/classic-schemas 实测均只 1-2 个 core.$constructor call 拖垮整模块，同构，设计推荐 A（整表达式 hoist + inst 闭包捕获）。"
   source: "量化 2026-11-13"
+  affects: [aot-readiness]
+
+- time: 2026-11-15T12:39:58
+  kind: decision
+  summary: "2026-11-15 重测 zod wasm 占比 28.0%（5875/20945），coverage_real.js --json 机器可读输出"
+  source: "coverage_real.js --json; commit pending"
   affects: [aot-readiness]
