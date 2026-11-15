@@ -300,8 +300,17 @@ class Emitter {
 
     // 收集函数体内所有箭头函数/函数表达式（含嵌套），按源序。返回节点列表。
     _collectLambdas(node, out = []) {
-        const isModInterpInit = (n) => ts.isVariableDeclaration(n.parent) && n.parent.initializer === n
-            && ts.isIdentifier(n.parent.name) && this._modInterpBindings && this._modInterpBindings.has(n.parent.name.text);
+        /* 模块级 const 走 interp_fn_value：其初值整棵子树里的闭包都不会被 wasm 发射（值由
+         * interpJs 副本承载）→ 收 lambda 时整棵跳过。直接父是 VariableDeclaration 覆盖
+         * `const f = async () => …`；沿 parent 链上溯覆盖 `const X = $constructor(…, (inst,def) => {…})`。 */
+        const isModInterpInit = (n) => {
+            for (let p = n.parent; p; p = p.parent) {
+                if (ts.isVariableDeclaration(p) && ts.isIdentifier(p.name)
+                    && this._modInterpBindings && this._modInterpBindings.has(p.name.text)) return true;
+                if (ts.isSourceFile(p) || ts.isStatement(p)) return false;
+            }
+            return false;
+        };
         const walk = (n) => {
             if (ts.isArrowFunction(n)) { if (isModInterpInit(n)) return; out.push(n); }
             else if (ts.isFunctionExpression(n)) {

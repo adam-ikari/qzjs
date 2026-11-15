@@ -341,6 +341,13 @@ function compileTS(input, outWasm, opts = {}) {
                             || (d.initializer.body && containsSuspendFn(d.initializer.body)))) {
                         modInterpBindings.set(d.name.text, d);   // 模块级 const 绑含挂起的闭包 → 走 interp_fn_value，不毒化整模块
                     }
+                    /* 模块级 const 绑 **call 表达式**、实参里含挂起闭包：`const X = $constructor("X",
+                     * (inst, def) => { …async/gen… })`（zod v4 checks/schemas 同形态）。挂起在 call 的
+                     * 箭头实参体内，不是 const 绑闭包本身 → 旧谓词漏检，整模块退 interp。整表达式按
+                     * interp_fn_value hoist（设计 A：inst 是箭头形参，语义精确，发射机制与闭包档同构）。 */
+                    else if (ts.isCallExpression(d.initializer) && containsSuspendFn(d.initializer)) {
+                        modInterpBindings.set(d.name.text, d);
+                    }
                 }
                 modStmts.push(st);
             } else if (ts.isClassDeclaration(st)) {
@@ -788,15 +795,58 @@ function compileTS(input, outWasm, opts = {}) {
                 || init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword
                 || init.kind === ts.SyntaxKind.NullKeyword
                 || ts.isPrefixUnaryExpression(init) && ts.isNumericLiteral(init.operand));
-            const isFn = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)); if (!isConst || (!prim && !isFn)) out.add(v.name.text);
+            const isFn = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)
+                /* 条件表达式的两个分支都是函数/函数引用（`const captureStackTrace = "captureStackTrace" in Error ? Error.captureStackTrace : …`）
+                 * → 值是两个域里等价的函数，无各自可变的模块状态。 */
+                || (ts.isConditionalExpression(init) && [init.whenTrue, init.whenFalse].every(b => ts.isArrowFunction(b) || ts.isFunctionExpression(b)
+                    || ts.isIdentifier(b) || ts.isPropertyAccessExpression(b)))
+                /* `const X = $constructor(name, initializer, proto)`：值是**类/构造器**（zod v4 的 trait 定义形态）。
+                 * 两个域各建一份类不产生跨域可变状态：实例经同一对象句柄传递，类只被读（.init/原型成员）。
+                 * 类定义本身（初值）走 interp 副本时属 modInterpBindings，与 wasm 侧无共享。 */
+                || (ts.isCallExpression(init) && ((ts.isIdentifier(init.expression) && init.expression.text === "$constructor")
+                    || (ts.isPropertyAccessExpression(init.expression) && init.expression.name.text === "$constructor"))));
+            if (!isConst || (!prim && !isFn)) out.add(v.name.text);
         }
         return out;
     })();
     if ((interpSet.size > 0 || modInterpBindings.size > 0) && mutableModNames.size > 0) {
         const modVarNames = mutableModNames;
-        const touched = (root) => {                  // 该语法树里引用到的模块级变量名
+        /* 该语法树里**真正引用到**的模块级变量名。
+         * 名字匹配会把局部遮蔽当触碰（`_encodeAsync` 里 `const parseAsync = _parseAsync(_Err)`
+         * 与模块导出的 parseAsync 同名）→ 误判 clash、整模块白退 interp。故按作用域判定：
+         * 本层或外层函数/块的声明名不复算作模块引用。属性名（`x.parseAsync`） тоже不是引用。 */
+        const touched = (root) => {
             const hit = new Set();
-            const walk0 = (n) => { if (ts.isIdentifier(n) && modVarNames.has(n.text)) hit.add(n.text); ts.forEachChild(n, walk0); };
+            const scopes = [];                       // 每层作用域的本地声明名
+            const scopeNames = (n) => {
+                const s = new Set();
+                const add = (nm) => { if (nm && ts.isIdentifier(nm)) s.add(nm.text); };
+                if (ts.isFunctionLike(n)) for (const p of n.parameters) add(p.name);
+                const body = n.body;
+                const stmts = ts.isSourceFile(n) ? n.statements : (body && ts.isBlock(body) ? body.statements : null);
+                if (stmts) for (const st of stmts) {
+                    if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) add(d.name);
+                    else if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) add(st.name);
+                }
+                return s;
+            };
+            const isScope = (n) => ts.isFunctionLike(n) || ts.isBlock(n) || ts.isSourceFile(n);
+            const walk0 = (n) => {
+                const pushed = isScope(n);
+                if (pushed) scopes.push(scopeNames(n));
+                if (ts.isIdentifier(n) && modVarNames.has(n.text)) {
+                    const p = n.parent;
+                    const skip = p && ((ts.isPropertyAccessExpression(p) && p.name === n)
+                        || (ts.isQualifiedName(p) && p.right === n)
+                        || (ts.isVariableDeclaration(p) && p.name === n)
+                        || (ts.isParameter(p) && p.name === n)
+                        || (ts.isBindingElement(p) && p.name === n)
+                        || ((ts.isFunctionDeclaration(p) || ts.isClassDeclaration(p) || ts.isFunctionExpression(p)) && p.name === n));
+                    if (!skip && !scopes.some(s => s.has(n.text))) hit.add(n.text);
+                }
+                ts.forEachChild(n, walk0);
+                if (pushed) scopes.pop();
+            };
             const walk = (n) => {
                 // 顶层类声明：定义点只执行静态块/静态字段初值——方法体/构造器是独立 wasm 函数（另经 fns 检查），不扫。
                 if (ts.isClassDeclaration(n)) {
@@ -816,7 +866,7 @@ function compileTS(input, outWasm, opts = {}) {
         const interpSide = new Map();                // 变量名 → 首个触碰它的 interp 函数名
         for (const f of fns) {
             if (!interpSet.has(f.name.text) || !f.body) continue;
-            for (const name of touched(f.body)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
+            for (const name of touched(f)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
         }
         // modInterpBindings 的闭包跑 interp 副本：其初值体内引用的模块级可变变量与 wasm 侧共享 → 同 clash。
         for (const [name, decl] of modInterpBindings) {
@@ -826,7 +876,7 @@ function compileTS(input, outWasm, opts = {}) {
         const clash = [];
         for (const f of fns) {
             if (interpSet.has(f.name.text) || !f.body) continue;
-            for (const name of touched(f.body)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / ${f.name.text} wasm）`);
+            for (const name of touched(f)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / ${f.name.text} wasm）`);
         }
         for (const st of modStmts) {                 // __module_init 属 wasm 侧
             for (const name of touched(st)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / __module_init wasm）`);
