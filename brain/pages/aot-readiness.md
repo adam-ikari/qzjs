@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-11-15T12:39:58"
+updated: "2026-11-15T12:55:54"
 ---
 
 <!-- compiled_truth -->
@@ -278,4 +278,10 @@ interpReasons），供 brain 记录 + 趋势追踪。
   kind: decision
   summary: "2026-11-15 重测 zod wasm 占比 28.0%（5875/20945），coverage_real.js --json 机器可读输出"
   source: "coverage_real.js --json; commit pending"
+  affects: [aot-readiness]
+
+- time: 2026-11-15T12:55:54
+  kind: decision
+  summary: "39 整模块 interp 缺口排序（带判据）：v4/core/schemas.ts impact 15504 第一（304 函数/挡 25 测试/影响 11 入口）；module-suspend 主导 38/39（唯一 shared-state 例外 v4/core/parse.ts）。清单 src/qzvm/aot/INTERP_GAPS.md + 分析脚本 interp_gaps.js。"
+  source: src/qzvm/aot/INTERP_GAPS.md
   affects: [aot-readiness]
