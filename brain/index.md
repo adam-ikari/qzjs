@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-15T04:55:54.882Z._
+_Auto-generated. Last updated 2026-11-16T10:10:48.653Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [agent-notify-protocol](pages/agent-notify-protocol.md) — category: concept | tags: [agent-ops, protocol] | 汇报协议（用户裁决 2026-11-13，绑定 agent-ops）：
@@ -17,9 +17,9 @@ _Auto-generated. Last updated 2026-11-15T04:55:54.882Z._
 - [aot-m4-feasibility](pages/aot-m4-feasibility.md) — category: decision | tags: [aot, m4, p2, feasibility] | <current best understanding — replace this with the real content>
 - [aot-m7-ast-analysis](pages/aot-m7-ast-analysis.md) — category: decision | tags: [aot, m7, ast, analysis] | ## M7: Sub-Function Numeric Subtree Extraction (no annotation)
 - [aot-performance-model](pages/aot-performance-model.md) — category: decision | tags: [decision, aot, performance, f64, wasm, numeric] | ## 结论
-- [aot-readiness](pages/aot-readiness.md) — category: decision | tags: [aot, readiness, wamr] | ## 当前状态（2026-11-15 重测）
+- [aot-readiness](pages/aot-readiness.md) — category: decision | tags: [aot, readiness, wamr] | ## 当前状态（2026-11-16 重测）
 - [aot-roadmap](pages/aot-roadmap.md) — category: reference | tags: [aot, roadmap, emitter, reference] | ## 验收口径 G1–G5（2026-11-13 主 agent 定）
-- [aot-shared-state-clash-design](pages/aot-shared-state-clash-design.md) — category: decision | tags: [aot, interp, clash, design] | <current best understanding — replace this with the real content>
+- [aot-shared-state-clash-design](pages/aot-shared-state-clash-design.md) — category: decision | tags: [aot, interp, clash, design] | ## 问题
 - [aot-sort-deterministic-merge](pages/aot-sort-deterministic-merge.md) — category: decision | tags: [aot, sort, audit] | ## 结论
 - [aot-wasm-tagged-backend](pages/aot-wasm-tagged-backend.md) — category: decision | tags: [aot, wasm, emitter, qzvm, perf] | # AOT tagged 后端（emitter.js → wasm）
 - [aot-zod-hotspot-measurement](pages/aot-zod-hotspot-measurement.md) — category: reference | tags: [aot, hotspot, benchmark, zod] | # zod 热点度量（按模块耗时/调用数/占比 top-N + 翻转可行性 + async/generator 标注）
@@ -70,6 +70,7 @@ _Auto-generated. Last updated 2026-11-15T04:55:54.882Z._
 - [quickjs-upstream-merge-strategy](pages/quickjs-upstream-merge-strategy.md) — category: decision | tags: [build, upstream] | ## quickjs-ng 上游同步与改动分层策略
 - [qzjs-positioning](pages/qzjs-positioning.md) — category: decision | # qzjs 定位（用户拍板 2026-09-09，2026-09-10 更新，2026-09-28 通信面措辞对齐 M-P7）
 - [qz-extensions-override](pages/qz-extensions-override.md) — category: decision | tags: [build, extensions, cmake] | - QZ_EXTENSIONS 是编译期扩展注册表（include/qzjs/qz_ext_registry.h），值是一个 C 宏表达式，展开成逗号分隔的 `const qz_ext_t *` 列表。
+- [qzjs-aot](pages/qzjs-aot.md) — category: decision | tags: [qzjs, aot, wamr, performance] | ## 决策：AOT = AST 算术子树拆分加速
 - [qzvm-qzjs-layering](pages/qzvm-qzjs-layering.md) — category: decision | tags: [decision, architecture, qzvm, in-module, boundary] | ## 结论
 - [release-artifact-topology](pages/release-artifact-topology.md) — category: decision | tags: [bytecode, release, artifact, wasm, wintertc, abi] | # 发行产物拓扑
 - [release-v030](pages/release-v030.md) — category: decision | tags: [release, version, milestone] | ## 结论

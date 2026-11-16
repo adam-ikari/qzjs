@@ -666,8 +666,9 @@ function compileTS(input, outWasm, opts = {}) {
     }
     // ── interp 回退：opts.interp 列出的函数不编 wasm，退到 JS 跑在宿主解释器里。
     // 理由：字符串操作在 wasm 里每轮循环都跨 qz.add 调宿主 → 跨界开销吃掉 AOT 收益。
-    // 传递闭包：wasm 函数调 interp 函数 = 该函数也须 interp（wasm 内无该函数索引）。
-    const allFnNames = new Set(fns.map(f => f.name.text));
+    // 不再是传递闭包：wasm 侧直调 interp 函数走 interp_fn_value + call_value 宿主通道
+    // （tagged.js `_funcIdx === undefined` 分支）→ 调用者留在 wasm，只有挂起语义的函数本身退 interp。
+    // 双域守卫不变：interp 与 wasm 两侧触碰同一模块级可变变量 → 整模块退 interp（单域）。
     // async / generator 函数无法在 wasm 里表达暂停/恢复（await/yield 需 CPS 或状态机）→ 自动走
     //   interp：产物是剥类型的原生 JS，`async`/`await`/`function*` 语义由宿主直接提供
     //   （零自研状态机）。此前把 async strip 成同步、await 作 identity（`await p` 拿到 Promise
@@ -710,67 +711,8 @@ function compileTS(input, outWasm, opts = {}) {
         if (!f.name || !f.body) continue;
         _aotStats.set(f.name.text, aotWorthiness(f));
     }
-    if (interpSet.size > 0) {
-        // 调用图：顶层函数 → 它调用的顶层函数集
-        const calls = new Map();
-        for (const f of fns) {
-            const callees = new Set();
-            const walk = (n) => {
-                if (ts.isCallExpression(n) && n.expression && ts.isIdentifier(n.expression)) {
-                    const resolved = importAlias.get(n.expression.text) || n.expression.text;
-                    if (allFnNames.has(resolved)) callees.add(resolved);
-                }
-                ts.forEachChild(n, walk);
-            };
-            if (f.body) walk(f.body);
-            calls.set(f.name.text, callees);
-        }
-        /* 类方法体也属 wasm 侧发射单元，且**没有**函数级 interp 通道：方法里调用了一个已退 interp 的
-         * 顶层函数，wasm 侧就找不到它（实测 zod：构造器调 initializeContext → 「未定义函数」，
-         * 因为该名字所在的 util 函数被 async 的传递闭包整体拉走了）。故类方法体也必须参与判据，
-         * 一旦命中 interp 侧，只能整模块退 interp（见下方）。 */
-        const classCalls = new Set();
-        {
-            const grab = (n) => {
-                if (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n)
-                    || ts.isConstructorDeclaration(n)) {
-                    const walk = (x) => {
-                        if (ts.isCallExpression(x) && x.expression && ts.isIdentifier(x.expression)) {
-                            const resolved = importAlias.get(x.expression.text) || x.expression.text;
-                            if (allFnNames.has(resolved)) classCalls.add(resolved);
-                        }
-                        ts.forEachChild(x, walk);
-                    };
-                    if (n.body) walk(n.body);
-                }
-                ts.forEachChild(n, grab);
-            };
-            for (const f of sfs) grab(f);
-        }
-        // 传递闭包
-        // `__module_init` 例外：它是模块级变量**初始化**的唯一执行点，必须留在 wasm 侧。
-        // 若它被拉进 interp（模块级语句调用了 async 函数就会发生），wasm 全局的初值永不赋值
-        // → 所有 wasm 函数读模块级变量得到 0/undefined（实测 zod compile.ts：interpSet 含
-        // __module_init，wasm 侧不再导出它）。它不被任何 wasm 函数「调用」（由宿主 start 段触发），
-        // 拉进来没有意义，只会丢初始化。
-        const NON_INTERP = new Set(["__module_init"]);
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const [fn, callees] of calls) {
-                if (interpSet.has(fn) || NON_INTERP.has(fn)) continue;
-                for (const callee of callees) {
-                    if (interpSet.has(callee)) { markI(fn, "calls:" + callee); changed = true; break; }
-                }
-            }
-        }
-        // 类方法调用了 interp 侧函数 → 无法局部修补（方法不参与 interp 转移）→ 整模块退 interp。
-        for (const callee of classCalls) {
-            if (interpSet.has(callee)) { for (const f of fns) if (f.name) markI(f.name.text, "class-calls:" + callee); break; }
-        }
-    }
     // 整模块退 interp 后 wasm 侧不承载任何函数 → 也不能发射类（类方法体属 wasm 侧发射单元）。
-    // 否则构造器里调用已退 interp 的顶层函数会报「未定义函数」。hasClasses 是 const，用独立标记。
+    // 类方法直调 interp 顶层函数由 call_value 通道承载（见上方 tagged.js 分支）。
     const emitClassesToWasm = hasClasses && !fns.every(f => interpSet.has(f.name.text));
     // interp 函数的产物是 `new Function(interpJs)` 里的独立 JS 副本，模块级 `let x` 在那里另有一份
     // （stripModuleSyntax 保留变量语句）。wasm 侧同名变量是 wasm 全局。两侧各自读写、互不可见：
@@ -1092,20 +1034,23 @@ function compileTS(input, outWasm, opts = {}) {
     for (const st of fns) if (st.body && usesArguments(st.body)) argsFnReal.add(st.name.text);
     const argsFnNames = new Set(argsFnReal);
     for (const [local, target] of importAlias) if (argsFnReal.has(target)) argsFnNames.add(local);
-    /* 顶层函数名（含 import 别名）：num 候选里「标识符被调」只有这些是直调，其余是函数值调用
-     * → 必须退 tagged（否则 num 路径按名发 call，编译期「call 未定义」）。*/
-    const fnNamesAll = new Set(fns.map(s => s.name.text));
-    for (const [local, target] of importAlias) if (fnNamesAll.has(target)) fnNamesAll.add(local);
+    /* 顶层函数名（含 import 别名）中**可 wasm 直调**者：num 候选里「标识符被调」只有这些是直调，
+     * 其余是函数值调用 → 必须退 tagged（否则 num 路径按名发 call，编译期「call 未定义」）。
+     * interp 函数无 wasm 索引（调用走 interp_fn_value + call_value），故从白名单剔除；
+     * 别名按目标名判定（`import { g as h }`，g interp → h 也不可直调）。*/
+    const directNames = new Set();
+    for (const st of fns) if (!interpSet.has(st.name.text)) directNames.add(st.name.text);
+    for (const [local, target] of importAlias) if (directNames.has(target)) directNames.add(local);
     // interp 函数不占 wasm，故不参与「是否需要 tagged 运行时」的判定。
-    const hasNumArr = fns.some(f => !interpSet.has(f.name.text) && funcMode(f, argsFnNames, fnNamesAll) === "num" && numArrNames(f).size > 0);
-    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f, argsFnNames, fnNamesAll) === "tagged") || emitClassesToWasm || hasNumArr;
+    const hasNumArr = fns.some(f => !interpSet.has(f.name.text) && funcMode(f, argsFnNames, directNames) === "num" && numArrNames(f).size > 0);
+    const anyTagged = fns.some(f => !interpSet.has(f.name.text) && funcMode(f, argsFnNames, directNames) === "tagged") || emitClassesToWasm || hasNumArr;
     // 顶层函数名 → {mode, void}：跨模式调用点据此插入 f64↔i64 按位重解释。
-    // interp 函数不进 wasm（其调用者经传递闭包一并退），故不在表内 —— 表内即 wasm 内可直调者。
+    // interp 函数不进表（无 wasm 索引，调用走 interp_fn_value + call_value）—— 表内即 wasm 内可直调者。
     const fnMode = new Map();
     for (const st of fns) {
         if (interpSet.has(st.name.text)) continue;
         fnMode.set(st.name.text, {
-            mode: funcMode(st, argsFnNames, fnNamesAll),
+            mode: funcMode(st, argsFnNames, directNames),
             void: !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword,
         });
     }
@@ -1150,7 +1095,7 @@ function compileTS(input, outWasm, opts = {}) {
 
         em._fnHasThis = new Map();       // 顶层函数名 → 是否带 TS this 形参（receiver 由宿主前置）
         em._fnArgs = argsFnReal;   // 顶层函数名 → 函数体引用 arguments（需全量实参数组）
-        em._fnKnown = fnNamesAll;  // 顶层函数名（含别名）：num 候选的「标识符被调」直调白名单
+        em._fnKnown = directNames;  // 顶层函数名（含别名）：num 候选的「标识符被调」直调白名单
         em._fnParams = new Map();        // 顶层函数名 → 形参数量（调用点按 JS 元数语义补 undefined/截断）
         em._fnNodes = new Map();         // 顶层函数名 → 声明节点（rest 形参打包用）
         for (const st of fns) em._fnNodes.set(st.name.text, st);
@@ -1226,7 +1171,7 @@ function compileTS(input, outWasm, opts = {}) {
         if (!process.env.QZ_NO_M7) for (const st of fns) {
             if (interpSet.has(st.name.text)) continue;
             // 纯 num 函数已是最优（无 tagged 部分可拆）→ 跳过；只提取 mixed（tagged）函数
-            if (funcMode(st, argsFnNames, fnNamesAll) === "num") continue;
+            if (funcMode(st, argsFnNames, directNames) === "num") continue;
             const r = extractFragments(st, checker, fragCounter);
             extractionResults.set(st, r);
             // 合成片段恒为 num 模式（f64 ABI）→ 注册到 fnMode，跨模式调用点据此插入重解释
@@ -1237,7 +1182,7 @@ function compileTS(input, outWasm, opts = {}) {
         for (const st of fns) {
             if (interpSet.has(st.name.text)) continue;   // interp 函数不进 wasm
             const isVoid = !!st.type && st.type.kind === ts.SyntaxKind.VoidKeyword;
-            const isNum = funcMode(st, argsFnNames, fnNamesAll) === "num";
+            const isNum = funcMode(st, argsFnNames, directNames) === "num";
             const vt = isNum ? "f64" : "i64";   // num=f64；tagged=i64（NaN-box）
             m.declareFunc(st.name.text, st.parameters.map(() => vt), isVoid ? [] : [vt]);
             const r = extractionResults.get(st);
@@ -1436,7 +1381,7 @@ function compileTS(input, outWasm, opts = {}) {
         const fm = _aotStats.get(f.name.text);
         return {
             name: f.name.text,
-            mode: interpSet.has(f.name.text) ? "interp" : funcMode(f, argsFnNames, fnNamesAll),
+            mode: interpSet.has(f.name.text) ? "interp" : funcMode(f, argsFnNames, directNames),
             params: f.parameters.length,
             async: !!(f.modifiers && f.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword)),
             arithOps: fm ? fm.arithOps : 0,

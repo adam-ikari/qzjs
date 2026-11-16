@@ -59,7 +59,8 @@ wat 仅作按需旁路中间产物，不进编译链路。
 全链回归门：`test/test_wamr_debug_rsp.sh`（debug 构建 + DWARF 行地址断点 + 命中断言）。
 
 **`--interp <fn1,fn2>`（可选）：把指定函数**从 wasm 里摘出去**，退到宿主解释器跑**（同一个
-qzjs 进程内的 qzvm），调用者经传递闭包一并退（`.ts` 里没有 wasm 函数索引可指）。glue 内联
+qzjs 进程内的 qzvm）。调用者**不再**经传递闭包退出：wasm 直调点发 `interp_fn_value`（取
+interp 副本句柄）+ `call_value`（宿主通道），调用者留在 wasm。glue 内联
 transpile 出的 JS（去类型 + 去模块语法），`__call` 对 `mode === "interp"` 直接走它。
 **何时用**：`s = s + i` 这类累加器现已能**原地追加**（走 `qzs_append` 的 bump-顶分支），
 复杂度 O(n)——实测 strWork(200000) **28ms**（修复前 ∵ 每轮 `qz.str_dup` 复制整串，

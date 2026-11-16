@@ -470,9 +470,11 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             this.emitTaggedExpr(lit0); this.emitTaggedExpr(rawLit0); M.call("qz.tagged_strings"); M.localSet(tStrings.v);
             this._expLeave();
             // 顶层函数标签：无闭包句柄 → 直接 wasm 调用（否则会误走「未定义捕获变量」）
+            // interp 函数无 wasm 索引 → 落下方值调用分支（interp_fn_value + call_value）
             if (tagName0 && this.fnNames && this.fnNames.has(tagName0) && this._local(tagName0) === undefined
                 && !(this.capMap && this.capMap.has(tagName0))
-                && !(this.moduleGlobals && this.moduleGlobals.get(tagName0) !== undefined)) {
+                && !(this.moduleGlobals && this.moduleGlobals.get(tagName0) !== undefined)
+                && this.m._funcIdx[this._fnName(tagName0)] !== undefined) {
                 M.localGet(tStrings.v);
                 this._emitCallArgs(cp0.slice(1), argNodes.slice(1), tagName0, false);   // 其余按形参表（rest 打包；直接调用无 ovf）
                 M.call(tagName0);
@@ -1395,6 +1397,17 @@ Emitter.prototype.emitTaggedExpr = function (e) {
             return;
         }
         if (this.m._funcIdx[this._fnName(fn)] === undefined) {
+            // 顶层函数但无 wasm 导出 = 本模块的 interp 函数（async/generator 或其传递调用者）。
+            // interpJs 副本里有同名绑定 → interp_fn_value 取宿主句柄，再经 call_value 直调。
+            // 这样类方法/模块初始化语句仍可留在 wasm，不必为「类方法调了 interp 函数」整模块回退。
+            const tgt = this._fnName(fn);
+            const mg = this.moduleGlobals;
+            const shadows = this._local(fn) !== undefined || (this.capMap && this.capMap.has(fn))
+                || (!!mg && (mg.get(fn) !== undefined || mg.get(tgt) !== undefined));
+            if (!shadows && ((this.fnNames && this.fnNames.has(fn)) || (this.fnNames && this.fnNames.has(tgt)))) {
+                this._emitValueCall(e.expression, e.arguments, undefined);
+                return;
+            }
             // 没有对应的 wasm 函数 → 名字持有闭包值：closure_call(handle, a0..a3)。
             // 句柄来源：本层局部变量、**捕获**，或模块级 const（含跨文件导入的模块级闭包
             // `export const makeIssue = (...) => ...` —— 导入名在 fnNames 里但没有 _funcIdx，

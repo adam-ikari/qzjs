@@ -121,7 +121,7 @@ wholeInterp.sort((a, b) =>
   (a.ownFuncs * (a.testsBlocked.length + a.entryAffected.length + a.directDeps + 1)));
 
 // 7. Output
-console.log(`# zod 整模块 interp 缺口排序（${wholeInterp.length} 个，2026-11-15）`);
+console.log(`# zod 整模块 interp 缺口排序（${wholeInterp.length} 个，2026-11-16）`);
 console.log(`# corpus: ${srcFiles.length} src + ${testFiles.length} test .ts；impact = ownFuncs × (tests + entries + deps + 1)\n`);
 console.log(`| # | 模块 | 自有函数 | 拦截原因 | 直接依赖 | 影响入口 | 挡测试 | impact |`);
 console.log(`|---|------|---------|----------|---------|---------|--------|--------|`);

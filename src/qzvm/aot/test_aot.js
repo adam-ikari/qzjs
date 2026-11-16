@@ -1105,7 +1105,8 @@ async function runMultiFile() {
 }
 
 /* interp 回退（opts.interp）：列出的函数不进 wasm，改由 glue 内联的 JS 跑。
- * 守「wasm 里无该函数 + 调用者被传递闭包带下来 + 可执行」。 */
+ * 调用者不再经传递闭包退 interp：wasm 直调点走 interp_fn_value + call_value（宿主通道），
+ * 调用者留在 wasm。 */
 async function runInterp() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qz_aot_interp_"));
     const src = path.join(dir, "i.ts");
@@ -1117,7 +1118,7 @@ async function runInterp() {
     const r = compileTS(src, wasm, { interp: ["heavy"] });
     const mode = (n) => (r.funcMeta.find(f => f.name === n) || {}).mode;
     check("interp.heavy 标记为 interp", mode("heavy"), "interp");
-    check("interp.调用者传递闭包 → interp", mode("caller"), "interp");
+    check("interp.调用者留在 wasm（tagged 直调通道）", mode("caller"), "tagged");
     check("interp.无关函数仍 num", mode("pureNum"), "num");
     // 产物里不该有 interp 函数（wasm 导出表）
     const exp = WebAssembly.Module.exports(await WebAssembly.compile(fs.readFileSync(wasm))).map(e => e.name);
@@ -1126,6 +1127,18 @@ async function runInterp() {
     // interp JS 已产出且去掉了模块语法（无 exports/require/import 残留）
     check("interp.产出去模块语法", /exports|require\(/.test(r.interpJs), false);
     check("interp.JS 含目标函数", /function heavy\s*\(/.test(r.interpJs), true);
+    {   // 直调通道运行时：wasm caller → call_value(heavy 句柄) → JS 副本，结果 10
+        const qzI = makeQzvm(r.strings, { fields: r.fields });
+        const instI = (await WebAssembly.instantiate(fs.readFileSync(wasm), { qz: qzI })).instance;
+        if (instI.exports.memory) qzI.bindMem(instI.exports.memory);
+        if (instI.exports.__bump) qzI.bindBump(instI.exports.__bump);
+        qzI.bindClosures(instI.exports, r.lamMeta);
+        const iNamesI = (r.funcMeta || []).filter(m => m.mode === "interp").map(m => m.name);
+        const imapI = new Function(r.interpJs + "\nreturn { " + iNamesI.join(", ") + " };")();
+        if (r.interpJs) qzI.bindInterp(imapI);
+        qzI.bindClasses(instI.exports, r.classMeta);
+        check("interp.wasm→interp 直调 caller(5)", qzI._toJS(instI.exports.caller(qzI._fromJS(5))), 10);
+    }
 
     // interp 跨文件：默认/命名导入引用点须折回顶层名（无 mod_1.x / require / export default 残留），
     // 且产出 JS 可直接执行得正确值。同名具名导入也须折回（否则 tsc 模块 transform 残留 (0, mod_1.x)）。
@@ -1179,8 +1192,19 @@ async function runInterp() {
         "class Box { n: number; constructor() { this.n = helper(1); } }\n" +
         "export function runBox(): number { return new Box().n; }\n");
     const r4 = compileTS(i4, path.join(dir4, "i4.wasm"), {});
-    check("interp.类调用被拉走的函数 → 整模块退 interp", r4.classMeta.length, 0);
-    check("interp.类构造器调用 interp 函数可执行", new Function(r4.interpJs + "\nreturn runBox;")()(), 2);
+    // 类方法调 interp 侧函数不再整模块回退：wasm 类保留，直调走 interp_fn_value + call_value。
+    check("interp.类方法调 interp 依赖不再回退整模块", r4.classMeta.length, 1);
+    {
+        const qzB = makeQzvm(r4.strings, { fields: r4.fields });
+        const instB = (await WebAssembly.instantiate(fs.readFileSync(path.join(dir4, "i4.wasm")), { qz: qzB })).instance;
+        if (instB.exports.memory) qzB.bindMem(instB.exports.memory);
+        if (instB.exports.__bump) qzB.bindBump(instB.exports.__bump);
+        qzB.bindClosures(instB.exports, r4.lamMeta);
+        const bNames = (r4.funcMeta || []).filter(m => m.mode === "interp").map(m => m.name);
+        if (bNames.length) qzB.bindInterp(new Function(r4.interpJs + "\nreturn { " + bNames.join(", ") + " };")());
+        qzB.bindClasses(instB.exports, r4.classMeta);
+        check("interp.类构造器经直调通道取 interp 值", qzB._toJS(instB.exports.runBox()), 2);
+    }
     // `import type` 的模块在运行时被完全擦除：其实现（尤其 async）不得被内联。
     // 此前 tsc 的 program 把类型依赖也纳入发射集 → 无关文件里的 async 污染 interp 判定，
     // 整模块被迫退 interp（zod util.ts 实测：83 个 program 文件里运行时只依赖 2 个）。
@@ -1289,8 +1313,18 @@ async function runSemantics() {
         "export function stepGen(): string { const g: any = gen(); const a: any = g.next(); const b: any = g.next(); const c: any = g.next(); return a.value + ',' + b.value + ',' + c.value + ',' + c.done; }\n");
     const genR = compileTS(genSrc, path.join(os.tmpdir(), "qz_aot_gen.wasm"), {});
     check("generator.自动走 interp", genR.funcMeta.find(m => m.name === "gen").mode, "interp");
-    check("generator.调用者经传递闭包一并退 interp", genR.funcMeta.find(m => m.name === "stepGen").mode, "interp");
-    check("generator.逐步消费语义", new Function(genR.interpJs + "; return stepGen;")()(), "1,2,3,true");
+    check("generator.调用者留在 wasm（tagged 直调通道）", genR.funcMeta.find(m => m.name === "stepGen").mode, "tagged");
+    {   // wasm stepGen → call_value(gen 句柄) → 宿主生成器；.next() 逐步消费
+        const qzG = makeQzvm(genR.strings, { fields: genR.fields });
+        const instG = (await WebAssembly.instantiate(fs.readFileSync(path.join(os.tmpdir(), "qz_aot_gen.wasm")), { qz: qzG })).instance;
+        if (instG.exports.memory) qzG.bindMem(instG.exports.memory);
+        if (instG.exports.__bump) qzG.bindBump(instG.exports.__bump);
+        qzG.bindClosures(instG.exports, genR.lamMeta);
+        const gNames = (genR.funcMeta || []).filter(m => m.mode === "interp").map(m => m.name);
+        qzG.bindInterp(new Function(genR.interpJs + "\nreturn { " + gNames.join(", ") + " };")());
+        qzG.bindClasses(instG.exports, genR.classMeta);
+        check("generator.wasm→interp 直调 stepGen", qzG._toJS(instG.exports.stepGen()), "1,2,3,true");
+    }
     // 类里的 generator 方法无函数级通道 → 整模块退 interp（与 async 方法同判据）。
     const genClsSrc = path.join(os.tmpdir(), "qz_aot_gencls.ts");
     fs.writeFileSync(genClsSrc,

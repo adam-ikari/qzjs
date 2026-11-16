@@ -2765,6 +2765,20 @@ function makeQzvm(strings, opts) {
     },
     bindClasses: (ex, cm) => { exportsRef = ex; classMeta = cm; tryRunModuleInit(); },   // 最后一次 bind → 触发模块初始化
     bindInterp: (m) => { interpFns = m; },
+    /* 循环级句柄表水位（emit tagged-core 的 loop save/restore 调这里）：
+     * 每迭代分配的对象句柄在迭代末释放，避免 host 句柄表随循环无界增长。
+     * 语义与 guest_entry.c qz_save_handles/qz_restore_handles 一致：水位以下（0/1 固定槽）永不释放。 */
+    save_handles: () => handles.length,
+    restore_handles: (saved) => {
+      const s = Math.max(saved | 0, 2);
+      for (let i = s; i < handles.length; i++) {
+        const v = handles[i];
+        if (typeof v === "object" || typeof v === "function") {
+          if (v !== null && hostOf.get(v) !== undefined) hostOf.delete(v);
+        } else if (typeof v === "symbol" && symOf.get(v) !== undefined) symOf.delete(v);
+      }
+      handles.length = s;
+    },
     bindFields,
     bindBump,
     setInWasm: (v) => { inWasm = !!v; },   // glue 的 __call 在进入/退出 wasm 时置位，供 gc 拒绝不安全的时机

@@ -5,17 +5,20 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-11-15T12:55:54"
+updated: "2026-11-16T18:10:31"
 ---
 
 <!-- compiled_truth -->
-## 当前状态（2026-11-15 重测）
+## 当前状态（2026-11-16 重测）
 
 zod 125 个非测试 .ts（`report_mcp/node_modules/zod/src`）：**编译成功 125/125**。
-函数 20945 个，其中 wasm **5875（28.0%）** / interp **15070（72.0%）**；
-含 interp 的文件 39 个，全部为整模块 interp。
+函数 20945 个，其中 wasm **6053（28.9%）** / interp **14892（71.1%）**；
+含 interp 的文件 **37** 个，全部为整模块 interp。
 
-interp 归因：module-suspend 14947（38 文件）、shared-state 90（1 文件）、async-self 33（33 文件）。
+interp 归因：shared-state 14792（33 文件）、module-suspend 67（4 文件）、async-self 33（33 文件）。
+即：每个文件只剩 1 个 async 函数（zod v4 的 `validateAsync`），但**只读的模块级 const**
+（`version`/`parse`/`parseAsync`/`ZodParsedType`/`dateRegexSource`）被双域触碰 → 双域守卫
+仍判 clash → 整模块回退。shared-state 是当前唯一大杠杆。
 
 **口径**：编译成功 ≠ AOT 覆盖。async/generator 等无 wasm 通道的代码按设计退 interp；指标必须
 同时看 wasm 函数占比。`coverage_real.js --json` 输出机器可读汇总（wasmRatio/wholeInterp/
@@ -24,6 +27,16 @@ interpReasons），供 brain 记录 + 趋势追踪。
 **已消解（累计）**：
 - 匿名默认导出 131、`export *` 145、TS 重载 115、跨文件同名私有 107、`new` 属性访问 86、
   `Proxy` 75、`instanceof` 内建族 75、命名空间声明 7、类成员/rest 解构 8/5 → 全部 0。
+- **wasm→interp 直调通道**（2026-11-16）：tagged 发射在直调点对无 wasm 索引的顶层 interp 函数
+  发 `interp_fn_value`（取 interpJs 副本句柄）+ `call_value`（宿主通道）。据此取消
+  `calls` 传递闭包与 `class-calls` 整模块回退：调用者留在 wasm，只有挂起函数本身退 interp。
+  类方法/模块初始化语句同样可直调 interp（此前是「整模块退 interp」的两个来源）。
+  覆盖面：`funcMode` 的直调白名单剔除 interp 名（否则 num 通道按名发 call 编译期崩），
+  tagged 模板标签同样走值调用分支。
+- **`save_handles`/`restore_handles` 宿主契约补齐**（2026-11-16）：`qzvm.js` 缺这两个 import
+  （`tagged-core` 的循环级句柄水位在用），`test_aot` 从 runTagged 起整体失败、corpus4 有 6 例
+  instantiate 报错。按 guest_entry.c 语义（水位 <2 取 2；释放水位数以上句柄并清 hostOf/symOf）
+  补齐后 test_aot ALL PASS、corpus4 66/66。
 - **instanceof 措辞**（2026-11-15）：quickjs.c JS_IsInstanceOf 分两种——非对象右值→
   "Right-hand side of 'instanceof' is not an object"，非函数对象右值→"not callable"
   （V8 实测确认；AOT 路径 guest_entry.c:4475 已有相同逻辑）。
@@ -32,28 +45,33 @@ interpReasons），供 brain 记录 + 趋势追踪。
   设计裁决：不实现状态机（见 aot-wasm-tagged-backend）。
 - **generator（原 YieldExpression 报错）**：2026-10-30 用同一挂起判据（asteriskToken + 嵌套检测）
   改走 interp，`.next()` 逐步消费由宿主原生生成器承载；删除旧的「平坦 yield 降级成数组」。
-  顶层 generator 及其调用者经传递闭包进 interp；类 generator 方法/模块级表达式 → 整模块 interp。
+  顶层 generator 退 interp、调用者留在 wasm 走直调通道；类 generator 方法/模块级表达式 → 整模块 interp。
 - **`import type` 依赖被内联**（2026-10-30）：tsc program 含类型依赖，此前整树被发射，
   无关 async 把模块拖进 interp（zod util.ts：83 个 program 文件里运行时只依赖 2 个）。
   改沿运行时导入边求闭包：zod 函数 48639→21111，interp 100%→71.8%，整模块 interp 115→39。
 
 **剩余大项**：
-- 真实 wasm 占比（28.0%）：挂起语义密集库（zod 即典型）绝大部分函数仍是 interp。要拿 AOT 收益，
+- 真实 wasm 占比（28.9%）：挂起语义密集库（zod 即典型）绝大部分函数仍是 interp。要拿 AOT 收益，
   要么热点路径无 async/generator，要么实现状态机（大工程，当前明确不做）。
-- 39 个整模块 interp 的缺口排序见 [[aot-m7-ast-analysis]] timeline + 专项清单。
-- re-export 聚合同名值（历史 19 例）已随跨文件改名/整模块回退消失，保留观察。
+- **shared-state 判定**（33/37 文件）：`const` 对象/函数绑定（含 call 初值）双侧只读触碰也判 clash。
+  三条路与裁决见 [[aot-shared-state-clash-design]]。翻 schemas.ts 双版本必须先解这一项。
+- 4 个 module-suspend 文件是 v3 遗留线（types.ts 336 函数 / parseUtil / external / index）。
+- 37 个整模块 interp 的缺口排序见 `src/qzvm/aot/INTERP_GAPS.md`（`interp_gaps.js` 生成）。
 
 ## 结构性事实
 
-功能缺口沿 import 图传播（历史主因）。**类型边与运行时边必须分开**：类型依赖不产生运行时
-语义，不得进入发射集。interp 多文件拼接的约束见 [[aot-interp-multifile-splicing]]。
+**wasm 与 interp 是双执行域**：interp 函数跑在 `new Function(interpJs)` 的独立 JS 副本里，
+wasm 侧模块级绑定是 wasm 全局。直调不再是传播理由（已有 `call_value` 通道），但**同一可变绑定
+被两侧触碰仍是静默错值** → 守卫整模块退 interp（单域）。类型边与运行时边必须分开：类型依赖
+不产生运行时语义，不得进入发射集。interp 多文件拼接的约束见 [[aot-interp-multifile-splicing]]。
 挂起语义（async/generator）只有一条通道：函数体任意深度出现即整函数退 interp；无函数级
 通道的位置（类体/字段初值/模块级语句）→ 整模块退 interp。
 
 ## 验证
 
-`test_aot` ALL PASS（含 generator 5 项门禁）；`audit_diff` 47/47、corpus7 27/27、corpus38 18/18；
-`glue_audit` 5/5；scin 11/11 数值一致。
+`test_aot` ALL PASS（含 wasm→interp 直调、generator 逐步消费）；`audit_diff` 全部 48 个语料
+0 diff（corpus4 66/66）；`test_interp_shared_clash` PASS（双域守卫仍捕获可变状态）；
+coverage zod 125/125 编译、wasm 28.9%、wholeInterp 37。
 
 ## 教训
 
@@ -61,6 +79,8 @@ interpReasons），供 brain 记录 + 趋势追踪。
 - 测试路径与产物路径必须一致：`glue_audit` 是唯一能捕获装配层缺陷的测试。
 - 「unsupported 登记」是临时口径：一旦有 interp 通道，必须移除登记并让用例真正对拍，
   否则 grep 式覆盖率会掩盖回归。
+- 回退理由要按「机制是否存在」复查：`class-calls`/`calls` 的整模块回退在直调通道落地后
+  只是掩盖了下一层的 shared-state，指标不变但瓶颈已换。
 
 
 ## Timeline
@@ -284,4 +304,10 @@ interpReasons），供 brain 记录 + 趋势追踪。
   kind: decision
   summary: "39 整模块 interp 缺口排序（带判据）：v4/core/schemas.ts impact 15504 第一（304 函数/挡 25 测试/影响 11 入口）；module-suspend 主导 38/39（唯一 shared-state 例外 v4/core/parse.ts）。清单 src/qzvm/aot/INTERP_GAPS.md + 分析脚本 interp_gaps.js。"
   source: src/qzvm/aot/INTERP_GAPS.md
+  affects: [aot-readiness]
+
+- time: 2026-11-16T18:10:31
+  kind: decision
+  summary: "2026-11-16 重测：wasm 28.9%，整模块 interp 37；wasm→interp 直调通道落地，主约束转为 shared-state"
+  source: "session 2026-11-16: coverage_real --json + audit/test_aot"
   affects: [aot-readiness]
