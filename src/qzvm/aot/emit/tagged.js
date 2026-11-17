@@ -7,7 +7,12 @@ const { RC_HDR, K_PLAIN, K_POJO, K_ARR, SCRATCH, STR_BASE, emitBumpAlloc, emitBu
 const { Emitter } = require("./emitter.js");
 require("./tagged-core.js");   // 副作用：挂 _foldPropName/_fnArenaFree 等 tagged 公共方法
 
-Emitter.prototype.emitTaggedBlock = function (node) { for (const st of node.statements) this.emitTaggedStmt(st); };
+Emitter.prototype.emitTaggedBlock = function (node) {
+    for (const st of node.statements) {
+        if (this._inModInit && this._modInitSkipKeys && this._modInitSkipKeys.has(st.getText(this.sf).trim())) continue;
+        this.emitTaggedStmt(st);
+    }
+};
 Emitter.prototype.emitTaggedStmt = function (s) {
     this.m.markLine(this._line(s));
     if (ts.isClassDeclaration(s)) {

@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, readiness, wamr]
 created: "2026-10-21T07:15:23"
-updated: "2026-11-16T18:10:31"
+updated: "2026-11-17T17:36:14"
 ---
 
 <!-- compiled_truth -->
@@ -310,4 +310,10 @@ coverage zod 125/125 编译、wasm 28.9%、wholeInterp 37。
   kind: decision
   summary: "2026-11-16 重测：wasm 28.9%，整模块 interp 37；wasm→interp 直调通道落地，主约束转为 shared-state"
   source: "session 2026-11-16: coverage_real --json + audit/test_aot"
+  affects: [aot-readiness]
+
+- time: 2026-11-17T17:36:14
+  kind: evidence
+  summary: "zod 重测：wasm 20845/20945 (99.5%)，整模块 interp 4（v3 module-suspend）；test_aot/47 corpus/clash/ss 全绿"
+  source: session 2026-11-17
   affects: [aot-readiness]

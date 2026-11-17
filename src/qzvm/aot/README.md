@@ -73,6 +73,14 @@ transpile 出的 JS（去类型 + 去模块语法），`__call` 对 `mode === "i
 （numWork 30x / objWork ~3x 对解释器）。
 `compile` 子命令同样支持；产物多一个 `<name>.interp.js`。
 
+**单源模块绑定（single-source）**：当 wasm 函数与 interp 函数触碰同一模块级 `const` 时，
+判据不再整模块回退，而是把该绑定提升为 host-backed：interpJs 副本是唯一事实源，
+wasm 模块初始化经 `interp_fn_value` 取同一 tagged 值（`ret()` 对对象/函数走 hostOf 缓存，
+身份与 Map 键跨端一致）。只触碰 host-backed 绑定的模块级语句也只在 interp 侧重放，
+避免初值/副作用双执行。`let`、类、构造器冲突仍整模块回退。回归门：
+`test_ss_module_bindings.js` + `test_interp_shared_clash.js`。
+zod 实测 wasm 6053/20945（28.9%）→ 20845/20945（99.5%），整模块 interp 37 → 4。
+
 - **JS 技术栈**：`build.js` 是唯一主入口（node 编排 compile→wamrc→glue），全部 JS（wamrc 是唯一外部后端）
 - **值模型**：tagged 值 = i64 f64 NaN-box（数值=原始 f64 位型，精确 53 位；句柄=高16位 `0x7FF9`|低32 offset；字段 8 字节）。wasm f64 恒为 IEEE-754 double，32 位宿主由 wamrc 降到软/硬浮点，**数值语义含 >2^31 的整数不变**，故 32/64 位设备共用同一表示——不按目标位宽切换
 - **产物分离**：`glue.js` + `.wasm` + `.aot` 三文件（不 base64 内嵌防膨胀），全部 gitignore（`build/`）

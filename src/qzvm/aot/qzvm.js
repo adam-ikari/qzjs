@@ -2708,17 +2708,17 @@ function makeQzvm(strings, opts) {
       fnCacheMap.set(nm, hv);
       return hv;
     },
-    // interp 回退函数作值：interpJs 副本（去类型 JS）里的 async/generator 没有 wasm 导出，
-    // 不能走 fn_value（exportsRef 查不到）→ 直接从 bindInterp 注入的表取裸 JS 函数包宿主句柄。
-    // closure_call 的 HOST 分支已做 JS 转换，句柄即函数本身；同名恒等同一句柄（与 fn_value 一致）。
+    // host-backed 模块级绑定作值：从 bindInterp 注入的 interpJs 副本取同名绑定，包装成 tagged 值。
+    // 原用途仅是 async/generator 函数（无 wasm 导出，不能走 fn_value）；single-source 后也承载
+    // 对象/字符串 const：wasm 侧模块初始化不再求值这些绑定，统一读 interp 副本这一份。
+    // 同名恒等同一句柄（ret 对对象/函数走 hostOf 缓存，结果再按名缓存）。
     interp_fn_value: (sid) => {
       const nm = strings[sid];
       fnCacheMap = fnCacheMap || new Map();
       const hit = fnCacheMap.get(nm);
       if (hit !== undefined) return hit;
-      const f = interpFns && interpFns[nm];
-      if (typeof f !== "function") { throwValue(new Error("interp_fn_value: 未注册 interp 函数 " + nm)); return TAG; }
-      const hv = tagHandle(f);
+      if (!interpFns || !(nm in interpFns)) { throwValue(new Error("interp_fn_value: 未注册 interp 绑定 " + nm)); return TAG; }
+      const hv = ret(interpFns[nm]);
       fnCacheMap.set(nm, hv);
       return hv;
     },

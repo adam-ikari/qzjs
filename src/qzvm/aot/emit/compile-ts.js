@@ -751,13 +751,14 @@ function compileTS(input, outWasm, opts = {}) {
         }
         return out;
     })();
+    let modInitSkipStmts = new Set();   // 只触碰 host-backed 绑定的模块级语句：wasm 侧不再重放
     if ((interpSet.size > 0 || modInterpBindings.size > 0) && mutableModNames.size > 0) {
         const modVarNames = mutableModNames;
         /* 该语法树里**真正引用到**的模块级变量名。
          * 名字匹配会把局部遮蔽当触碰（`_encodeAsync` 里 `const parseAsync = _parseAsync(_Err)`
          * 与模块导出的 parseAsync 同名）→ 误判 clash、整模块白退 interp。故按作用域判定：
          * 本层或外层函数/块的声明名不复算作模块引用。属性名（`x.parseAsync`） тоже不是引用。 */
-        const touched = (root) => {
+        const touched = (root, names = modVarNames) => {
             const hit = new Set();
             const scopes = [];                       // 每层作用域的本地声明名
             const scopeNames = (n) => {
@@ -776,7 +777,7 @@ function compileTS(input, outWasm, opts = {}) {
             const walk0 = (n) => {
                 const pushed = isScope(n);
                 if (pushed) scopes.push(scopeNames(n));
-                if (ts.isIdentifier(n) && modVarNames.has(n.text)) {
+                if (ts.isIdentifier(n) && names.has(n.text)) {
                     const p = n.parent;
                     const skip = p && ((ts.isPropertyAccessExpression(p) && p.name === n)
                         || (ts.isQualifiedName(p) && p.right === n)
@@ -805,28 +806,69 @@ function compileTS(input, outWasm, opts = {}) {
             walk(root);
             return hit;
         };
-        const interpSide = new Map();                // 变量名 → 首个触碰它的 interp 函数名
-        for (const f of fns) {
-            if (!interpSet.has(f.name.text) || !f.body) continue;
-            for (const name of touched(f)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
+        // single-source：冲突的 const 模块绑定提升为 host-backed（interpJs 副本是唯一事实源），
+        // wasm 模块初始化不再求值这些绑定（emitter 走 interp_fn_value）；let / 类 / 构造器
+        // 等无法安全单源的冲突仍整模块退 interp。
+        const constDecls = new Map();
+        for (const v of modVars) if (mutableModNames.has(v.name.text)) constDecls.set(v.name.text, v);
+        const hostable = (name) => {
+            const v = constDecls.get(name);
+            if (!v || !v.initializer) return false;
+            const list = v.parent;
+            if (!list || !(list.flags & ts.NodeFlags.Const)) return false;
+            const init = v.initializer;
+            if (ts.isClassExpression(init)) return false;
+            if (ts.isCallExpression(init)) {
+                const e = init.expression;
+                if ((ts.isIdentifier(e) && e.text === "$constructor")
+                    || (ts.isPropertyAccessExpression(e) && e.name.text === "$constructor")) return false;
+            }
+            return true;
+        };
+        const promote = (name) => {
+            if (!hostable(name)) return false;
+            mutableModNames.delete(name);              // touched() 不再视其为跨端共享名
+            modInterpBindings.set(name, constDecls.get(name));
+            return true;
+        };
+        let promoteAgain = true, rollback = false;
+        while (promoteAgain && !rollback) {
+            promoteAgain = false;
+            const interpSide = new Map();              // 变量名 → 首个触碰它的 interp 函数名
+            for (const f of fns) {
+                if (!interpSet.has(f.name.text) || !f.body) continue;
+                for (const name of touched(f)) if (!interpSide.has(name)) interpSide.set(name, f.name.text);
+            }
+            // host-backed 绑定的初值在 interp 副本求值：其依赖同样要收敛到单源或回退。
+            for (const [name, decl] of modInterpBindings) {
+                if (!decl.initializer) continue;
+                for (const nm of touched(decl.initializer)) if (!interpSide.has(nm)) interpSide.set(nm, name);
+            }
+            const clash = [];
+            const record = (name, where) => {
+                if (interpSide.has(name) && !modInterpBindings.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / ${where} wasm）`);
+            };
+            for (const f of fns) {
+                if (interpSet.has(f.name.text) || !f.body) continue;
+                for (const name of touched(f)) record(name, f.name.text);
+            }
+            for (const st of modStmts) for (const name of touched(st)) record(name, "__module_init");
+            if (clash.length && process.env.QZD_CLASH) console.error('CLASH:', clash.join(' | '));
+            if (clash.length) {
+                const names = [...new Set(clash.map(s => s.slice(0, s.indexOf('（'))))];
+                for (const name of names) if (promote(name)) promoteAgain = true;
+                if (!promoteAgain) rollback = true;
+            }
         }
-        // modInterpBindings 的闭包跑 interp 副本：其初值体内引用的模块级可变变量与 wasm 侧共享 → 同 clash。
-        for (const [name, decl] of modInterpBindings) {
-            if (!decl.initializer) continue;
-            for (const nm of touched(decl.initializer)) if (!interpSide.has(nm)) interpSide.set(nm, name);
+        // 回退：mutating interpSet 后冲突自然消失（模块级变量只剩 interp 一份）。
+        if (rollback) tryWholeModuleInterp();
+        else if (modInterpBindings.size) {
+            const hosted = new Set(modInterpBindings.keys());
+            for (const st of modStmts) {
+                if (!ts.isExpressionStatement(st)) continue;
+                if (touched(st, hosted).size) modInitSkipStmts.add(st);
+            }
         }
-        const clash = [];
-        for (const f of fns) {
-            if (interpSet.has(f.name.text) || !f.body) continue;
-            for (const name of touched(f)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / ${f.name.text} wasm）`);
-        }
-        for (const st of modStmts) {                 // __module_init 属 wasm 侧
-            for (const name of touched(st)) if (interpSide.has(name)) clash.push(`${name}（${interpSide.get(name)} interp / __module_init wasm）`);
-        }
-        // 有冲突 → 整模块退 interp。mutating interpSet 后**必须重算**：此时无 wasm 侧函数，
-        // 冲突自然消失（模块级变量只剩 interp 一份）。
-        if (clash.length && process.env.QZD_CLASH) console.error('CLASH:', clash.join(' | '));
-        if (clash.length) tryWholeModuleInterp();
     }
     // TS→JS（去类型）供 glue 内联 interp 函数。
     // 内联后是**单一作用域**（模块边界已由 inlining 消除），故须剥掉模块语法：
@@ -1088,7 +1130,8 @@ function compileTS(input, outWasm, opts = {}) {
         em.enums = enums;                // TS enum：编译期求值表（名字 → {fwd, rev}）
         em.modConstLit = modConstLit;    // 模块级字面量 const（计算属性名折叠用）
         em._modSymLit = modSymLit;       // 模块级 Symbol.<well-known> 常量
-        em._modInterpBindings = modInterpBindings;   // 模块级 const 绑 async/generator 闭包（走 interp_fn_value）
+        em._modInterpBindings = modInterpBindings;   // host-backed 模块绑定（走 interp_fn_value）
+        em._modInitSkipKeys = new Set([...modInitSkipStmts].map(s => s.getText(sf).trim()));  // 只触碰 host-backed 的语句由 interp 侧单独执行
         em.nsAliasByFile = nsAliasByFile;   // 跨文件同名 namespace 导入隔离表（_nsMember 按 em.sf 查）
         em.checker = checker;            // 符号身份（TDZ 判据：同名遮蔽必须按符号区分，不能按文本）
         em.protNameId = (n) => em._strId(n);
