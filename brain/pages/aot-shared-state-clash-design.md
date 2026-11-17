@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, interp, clash, design]
 created: "2026-11-13T22:28:21"
-updated: "2026-11-17T17:36:04"
+updated: "2026-11-18T07:54:35"
 ---
 
 <!-- compiled_truth -->
@@ -83,4 +83,10 @@ zod 125 文件：编译 125/125；函数 20945，wasm **20845（99.5%）** / int
   kind: decision
   summary: "(c) single-source 落地：clash const host-backed + 模块语句单侧执行；zod wasm 28.9%→99.5%，整模块 interp 37→4"
   source: session 2026-11-17
+  affects: [aot-shared-state-clash-design]
+
+- time: 2026-11-18T07:54:35
+  kind: evidence
+  summary: "剩余 4 个 v3 module-suspend 根因：ZodType 类内 async parseAsync/safeParseAsync 等类方法挂起；hasSuspendOutsideFn 命中即整模块退 interp，需类方法级 interp 通道，非 host-backed 绑定可解；收益仅 67 函数 (0.5%)"
+  source: session 2026-11-18
   affects: [aot-shared-state-clash-design]
