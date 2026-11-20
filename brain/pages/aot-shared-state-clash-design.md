@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [aot, interp, clash, design]
 created: "2026-11-13T22:28:21"
-updated: "2026-11-18T07:54:35"
+updated: "2026-11-20T23:15:26"
 ---
 
 <!-- compiled_truth -->
@@ -89,4 +89,10 @@ zod 125 文件：编译 125/125；函数 20945，wasm **20845（99.5%）** / int
   kind: evidence
   summary: "剩余 4 个 v3 module-suspend 根因：ZodType 类内 async parseAsync/safeParseAsync 等类方法挂起；hasSuspendOutsideFn 命中即整模块退 interp，需类方法级 interp 通道，非 host-backed 绑定可解；收益仅 67 函数 (0.5%)"
   source: session 2026-11-18
+  affects: [aot-shared-state-clash-design]
+
+- time: 2026-11-20T23:15:26
+  kind: evidence
+  summary: "Symbol.for(x) const 按原始值计入 primitive 判据后 zod 覆盖恢复 20845/20945 (99.5%)、wholeInterp 4；但完整 zod 入口 build.js 产物仍被 wasm-validate/wamrc 拒绝（func[819] __lam_135 if 分支尾部多余 i64），与 Symbol promotion 非单一因果，属独立发射端栈失衡，zod AOT 基准因此仍被阻塞"
+  source: session 2026-11-20
   affects: [aot-shared-state-clash-design]

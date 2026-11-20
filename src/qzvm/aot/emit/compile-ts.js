@@ -732,11 +732,16 @@ function compileTS(input, outWasm, opts = {}) {
             const isConst = !!list && !!(list.flags & ts.NodeFlags.Const);
             // `const` 只在**原始值**上无害：`const cache = {}` / `const arr = []` 两侧各有一份对象，
             // 一侧写字段另一侧读不到 → 同样是错值。故只有「const 且初值为原始字面量」才排除。
+            // Symbol.for(x) 由全局符号注册表保证两域取到同一 symbol，视同原始值（跨域身份一致）。
             const init = v.initializer;
+            const isSymbolFor = !!init && ts.isCallExpression(init) && ts.isPropertyAccessExpression(init.expression)
+                && init.expression.name.text === "for"
+                && ts.isIdentifier(init.expression.expression) && init.expression.expression.text === "Symbol";
             const prim = !!init && (ts.isStringLiteral(init) || ts.isNumericLiteral(init)
                 || init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword
                 || init.kind === ts.SyntaxKind.NullKeyword
-                || ts.isPrefixUnaryExpression(init) && ts.isNumericLiteral(init.operand));
+                || ts.isPrefixUnaryExpression(init) && ts.isNumericLiteral(init.operand)
+                || isSymbolFor);
             const isFn = !!init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)
                 /* 条件表达式的两个分支都是函数/函数引用（`const captureStackTrace = "captureStackTrace" in Error ? Error.captureStackTrace : …`）
                  * → 值是两个域里等价的函数，无各自可变的模块状态。 */
@@ -822,6 +827,9 @@ function compileTS(input, outWasm, opts = {}) {
                 const e = init.expression;
                 if ((ts.isIdentifier(e) && e.text === "$constructor")
                     || (ts.isPropertyAccessExpression(e) && e.name.text === "$constructor")) return false;
+                if ((ts.isIdentifier(e) && e.text === "Symbol")
+                    || (ts.isPropertyAccessExpression(e) && e.name.text === "for"
+                        && ts.isIdentifier(e.expression) && e.expression.text === "Symbol")) return false;
             }
             return true;
         };
