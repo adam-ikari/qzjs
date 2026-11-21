@@ -224,7 +224,8 @@ function compileTS(input, outWasm, opts = {}) {
     };
     const checker = program.getTypeChecker();   // 收集阶段就要解析符号身份（see `export namespace` 展平）
     const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)；收集阶段就要写（see `export namespace`）
-    const nsAliasByFile = {};        // 文件名 → (命名空间本地名 → 成员表)：跨文件同名导入隔离
+    const nsAliasByFile = {};        // 文件名 → (命名空间本地名 → 成员表)：wasm 发射端用
+    const interpNsAliasByFile = {};  // 文件名 → 同上：仅 interpJs 拼接用（具名导入的 namespace re-export）
     const collectDecls = (f) => {
         scanDeclaredNames(f);
         // nested：不在模块顶层语句位置（函数/块/循环内）——类被提升后其外层绑定不可见；
@@ -598,9 +599,10 @@ function compileTS(input, outWasm, opts = {}) {
                             }
                         } catch { /* 非 namespace 符号：getExportsOfModule 会抛，按普通导入处理 */ }
                         if (nsMembers && nsMembers.size) {
-                            importAlias.set(sp.name.text, sp.name.text);
-                            (nsAliasByFile[f.fileName] = nsAliasByFile[f.fileName] || new Map()).set(sp.name.text, nsMembers);
-                            continue;
+                            // wasm 端仍按原 importAlias 走；只给 interpJs 拼接登记成员表，
+                            // 否则 _nsMember 把具名 namespace 当普通 namespace 改写，破坏 wasm 发射。
+                            (interpNsAliasByFile[f.fileName] = interpNsAliasByFile[f.fileName] || new Map()).set(sp.name.text, nsMembers);
+                            // 保留下面的普通 importAlias 登记（不 continue）。
                         }
                         if (declFile && sfNames.has(declFile.fileName)) {
                             importAlias.set(sp.name.text, tgt.name);
@@ -1014,7 +1016,10 @@ function compileTS(input, outWasm, opts = {}) {
                 if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
                     // 按当前文件查：同名 namespace 导入在不同文件指向不同模块（见 nsAliasByFile）
                     const byFile2 = nsAliasByFile[sf2.fileName];
-                    const nsMap = byFile2 ? byFile2.get(n.expression.text) : nsAlias.get(n.expression.text);
+                    const interpByFile = interpNsAliasByFile[sf2.fileName];
+                    const nsMap = (byFile2 && byFile2.get(n.expression.text))
+                        || (interpByFile && interpByFile.get(n.expression.text))
+                        || nsAlias.get(n.expression.text);
                     const resolved = nsMap && nsMap.get(n.name.text);
                     if (resolved !== undefined) return ts.factory.createIdentifier(globalRename.get(resolved) || resolved);
                     return ts.visitEachChild(n, visit, ctx);
@@ -1028,7 +1033,10 @@ function compileTS(input, outWasm, opts = {}) {
                         || (ts.isPropertyAssignment(p0) && p0.name === n)
                         || (ts.isMethodDeclaration(p0) && p0.name === n));
                     const byFileNs0 = nsAliasByFile[sf2.fileName];
-                    const ns0 = (!isNsAccess && !isPropName0 && byFileNs0) ? byFileNs0.get(n.text) : null;
+                    const interpNs0 = interpNsAliasByFile[sf2.fileName];
+                    const ns0 = (!isNsAccess && !isPropName0)
+                        ? ((byFileNs0 && byFileNs0.get(n.text)) || (interpNs0 && interpNs0.get(n.text)) || null)
+                        : null;
                     if (ns0 && ns0.size) {
                         return ts.factory.createObjectLiteralExpression([...ns0].map(([k, v]) =>
                             ts.factory.createShorthandPropertyAssignment(globalRename.get(v) || v, undefined)), false);

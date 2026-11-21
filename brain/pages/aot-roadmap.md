@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-21T11:01:30"
+updated: "2026-11-21T11:43:27"
 ---
 
 <!-- compiled_truth -->
@@ -672,3 +672,9 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   summary: "2026-11-21 fix：修复命名空间成员直调 rest 元数（issue(...args)）、try 内 br 目标值、按 wasm 签名补 void 返回、跨文件导出重名与 namespace re-export 展平；完整 zod 入口已过 wasm-validate + wamrc，test_ss/clash/test_aot 全绿。仍未达 100% 兼容：interpJs 顶层求值报 'value is not iterable'，glue 运行时失败，需继续修 interp 多文件拼接/命名空间展平"
   source: session 2026-11-21
   affects: [aot-roadmap, aot-readiness]
+
+- time: 2026-11-21T11:43:27
+  kind: evidence
+  summary: "2026-11-21 follow-up：具名 namespace re-export 的 interp 专用成员表与 wasm nsAliasByFile 拆开，修复 v3 ZodError.ts arrayToEnum 编译回归；coverage 恢复 125/125、wasm 20845/20945 (99.5%)。完整 zod glue 运行时仍报 TypeError value is not iterable，100% 兼容未达成"
+  source: session 2026-11-21
+  affects: [aot-roadmap]
