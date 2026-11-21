@@ -1309,10 +1309,21 @@ Emitter.prototype.emitTaggedExpr = function (e) {
                     const cn = this._calleeInfo(resolved);
                     const xn = cn && cn.mode !== this.mode;
                     const cp = this._calleeParams(resolved) || (this.importAlias && this._calleeParams(this.importAlias.get(resolved)));
-                    for (const a of e.arguments) { this.emitTaggedExpr(a); if (xn) this._argToCallee(resolved); }
-                    if (cp && !cp.some(p => p.dotDotDotToken)) for (let i = e.arguments.length; i < cp.length; i++) { this._emitUndefined(); if (xn) this._argToCallee(resolved); }
+                    const hasRest = !!(cp && cp.some(p => p.dotDotDotToken));
+                    const usesArgs = !!(this._fnArgs && this._fnArgs.has(resolved));
+                    // 实参多于形参且被调读取 arguments：直调会丢额外实参 → 退回值调用保留完整实参。
+                    if (cp && !hasRest && usesArgs && e.arguments.length > cp.length) {
+                        this._emitValueCall(e.expression, e.arguments, undefined); return;
+                    }
+                    // rest/元数统一交给 _emitCallArgs：此前全量压栈，rest 被调只收 1 个打包数组 →
+                    // 多余实参留在栈上，wasm 调用签名不符（zod issue(...args) 触发）。
+                    if (cp) this._emitCallArgs(cp, e.arguments, resolved, true);
+                    else for (const a of e.arguments) { this.emitTaggedExpr(a); if (xn) this._argToCallee(resolved); }
                     this.m.call(this._fnName(resolved));
-                    this._retFromCallee(resolved); return;
+                    this._retFromCallee(resolved);
+                    const nsRes = this.m.funcResults(this._fnName(resolved));
+                    if (!nsRes || nsRes.length === 0) this._emitUndefined();
+                    return;
                 }
             }
             // 类静态方法优先：C.push/C.pop 等与数组方法同名，不能走数组快路径
@@ -1471,7 +1482,10 @@ Emitter.prototype.emitTaggedExpr = function (e) {
         }
         this.m.call(this._fnName(fn));
         this._retFromCallee(fn);
-        if (ct && ct.void) this._emitUndefined();                 // void 被调：tagged 表达式恒出一值（语义 undefined）
+        // void 判定以 wasm 签名为准：TS 未显式写 `: void` 但函数体无返回时 fnMode.void=false，
+        // 旧逻辑漏补 undefined → 表达式语句的 drop 落在空栈上。
+        const calleeRes = this.m.funcResults(this._fnName(fn));
+        if (!calleeRes || calleeRes.length === 0) this._emitUndefined();
         this._emitErrCheck();
         return;
     }

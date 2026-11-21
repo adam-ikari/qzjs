@@ -961,7 +961,11 @@ class Emitter {
         M.globalGet(1); M.i64Eqz(); M.i32Eqz();                  // __err != 0 ?
         M.ifBlock("void");
         if (this._tryStack.length) {
-            M.br((this.depth + 1) - this._tryStack[this._tryStack.length - 1].errBrk);   // +1：本 if 自身多一层 block
+            const d = (this.depth + 1) - this._tryStack[this._tryStack.length - 1].errBrk;   // +1：本 if 自身多一层 block
+            const target = M._blockTypes[M._blockTypes.length - 1 - d];
+            if (target === "i64") this._emitUndefined();
+            else if (target === "f64") M.i64ConstBits(...f64Bits(NaN));   // f64 档 NaN-box 位型
+            M.br(d);
         } else {
             this._emitPendingFinally(true, false);                // 无 try → 跑完 finally 后立即向上返回
             if (!this._fnVoid) this._emitUndefined();

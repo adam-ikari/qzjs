@@ -66,6 +66,7 @@ const OP = {
 
 class Module {
     constructor(opts) { this.types = []; this.imports = []; this.funcs = []; this.memory = null; this.exports = []; this.codes = []; this.globals = null; this.data = []; this.startIdx = null; this.table = null; this.tableElems = []; this._typeIdx = {}; this._funcIdx = {}; this._importIdx = {}; this._cur = null;
+        this._blockTypes = [];                 // block/loop/if 结果类型栈（br 目标类型判定）
         this.debug = !!(opts && opts.debug);   // 生成 name 段（函数名）→ wat/wasm 可读，DAP 友好
         this._fnNames = [];                    // funcidx(全局) → 名（导入在前，本地函数在后）
         this.debugLine = !!(opts && opts.debugLine); // 生成 DWARF 调试段（.debug_info/line/abbrev/str）
@@ -136,8 +137,9 @@ class Module {
         const idx = (this._codeIdx || {})[name];
         if (idx === undefined) throw new Error(`[wasm-encoder] startBody 未知函数 "${name}"（未 declareFunc）`);
         this._cur = { idx, name, locals: locals || [], names: names || null, body: [], marks: [], declLine: declLine || 1 };
+        this._blockTypes.length = 0;
     }
-    endBody() { if (this._cur) { this._cur.body.push(OP.end); this.codes[this._cur.idx] = { name: this._cur.name, locals: this._cur.locals, names: this._cur.names, body: this._cur.body, marks: this._cur.marks, declLine: this._cur.declLine }; this._cur = null; } }
+    endBody() { if (this._cur) { this._blockTypes.length = 0; this._cur.body.push(OP.end); this.codes[this._cur.idx] = { name: this._cur.name, locals: this._cur.locals, names: this._cur.names, body: this._cur.body, marks: this._cur.marks, declLine: this._cur.declLine }; this._cur = null; } }
     // 语句级行标记：记录「当前函数体内指令字节偏移 → 源码行」。DWARF 行表用。
     markLine(srcLine) { if (this.debugLine && this._cur) this._cur.marks.push([this._cur.body.length, srcLine]); }
     addFunc(name, params, results, locals) {
@@ -153,7 +155,7 @@ class Module {
     start(name) { this.addFunc(name, [], []); }
     // --- 指令 ---
     _emit(...bytes) { this._cur.body.push(...bytes); }
-    end() { this._emit(OP.end); }        // 结束 block/loop/if（只 push end）
+    end() { this._emit(OP.end); if (this._blockTypes.length) this._blockTypes.pop(); }   // 结束 block/loop/if
     finish() { this._emit(OP.end); if (this._cur) { this.codes.push({ locals: this._cur.locals, body: this._cur.body }); this._cur = null; } }
     i32Const(v) { this._emit(OP.i32_const, ...sleb(v | 0)); }
     i64Const(v) { this._emit(OP.i64_const, ...sleb64(v)); }
@@ -209,9 +211,9 @@ class Module {
     i32Shl() { this._emit(OP.i32_shl); } i32ShrU() { this._emit(OP.i32_shr_u); } i32ShrS() { this._emit(OP.i32_shr_s); } i32Or() { this._emit(OP.i32_or); } i32And() { this._emit(OP.i32_and); }
     i32And() { this._emit(OP.i32_and); } i32Or() { this._emit(OP.i32_or); } i32Xor() { this._emit(OP.i32_xor); }
     // 控制流（label 用索引引用，wasm 相对深度）
-    block(t) { this._emit(OP.block, t ? VAL[t] : VAL.void); }
-    loop(t) { this._emit(OP.loop, t ? VAL[t] : VAL.void); }
-    ifBlock(t) { this._emit(OP.if, t ? VAL[t] : VAL.void); }
+    block(t) { this._emit(OP.block, t ? VAL[t] : VAL.void); this._blockTypes.push(t || "void"); }
+    loop(t) { this._emit(OP.loop, t ? VAL[t] : VAL.void); this._blockTypes.push(t || "void"); }
+    ifBlock(t) { this._emit(OP.if, t ? VAL[t] : VAL.void); this._blockTypes.push(t || "void"); }
     else_() { this._emit(OP.else); }
     br(depth) { this._emit(OP.br, ...uleb(depth)); }
     brIf(depth) { this._emit(OP.br_if, ...uleb(depth)); }
