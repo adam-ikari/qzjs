@@ -27,6 +27,7 @@ qzjs --bytecode app.bc [args...]  # run precompiled bytecode
 qzjs                       # interactive REPL (Ctrl-D to exit)
 qzjs --help                # usage
 qzjs --version             # version string
+qzjs --seed=42 script.js  # deterministic RNG seed (reproducible Math.random())
 ```
 
 ### Script mode
@@ -90,6 +91,11 @@ bound to the exact qzjs build — an incompatible file fails with
 - **`globalThis.env`** — the process environment as a plain object.
 - **Exit codes** — `0` success; `1` script threw (message on stderr) or the file
   was unreadable; `2` unknown flag / bad `-e` usage.
+- **Deterministic RNG** — `--seed=<u64>` pins the seed behind `Math.random()`
+  (and the engine's hash seed, which decides property enumeration order for
+  hash-backed objects). The same seed gives an identical sequence across runs;
+  `0` (the default) seeds from the clock. See
+  [Layering](/architecture/qzvm-qzjs-layering) constraint ③.
 
 ## Control plane (`qzjs-ctl`)
 

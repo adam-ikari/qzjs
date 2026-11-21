@@ -180,3 +180,18 @@ int qz_compile(const char *source, size_t len, const char *filename,
  * qzjs 线程侧内部函数（thread.c 调用）
  * ================================================================ */
 
+
+
+/* ================================================================
+ * tick 原语（原 host/thread.c 的 qz_flush_microtasks 上移，M3）
+ *
+ * 在安全点排空 JS 微任务 / 待执行 job，返回本轮处理数。纯 quickjs API，
+ * 零 libuv —— 宿主每轮 uv_run 后调它拉模块推进（§5.4 tick 拉模型）。
+ * ================================================================ */
+int qz_tick(qz_t *rt)
+{
+    int total = 0, n;
+    JSContext *job_ctx = NULL;
+    while ((n = JS_ExecutePendingJob(rt->jsrt, &job_ctx)) > 0) total += n;
+    return total;
+}

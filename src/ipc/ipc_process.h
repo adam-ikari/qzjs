@@ -112,6 +112,17 @@ size_t qz_ipc_build_ack(char *out, size_t cap, int ok);
                                          * ping 转发失败（无对应子槽位/通道
                                          * 死）：中间节点回 corr=seq，宿主
                                          * 快速 -1（不白等 timeout）。 */
+#define QZ_IPC_CTL_GC_MSG     "{\"qzjs\":1,\"gc\":1}"   /* 宿主显式驱动 GC
+                                         * （qz_gc()）：主RT 读回调转 msgq
+                                         * flags=QZ_MSG_FLAG_GC_RUN，由 wake
+                                         * 分割点就地 JS_RunGC。**不走控制面**
+                                         * ——它不受 control_plane 档位门控
+                                         * （OFF 档下仍生效），也无 correl/
+                                         * 回执。多进程模型下 GC 只存在于主RT
+                                         * 进程，宿主进程没有 JS，故必须跨进程
+                                         * 传递；若 worker 各自有 JSRuntime（树
+                                         * 形拓扑），命令按 target_path 逐跳
+                                         * 下发即可复用现有 CONTROL 路由。 */
 typedef enum {
     QZ_IPC_CTL_NONE = 0,   /* 非 M-P2 协议 CONTROL payload */
     QZ_IPC_CTL_READY,
@@ -125,6 +136,8 @@ typedef enum {
                               * 跨层回显 "tp"） */
     QZ_IPC_CTL_PFAIL,      /* 跨层 ping 转发失败（{"qzjs":1,"pfail":1,
                               * "corr":seq}） */
+    QZ_IPC_CTL_GC,         /* 显式 GC 驱动（{"qzjs":1,"gc":1}，qz_gc()）：
+                              * 主RT 读回调转 msgq flags=GC_RUN 就地执行 */
 } qz_ipc_ctl_kind_t;
 
 /* 跨层 ping/pong payload 的 "tp" 数组提取（u16 槽位链，§8.2 root-relative）。

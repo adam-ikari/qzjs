@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [dap, debugger, quickjs, bytecode, pc2line]
 created: "2026-09-26T21:17:27"
-updated: "2026-09-27T04:13:22"
+updated: "2026-10-13T08:18:12"
 ---
 
 <!-- compiled_truth -->
@@ -15,7 +15,7 @@ updated: "2026-09-27T04:13:22"
 
 **根因**（字节码 dump 证实）：quickjs-ng `resolve_labels` 的 peephole 通过 `code_match` 前瞻时会跳过 `OP_source_loc` marker 并返回*最后一个被跳过的 marker* 的行（即下一语句的行），随后在 `add_pc2line_info(bc_out.size, …)`（当前输出位置）之前先采纳该行 → 行表条目整体早一个语句。测试程序 `f` 的表曾是 (1,3),(2,4),(4,5)：行 3 断点在 PC1（上一语句 `var x=1` 的 store 尚未执行）命中 → `locals.x` 为 undefined → evaluate 返回 result:"error"。
 
-**修复**（3 处，全部在 `deps/quickjs-ng/quickjs.c`，镜像进 `deps/quickjs-ng-debugger.patch`）。不变量：条目必须用"被合并 opcode 起始处的行"，lookahead 消费的 marker 在 emit 之后才生效。
+**修复**（3 处，全部在 `deps/quickjs-ng/quickjs.c`，镜像进 `src/qzvm/patches/engine-dap-debugger.patch`）。不变量：条目必须用"被合并 opcode 起始处的行"，lookahead 消费的 marker 在 emit 之后才生效。
 1. 语句入口 `emit_source_loc`（首轮只做了 `case TOK_VAR`，第二轮上移为通用入口，见下——TOK_VAR 专用 emit 已删）。
 2. `OP_put_loc` fold（put_x+get_x→set_x）：先 add 再采纳 cc.line/col。
 3. `OP_post_inc` fold（第二次 `code_match` 可跨语句吞掉下一句的 get_x）：引入 `bool fold`，先 add+emit 再在 `if (fold)` 内采纳。
@@ -43,7 +43,7 @@ updated: "2026-09-27T04:13:22"
 ## 工作流 gotcha：子模块 patch 镜像
 
 - `git -C deps/quickjs-ng diff` 是 4 个 configure-time patch 的**超集**（c99-atomics → drain-jobs → bc-reader-hardening → debugger，见 CMakeLists.txt:333-486）。debugger-only delta 必须 diff(worktree, HEAD+atomics+drain+bc)，基线副本在 `/tmp/opencode/base_patched`（已核对：与 fresh HEAD+3patch 逐字节相同，c-atomics.h 同步过）。
-- 镜像流程：`git diff --no-index --src-prefix= --dst-prefix= base_patched/quickjs.c <worktree>/quickjs.c > /tmp/opencode/qjs_debugger_only.diff` → `python3 /tmp/opencode/assemble_patch.py`（保留 header/opcode/quickjs.h 三段字节相同，只换 quickjs.c 段）→ 覆盖 `deps/quickjs-ng-debugger.patch`。
+- 镜像流程：`git diff --no-index --src-prefix= --dst-prefix= base_patched/quickjs.c <worktree>/quickjs.c > /tmp/opencode/qjs_debugger_only.diff` → `python3 /tmp/opencode/assemble_patch.py`（保留 header/opcode/quickjs.h 三段字节相同，只换 quickjs.c 段）→ 覆盖 `src/qzvm/patches/engine-dap-debugger.patch`。
 - 金标准校验：把 4 个 patch 依 CMake 顺序应用到 clean HEAD 副本 → `cmp` 四文件（quickjs.c / quickjs.h / quickjs-opcode.h / quickjs-c-atomics.h）与工作树逐一相同；再加 hunk 计数校验（/tmp/opencode/hunkcheck.py）+ 对已 patch 树的 reverse dry-run。
 - 旧 patch 的 a-side 基线是 stale 的 v0.16.2（HEAD 已是 0.17.0）——靠 offset 也能应用，但重建时已刷新为 configure 时基线。
 - **构建时序 gotcha**：改 quickjs.c 后必须真正 `cmake --build build_dbg`（`libqjs.a` mtime 要新于源文件）；一次被过滤掉输出的构建命令可能实际没重编，导致"改了但行为没变"的假阴性——用探针/测试验证前先查 `stat libqjs.a`。
@@ -79,4 +79,10 @@ updated: "2026-09-27T04:13:22"
   kind: decision
   summary: "修正上一条：移除误入 compiled_truth 的重复 '## Timeline' 标题（结构修复，内容不变）"
   source: "2026-09-27 断点行覆盖修复会话"
+  affects: [dap-pc2line-line-attribution]
+
+- time: 2026-10-13T08:18:12
+  kind: decision
+  summary: "修正失效引用：镜像目标 patch 名 deps/quickjs-ng-debugger.patch → src/qzvm/patches/engine-dap-debugger.patch（补丁已随 5fe3413d 迁到 qzvm 树）。"
+  source: "locale 核实：src/qzvm/patches/ 实际内容"
   affects: [dap-pc2line-line-attribution]

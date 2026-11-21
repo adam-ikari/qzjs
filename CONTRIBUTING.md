@@ -31,6 +31,11 @@ cd build && ctest -L offline --output-on-failure
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
+**Language**: commit messages, PR titles, and PR descriptions are English only —
+this is a globally distributed open-source project, and its history is read by
+contributors who do not read Chinese. Use a Chinese summary only as an additional
+line when a design rationale genuinely loses meaning in translation.
+
 ```
 feat(qzjs): add timer handle leak protection on HTTP abort
 fix(uv_io): fix chunked response decode boundary case

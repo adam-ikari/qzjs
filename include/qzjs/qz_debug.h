@@ -3,7 +3,7 @@
  *
  * PAL-agnostic. Provides breakpoint/step/pause and call-frame/local
  * introspection on top of the QuickJS-ng debugger engine patch
- * (deps/quickjs-ng-debugger.patch). The DAP protocol front-end
+ * (src/qzvm/patches/engine-dap-debugger.patch). The DAP protocol front-end
  * (qz_debug_dap.h) builds on this; hosts may also drive it directly.
  *
  * Compiled in only when QZ_BUILD_DEBUGGER=ON (which defines

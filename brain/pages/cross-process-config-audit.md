@@ -5,10 +5,9 @@ category: decision
 status: active
 tags: [audit, cross-process, ipc, methodology]
 created: "2026-10-06T10:04:34"
-updated: "2026-10-06T10:04:50"
+updated: "2026-10-15T09:14:07"
 ---
 
-<!-- compiled_truth -->
 <!-- compiled_truth -->
 ## 背景
 
@@ -80,4 +79,22 @@ IPC 控制帧只有 READY/IDLE/SHUTDOWN/CLOSING/PING/PONG/PFAIL，**IDLE 仅存�
   kind: decision
   summary: "跨进程配置传递审计：可复用的四条扫描判据 + 2026-10 全库扫描结论（含否定项）"
   source: "2026-10 以 #9~#16 沉淀的失效模式扫全库"
+  affects: [cross-process-config-audit]
+
+- time: 2026-10-13T08:35:24
+  kind: decision
+  summary: "规范化存储标记：compiled_truth 区块开头重复的 <!-- compiled_truth --> 标记（CLI extractSection 会把它当正文首行）已去掉；正文无实质改动。"
+  source: "brain CLI 重复 marker 自愈"
+  affects: [cross-process-config-audit]
+
+- time: 2026-10-15T07:54:38
+  kind: decision
+  summary: "新增字段 random_seed 的跨进程传递 + 判据升级。random_seed（确定性随机源，约束③）照本页判据 #1 走 rt_host.c 的 --seed argv 进主RT；worker 是独立 qz_t（config 被 calloc 清零、不继承父配置）故另按槽位派生 parent_seed+slot+1——这类「worker 不继承父 qz_config_t」是本页未覆盖的第 5 类边界（父→in-process worker runtime），目前只有 seed 与 CA 做了继承。判据加固：本页 #1 是**静态**检查（字段名是否出现在 argv 组装里），捕不到「argv 拼了但子进程没解析」或「解析了但没写进 config」——新增行为型 e2e test/test_seed_determinism_e2e.sh 补这一段，并带**负控**（临时把 rt_host.c 的 --seed 透传断掉，e2e 立刻红）。建议后续为其它跨进程字段复制该「静态门 + 行为 e2e + 负控」三件套。"
+  source: "实现 random_seed 跨进程传递时按本页判据核对"
+  affects: [cross-process-config-audit]
+
+- time: 2026-10-15T09:14:07
+  kind: decision
+  summary: "第 3 个确定性字段 memory_limit 的跨进程传递（本页判据 #1 再次命中）。qz_config_t.memory_limit 照判据 #1 走 rt_host.c 的 --memory-limit argv 进主RT，rt_main.c 还原；worker（独立 qz_t、config 被 calloc 清零）另按同一绝对值继承。**判据 #1 的静态检查又一次不够**：字段名出现只说明「拼了」，不说明「解析了/写进 config 了」——本轮照 seed 的先例补了行为型 e2e（test/test_mem_limit_e2e.sh + test/mem_limit_e2e.c，跨真进程边界做值级断言），并实测负控：断掉 rt_host.c 的 argv 透传后 e2e 立刻红（报「竟然成功——上限没穿到主RT」）。至此本页建议的三件套（静态门 + 行为 e2e + 负控）已在 seed 与 memory_limit 两个字段上落地；剩余跨进程字段建议照抄。"
+  source: "实现 memory_limit 透传时按本页判据核对"
   affects: [cross-process-config-audit]

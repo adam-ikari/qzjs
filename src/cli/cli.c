@@ -35,6 +35,9 @@
  * run_code 应用到 qz_config_t）。-1 = 缺省（OFF）。 */
 static int g_control_plane = -1;
 static const char *g_control_pipe = NULL;
+/* 确定性随机源（--seed=N）：!=0 时 runtime 的 context 以它作初始 random_state
+ * → Math.random() 与对象属性枚举序逐次可复现（qz_config_t.random_seed）。 */
+static uint64_t g_random_seed = 0;
 /* strict 模式（--strict-sandbox=PATH）：安全跑第三方/不可信代码。gz_fs 限根、
  * processSpawn 仅 qzjs-rt、env 白名单。env 白名单默认 {PATH,HOME,LANG}，
  * QZ_STRICT_ENV 环境变量可逗号分隔覆盖。 */
@@ -57,6 +60,9 @@ static void usage(FILE *out) {
         "                      qjsc -b; bytecode is NOT portable across qzjs versions)\n"
         "  --compile <in.js>   compile JS source to a bytecode file\n"
         "  -o <out.bc>         output path for --compile (default <in.js>.bc)\n"
+        "  --seed=<u64>        deterministic RNG seed: Math.random() and object\n"
+        "                      property enumeration order become reproducible\n"
+        "                      (0 = seed from the clock, the default)\n"
         "  --control-plane=<off|in-proc|local>\n"
         "                      control-plane tier (default off); local exposes\n"
         "                      an AF_UNIX endpoint (see qzjs-ctl)\n"
@@ -428,6 +434,11 @@ static void apply_control_plane(qz_config_t *cfg) {
     cfg->control_pipe_path = g_control_pipe;
 }
 
+/* 确定性随机（--seed=N → qz_config_t.random_seed）。0 = 时钟播种（缺省）。 */
+static void apply_random_seed(qz_config_t *cfg) {
+    if (g_random_seed) cfg->random_seed = g_random_seed;
+}
+
 /* strict 模式应用（--strict-sandbox 解析于 main，run_code 应用到 config）。
  * env 白名单：QZ_STRICT_ENV 逗号分隔覆盖缺省 {PATH,HOME,LANG}。 */
 static const char *const *strict_env_allow(void) {
@@ -506,6 +517,7 @@ static int run_code(const char *code, const char *file,
     qz_config_init(&cfg);
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+    apply_random_seed(&cfg);
     apply_strict_mode(&cfg);
     /* strict 下 env 白名单非 NULL（可能为空表 {NULL} → 注入 {}）；非 strict 传
      * NULL → build_bootstrap 保留现状的全量 environ 注入。 */
@@ -622,6 +634,7 @@ static int repl_loop(void) {
     cfg.initial_script = bootstrap;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+    apply_random_seed(&cfg);
     apply_strict_mode(&cfg);
 
     qz_t *rt = qz_create(&cfg);
@@ -767,6 +780,7 @@ static int run_bytecode(const char *bc_path, const char *const *args, int nargs)
     cfg.initial_bytecode_len = (size_t)sz;
     apply_worker_backend(&cfg);
     apply_control_plane(&cfg);
+    apply_random_seed(&cfg);
     apply_strict_mode(&cfg);
 
     qz_t *rt = qz_create(&cfg);
@@ -815,6 +829,10 @@ int cli_main(int argc, char **argv) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(stdout);
             return 0;
+        }
+        if (!strncmp(argv[i], "--seed=", 7)) {
+            g_random_seed = strtoull(argv[i] + 7, NULL, 10);
+            continue;
         }
         if (!strncmp(argv[i], "--control-plane=", 16)) {
             const char *v = argv[i] + 16;

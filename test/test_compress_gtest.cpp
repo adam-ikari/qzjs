@@ -2,7 +2,7 @@
 //
 // CompressionStream/DecompressionStream 的压缩动作在 writable.close() 内同步完成
 // （pal.nativeCompress / pal.nativeDecompress，纯 CPU 无 I/O），剩下的只是 promise
-// 链（微任务）。qzjs 线程每轮 uv_run 后冲刷全部微任务（qz_flush_microtasks 排空
+// 链（微任务）。qzjs 线程每轮 uv_run 后冲刷全部微任务（qz_tick 排空
 // job 队列），因此下一次 host_eval 即可见上一阶段的结果；最终结果用
 // host_poll_until_value 轮询标志位（与 test_polyfill_gtest 的异步模式一致）。
 //

@@ -549,8 +549,8 @@ index c9a0a6c..e483839 100644
  typedef int JSInterruptHandler(JSContext *ctx, void *opaque);
  JS_EXTERN void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque);
 +
-+/* ====== qwrt Debugger API ======
-+ * Added by deps/quickjs-ng-debugger.patch. When a debugger is attached
++/* ====== qzjs Debugger API ======
++ * Added by src/qzvm/patches/engine-dap-debugger.patch. When a debugger is attached
 + * (JS_SetDebuggerHandler with a non-NULL hooks), the bytecode dispatch loop
 + * calls hooks->on_dispatch once per opcode. The handler must return 0 to
 + * continue; to pause it BLOCKS inside on_dispatch (e.g. pumping a debug
