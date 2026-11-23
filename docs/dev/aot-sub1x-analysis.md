@@ -99,6 +99,22 @@ interp 0.508 ms / 100 次 ≈ 5 µs/次。也就是说 zod 的解析逻辑在两
 或在不触碰共享状态/async 的前提下把同步热函数真正翻入 wasm。后者受
 `aot-zod-hotspot-measurement` 记录的 schemas/checks 共享状态与挂起语义限制。
 
+## 已实施优化后的同口径 A/B（2026-11-24，本地）
+
+同一 `qzjs` 二进制、同一 `bench/aot-product/run.js --rebuild`、5 次 p50；基线源码
+`c6797e04` 与本轮起点 `a259d07b` 的 AOT 运行时源码完全一致。CI 基线文件未改写。
+
+| 负载 | 基线 wasm p50 | 优化后 wasm p50 | 比值 | 说明 |
+|---|---:|---:|---:|---|
+| `computeWork` | 34.238 ms | 32.535 ms | 1.05× | 噪声范围内，未改数值路径 |
+| `jsonWork` | 1690.643 ms | 1632.605 ms | 1.04× | `field_order_lit` 缓存收益很小 |
+| `validationWork` | 8633.842 ms | 3042.792 ms | **2.84×** | 原 1.7M 跨界降至约 300k（严格比较/null/typeof/短路内联） |
+
+载荷从 23514 B 降至 22986 B（-2.2%）；三负载 check 均一致。`validationWork` 仍慢于
+interp（0.03× vs 0.01×），但跨界热点已大幅收敛。剩余的 `qz.method_call`（200k，字符串
+`indexOf`）和 `qz.rem`（100k）未优化；一次 `rem` 零余数快路径实验因破坏 `-0`/宿主回退语义
+已完整回退。
+
 ## 优先级
 
 1. 减少每次跨界的 JS shim 成本（最高杠杆，覆盖四个负载）。

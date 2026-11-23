@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-24T00:30:05"
+updated: "2026-11-24T07:48:19"
 ---
 
 <!-- compiled_truth -->
@@ -65,4 +65,10 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   kind: evidence
   summary: "strict 比较构成的 &&/|| 短路条件直接发裸 i32 逻辑，表达式位再 box 为 tagged bool。validationWork(200000) 现网计数：qz.truthy 400000→0；剩余 method_call 200000、rem 100000；check=300000，test_aot ALL PASS。"
   source: "src/qzvm/aot/test_bool_shortcircuit.js + instrumented aotp glue"
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-24T07:48:19
+  kind: evidence
+  summary: "同口径本地 A/B（run.js --rebuild, 5 reps, same qzjs, baseline c6797e04 vs optimized 2b2d5fc5): validationWork wasm p50 8633.842ms→3042.792ms = 2.84x；compute 34.238→32.535ms，json 1690.643→1632.605ms；载荷 23514→22986B；CI baseline 未改。"
+  source: "docs/dev/aot-sub1x-analysis.md + /tmp/perf_baseline_final.txt + /tmp/perf_optimized_final.txt"
   affects: [aot-sub1x-root-cause]
