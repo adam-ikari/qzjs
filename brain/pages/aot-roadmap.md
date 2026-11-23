@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-23T11:08:47"
+updated: "2026-11-23T11:23:02"
 ---
 
 <!-- compiled_truth -->
@@ -695,4 +695,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "2026-11-23 集成收尾：origin/master 037cb6a4 已 merge 进 experiment/aot-v2，保持 PR #29 draft。merge 后 cmake --build + ctest -L offline 30/30、四个 AOT 回归全绿、从当前 HEAD 重建 zodbench bench(100)=100。完整 interp 与 wasm/AOT 输出一致。"
   source: "github PR #29 checks run 45097611561; local integration logs /tmp/integration.* /tmp/zodbench.merged.*"
+  affects: [aot-roadmap]
+
+- time: 2026-11-23T11:23:02
+  kind: evidence
+  summary: "2026-11-23: PR #29 在 8a870073（合并 origin/master 后）全矩阵 CI 完成，31/31 checks pass，Merge state CLEAN，PR 保持 draft。"
+  source: "gh pr checks 29 --watch run 45104380334; pr://29"
   affects: [aot-roadmap]

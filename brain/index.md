@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-23T03:08:47.256Z._
+_Auto-generated. Last updated 2026-11-23T03:23:02.369Z._
 
 - [a2-worker-robustness](pages/a2-worker-robustness.md) — category: decision | tags: [worker, suspend, transferable, robustness, gtest] | - **范围**：ROADMAP A2「多上下文 / Worker 健壮性」= 软挂起恢复边界、transferable 泄漏、worker 错误事件流全覆盖，交付 gtest + 压力。
 - [agent-notify-protocol](pages/agent-notify-protocol.md) — category: concept | tags: [agent-ops, protocol] | 汇报协议（用户裁决 2026-11-13，绑定 agent-ops）：
