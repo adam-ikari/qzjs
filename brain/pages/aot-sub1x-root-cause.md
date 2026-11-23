@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-23T19:00:34"
+updated: "2026-11-23T21:53:49"
 ---
 
 <!-- compiled_truth -->
@@ -41,4 +41,10 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   kind: evidence
   summary: "四个低于 1× 负载均定位到 qz.* 跨界：jsonWork 12 calls/iter、validationWork 8.5、objWork 2（field_order_lit+restore_handles）、zodbench 4（safeParse 在 HOST_HI 宿主方法）。"
   source: docs/dev/aot-sub1x-analysis.md
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-23T21:53:49
+  kind: evidence
+  summary: "field_order_lit static field-name cache: focused A/B 30k calls p50 8.25ms→7.643ms (0.6ms); product benchmark noise dominated. Not a material optimization; keep only as correctness-neutral dedup of per-literal split."
+  source: "src/qzvm/aot/test_field_order_cache.js + /tmp/bench_field_order_cache.js"
   affects: [aot-sub1x-root-cause]
