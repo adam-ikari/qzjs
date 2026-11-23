@@ -48,9 +48,9 @@ emitter 就必须发 `qz.*` import。每次 import 经过 WAMR→JS shim，伴�
 |---|---:|---:|---|
 | `qz.sne` | 800000（4/iter） | 4683 ms | 四处 `typeof ... !== "..."` 严格比较 |
 | `qz.method_call` | 200000（1/iter） | 1651 ms | `v.email.indexOf("@")`（receiver 为字符串句柄） |
-| `qz.rem` | 100000（0.5/iter） | 385 ms | `%` 的 tagged 回退 |
+| `qz.rem` | 100000（0.5/iter） | 385 ms | 取模的 tagged 回退 |
 | `qz.truthy` | 400000（2/iter） | 340 ms | `if` 条件 |
-| `qz.seq` | 200000（1/iter） | 283 ms | `i % 2 === 0` 严格相等 |
+| `qz.seq` | 200000（1/iter） | 283 ms | 严格相等回退（类型守卫 / 分支条件） |
 
 结论：每轮约 8.5 次 `qz.*`，共 1700005 次。`sne` 和 `method_call` 占诊断时间约 77%。
 优化方向：对已知 tag/shape 做静态类型收窄，把 `typeof x !== "literal"` 和字符串原生方法
