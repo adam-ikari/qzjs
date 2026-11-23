@@ -46,6 +46,7 @@ package-lock.json
 !vscode/qzjs-debug/package-lock.json
 !src/polyfill/package-lock.json
 !src/qzvm/aot/package-lock.json
+!bench/aot-product/package-lock.json
 
 # IDE / editor
 .vscode/

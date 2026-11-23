@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 
@@ -1713,3 +1714,83 @@ jobs:
           path: corpus-out/
           if-no-files-found: warn
           retention-days: 30
+
+  # ============================================================================
+  # AOT performance/memory baseline: the ONLY authoritative baseline source.
+  # Local measurements are for development only; the committed baseline JSON
+  # comes from this job on ubuntu-latest with pinned Node/wamrc/zod versions.
+  # ============================================================================
+  aot-perf-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    name: AOT perf/memory baseline
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/ccache-setup
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config ninja-build python3 curl
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install npm deps (polyfill, AOT emitter, pinned zod source)
+        run: |
+          npm ci --prefix src/polyfill
+          npm ci --prefix src/qzvm/aot
+          npm ci --prefix bench/aot-product
+
+      - name: Configure (Release, WAMR enabled)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQZ_BUILD_TESTS=OFF \
+            -DQZ_WITH_WAMR=ON
+
+      - name: Build qzjs
+        run: cmake --build build --target qzjs --parallel
+
+      - name: Install wamrc 2.4.5
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/wamrc-2.4.5
+          curl -fsSL --retry 3 --connect-timeout 20 \
+            -o /tmp/wamrc-2.4.5.tar.gz \
+            https://github.com/wasm-micro-runtime/wasm-micro-runtime/releases/download/WAMR-2.4.5/wamrc-2.4.5-x86_64-ubuntu-22.04.tar.gz
+          tar -xzf /tmp/wamrc-2.4.5.tar.gz -C /tmp/wamrc-2.4.5
+          WAMRC=$(find /tmp/wamrc-2.4.5 -type f -name wamrc -print -quit)
+          test -n "$WAMRC"
+          chmod +x "$WAMRC"
+          "$WAMRC" --version
+          echo "WAMRC=$WAMRC" >> "$GITHUB_ENV"
+
+      - name: Collect AOT baseline
+        run: |
+          QZJS="$PWD/build/qzjs" \
+            node bench/aot-product/baseline_ci.mjs --out /tmp/aot-baseline.json \
+            | tee /tmp/aot-baseline.out
+
+      - name: Upload AOT baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aot-perf-baseline-${{ github.sha }}
+          path: |
+            /tmp/aot-baseline.json
+            /tmp/aot-baseline.out
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Compare against committed baseline
+        if: hashFiles('test/perf_baselines/aot.json') != ''
+        run: |
+          python3 test/compare_perf.py \
+            --baseline test/perf_baselines/aot.json \
+            --out /tmp/aot-baseline.out \
+            --section aot
