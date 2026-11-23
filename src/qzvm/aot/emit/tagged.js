@@ -1764,11 +1764,15 @@ Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
 Emitter.prototype.emitCondI32 = function (expr) {
     if (ts.isBinaryExpression(expr)) {
         const isStrLit = (n) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n);
+        const isNull = (n) => n.kind === ts.SyntaxKind.NullKeyword;
         const op = expr.operatorToken.kind;
+        const strict = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
         const typeofVsStrLit = (ts.isTypeOfExpression(expr.left) && isStrLit(expr.right))
             || (isStrLit(expr.left) && ts.isTypeOfExpression(expr.right));
-        if (typeofVsStrLit && (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken)) {
-            this.emitTaggedExpr(expr.left); this.emitTaggedExpr(expr.right);
+        const nullCmp = isNull(expr.left) || isNull(expr.right);
+        if (strict && (typeofVsStrLit || nullCmp)) {
+            if (isNull(expr.left)) { this._emitNull(); this.emitTaggedExpr(expr.right); }
+            else { this.emitTaggedExpr(expr.left); if (nullCmp) this._emitNull(); else this.emitTaggedExpr(expr.right); }
             if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) this.m.i64Eq(); else this.m.i64Ne();
             return;
         }
@@ -2974,12 +2978,16 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         this.emitNullish(e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
     }
-    // typeof 结果恒是 interned 字符串句柄；与字符串字面量严格比较时直接比句柄，免 qz.seq/sne 跨界。
+    // typeof 结果与字符串字面量、以及 null 严格比较：两边都是固定 tagged 位型，直接在 wasm 内比。
     const isStrLit = (n) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n);
+    const isNull = (n) => n.kind === ts.SyntaxKind.NullKeyword;
+    const strict = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
     const typeofVsStrLit = (ts.isTypeOfExpression(e.left) && isStrLit(e.right))
         || (isStrLit(e.left) && ts.isTypeOfExpression(e.right));
-    if (typeofVsStrLit && (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken)) {
-        this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right);
+    const nullCmp = isNull(e.left) || isNull(e.right);
+    if (strict && (typeofVsStrLit || nullCmp)) {
+        if (isNull(e.left)) { this._emitNull(); this.emitTaggedExpr(e.right); }
+        else { this.emitTaggedExpr(e.left); if (nullCmp) this._emitNull(); else this.emitTaggedExpr(e.right); }
         if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) this.m.i64Eq(); else this.m.i64Ne();
         this.emitBoxBool();
         return;
