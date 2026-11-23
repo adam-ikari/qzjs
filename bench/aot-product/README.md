@@ -10,7 +10,7 @@
 | `jsonWork` | JSON→对象映射 | `JSON.parse` + 对象构造 + 属性读 + 数组索引 |
 | `validationWork` | schema 校验（zod 类） | required/type/range/字符串检查 |
 
-工作负载定义在 `workloads/aotp.ts`；解释器基线是同语义纯 JS（内嵌于 `run.js`，勿偏离）。
+工作负载定义在 `workloads/aotp.ts`；解释器基线是同语义纯 JS（`workloads/aotp.interp.js`，`run.js` 与 CI 基线共用，勿偏离）。
 
 ## 变体与口径（host 与真机同一口径）
 
@@ -27,6 +27,22 @@ node bench/aot-product/run.js --rebuild   # 编译并测量
 node bench/aot-product/run.js             # 用已有 build/aot/aotp.* 测量
 QZJS=/path/to/qzjs node bench/aot-product/run.js   # 真机二进制
 ```
+
+## 权威 CI 基线
+
+性能/内存基线只取自 CI job `aot-perf-baseline`（`ubuntu-latest`、Release qzjs、Node 22、
+wamrc 2.4.5、zod 4.6.5）。本地数值只作开发验证，不得写回基线。
+
+```sh
+# 本地 dry-run（不会更新基线）
+npm ci --prefix src/qzvm/aot
+npm ci --prefix bench/aot-product
+QZJS=build/qzjs WAMRC=/path/to/wamrc \
+  node bench/aot-product/baseline_ci.mjs --out /tmp/aot-baseline.json
+```
+
+CI 产出 JSON artifact；首次产物固化为 `test/perf_baselines/aot.json`（外层键 `aot`），
+后续 CI 用 `test/compare_perf.py --section aot` 仅报告 Δ%，不设硬门槛。
 
 ## 准入判定（G2/G3）
 

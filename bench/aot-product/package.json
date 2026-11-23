@@ -1,0 +1,9 @@
+{
+  "name": "qzjs-aot-product-bench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AOT product benchmark inputs with pinned zod source for CI baselines",
+  "dependencies": {
+    "zod": "4.6.5"
+  }
+}
