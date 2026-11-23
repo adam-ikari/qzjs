@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-23T11:23:02"
+updated: "2026-11-23T12:32:18"
 ---
 
 <!-- compiled_truth -->
@@ -701,4 +701,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "2026-11-23: PR #29 在 8a870073（合并 origin/master 后）全矩阵 CI 完成，31/31 checks pass，Merge state CLEAN，PR 保持 draft。"
   source: "gh pr checks 29 --watch run 45104380334; pr://29"
+  affects: [aot-roadmap]
+
+- time: 2026-11-23T12:32:18
+  kind: evidence
+  summary: "2026-11-23: PR #29 已 squash 合并到 master（3682dd5e），CI 31/31 pass。master Pages job 因 docs/guide/cli.md 指向被 srcExclude 排除的 /architecture/qzvm-qzjs-layering 而死链失败；hotfix 改为 GitHub 源文件链接，本地 npm run build 通过。"
+  source: "gh run 45108366473; docs build /tmp/docs.build.log"
   affects: [aot-roadmap]

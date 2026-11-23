@@ -95,7 +95,7 @@ bound to the exact qzjs build — an incompatible file fails with
   (and the engine's hash seed, which decides property enumeration order for
   hash-backed objects). The same seed gives an identical sequence across runs;
   `0` (the default) seeds from the clock. See
-  [Layering](/architecture/qzvm-qzjs-layering) constraint ③.
+  [Layering](https://github.com/adam-ikari/qzjs/blob/master/docs/architecture/qzvm-qzjs-layering.md) constraint ③.
 
 ## Control plane (`qzjs-ctl`)
 
