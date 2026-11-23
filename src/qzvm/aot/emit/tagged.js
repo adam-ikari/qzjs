@@ -1761,7 +1761,42 @@ Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
     M[f64cmp]();
     M.end();
 };
+Emitter.prototype._isBoolCmpExpr = function (expr) {
+    if (!ts.isBinaryExpression(expr)) return false;
+    const op = expr.operatorToken.kind;
+    if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.AmpersandAmpersandToken)
+        return this._isBoolCmpExpr(expr.left) && this._isBoolCmpExpr(expr.right);
+    if (op !== ts.SyntaxKind.EqualsEqualsEqualsToken && op !== ts.SyntaxKind.ExclamationEqualsEqualsToken) return false;
+    const isStrLit = (n) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n);
+    const isNull = (n) => n.kind === ts.SyntaxKind.NullKeyword;
+    return isNull(expr.left) || isNull(expr.right)
+        || (ts.isTypeOfExpression(expr.left) && isStrLit(expr.right))
+        || (isStrLit(expr.left) && ts.isTypeOfExpression(expr.right));
+};
+// 发出裸 i32 布尔。仅用于 _isBoolCmpExpr 已确认的 strict/null/typeof 比较及其 &&/|| 组合。
+Emitter.prototype.emitBoolI32 = function (expr) {
+    const M = this.m;
+    if (!ts.isBinaryExpression(expr)) throw new Error("[tagged] emitBoolI32: not a binary expression");
+    const op = expr.operatorToken.kind;
+    if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.AmpersandAmpersandToken) {
+        M.block("i32"); this.depth++;
+        this.emitBoolI32(expr.left);
+        M.ifBlock("i32");
+        if (op === ts.SyntaxKind.BarBarToken) { M.i32Const(1); M.else_(); this.emitBoolI32(expr.right); }
+        else { this.emitBoolI32(expr.right); M.else_(); M.i32Const(0); }
+        M.end(); this.depth--; M.end();
+        return;
+    }
+    const isNull = (n) => n.kind === ts.SyntaxKind.NullKeyword;
+    if (isNull(expr.left)) { this._emitNull(); this.emitTaggedExpr(expr.right); }
+    else { this.emitTaggedExpr(expr.left); if (isNull(expr.right)) this._emitNull(); else this.emitTaggedExpr(expr.right); }
+    if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) M.i64Eq(); else M.i64Ne();
+};
 Emitter.prototype.emitCondI32 = function (expr) {
+    if (ts.isBinaryExpression(expr) && this._isBoolCmpExpr(expr)) {
+        this.emitBoolI32(expr);
+        return;
+    }
     if (ts.isBinaryExpression(expr)) {
         const isStrLit = (n) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n);
         const isNull = (n) => n.kind === ts.SyntaxKind.NullKeyword;
@@ -3001,6 +3036,14 @@ Emitter.prototype.emitTaggedBinary = function (e) {
 //  && : truthy(a) ? b : a；|| : truthy(a) ? a : b
 Emitter.prototype.emitShortCircuit = function (isAnd, left, right) {
     const M = this.m;
+    if (this._isBoolCmpExpr(left) && this._isBoolCmpExpr(right)) {
+        M.block("i64"); this.depth++;
+        this.emitBoolI32(isAnd ? ts.factory.createBinaryExpression(left, ts.SyntaxKind.AmpersandAmpersandToken, right)
+                               : ts.factory.createBinaryExpression(left, ts.SyntaxKind.BarBarToken, right));
+        this.emitBoxBool();
+        this.depth--; M.end();
+        return;
+    }
     M.block("i64"); this.depth++;                    // block (result i64)
     this.emitTaggedExpr(left);                       // [a]
     M.localSet(this.scratch);                        // []

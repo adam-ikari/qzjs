@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-23T23:31:04"
+updated: "2026-11-24T00:30:05"
 ---
 
 <!-- compiled_truth -->
@@ -59,4 +59,10 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   kind: evidence
   summary: "x === null / !== null 直接比较固定 tagged null 句柄 0x7FF9|1。validationWork(200000) 现网计数：sne 0、seq 0（原 200000）、truthy 400000、method_call 200000、rem 100000；总跨界约 900005→700005；check=300000，test_aot ALL PASS。"
   source: "src/qzvm/aot/test_null_strict_eq.js + instrumented aotp glue"
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-24T00:30:05
+  kind: evidence
+  summary: "strict 比较构成的 &&/|| 短路条件直接发裸 i32 逻辑，表达式位再 box 为 tagged bool。validationWork(200000) 现网计数：qz.truthy 400000→0；剩余 method_call 200000、rem 100000；check=300000，test_aot ALL PASS。"
+  source: "src/qzvm/aot/test_bool_shortcircuit.js + instrumented aotp glue"
   affects: [aot-sub1x-root-cause]
