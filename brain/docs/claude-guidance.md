@@ -259,10 +259,11 @@ Example: the Web Crypto 65536-byte cap on `getRandomValues` lives in
 - **Never edit vendored dep source** — control them only via CMake
   variables/options in the root `CMakeLists.txt`. Deps are pinned to specific
   git tags; update by checking out the desired tag in the submodule.
-- `src/debugger.c` + `src/debugger_dap.c` (+ `include/qzjs/qz_debug{,_dap}.h`)
+- `src/qzvm/debugger.c` + `src/qzvm/debugger_dap.c` (+ `include/qzjs/qz_debug{,_dap}.h`)
   implement the DAP step-debugger, gated by `QZ_BUILD_DEBUGGER` (default OFF;
-  applies `deps/quickjs-ng-debugger.patch` to the engine).
-- `libam_full` is a CMake link-interface aggregator (qzjs + real libuv + enabled extensions) for host embedding; the core static lib deliberately does not bundle uv/extension symbols — they resolve at the final link, and `install` ships every vendored archive alongside `libqzjs.a`.
+  the `src/qzvm/patches/engine-dap-debugger.patch` engine patch is applied
+  unconditionally at configure time — the option gates only the qzjs-side sources).
+- `qz_full` is a CMake link-interface aggregator (qzjs + real libuv + enabled extensions) for host embedding; the core static lib deliberately does not bundle uv/extension symbols — they resolve at the final link, and `install` ships every vendored archive alongside `libqzjs.a`.
 - `qzjs.pc` (pkg-config, full static link line) is also produced.
 - `.github/workflows/ci.yml` — Actions matrix: most jobs build with
   `-DQZ_WITH_WAMR=OFF` for speed, plus dedicated `wamr`/`wasm3` and ASan+UBSan

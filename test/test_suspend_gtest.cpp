@@ -246,7 +246,7 @@ TEST(qz_suspend_, stress_cycle_10_rounds) {
 
 // G2 回归：销毁带 pending job 的 context 不得 UAF。JS_FreeContext 不清
 // rt->job_list 中属于该 ctx 的 entry——修复前残留悬垂 e->ctx，下一轮
-// qz_flush_microtasks（每次 eval 后主循环都会跑）执行 JS_ExecutePendingJob
+// qz_tick（每次 eval 后主循环都会跑）执行 JS_ExecutePendingJob
 // 即访问已释放内存。修复 = qz_ctx_destroy 在 JS_FreeContext 前调
 // JS_DrainPendingJobsForContext（quickjs-ng drain-jobs patch）摘除该 ctx 的
 // pending job。

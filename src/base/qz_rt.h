@@ -48,8 +48,11 @@ void qz_thread_teardown(qz_t *rt);
 void qz_dap_service(qz_t *rt);
 #endif
 
-/* thread.c — flush pending JS microtasks (worker.c calls this on its loop) */
-int qz_flush_microtasks(qz_t *rt);
+/* vm_core.c — tick 原语：排空 JS 微任务/待执行 job（原 host/thread.c 的
+ * qz_flush_microtasks 上移，M3）。纯 quickjs、零 libuv，宿主每轮 uv_run 后
+ * 调它拉模块推进（§5.4 tick 拉模型）。 */
+int qz_tick(qz_t *rt);
+#ifndef QZ_VM_GUEST
 /* worker.c — worker-runtime inbound dispatch: raw cloned bytes →
  * __qz_dispatch__(bytes, 0, kind). Used by the worker thread loop AND by the
  * process-backend child (rt_main.c) — same shim semantics. kind is projected
@@ -72,17 +75,32 @@ void qz_worker_free(qz_worker_t *w);
  * ipc_process.c 定义，thread.c 在 wait_idle 豁免这些恒活动 pipe。 */
 int qz_proc_handle_is_pipe(qz_t *rt, uv_handle_t *h);
 
+/* qzjs.c — 显式 GC 驱动点的**唯一**入口（约束③ ⑤）：跑一次 JS_RunGC 并记账
+ * （rt->gc_runs/gc_last_us/gc_total_us）。所有显式驱动点（rt_main.c 的 wake
+ * 安全点、thread.c 的 qz_wake_cb、控制面 "gc" op）都经它，计数才不会有洞。
+ * 只在宿主侧存在（guest 无控制面、无 uv_hrtime）。 */
+void qz_gc_drive(qz_t *rt);
+#endif /* !QZ_VM_GUEST */
+
 /* context.c — context lifecycle helpers */
 qz_ctx_t *qz_get_active_ctx(qz_t *rt);
 JSContext *qz_get_active_jsctx(qz_t *rt);
 qz_ctx_t *qz_get_ctx_by_id(qz_t *rt, int context_id);
+/* context.c（VM 内核）— realm 生命周期：只建/拆 JSContext + 登记 rt->contexts。
+ * 边界接线（pal / polyfill / 扩展 init）在 host/ctx_orchestrate.c，见
+ * IN_MODULE_DESIGN.md §5.2/§5.3。 */
 qz_ctx_t *qz_ctx_create(qz_t *rt, const qz_config_t *config);
+qz_ctx_t *qz_ctx_create_at(qz_t *rt, int slot);   /* 指定槽位建 realm（宿主恢复用） */
 void qz_ctx_destroy(qz_t *rt, qz_ctx_t *ctx);
 
-/* context.c — multi-context + soft suspend/resume (Task 5). 全部由父（主
- * context）线程调用；宿主只见主 context，spawn/suspend/resume/destroy 由
- * polyfill 的 qzContext 经 bridge 驱动。目标 ctx_id 若 == active（正在执行
- * JS 的 ctx）返回 QZ_ERR_BUSY——不能挂起/销毁/重建自己正在运行的 context。 */
+/* ctx_orchestrate.c（宿主）— 边界接线 + 多 context + soft suspend/resume
+ * (Task 5)。全部由父（主 context）线程调用；宿主只见主 context，
+ * spawn/suspend/resume/destroy 由 polyfill 的 qzContext 经 bridge 驱动。目标
+ * ctx_id 若 == active（正在执行 JS 的 ctx）返回 QZ_ERR_BUSY——不能挂起/销毁/
+ * 重建自己正在运行的 context。 */
+qz_ctx_t *qz_ctx_create_host(qz_t *rt, const qz_config_t *config);  /* create + wire_up */
+void qz_ctx_destroy_host(qz_t *rt, qz_ctx_t *ctx); /* 扩展 destroy + 资源清理 + qz_ctx_destroy */
+int qz_ctx_wire_up(qz_t *rt, qz_ctx_t *ctx);       /* realm 建成后边界接线；失败回滚返回 -1 */
 int qz_ctx_spawn(qz_t *rt, const char *init_script);   /* 返回 ctx id 或 <0 */
 int qz_ctx_serialize(qz_t *rt, int ctx_id, const char *state_path);
 int qz_ctx_rebuild(qz_t *rt, int ctx_id, const char *script_ref, const char *state_path);
@@ -106,12 +124,12 @@ int qz_ext_resume_all(qz_t *rt, qz_ctx_t *ctx);
 /* bridge.c — creates the internal pal JS object (per-context version) */
 JSValue qz_create_pal_object_ctx(qz_t *rt, qz_ctx_t *ctx);
 
-/* bridge.c — inject polyfill via __native_inject__ temp global (per-context version) */
-int qz_inject_polyfill_ctx(qz_t *rt, qz_ctx_t *ctx, const uint8_t *code, size_t code_len);
 
 /* bridge.c — dispatch an inbound message to the main context's
  * __qz_dispatch__ (source 0 = host JSON, parsed; >0 = worker bytes). */
+#ifndef QZ_VM_GUEST
 void qz_dispatch_message(qz_t *rt, qz_msg_t *m);
+#endif /* !QZ_VM_GUEST */
 
 /* bridge.c — free a qz_cb_data_t: releases resolve/reject JSValues and
  * calls js_free on the allocation.  Safe to call with NULL. */
@@ -190,7 +208,9 @@ int qz_control(qz_t *rt, const char *bytes, size_t len);
  * WAKE_SAFEPOINT 类就地执行（eval/inspect/metrics/interrupt/events.subscribe）。
  * IDLE_SAFEPOINT 类（ctx.suspend/ctx.destroy/worker.terminate/runtime.shutdown）
  * 转 wait_idle 通道——CTL-0 仅执行 WAKE 类四命令，IDLE 类返回 NOT_SUPPORTED。 */
+#ifndef QZ_VM_GUEST
 void qz_control_dispatch(qz_t *rt, qz_msg_t *m);
+#endif /* !QZ_VM_GUEST */
 /* 主循环每轮调用：扫描过期回执条目，发 TIMEOUT 回执并回收（qzjs 线程独占）。 */
 void qz_ctl_reap_timeouts(qz_t *rt);
 /* teardown 时回收所有未完成回执条目（无回执发出，发起方靠 timeout 侧超时）。 */

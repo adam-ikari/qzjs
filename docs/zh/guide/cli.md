@@ -27,6 +27,7 @@ qzjs --bytecode app.bc [args...]  # 运行预编译字节码
 qzjs                       # 交互式 REPL（Ctrl-D 退出）
 qzjs --help                # 用法
 qzjs --version             # 版本字符串
+qzjs --seed=42 script.js   # 确定性随机种子（Math.random() 可复现）
 ```
 
 ### 脚本模式
@@ -87,6 +88,9 @@ qzjs --bytecode app.bc arg1 arg2
 - **`globalThis.env`** — 进程环境，以普通对象形式暴露。
 - **退出码** — `0` 成功；`1` 脚本抛错（消息打到 stderr）或文件不可读；
   `2` 未知 flag / `-e` 用法错误。
+- **确定性随机** — `--seed=<u64>` 钉住 `Math.random()` 背后的种子（以及引擎的
+  hash seed——它决定哈希表支撑对象的属性枚举顺序）。同一种子跨运行给出同一序列；
+  `0`（缺省）用时钟播种。见分层设计文档 `docs/architecture/qzvm-qzjs-layering.md` 约束 ③。
 
 ## 控制面（`qzjs-ctl`）
 

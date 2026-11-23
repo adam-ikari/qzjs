@@ -78,9 +78,16 @@ static void child_wake_cb(uv_async_t *a)
          * flags==2）走运行时的应用消息派发，kind 作为第三参交给 JS。 */
         if (m->flags == QZ_MSG_FLAG_CONTROL) {
             qz_control_dispatch(rt, m);
+        } else if (m->flags == QZ_MSG_FLAG_GC_RUN) {
+            /* 宿主显式 GC（qz_gc / 控制面 "gc" op）：C 层就地跑 mark-sweep
+             * 回收引用环。刻意不入 JS——环回收不需要 JS 栈，且本点是
+             * WAKE_SAFEPOINT（无 JS 在执行），是确定点。JS_RunGC 在本线程
+             * （主RT 的 loop 线程 = JS 线程）调用，满足引擎单线程所有权。
+             * 经 qz_gc_drive 走唯一入口：回收 + 计数（约束③ ⑤）。 */
+            qz_gc_drive(rt);
         } else if (g_server_mode) {
             qz_dispatch_message(rt, m);
-            qz_flush_microtasks(rt);
+            qz_tick(rt);
         } else {
             qz_worker_dispatch(rt, m);
         }
@@ -355,6 +362,17 @@ static void process_rx(qz_t *rt)
                                             view.corr,
                                             view.payload,
                                             view.payload_len);
+                    } else if (ck == QZ_IPC_CTL_GC) {
+                        /* 宿主显式驱动 GC（qz_gc()）：转 msgq（flags=GC_RUN）
+                         * 由 wake 分割点就地 JS_RunGC。**不经控制面路由**——
+                         * qz_gc 与 control_plane 档位正交（OFF 档下仍须生效），
+                         * 走 qz_control_route 会被 OFF 门丢弃。主RT 形态的
+                         * 入站帧源恒为宿主（worker 自有 JSRuntime 且不在此
+                         * 路径），故无条件入本地队列。 */
+                        qz_msg_push(rt, (const char *)view.payload,
+                                      view.payload_len, view.source,
+                                      QZ_MSG_FLAG_GC_RUN);
+                        uv_async_send(&rt->wake);
                     }
                 }
                 /* CONTROL{shutdown} → graceful exit (§9.2 tier 1)。两种 payload
@@ -507,6 +525,13 @@ int rt_main_entry(int argc, char **argv)
     int control_plane = -1;     /* --control-plane；-1 = 缺省（OFF） */
     int debug_arg = 0;          /* --debug；父进程经 argv 传递（见 rt_host.c） */
     const char *control_pipe = NULL;   /* --control-pipe 路径（NULL = 缺省） */
+    /* --gc-threshold：0 = 关隐式阈值 GC（缺省，确定性内存），>0 = 阈值安全网。
+     * 语义见 qz_config_t.gc_threshold。 */
+    size_t gc_threshold = 0;
+    /* --seed：确定性随机源种子（0 = 时钟播种，见 qz_config_t.random_seed）。 */
+    uint64_t random_seed = 0;
+    /* --memory-limit：堆硬上限字节数（0 = 不限，见 qz_config_t.memory_limit）。 */
+    size_t memory_limit = 0;
     const char *path_arg = NULL;       /* §8.2 path 链 "k1,k2,..."（父经 argv 传） */
 
     for (int i = 1; i < argc; i++) {
@@ -555,6 +580,12 @@ int rt_main_entry(int argc, char **argv)
             }
         } else if (strcmp(argv[i], "--control-pipe") == 0 && i + 1 < argc) {
             control_pipe = argv[++i];
+        } else if (strcmp(argv[i], "--gc-threshold") == 0 && i + 1 < argc) {
+            gc_threshold = (size_t)strtoull(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+            random_seed = strtoull(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--memory-limit") == 0 && i + 1 < argc) {
+            memory_limit = (size_t)strtoull(argv[++i], NULL, 10);
         }
     }
 
@@ -839,6 +870,9 @@ int rt_main_entry(int argc, char **argv)
         rt->config.control_plane = QZ_CONTROL_IN_PROC;
     }
     rt->config.control_pipe_path = control_pipe;
+    rt->config.gc_threshold = gc_threshold;
+    rt->config.random_seed = random_seed;
+    rt->config.memory_limit = memory_limit;
 
     /* §8.2：本节点 path 链。父经 --path 传完整链；缺省（无 --path 的 worker）
      * 退化为单元素 [worker_id]（深度 1 的旧扁平语义）。主RT/宿主形态为空 path。 */
@@ -988,7 +1022,7 @@ int rt_main_entry(int argc, char **argv)
         if (is_server) qz_ctl_reap_timeouts(rt);
         if (__atomic_load_n(&rt->shutting_down, __ATOMIC_ACQUIRE) ||
             (w && __atomic_load_n(&w->shutting_down, __ATOMIC_ACQUIRE))) break;
-        qz_flush_microtasks(rt);
+        qz_tick(rt);
         if (is_server &&
             __atomic_load_n(&rt->wait_idle, __ATOMIC_ACQUIRE) &&
             qz_loop_idle(rt)) {

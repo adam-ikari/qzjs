@@ -1,0 +1,120 @@
+// 类：继承 + super() + 字段默认值 + 方法动态分派 + 遮蔽字段
+class Animal {
+    name: string;
+    legs: number = 4;
+    constructor(n: string) { this.name = n; }
+    speak(): string { return this.name; }
+    greet(): string { return "hi " + this.speak(); }
+    add(a: number, b: number): number { return a + b; }
+    nameLen(): number { return this.name.length; }              // 读 this → 暴露 self 槽被覆盖
+    w(a: number, b: number): number { return this.legs * 100 + a * 10 + b; }
+}
+class Dog extends Animal {
+    legs: number = 3;                       // 遮蔽父字段
+    constructor(n: string) { super(n); }
+    speak(): string { return "woof"; }
+    loud(): string { return this.speak() + "!"; }
+}
+class Puppy extends Dog {
+    // 无显式 ctor：合成 ctor 应隐式 super(...) 转发
+    tag(): string { return this.name + "/" + this.legs; }
+}
+function dogRun(): string {
+    const d = new Dog("rex");
+    return d.greet() + "/" + d.loud();
+}
+function fieldRun(): number {
+    const a = new Animal("x");
+    const p = new Puppy("bit");
+    return a.legs * 10 + p.legs;            // 4*10 + 3（遮蔽字段父写后子覆写）
+}
+function argRun(): number {
+    const d = new Dog("r");
+    return d.add(3, 4);                     // 动态分派 + 多参
+}
+function fwdRun(): string {
+    const p = new Puppy("bit");             // 合成 ctor 转发参数 → 父 ctor 收到 name
+    return p.tag();
+}
+
+// 回归：类实例真值判断（句柄 tag 与 JS 句柄表同 tag，toJS 会误判 falsy）
+function truthyRun(): number {
+    const d = new Dog("z");
+    if (d) return 5; else return 9;
+}
+// 回归：逻辑复合赋值使变量动态化 → 静态直调必须作废（Dog.legs=3 vs Animal.legs=4）
+function andAssignRun(): number {
+    const d = new Dog("d");
+    let x: any = new Animal("b");
+    x &&= d;
+    return x.w(0, 0);                        // 动态→Dog: 3*100=300；误静态→Animal: 400
+}
+// 回归：嵌套方法调用作实参（固定暂存槽覆盖 self → 接收者取错）
+function nestedArgRun(): number {
+    const d = new Dog("r");
+    const a = new Animal("q");
+    return a.w(d.w(1, 2), 0);                // d.w(1,2)=312; a.w(312,0)=4*100+3120=3520
+}
+
+// 回归：成员自增/自减（++this.n / this.n--）——原只认标识符操作数 → NaN/undefined
+function preFieldInc(): number {
+    const d = new Dog("p");
+    const before = d.legs;                   // 3
+    const a = ++d.legs;                      // 4
+    return a * 1000 + d.legs * 10 + before;  // 4*1000 + 4*10 + 3 = 4043
+}
+function postFieldInc(): number {
+    const d = new Dog("q");
+    const a = d.legs++;                      // 旧值 3
+    return a * 1000 + d.legs;                // 3*1000 + 4 = 3004
+}
+function preFieldDec(): number {
+    const d = new Dog("r");
+    const a = --d.legs;                      // 2
+    return a * 100 + d.legs;                 // 2*100 + 2 = 202
+}
+function postFieldDec(): number {
+    const d = new Dog("s");
+    const a = d.legs--;                      // 旧值 3
+    return a * 100 + d.legs;                 // 3*100 + 2 = 302
+}
+function fieldIncLoop(): number {
+    const d = new Dog("t");                  // legs=3
+    let s = 0;
+    for (let i = 0; i < 5; i++) s += d.legs++;  // 3+4+5+6+7=25 → legs=8
+    return s * 100 + d.legs;                 // 2508
+}
+
+// 静态块副作用在**定义点** eager 执行（JS 语义）：new 即触发，无需任何静态访问。
+let staticBlkCounter: number = 0;
+class StaticBlk {
+    static { staticBlkCounter = staticBlkCounter + 5; }
+}
+function staticBlkRun(): number { new StaticBlk(); return staticBlkCounter; }  // 5
+
+// 顶层别名类表达式 `const X = class { static {...} }`：static 块定义点 eager 执行。
+let aliasBlkCounter: number = 0;
+const AliasCls = class { static { aliasBlkCounter = 7; } }
+function aliasBlkRun(): number { void AliasCls; return aliasBlkCounter; }  // 7
+
+// 类字段默认箭头捕获 this：env 槽存原始 tagged i64（保实例身份），this.a 读到实例字段。
+class FieldArrowThis {
+    a: number = 3;
+    m = (): number => this.a * 2;
+}
+function fieldArrowThisRun(): number { return new FieldArrowThis().m(); }  // 6
+
+// typeof 函数值：类实例→object；提取方法值/类名/原型方法→function；方法调用结果→number。
+// （回归：探针漏 bindClasses 时 classMeta=null 会静默 undefined，此处双档锁定真值）
+class TClass { m(): number { return 7; } }
+function typeofRun(): string {
+    const o: any = new TClass();
+    const a = typeof o;             // "object"（实例）
+    const b = typeof TClass;        // "function"（类名）
+    const c = typeof o.m();         // "number"（方法调用结果）
+    const d = typeof 5;             // "number"
+    const e = typeof "x";           // "string"
+    return a + "/" + b + "/" + c + "/" + d + "/" + e;
+}
+// C 档提取方法作值 loud=throw（无法物化 wasm 闭包为 JS 值，记录在案）；JS 档可提取。
+function typeofMethodValue(): string { const o: any = new TClass(); return typeof o.m; }

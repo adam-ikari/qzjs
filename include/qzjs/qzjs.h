@@ -15,7 +15,7 @@ typedef struct qz_t qz_t;
  * 重新编译宿主。qz_config_t 按值跨库边界传递（qz_create 整块拷贝），跨版本
  * 混用会越界读宿主栈上的结构体尾部，abi_version 门控把这个静默的内存不安全
  * 变成显式的 qz_create 失败 + 诊断串。 */
-#define QZ_ABI_VERSION 1
+#define QZ_ABI_VERSION 3
 
 /* 库侧运行时 ABI 版本。宿主用它核对「编译时头文件」与「运行时库」是否同
  * 版本——动态链接场景下这是唯一能提前发现 ABI 错配的手段（否则症状是随机的
@@ -72,6 +72,52 @@ typedef struct qz_config_s {
     int strict_mode;                 /* 0 = off（默认）| 1 = on */
     const char *sandbox_root;
     const char *const *env_allowlist;
+    /* ── GC 策略（确定性内存，brain/pages/qzvm-qzjs-layering.md 约束③）──
+     * 引擎回收 = 引用计数（引用归 0 立即释放，确定性）+ 环回收（引用环只能靠
+     * mark-sweep 收）。默认（gc_threshold == 0）：**关掉阈值驱动的隐式 GC**
+     * ——回收只发生在确定点（qz_gc() / 控制面 "gc" op），环不会在任意分配点
+     * 被非确定地回收。代价：无宿主显式驱动时环会累积。
+     * gc_threshold > 0：恢复引擎的阈值自动 GC 作为安全网（长跑、宿主不驱动
+     * 回收的场景）——代价是回收时机不确定（内存压力即触发）。
+     * 增量语义同 quickjs（触发后阈值 = 当前用量 × 1.5），非绝对值上限；
+     * 要**硬上限**用 memory_limit（见下）。 */
+    size_t gc_threshold;
+    /* ── 随机源种子（确定性执行，brain/pages/qzvm-qzjs-layering.md 约束③）──
+     * 引擎的 `ctx->random_state` 默认由时钟播种（`js__gettimeofday_us()`），
+     * 而 `hash_seed` 由它派生 → `Math.random()` 与 **Map/Set 迭代序**逐次运行
+     * 不同，破坏「相同输入 → 逐位相同输出」。
+     * random_seed != 0：runtime 的全部 context 以该值作初始 random_state
+     * （经引擎 patch 的 `JS_SetRandomSeed`；同一 runtime 内各 context 起步种子
+     * 相同，各自随调用推进）。
+     * random_seed == 0（默认）：沿用引擎的时钟播种（非确定性，兼容旧行为）。
+     * 须在建 context 前生效——qz_create 在 qz_runtime_init 里于 context 创建
+     * 之前调用 JS_SetRandomSeed。 */
+    uint64_t random_seed;
+    /* ── 堆硬上限（确定性内存 + 资源约束，约束③）──
+     * 透传引擎的 `JS_SetMemoryLimit`：一把**硬上限**——分配使堆超过该值时，
+     * 引擎不比阈值 GC 而直接让分配失败 → 抛 `InternalError: out of memory`
+     * （`JS_ThrowInternalError`）。**这是 quickjs-ng 的 uncatchable error**
+     * （`is_uncatchable_error`，与栈溢出同类）：脚本自己的 try/catch **捕不到**，
+     * 异常径直穿过到调 eval 的嵌入方。与 gc_threshold 的「惰性触发点」正交。
+     *
+     * memory_limit == 0（默认）：不限（引擎缺省）。
+     * memory_limit > 0：堆字节上限。宿主用它把「不可信 JS 把进程撑爆」变成
+     *   可预期的失败点，或在确定性回放里锁定内存包络。
+     * 与 gc_threshold 同理：**相对引擎的堆账**（malloc 用量 + MALLOC_OVERHEAD），
+     * 非 RSS。
+     * 检查点在 runtime 的 malloc_state（`js_malloc_rt`/`js_calloc_rt`/
+     * `js_realloc_rt` 每条路径，非 per-context），故首次分配前设置即可；
+     * qz_runtime_init 在建 context 之前接线。
+     *
+     * ⚠ 超限后的可观测性：引擎抛的是 uncatchable error，JS 层捕不到。
+     * qzjs 入站消息派发（`qz_dispatch_message`）在 `JS_Call` 后检测异常：
+     * 若 `__qz_dispatch__` 抛异常（含 OOM 穿透 try/catch），投递
+     * `{"type":"error","error":"dispatch-failed","detail":...}` 错误帧到宿主
+     * 邮箱；OOM 双重失败（envelope 对象建不起来）退静态
+     * `{"type":"error","error":"out-of-memory"}` 帧。故经 `qz_post_message`
+     * 触发的 eval 超限时宿主会收到错误帧而非静默超时。用本字段的宿主仍应
+     * 自行准备超时兜底（错误帧是 best-effort，极端双重 OOM 下也只退静态帧）。 */
+    size_t memory_limit;
 } qz_config_t;
 
 /* 初始化 qz_config_t 的 ABI 门控字段（struct_size / abi_version）与其余字段的
@@ -204,6 +250,15 @@ int qz_ping_path(qz_t *rt, const int32_t *path, int path_len,
  *   loop 验过了，而实际上什么都没验。
  * 返回 0 = 通畅 / 1 = 阻塞 / -1 = 参数或状态错误 / -2 = 本模型不可测。 */
 int qz_ping_if_available(qz_t *rt, int32_t timeout_ms);
+/* 显式回收引用环（**确定性 GC 的宿主驱动入口**，见 qz_config_t.gc_threshold）。
+ * 引用计数回收（引用归 0）本就即时、确定，无需驱动；此函数只跑 mark-sweep
+ * 回收引用环。默认配置下引擎的阈值自动 GC 已关闭，环只在两处回收：本函数，
+ * 或控制面 {"op":"gc"}。**线程安全**：入队到主执行体（ISOLATED = 主RT 进程 /
+ * THREAD = qzjs 线程）的事件循环安全点执行，返回 0 = 已入队（非已回收）。
+ * 回收量不在此返回——需要可观测性用控制面 "gc" op（回执带回 heap_bytes）。
+ * 返回 0 成功入队，-1 参数/状态错误（rt 无效或正在关停）。 */
+int qz_gc(qz_t *rt);
+
 
 /* qz_ping_path 的跨模型版本，返回值语义同上（path/path_len 语义见
  * qz_ping_path 注释；THREAD 构建下 path 不会被读）。 */
