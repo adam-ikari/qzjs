@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-23T09:39:20"
+updated: "2026-11-23T11:08:47"
 ---
 
 <!-- compiled_truth -->
@@ -689,4 +689,10 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "2026-11-23: zod v4 AOT 端到端打通；bench(100)=100。修复链：恢复 $constructor hoist；host-backed 绑定前置到 __module_init 开头以消除 ZodUUID 前向引用裸 0；zod 同名 canonical 符号优先，避免 boolean 函数被正则常量改名覆盖；保留宿主父类构造转发与跨文件 interp 桥接。验证：wasm-validate、node --check、四个 AOT 回归、corpus47、zod coverage 107/107（wasm 99.8%）全绿。"
   source: "src/qzvm/aot/emit/compile-ts.js, src/qzvm/aot/qzvm.js, src/qzvm/aot/build.js, src/qzvm/aot/test_aot_constructor_hoist.js"
+  affects: [aot-roadmap]
+
+- time: 2026-11-23T11:08:47
+  kind: evidence
+  summary: "2026-11-23 集成收尾：origin/master 037cb6a4 已 merge 进 experiment/aot-v2，保持 PR #29 draft。merge 后 cmake --build + ctest -L offline 30/30、四个 AOT 回归全绿、从当前 HEAD 重建 zodbench bench(100)=100。完整 interp 与 wasm/AOT 输出一致。"
+  source: "github PR #29 checks run 45097611561; local integration logs /tmp/integration.* /tmp/zodbench.merged.*"
   affects: [aot-roadmap]
