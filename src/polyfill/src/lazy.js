@@ -80,8 +80,21 @@ export function lazyUnit(globalNames, props, setup) {
   function ensure() {
     if (done) return;
     done = true;
-    for (var i = 0; i < globalNames.length; i++) delete globalThis[globalNames[i]];
-    for (var j = 0; j < props.length; j++) delete props[j][0][props[j][1]];
+    for (var i = 0; i < globalNames.length; i++) {
+      /* 只清本单元注册的 accessor 面；数据属性视为宿主/页面外部覆盖
+       * （宿主意志），delete 会误删宿主实现在用的属性——保留，setup 的
+       * defineProperty 侧对不可重定义名 try-catch 保持现状。 */
+      var d = Object.getOwnPropertyDescriptor(globalThis, globalNames[i]);
+      if (d && (typeof d.get === 'function' || typeof d.set === 'function')) {
+        delete globalThis[globalNames[i]];
+      }
+    }
+    for (var j = 0; j < props.length; j++) {
+      var pr = Object.getOwnPropertyDescriptor(props[j][0], props[j][1]);
+      if (pr && (typeof pr.get === 'function' || typeof pr.set === 'function')) {
+        delete props[j][0][props[j][1]];
+      }
+    }
     try {
       setup();
     } catch (e) {

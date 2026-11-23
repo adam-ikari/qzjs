@@ -100,8 +100,14 @@ for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 ctl() { timeout 10 "$QZCTL" --pipe "$SOCK" "$@"; }
 
 # 孙的 path = [主RT 给 worker 的槽位, worker 给孙的槽位] = 1001,1001（见 worker.js procWorkerSeq）。
-OUT="$(ctl --correl n-set --target-path 1001,1001 eval "(function(){ globalThis.__GRAND__=42; return 'set-ok'; })()")" \
-  || fail "3 eval on grandchild rc" "$OUT"
+# grandchild 异步注册到 control-plane；CI 资源紧张时 spawn 慢，eval 太早
+# 会 NOT_FOUND。轮询直到 grandchild 可达或超时。
+for _ in $(seq 1 30); do
+  OUT="$(ctl --correl n-set --target-path 1001,1001 eval "(function(){ globalThis.__GRAND__=42; return 'set-ok'; })()")" \
+    && break
+  sleep 0.1
+done
+echo "$OUT" | grep -q '"ok":true' || fail "3 eval on grandchild rc" "$OUT"
 echo "$OUT" | grep -q '"correl":"n-set"' || fail "3 grandchild receipt correl" "$OUT"
 echo "$OUT" | grep -q '"result":"set-ok"' || fail "3 grandchild eval executed" "$OUT"
 OUT="$(ctl --target-path 1001,1001 eval "'grand:' + globalThis.__GRAND__")" \

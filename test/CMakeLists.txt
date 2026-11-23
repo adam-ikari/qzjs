@@ -191,9 +191,13 @@ endif()
 # matching against the error file.
 # CI 全量 build 默认不产出 runner——顶层以 QZ_BUILD_TESTS 条件的 ALL 目标
 # 显式依赖 run-test262（见 CMakeLists.txt quickjs 段）。
+if(EXISTS "${CMAKE_SOURCE_DIR}/deps/quickjs-ng/test262/test")
 add_test(NAME test262_quickjs
   COMMAND ${CMAKE_BINARY_DIR}/deps/quickjs-ng/run-test262
     -c test262.conf
     test262/test
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/deps/quickjs-ng)
 set_tests_properties(test262_quickjs PROPERTIES LABELS "test262")
+else()
+message(STATUS "test262 suite not found, skipping test262_quickjs")
+endif()

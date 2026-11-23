@@ -82,6 +82,32 @@ TEST_F(BridgeHttpTest, HttpsFetchRejectsUntrustedPeer) {
     ASSERT_TRUE(host_poll_until_value(h, "_fetchErr", "rejected", &out));
 }
 
+/* issue #4: mock_tcp_written returns a NUL-terminated C string, but a TLS
+ * ClientHello contains embedded 0x00 bytes (the handshake length is
+ * big-endian, so the high byte is 0). strlen() therefore truncated the
+ * capture at byte 6 (16 03 03 01 cc 01), making protocol-level byte
+ * assertions impossible. mock_tcp_written_len returns the true byte count. */
+TEST_F(BridgeHttpTest, TlsClientHelloFullyCaptured) {
+    const char *garbage = "\x16\x03\x03\x00\x04not-a-real-server-hello";
+    ASSERT_EQ(0, mock_tcp_respond(&h->rt->loop, garbage, strlen(garbage)));
+    std::string out;
+    ASSERT_TRUE(host_eval(h,
+        "globalThis._r='pending';"
+        "fetch('https://localhost/').then(function(r){_r='resolved';},"
+        "function(e){_r='rejected';});'started'", &out));
+    ASSERT_TRUE(host_poll_until_value(h, "_r", "rejected", &out));
+    size_t wl = mock_tcp_written_len(&h->rt->loop);
+    const char *w = mock_tcp_written(&h->rt->loop);
+    /* No-TLS builds reject immediately without sending anything; only
+     * assert the ClientHello shape when bytes were actually written. */
+    if (wl > 0) {
+        EXPECT_GE(wl, 40u) << "ClientHello captured only " << wl << " bytes";
+        ASSERT_GE(wl, 6u);
+        EXPECT_EQ((unsigned char)w[0], 0x16);  /* TLS handshake record */
+        EXPECT_EQ((unsigned char)w[5], 0x01);  /* handshake type = ClientHello */
+    }
+}
+
 /* ---- uv_io_parse_url 回归：userinfo 剥离 / 端口 / fragment / Host 头 ----
  * 断言写上线上的字节（mock uv_write 捕获），而非解析器内部状态。 */
 
