@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-23T21:53:49"
+updated: "2026-11-23T22:44:26"
 ---
 
 <!-- compiled_truth -->
@@ -47,4 +47,10 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   kind: evidence
   summary: "field_order_lit static field-name cache: focused A/B 30k calls p50 8.25ms→7.643ms (0.6ms); product benchmark noise dominated. Not a material optimization; keep only as correctness-neutral dedup of per-literal split."
   source: "src/qzvm/aot/test_field_order_cache.js + /tmp/bench_field_order_cache.js"
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-23T22:44:26
+  kind: evidence
+  summary: "typeof v !== \"string\" 严格比较内联为 wasm interned 字符串句柄 i64Eq/i64Ne。validationWork(200000) 现网 qz.* 计数：sne 0（原 800000）、seq 200000、method_call 200000、truthy 400000、rem 100000，总跨界约 1700005→900005；check=300000，test_aot ALL PASS。"
+  source: "src/qzvm/aot/test_typeof_strict_eq.js + instrumented aotp glue"
   affects: [aot-sub1x-root-cause]

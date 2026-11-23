@@ -1762,11 +1762,22 @@ Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
     M.end();
 };
 Emitter.prototype.emitCondI32 = function (expr) {
-    if (ts.isBinaryExpression(expr) && CMP_GUARD[expr.operatorToken.kind]) {
-        const [qz, f64] = CMP_GUARD[expr.operatorToken.kind];
-        this.emitTaggedExpr(expr.left); this.emitTaggedExpr(expr.right);
-        this.emitCmpI32(qz, f64);
-        return;
+    if (ts.isBinaryExpression(expr)) {
+        const isStrLit = (n) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n);
+        const op = expr.operatorToken.kind;
+        const typeofVsStrLit = (ts.isTypeOfExpression(expr.left) && isStrLit(expr.right))
+            || (isStrLit(expr.left) && ts.isTypeOfExpression(expr.right));
+        if (typeofVsStrLit && (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken)) {
+            this.emitTaggedExpr(expr.left); this.emitTaggedExpr(expr.right);
+            if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) this.m.i64Eq(); else this.m.i64Ne();
+            return;
+        }
+        if (CMP_GUARD[op]) {
+            const [qz, f64] = CMP_GUARD[op];
+            this.emitTaggedExpr(expr.left); this.emitTaggedExpr(expr.right);
+            this.emitCmpI32(qz, f64);
+            return;
+        }
     }
     this.emitTaggedExpr(expr); this.m.call("qz.truthy");
 };
@@ -2962,6 +2973,16 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         }
         this.emitNullish(e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
+    }
+    // typeof 结果恒是 interned 字符串句柄；与字符串字面量严格比较时直接比句柄，免 qz.seq/sne 跨界。
+    const isStrLit = (n) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n);
+    const typeofVsStrLit = (ts.isTypeOfExpression(e.left) && isStrLit(e.right))
+        || (isStrLit(e.left) && ts.isTypeOfExpression(e.right));
+    if (typeofVsStrLit && (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken)) {
+        this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right);
+        if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) this.m.i64Eq(); else this.m.i64Ne();
+        this.emitBoxBool();
+        return;
     }
     // 拼接左操作数来历 → 是否允许原地追加（_emitConcat 内部读 _concatInPlace）
     if (op === ts.SyntaxKind.PlusToken) this._concatInPlace = this._concatSafe(e.left);

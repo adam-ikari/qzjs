@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [decision, aot, performance, f64, wasm, numeric]
 created: "2026-10-13T06:22:46"
-updated: "2026-10-29T21:00:22"
+updated: "2026-11-23T22:44:26"
 ---
 
 <!-- compiled_truth -->
@@ -187,4 +187,10 @@ num 快路径**已是原生裸 f64**（`emitter.js:4`、`:245`：`mode==="num"` 
 - time: 2026-10-29T21:00:22
   kind: decision
   summary: "科学计算基准扩到 5 运行时（AOT/解释器/V8/CPython/C -O2）：vs 解释器 9-46x、vs CPython 9-65x、vs V8 几何 1.3x、vs C 中位 2.2x；SIMD 假设被 -fno-tree-vectorize 实测否决，真实差距是常量折叠+循环展开+f64→i32 下标截断"
+  affects: [aot-performance-model]
+
+- time: 2026-11-23T22:44:26
+  kind: evidence
+  summary: "静态已知字符串句柄比较（typeof 结果 vs 字符串字面量）可直接用 wasm i64Eq/i64Ne，免 qz.seq/sne；emitCondI32 与 emitTaggedBinary 两条路径均已覆盖，回归 ALL PASS。"
+  source: "src/qzvm/aot/emit/tagged.js + test_typeof_strict_eq.js"
   affects: [aot-performance-model]
