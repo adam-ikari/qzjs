@@ -209,10 +209,22 @@ function compileTS(input, outWasm, opts = {}) {
     const modSymLit = new Map();     // 模块级 const 持有 Symbol.<well-known>（名字 → "@@<sym>"），供类计算属性名解析
     const modConstLit = new Map();   // 模块级字面量 const（名字 → 字符串/数值），供计算属性名折叠
     const modVars = [];          // 模块级变量声明（含初值）
+    const fileRename = new Map(); // fileName → Map(旧名 → 新名)；禁跨文件同名冲突
+    const topNamesByFile = new Map(); // fileName → Set(顶层声明名)：未绑定引用优先解析到本文件声明
+    for (const f of sfs) {
+        const names = new Set();
+        for (const st of f.statements) {
+            if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations)
+                if (ts.isIdentifier(d.name)) names.add(d.name.text);
+            else if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st) || ts.isEnumDeclaration(st)) && st.name) names.add(st.name.text);
+        }
+        topNamesByFile.set(path.resolve(f.fileName), names);
+    }
     const modStmts = [];         // 模块级变量语句（合成 __module_init 的函数体）
     // 模块级 `const f = <async/generator 闭包>`：wasm 无挂起通道，此前触发整模块 interp。
     // 改走 interp_fn_value 通道——f 作宿主句柄包 interpJs 副本里的同名绑定，模块留在 wasm。
     const modInterpBindings = new Map();   // 绑定名 → VariableDeclaration
+    const modInterpBindingFinal = new Map(); // 绑定名 → interpJs 实际声明名（改名后可能不同）
     // 闭包体内任意深度出现 async/generator → wasm 无挂起通道（与 containsSuspend 同形，
     // 提前到此供 collectDecls 识别模块级 const 绑「含挂起的闭包」）。
     const containsSuspendFn = (root) => {
@@ -222,10 +234,17 @@ function compileTS(input, outWasm, opts = {}) {
             ts.forEachChild(n, w); };
         w(root); return hit;
     };
+    const ctorCallee = (e) => ts.isIdentifier(e) ? e.text : (ts.isPropertyAccessExpression(e) ? e.name.text : "");
+    const isCtorCall = (n) => !!n && ts.isCallExpression(n) && /^\$constructor(?:\$f\d+|__m_[A-Za-z0-9_$]*\$constructor)?$/.test(ctorCallee(n.expression));
     const checker = program.getTypeChecker();   // 收集阶段就要解析符号身份（see `export namespace` 展平）
     const nsAlias = new Map();       // 命名空间本地名 → Map(成员名 → 目标顶层名)；收集阶段就要写（see `export namespace`）
     const nsAliasByFile = {};        // 文件名 → (命名空间本地名 → 成员表)：wasm 发射端用
     const interpNsAliasByFile = {};  // 文件名 → 同上：仅 interpJs 拼接用（具名导入的 namespace re-export）
+    const importAliasByFile = {};    // 文件名 → (本地名 → 目标真名)：未绑定引用兜底（import { members as installMembers }）
+    const importSymByFile = {};      // 文件名 → (本地名 → 目标符号)：import alias 精确改名
+    const localAliasTarget = new Map(); // `${file}:${ns}.${member}` → 展平后的目标真名
+    const nsTargetSym = new Map();   // `${ns}.${member}` → 目标符号：兜底
+    const nsTargetSymByFile = {};    // 文件名 → nsName → (member → 符号)：同名 ns 跨文件消歧
     const collectDecls = (f) => {
         scanDeclaredNames(f);
         // nested：不在模块顶层语句位置（函数/块/循环内）——类被提升后其外层绑定不可见；
@@ -346,6 +365,9 @@ function compileTS(input, outWasm, opts = {}) {
                      * (inst, def) => { …async/gen… })`（zod v4 checks/schemas 同形态）。挂起在 call 的
                      * 箭头实参体内，不是 const 绑闭包本身 → 旧谓词漏检，整模块退 interp。整表达式按
                      * interp_fn_value hoist（设计 A：inst 是箭头形参，语义精确，发射机制与闭包档同构）。 */
+                    else if (isCtorCall(d.initializer)) {
+                        modInterpBindings.set(d.name.text, d);   // 类值由 interp 求值，wasm 经 interp_fn_value 取宿主函数
+                    }
                     else if (ts.isCallExpression(d.initializer) && containsSuspendFn(d.initializer)) {
                         modInterpBindings.set(d.name.text, d);
                     }
@@ -389,6 +411,16 @@ function compileTS(input, outWasm, opts = {}) {
         }
     }
     if (modStmts.length) {
+        // host-backed 类值/闭包必须先于任何模块级语句落定：zod 里 `new Class(...)` 的静态初始化
+        // 会引用后面才声明的类值（如 ZodUUID），按源序发射会读到裸 0。前置fiduties只取 interp 句柄，幂等。
+        const preinit = [...modInterpBindings.values()].map((d, i) => {
+            const st = ts.factory.createVariableStatement(undefined, ts.factory.createVariableDeclarationList([
+                ts.factory.createVariableDeclaration(d.name, undefined, undefined, ts.factory.createIdentifier("undefined")),
+            ], ts.NodeFlags.Const));
+            st.pos = d.pos; st.end = d.end; st.parent = sf;
+            return st;
+        });
+        modStmts.unshift(...preinit);
         // 合成模块初始化函数：体 = 模块级变量语句（按源序），返回值 void；实例化时由 start 段自动执行。
         const initFn = ts.factory.createFunctionDeclaration(undefined, undefined, "__module_init", undefined, [],
             ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword), ts.factory.createBlock(modStmts, true));
@@ -543,6 +575,8 @@ function compileTS(input, outWasm, opts = {}) {
                 if (!decl.name)   // `export default function(){}` 匿名默认导出：无稳定顶层名
                     throw new Error(`[inline] 匿名默认导出不支持内联（请给函数/类命名）（${path.basename(declFile.fileName)}）`);
                 importAlias.set(ic.name.text, decl.name.text);
+                (importAliasByFile[f.fileName] = importAliasByFile[f.fileName] || new Map()).set(ic.name.text, decl.name.text);
+                (importSymByFile[f.fileName] = importSymByFile[f.fileName] || new Map()).set(ic.name.text, tgt);
                 if (ts.isClassDeclaration(decl)) classAlias.set(ic.name.text, decl.name.text);
             }
             if (!ic.namedBindings) continue;
@@ -561,6 +595,9 @@ function compileTS(input, outWasm, opts = {}) {
                     if (!df || !sfNames.has(df.fileName))
                         throw new Error(`[inline] 命名空间导入含外部模块成员，不支持内联: "${e.name}" from "${st.moduleSpecifier.text}"（${path.basename(f.fileName)}）`);
                     members.set(e.name, t.name);
+                    nsTargetSym.set(`${ic.namedBindings.name.text}.${e.name}`, t);
+                    const perNs = (nsTargetSymByFile[f.fileName] = nsTargetSymByFile[f.fileName] || {});
+                    (perNs[ic.namedBindings.name.text] = perNs[ic.namedBindings.name.text] || new Map()).set(e.name, t);
                 }
                 importAlias.set(ic.namedBindings.name.text, ic.namedBindings.name.text);
                 nsAlias.set(ic.namedBindings.name.text, members);
@@ -595,6 +632,9 @@ function compileTS(input, outWasm, opts = {}) {
                                     const df = d && ts.getSourceFileOfNode(d);
                                     if (!df || !sfNames.has(df.fileName)) continue;
                                     nsMembers.set(e.name, t.name);
+                                    nsTargetSym.set(`${sp.name.text}.${e.name}`, t);
+                                    const perNs = (nsTargetSymByFile[f.fileName] = nsTargetSymByFile[f.fileName] || {});
+                                    (perNs[sp.name.text] = perNs[sp.name.text] || new Map()).set(e.name, t);
                                 }
                             }
                         } catch { /* 非 namespace 符号：getExportsOfModule 会抛，按普通导入处理 */ }
@@ -606,6 +646,8 @@ function compileTS(input, outWasm, opts = {}) {
                         }
                         if (declFile && sfNames.has(declFile.fileName)) {
                             importAlias.set(sp.name.text, tgt.name);
+                            (importAliasByFile[f.fileName] = importAliasByFile[f.fileName] || new Map()).set(sp.name.text, tgt.name);
+                            (importSymByFile[f.fileName] = importSymByFile[f.fileName] || new Map()).set(sp.name.text, tgt);
                             if (ts.isClassDeclaration(decl)) classAlias.set(sp.name.text, tgt.name);
                             continue;
                         }
@@ -948,17 +990,26 @@ function compileTS(input, outWasm, opts = {}) {
          * been declared`）。这些名字在 TS 语义里是文件私有的，不存在跨文件引用 → 按文件加后缀
          * 改名即可。导出名不能改（宿主按原名取 interp 函数），故只处理未导出的重复名。 */
         const symRename = new Map();   // symbol → 新名
-        const fileRename = new Map();  // fileName → Map(旧名 → 新名)；兜底按文件查（见 identifier 分支）
         const globalRename = new Map(); // 旧名 → 唯一新名；仅一个符号被改名时用，兜底跨文件未绑定引用
         /* prog2 的 getSourceFiles() 仍含类型依赖（见 sfs 的注释）：重名判定与拼接都必须
          * 只看**运行时文件**，否则类型文件里的同名声明会把真正的运行时声明无谓改名，
          * 类型文件自身也会被拼进 interpJs（运行时不该存在）。 */
         const runtimeKeys = new Set(sfs.map(f => path.resolve(f.fileName)));
+        // 入口 namespace 实际引用的目标名保留原样，避免被同名私有声明的全局改名误伤。
+        const entryTargetNames = new Set();
+        for (const [fk, byNs] of [...Object.entries(nsAliasByFile), ...Object.entries(interpNsAliasByFile)])
+            if (path.resolve(fk) === path.resolve(input))
+                for (const members of byNs.values()) for (const name of members.values()) entryTargetNames.add(name);
+        const canonicalNames = new Set();  // 重命名阶段保留原名的名字
+        const canonicalSymbols = new Set(); // 保留原名的具体符号（同名私有声明仍应改名）
         {
             const byName = new Map();  // name → [{ sym, sfIdx, exported }]
             prog2.getSourceFiles().forEach((f, sfIdx) => {
                 if (f.isDeclarationFile || !f.fileName.endsWith(".ts") || !runtimeKeys.has(path.resolve(f.fileName))) return;
                 for (const st of f.statements) {
+                    // interface/type alias 无运行期值；混入同名统计会让 canonical 选到类型声明，
+                    // 真正的 const/function 被加 `$fN` 后缀 → interp_fn_value 按原名查不到。
+                    if (ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st)) continue;
                     /* TS 7 里 `const error = () => …` 的 kind 是 FirstStatement（非 VariableStatement），
                      * `ts.isVariableStatement` 判不出，故按「有声明名」通用收集。 */
                     const decls = st.declarationList ? st.declarationList.declarations
@@ -990,21 +1041,113 @@ function compileTS(input, outWasm, opts = {}) {
                 const canonicalIdx = canonicalFile
                     ? list.findIndex(x => path.resolve(prog2.getSourceFiles()[x.sfIdx].fileName) === canonicalFile)
                     : (fnIdxs.length ? fnIdxs[fnIdxs.length - 1] : 0);
+                let keptOriginal = false;
                 for (let li = 0; li < list.length; li++) {
                     const { sym, sfIdx, exported } = list[li];
                     // 导出名默认保留（宿主按原名取 interp 函数）；但同名导出来自不同文件时，
                     // interpJs 拼接会撞车。保留 modInterpBindings 选中的那份（无映射取首个），其余改名。
-                    if (exported && li === canonicalIdx) continue;
+                    if (exported && li === canonicalIdx) { keptOriginal = true; canonicalSymbols.add(sym); continue; }
                     const newName = `${nm}$f${sfIdx}`;
+                    const binding = modInterpBindings.get(nm);
+                    if (binding && path.resolve(binding.getSourceFile().fileName) === path.resolve(prog2.getSourceFiles()[sfIdx].fileName))
+                        modInterpBindingFinal.set(nm, newName);
                     symRename.set(sym, newName);
                     if (globalRename.has(nm) && globalRename.get(nm) !== newName) globalRename.set(nm, null);
                     else if (!globalRename.has(nm)) globalRename.set(nm, newName);
-                    const key = prog2.getSourceFiles()[sfIdx].fileName;
+                    const key = path.resolve(prog2.getSourceFiles()[sfIdx].fileName);
                     if (!fileRename.has(key)) fileRename.set(key, new Map());
                     fileRename.get(key).set(nm, newName);
                 }
+                if (keptOriginal) canonicalNames.add(nm);
             }
         }
+        const lookupNsMap = (table, fileName, nsName) => {
+            const hit = table[fileName] && table[fileName].get(nsName);
+            if (hit) return hit;
+            const base = `${path.basename(path.dirname(fileName))}/${path.basename(fileName)}`;
+            for (const [fk, byNs] of Object.entries(table))
+                if (`${path.basename(path.dirname(fk))}/${path.basename(fk)}` === base && byNs.has(nsName)) return byNs.get(nsName);
+            return undefined;
+        };
+        const lookupNsMapAny = (table, nsName) => {
+            for (const byNs of Object.values(table)) if (byNs.has(nsName)) return byNs.get(nsName);
+            return undefined;
+        };
+        const lookupAnyFileRename = name => {
+            for (const fr of fileRename.values()) {
+                const hit = fr.get(name);
+                if (hit !== undefined) return hit;
+            }
+            return undefined;
+        };
+        const derefSym = sym => {
+            while (sym && (sym.flags & ts.SymbolFlags.Alias)) {
+                const next = checker.getAliasedSymbol(sym);
+                if (!next || next === sym) break;
+                sym = next;
+            }
+            return sym;
+        };
+        const lookupNsSym = (fileName, nsName, member) => {
+            const direct = nsTargetSymByFile[fileName] && nsTargetSymByFile[fileName][nsName];
+            if (direct && direct.has(member)) return direct.get(member);
+            const base = `${path.basename(path.dirname(fileName))}/${path.basename(fileName)}`;
+            for (const [fk, byNs] of Object.entries(nsTargetSymByFile))
+                if (`${path.basename(path.dirname(fk))}/${path.basename(fk)}` === base && byNs[nsName] && byNs[nsName].has(member)) return byNs[nsName].get(member);
+            return nsTargetSym.get(`${nsName}.${member}`);
+        };
+        // renameInFile 直接改了 AST 的 escapedText，nsAlias 仍存 Symbol.name → 同步到最终名字。
+        const fixNs = (members, nsName, fk) => {
+            if (!members) return;
+            for (const [member, oldName] of members) {
+                const sym = derefSym(lookupNsSym(fk, nsName, member));
+                const d = sym && (sym.valueDeclaration || (sym.declarations && sym.declarations[0]));
+                if (!d || !d.name || !ts.isIdentifier(d.name)) continue;
+                const fr = fileRename.get(path.resolve(d.getSourceFile().fileName));
+                const nn = (fr && fr.get(d.name.text)) || d.name.text;
+                if (nn !== oldName) members.set(member, nn);
+            }
+        };
+        for (const [fk, byNs] of Object.entries(interpNsAliasByFile))
+            for (const [nsName, members] of byNs) fixNs(members, nsName, fk);
+
+        // `const describe = core.describe` 展平后 RHS 与局部声明同名 → TDZ；局部声明单独改名。
+        const runtimeFiles = prog2.getSourceFiles().filter(f => !f.isDeclarationFile && f.fileName.endsWith(".ts") && runtimeKeys.has(path.resolve(f.fileName)));
+        for (const sf2 of runtimeFiles) ts.forEachChild(sf2, function walk(n) {
+            if (ts.isVariableDeclaration(n) && n.initializer && ts.isIdentifier(n.name) && ts.isPropertyAccessExpression(n.initializer)
+                && ts.isIdentifier(n.initializer.expression)) {
+                const ns = n.initializer.expression.text, member = n.initializer.name.text;
+                const byFile = nsAliasByFile[sf2.fileName] || interpNsAliasByFile[sf2.fileName];
+                const resolved = (byFile && byFile.get(ns) && byFile.get(ns).get(member))
+                    || (nsAlias.get(ns) && nsAlias.get(ns).get(member));
+                if (resolved === n.name.text) {
+                    const sym2 = checker2.getSymbolAtLocation(n.name);
+                    if (sym2) symRename.set(sym2, `${n.name.text}$local`);
+                    if (modInterpBindings.has(n.name.text)) modInterpBindingFinal.set(n.name.text, `${n.name.text}$local`);
+                    const targetSym = lookupNsSym(sf2.fileName, ns, member);
+                    const td = targetSym && (targetSym.valueDeclaration || (targetSym.declarations && targetSym.declarations[0]));
+                    const tm = td && fileRename.get(path.resolve(td.getSourceFile().fileName));
+                    const targetName = (tm && tm.get(resolved)) || (canonicalNames.has(resolved) ? resolved : (globalRename.get(resolved) || resolved));
+                    localAliasTarget.set(`${ns}.${member}`, targetName);
+                }
+            }
+            ts.forEachChild(n, walk);
+        });
+        const importAliasName = (sym, fallback) => {
+            const d = sym.valueDeclaration || (sym.declarations && sym.declarations[0]);
+            const df = d && ts.getSourceFileOfNode(d);
+            const byFile = df && fileRename.get(path.resolve(df.fileName));
+            return (byFile && byFile.get(sym.name)) || globalRename.get(fallback) || fallback;
+        };
+        const lookupFileRename = (fileName, name) => {
+            const exact = fileRename.get(path.resolve(fileName));
+            if (exact && exact.has(name)) return exact.get(name);
+            const base = `${path.basename(path.dirname(fileName))}/${path.basename(fileName)}`;
+            let hit, count = 0;
+            for (const [k, m] of fileRename) if (`${path.basename(path.dirname(k))}/${path.basename(k)}` === base && m.has(name)) { hit = m.get(name); count++; }
+            return count === 1 ? hit : undefined;
+        };
+        const emitId = (n) => (ts.isIdentifier(n) && n.text.startsWith("__m_")) ? ts.factory.createIdentifier(n.text) : n;
         const stripModuleSyntax = (ctx) => (sf2) => {
             const visit = (n) => {
                 if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) return undefined;
@@ -1015,13 +1158,24 @@ function compileTS(input, outWasm, opts = {}) {
                 }
                 if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
                     // 按当前文件查：同名 namespace 导入在不同文件指向不同模块（见 nsAliasByFile）
-                    const byFile2 = nsAliasByFile[sf2.fileName];
-                    const interpByFile = interpNsAliasByFile[sf2.fileName];
-                    const nsMap = (byFile2 && byFile2.get(n.expression.text))
-                        || (interpByFile && interpByFile.get(n.expression.text))
+                    const nsMap = lookupNsMap(interpNsAliasByFile, sf2.fileName, n.expression.text)
+                        || lookupNsMap(nsAliasByFile, sf2.fileName, n.expression.text)
+                        || lookupNsMapAny(interpNsAliasByFile, n.expression.text)
                         || nsAlias.get(n.expression.text);
+                    const aliasHit = localAliasTarget.get(`${n.expression.text}.${n.name.text}`);
+                    if (aliasHit !== undefined) return ts.factory.createIdentifier(aliasHit);
                     const resolved = nsMap && nsMap.get(n.name.text);
-                    if (resolved !== undefined) return ts.factory.createIdentifier(globalRename.get(resolved) || resolved);
+                    if (resolved !== undefined) {
+                        const tsym = derefSym(lookupNsSym(sf2.fileName, n.expression.text, n.name.text));
+                        const td = tsym && (tsym.valueDeclaration || (tsym.declarations && tsym.declarations[0]));
+                        const tm = td && fileRename.get(path.resolve(td.getSourceFile().fileName));
+                        const dn = td && td.name && td.name.text;
+                        // canonical 符号保留原名；其他同名声明仍按文件级改名。
+                        const nn = canonicalSymbols.has(derefSym(tsym)) ? resolved
+                            : ((tm && dn && tm.get(dn)) || (tm && tm.get(resolved)) || lookupAnyFileRename(resolved)
+                                || (canonicalNames.has(resolved) ? resolved : (globalRename.get(resolved) || resolved)));
+                        return ts.factory.createIdentifier(nn);
+                    }
                     return ts.visitEachChild(n, visit, ctx);
                 }
                 if (ts.isIdentifier(n)) {
@@ -1031,15 +1185,26 @@ function compileTS(input, outWasm, opts = {}) {
                     const isNsAccess = p0 && ts.isPropertyAccessExpression(p0) && p0.expression === n;
                     const isPropName0 = p0 && ((ts.isPropertyAccessExpression(p0) && p0.name === n)
                         || (ts.isPropertyAssignment(p0) && p0.name === n)
+                        || (ts.isShorthandPropertyAssignment(p0) && p0.name === n)
                         || (ts.isMethodDeclaration(p0) && p0.name === n));
-                    const byFileNs0 = nsAliasByFile[sf2.fileName];
-                    const interpNs0 = interpNsAliasByFile[sf2.fileName];
-                    const ns0 = (!isNsAccess && !isPropName0)
-                        ? ((byFileNs0 && byFileNs0.get(n.text)) || (interpNs0 && interpNs0.get(n.text)) || null)
+                    const sym0 = checker2.getSymbolAtLocation(n) || checker.getSymbolAtLocation(n);
+                    const localShadow = !!(sym0 && sym0.declarations && sym0.declarations.some(d =>
+                        ts.isVariableDeclaration(d) || ts.isParameter(d) || ts.isFunctionDeclaration(d)
+                        || ts.isClassDeclaration(d) || ts.isBindingElement(d)));
+                    const ns0 = (!isNsAccess && !isPropName0 && !localShadow)
+                        ? (lookupNsMap(interpNsAliasByFile, sf2.fileName, n.text)
+                            || lookupNsMap(nsAliasByFile, sf2.fileName, n.text) || null)
                         : null;
                     if (ns0 && ns0.size) {
-                        return ts.factory.createObjectLiteralExpression([...ns0].map(([k, v]) =>
-                            ts.factory.createShorthandPropertyAssignment(globalRename.get(v) || v, undefined)), false);
+                        return ts.factory.createObjectLiteralExpression([...ns0].map(([k, v]) => {
+                            const tsym = derefSym(lookupNsSym(sf2.fileName, n.text, k));
+                            const td = tsym && (tsym.valueDeclaration || (tsym.declarations && tsym.declarations[0]));
+                            const tm = td && fileRename.get(path.resolve(td.getSourceFile().fileName));
+                            const dn = td && td.name && td.name.text;
+                            const nn = (tm && dn && tm.get(dn)) || (tm && tm.get(v)) || lookupAnyFileRename(v)
+                                || (canonicalNames.has(v) ? v : (globalRename.get(v) || v));
+                            return ts.factory.createShorthandPropertyAssignment(nn, undefined);
+                        }), false);
                     }
                     /* checker2 对**已被访问/替换过**的引用点返回 undefined（声明点正常）。
                      * 节点是 prog1 的原对象 → 回退 prog1 的 checker 拿同一符号。 */
@@ -1048,30 +1213,45 @@ function compileTS(input, outWasm, opts = {}) {
                      * import 绑定是 alias 符号，先解析到目标再查（`import { validateURL }`）。 */
                     const direct = sym && symRename.get(sym);
                     if (direct !== undefined) return ts.factory.createIdentifier(direct);
-                    /* 兜底：tsc 对某些引用点（`return error();` 的调用位）不建符号绑定，
-                     * 两个 checker 都返回 undefined。此时按「文件名 + 名字」查改名表——
-                     * 内联后的引用只可能指向**本文件**的私有声明（跨文件引用走 import，已被
-                     * 上面的 alias 分支处理），故文件级匹配安全。 */
-                    if (!sym) {
-                        /* 排除**非引用**位置：属性名 `a.error`、字符串键、声明名本身（声明名有
-                         * sym，走不到这里）、`{ error: 1 }` 的键。 */
-                        const p = n.parent;
-                        const isPropName = p && ((ts.isPropertyAccessExpression(p) && p.name === n)
-                            || (ts.isPropertyAssignment(p) && p.name === n)
-                            || (ts.isMethodDeclaration(p) && p.name === n));
-                        if (!isPropName) {
-                            const byFileRename = fileRename.get(sf2.fileName);
-                            const hit = byFileRename && byFileRename.get(n.text);
-                            if (hit !== undefined) return ts.factory.createIdentifier(hit);
-                            const g = globalRename.get(n.text);
-                            if (g) return ts.factory.createIdentifier(g);
+                    /* 兜底：tsc 对某些引用点不建可用符号绑定；同名本地声明优先（不误改）。 */
+                    const pp = n.parent;
+                    const isPropName = pp && ((ts.isPropertyAccessExpression(pp) && pp.name === n)
+                        || (ts.isPropertyAssignment(pp) && pp.name === n)
+                        || (ts.isMethodDeclaration(pp) && pp.name === n));
+                    const decls0 = sym && sym.declarations;
+                    const isTopLevelDecl = !!(decls0 && decls0.some(d => d.parent === d.getSourceFile()));
+                    let isLocalDecl = !!(decls0 && decls0.some(d =>
+                        (ts.isVariableDeclaration(d) || ts.isParameter(d) || ts.isFunctionDeclaration(d)
+                        || ts.isClassDeclaration(d) || ts.isBindingElement(d)) && d.parent !== d.getSourceFile()));
+                    const ownTop = topNamesByFile.get(path.resolve(sf2.fileName));
+                    if (isTopLevelDecl || (ownTop && ownTop.has(n.text))) isLocalDecl = false;
+                    if (!isPropName && !isLocalDecl) {
+                        const byDecl = decls0 && decls0.map(d => {
+                            if (!d || d.parent !== d.getSourceFile()) return undefined;
+                            const fr = fileRename.get(path.resolve(d.getSourceFile().fileName));
+                            return fr && fr.get(n.text);
+                        }).find(v => v !== undefined);
+                        if (byDecl !== undefined) return ts.factory.createIdentifier(byDecl);
+                        const hit = lookupFileRename(sf2.fileName, n.text);
+                        if (hit !== undefined) return ts.factory.createIdentifier(hit);
+                        const byImport = importAliasByFile[sf2.fileName];
+                        const target = byImport && byImport.get(n.text);
+                        if (target !== undefined) {
+                            const symByImport = importSymByFile[sf2.fileName];
+                            const symImport = symByImport && symByImport.get(n.text);
+                            return ts.factory.createIdentifier(symImport ? importAliasName(symImport, target) : (globalRename.get(target) || target));
                         }
+                        if (isTopLevelDecl) return emitId(n);
+                        const ownTop = topNamesByFile.get(path.resolve(sf2.fileName));
+                        if (ownTop && ownTop.has(n.text)) return emitId(n);
+                        const g = globalRename.get(n.text);
+                        if (g) return ts.factory.createIdentifier(g);
                     }
                     if (sym && (sym.flags & ts.SymbolFlags.Alias) && sym.declarations) {
                         const d0 = sym.declarations[0];
                         if (ts.isImportSpecifier(d0) || ts.isImportClause(d0)) {   // 具名 / 默认导入
                             const target = checker2.getAliasedSymbol(sym);
-                            if (!target) return n;
+                            if (!target) return emitId(n);
                             const renamed = symRename.get(target);
                             if (renamed !== undefined) {
                                 // 未绑定引用（checker 返回 undefined）走文件级兜底：本文件里该 import
@@ -1090,7 +1270,7 @@ function compileTS(input, outWasm, opts = {}) {
                             return ts.factory.createIdentifier(g || realName);
                         }
                     }
-                    return n;
+                    return emitId(n);
                 }
                 if (ts.canHaveModifiers(n)) {
                     const mods = ts.getModifiers(n);
@@ -1146,6 +1326,17 @@ function compileTS(input, outWasm, opts = {}) {
         // DCE：只保留从 interp 根可达的顶层声明（详见 dceInterpJs）。
         // 跨文件导出改名后，DCE 按名可达性会漏掉 import alias 的依赖（zod `$constructor`），
         // 造成运行期 ReferenceError。100% 兼容优先：有改名时保留全部声明，无改名才启用优化。
+        // host-backed 绑定被局部别名/跨文件重名改名后，wasm 仍按原绑定名取 interp_fn_value。
+        // 在 interpJs 末尾补顶层桥接，并以断言把缺失暴露在编译期（不再静默变 undefined）。
+        const declaredAsTop = (name) => new RegExp(`(?:^|[;\\n])\\s*(?:const|let|var|function)\\s+${name.replace(/[$]/g, "\\$")}\\b`).test(interpJs);
+        for (const nm of modInterpBindings.keys()) {
+            if (declaredAsTop(nm)) continue;
+            const final = modInterpBindingFinal.get(nm);
+            if (!final || !declaredAsTop(final)) {
+                throw new Error(`[interp] host-backed 绑定 ${nm} 在 interpJs 中不存在`);
+            }
+            interpJs += `\nconst ${nm} = ${final};\n`;
+        }
         if (!process.env.QZD_NO_DCE && globalRename.size === 0) interpJs = dceInterpJs(interpJs, new Set([...interpSet, ...modInterpBindings.keys()]));
     }
     /* 函数体引用 arguments 的顶层函数名（真实编译名）。num 模式没有全量实参数组通道，

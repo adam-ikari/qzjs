@@ -84,6 +84,10 @@ function genGlue(prefix, mainCalls, wasmOnly) {
     // 故 interpJs 副本须暴露这些名供 bindInterp 注入。
     const modInterpBindings = metaObj.modInterpBindings || [];
     const interpNames = [...new Set([...meta.filter(m => m.mode === "interp").map(m => m.name), ...modInterpBindings])];
+    const interpBindingNames = new Set(modInterpBindings);
+    const interpEntries = interpNames.map(n => interpBindingNames.has(n)
+        ? `${n}: typeof ${n} !== "undefined" ? ${n} : undefined`       // host-backed const 可能是对象/字符串
+        : `${n}: typeof ${n} === "function" ? ${n} : undefined`);
     const interpFile = prefix + ".interp.js";
     const interpJs = (interpNames.length && fs.existsSync(interpFile)) ? fs.readFileSync(interpFile, "utf8") : "";
     const makeQzvm = extractMakeQzvm();
@@ -114,7 +118,7 @@ const __fs = globalThis.qzjs && globalThis.qzjs.fs;
 // 与 wasm 路径语义等价（同一份 TS 源码），只是跑在宿主解释器而非 AOT 机器码。
 const __interp = (function () {
 ${interpJs}
-return { ${interpNames.map(n => `${n}: typeof ${n} === "function" ? ${n} : undefined`).join(", ")} };
+return { ${interpEntries.join(", ")} };
 })();
 ${load}
     const __ex = instance.exports;

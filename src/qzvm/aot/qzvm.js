@@ -669,6 +669,8 @@ function makeQzvm(strings, opts) {
     while (c !== null && c !== undefined) {
       if (c === clsId) return boxBool(true);
       const m = classMeta && classMeta[c];
+      const pf = classRuntimeParentFn.get(c);
+      if (pf !== undefined) { try { return boxBool(toJS(obj) instanceof pf); } catch (_) { return boxBool(false); } }
       c = classRuntimeParent.has(c) ? classRuntimeParent.get(c) : (m ? m.parent : null);
     }
     return boxBool(false);
@@ -684,6 +686,7 @@ function makeQzvm(strings, opts) {
     return h0;
   };
   const classRuntimeParent = new Map();    // clsId → 运行时父 clsId（动态 extends / mixin）
+  const classRuntimeParentFn = new Map();  // clsId → 运行时父宿主函数（$constructor 类值）
   const chainNext = (cc) => {              // 类链下一跳：优先运行时父（mixin），否则静态 parent
     if (!cc) return null;
     const rp = classRuntimeParent.get(cc.id);
@@ -1276,8 +1279,8 @@ function makeQzvm(strings, opts) {
       const baseCtor = handles[idxOf(baseObj)];
       if (typeof baseCtor !== "function") throw new Error("extends: 父类值不是类对象");
       const bid = baseCtor.__qzClsId;
-      if (bid === undefined) throw new Error("extends: 父类值缺少 __qzClsId");
-      classRuntimeParent.set(clsId, bid);
+      if (bid === undefined) classRuntimeParentFn.set(clsId, baseCtor);
+      else classRuntimeParent.set(clsId, bid);
       let h = classHandles.get(clsId);
       if (h !== undefined) return h;
       const c = classObjImpl(clsId, baseCtor);
@@ -1287,6 +1290,11 @@ function makeQzvm(strings, opts) {
     },
     super_ctor: (clsId, self, a0, a1, a2, a3) => {   // 动态父构造转发（mixin 的合成 ctor）
       // 父链来源二选一：动态 extends（classRuntimeParent）或 classMeta.parent（克隆派生类）。
+      const hostParent = classRuntimeParentFn.get(clsId);
+      if (hostParent !== undefined) {
+        hostParent(self, ...[a0, a1, a2, a3].map(x => toJS(x)));
+        return;
+      }
       const bid = classRuntimeParent.has(clsId) ? classRuntimeParent.get(clsId)
                 : (classMeta && classMeta[clsId] && classMeta[clsId].parent != null ? classMeta[clsId].parent : undefined);
       if (bid === undefined) throw new Error("super_ctor: 无运行时父类（动态 extends 未链接）");
@@ -1422,6 +1430,8 @@ function makeQzvm(strings, opts) {
       while (c !== null && c !== undefined) {
         if (c === clsId) return boxBool(true);
         const m = classMeta && classMeta[c];
+        const pf = classRuntimeParentFn.get(c);
+        if (pf !== undefined) { try { return boxBool(toJS(obj) instanceof pf); } catch (_) { return boxBool(false); } }
         c = classRuntimeParent.has(c) ? classRuntimeParent.get(c) : (m ? m.parent : null);
       }
       return boxBool(false);
