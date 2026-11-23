@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-21T11:43:27"
+updated: "2026-11-23T09:39:20"
 ---
 
 <!-- compiled_truth -->
@@ -677,4 +677,16 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "2026-11-21 follow-up：具名 namespace re-export 的 interp 专用成员表与 wasm nsAliasByFile 拆开，修复 v3 ZodError.ts arrayToEnum 编译回归；coverage 恢复 125/125、wasm 20845/20945 (99.5%)。完整 zod glue 运行时仍报 TypeError value is not iterable，100% 兼容未达成"
   source: session 2026-11-21
+  affects: [aot-roadmap]
+
+- time: 2026-11-23T02:47:31
+  kind: reversal
+  summary: "2026-11-23 实验性全量 hoist $constructor 到 modInterpBindings 已回退：模块初始化出现 new_dynamic 目标句柄 0 / schema 未初始化，未达 100% 兼容；保留已验证的修复：byName 过滤 interface/type alias、strip 输出 __m_ 新名、host-backed interp 绑定按值暴露。新增 test_aot_constructor_hoist.js 仍 RED，不得宣称完成"
+  source: session 2026-11-23
+  affects: [aot-roadmap]
+
+- time: 2026-11-23T09:39:20
+  kind: evidence
+  summary: "2026-11-23: zod v4 AOT 端到端打通；bench(100)=100。修复链：恢复 $constructor hoist；host-backed 绑定前置到 __module_init 开头以消除 ZodUUID 前向引用裸 0；zod 同名 canonical 符号优先，避免 boolean 函数被正则常量改名覆盖；保留宿主父类构造转发与跨文件 interp 桥接。验证：wasm-validate、node --check、四个 AOT 回归、corpus47、zod coverage 107/107（wasm 99.8%）全绿。"
+  source: "src/qzvm/aot/emit/compile-ts.js, src/qzvm/aot/qzvm.js, src/qzvm/aot/build.js, src/qzvm/aot/test_aot_constructor_hoist.js"
   affects: [aot-roadmap]
