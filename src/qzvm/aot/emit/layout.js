@@ -340,6 +340,50 @@ function emitStringHelpers(m) {
     m.end(); m.end();
     m.localGet(3);
     m.endBody();
+
+    // qzs_indexof_ascii(hayOff:i32, needleOff:i32) -> i32：UTF-8 字节扫描 ASCII 字面量 needle，
+    // 返回 UTF-16 码元索引（含代理对）或 -1。ASCII 字节不会落在多字节续字节内，按字节比较安全；
+    // 匹配前的码元数按 UTF-8 首字节累加（4 字节首 +2），与 qzs_utf16len 同规则。
+    m.declareFunc("qzs_indexof_ascii", ["i32", "i32"], ["i32"]);
+    m.startBody("qzs_indexof_ascii", ["i32", "i32", "i32", "i32", "i32", "i32"]);
+    // locals: 2=hayLen 3=needleLen 4=i 5=j 6=cnt 7=b
+    m.localGet(0); m.i32Load(2, 0); m.localSet(2);
+    m.localGet(1); m.i32Load(2, 0); m.localSet(3);
+    m.localGet(3); m.i32Eqz(); m.ifBlock("void");
+    m.i32Const(0); m.return_();
+    m.end();
+    m.localGet(3); m.localGet(2); m.i32GtU(); m.ifBlock("void");
+    m.i32Const(-1); m.return_();
+    m.end();
+    m.i32Const(0); m.localSet(4);                                // i = 0
+    m.i32Const(0); m.localSet(6);                                // cnt = 0（i 前的 UTF-16 码元数）
+    m.block("void"); m.loop("void");                             // 外层：起点 i
+    m.localGet(4); m.localGet(3); m.i32Add(); m.localGet(2); m.i32GtU(); m.brIf(1);
+    m.i32Const(0); m.localSet(5);                                // j = 0
+    m.block("void"); m.loop("void");                             // 内层：needle 字节比较
+    m.localGet(5); m.localGet(3); m.i32GeU(); m.brIf(1);
+    m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(4); m.localGet(5); m.i32Add(); m.i32Add();
+    m.i32Load8U(0, 0);
+    m.localGet(1); m.i32Const(4); m.i32Add(); m.localGet(5); m.i32Add(); m.i32Load8U(0, 0);
+    m.i32Ne(); m.brIf(1);
+    m.localGet(5); m.i32Const(1); m.i32Add(); m.localSet(5);
+    m.br(0);
+    m.end(); m.end();
+    m.localGet(5); m.localGet(3); m.i32Eq(); m.ifBlock("void");
+    m.localGet(6); m.return_();
+    m.end();
+    m.localGet(0); m.i32Const(4); m.i32Add(); m.localGet(4); m.i32Add(); m.i32Load8U(0, 0); m.localSet(7);
+    m.localGet(7); m.i32Const(0x80); m.i32LtU();
+    m.localGet(7); m.i32Const(0xc0); m.i32GeU();
+    m.i32Or();
+    m.localGet(7); m.i32Const(0xf0); m.i32GeU();
+    m.i32Add();
+    m.localGet(6); m.i32Add(); m.localSet(6);
+    m.localGet(4); m.i32Const(1); m.i32Add(); m.localSet(4);
+    m.br(0);
+    m.end(); m.end();
+    m.i32Const(-1);
+    m.endBody();
 }
 
 // num 数组扩容：qz_numarr_grow(base:i32, len:i32) -> i32(新 base)。

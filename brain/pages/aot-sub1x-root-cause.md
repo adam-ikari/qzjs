@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-24T09:34:59"
+updated: "2026-11-24T11:21:55"
 ---
 
 <!-- compiled_truth -->
@@ -77,4 +77,10 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   kind: reversal
   summary: "回退 field_order_lit 静态字段名缓存（原提交 045da477）：专项 A/B 仅 8.25ms→7.643ms/30k 次，低于本机噪声；删除 litNames 与 test_field_order_cache.js。保留 strict 比较/null/typeof/短路内联；回退后 test_aot ALL PASS，validationWork(200000)=2367.801ms（本地噪声大，以跨界计数为准）。"
   source: "docs/dev/aot-sub1x-analysis.md + /tmp/perf_after_cache_revert.txt"
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-24T11:21:55
+  kind: evidence
+  summary: "String.prototype.indexOf(ASCII literal) 在 wasm 内扫描（qzs_indexof_ascii，按 UTF-8 前缀累加 UTF-16 码元；非字符串/多参回退 qz.method_call）。validationWork(200000) p50 从 2367.801ms 降至 601.030ms；test_indexof_inline.js 验证零 method_call、UTF-8 代理对索引、empty needle、非字符串 loud 抛错；test_aot.js ALL PASS。"
+  source: "src/qzvm/aot/test_indexof_inline.js + /tmp/perf_indexof_inline.txt"
   affects: [aot-sub1x-root-cause]

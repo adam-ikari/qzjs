@@ -2816,6 +2816,33 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
             return;
         }
     }
+    // `s.indexOf("ASCII")`：接收者运行时守卫为 wasm 字符串(0x7FFA) 时在 wasm 扫 UTF-8 字节，
+    // 按 UTF-16 码元返回索引；其它接收者仍走通用 qz.method_call（保留真 JS 语义/异常）。
+    // needle 用 _litOffset 直接读字面量的 [len][utf8]，不跨宿主；仅无 fromIndex 的单参形态。
+    if (method === "indexOf" && args.length === 1 && ts.isStringLiteral(args[0])
+        && /^[\x00-\x7F]*$/.test(args[0].text)) {
+        const Mg = this.m, tg = this._expEnter();
+        this.emitTaggedExpr(rx); Mg.localSet(tg.v);                 // 接收者只求值一次
+        Mg.localGet(tg.v); Mg.i64Const(48n); Mg.i64ShrU();
+        Mg.i64Const(0x7ffan); Mg.i64Eq();
+        Mg.ifBlock("i64");
+        this.depth++;                                              // 分支内含 errCheck 的 br
+        Mg.localGet(tg.v); Mg.i32WrapI64();
+        Mg.i32Const(this._litOffset(args[0].text));
+        Mg.call("qzs_indexof_ascii");
+        Mg.f64ConvertI32S(); Mg.i64ReinterpretF64();
+        Mg.else_();
+        Mg.localGet(tg.v); Mg.i32Const(this._strId("indexOf"));
+        this.emitTaggedExpr(args[0]);
+        for (let k = 0; k < 3; k++) this._emitUndefined();
+        this.emitTaggedExpr(ts.factory.createArrayLiteralExpression([]));
+        Mg.call("qz.method_call");
+        this._emitErrCheck();
+        Mg.end();
+        this.depth--;
+        this._expLeave();
+        return;
+    }
     // 动态：压 recv + mid + 4 参 + ovf 入值栈。同名类方法有用 arguments 者 → 调用点写 __args 全量实参数组
     // （method_call 宿主派发不知实参个数，无法自建；调用点已知 e.arguments）。
     const dynArgsProv = this._methArgsNames().has(method) && !args.some(a => ts.isSpreadElement(a));

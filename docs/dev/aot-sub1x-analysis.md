@@ -120,6 +120,13 @@ interp（0.03× vs 0.01×），但跨界热点已大幅收敛。剩余的 `qz.me
 1342.846ms、`validationWork` 2367.801ms，check 全部一致、`test_aot.js ALL PASS`；跨轮
 绝对时间波动较大，因此只把跨界计数减少视为可靠收益指标。
 
+字符串单参 `indexOf(ASCII 字面量)` 已下推到 wasm：`qzs_indexof_ascii` 按 UTF-8 字节扫描，
+在匹配点按 UTF-8 首字节累加 UTF-16 码元（4 字节首 +2），非字符串接收者仍走宿主派发。
+新增 `test_indexof_inline.js` 验证零 `qz.method_call`、UTF-8 中文/代理对索引、空 needle
+与非字符串 loud 抛错；`test_aot.js ALL PASS`。同口径重测：`validationWork` p50 从
+2367.801ms 降至 601.030ms，check 一致；`computeWork` 29.278ms、`jsonWork` 1234.067ms。
+`indexOf` 剩余未优化形态：多参 `fromIndex`、非 ASCII needle。
+
 ## 优先级
 
 1. 减少每次跨界的 JS shim 成本（最高杠杆，覆盖四个负载）。
