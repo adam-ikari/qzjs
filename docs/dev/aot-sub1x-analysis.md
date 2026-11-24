@@ -107,13 +107,18 @@ interp 0.508 ms / 100 次 ≈ 5 µs/次。也就是说 zod 的解析逻辑在两
 | 负载 | 基线 wasm p50 | 优化后 wasm p50 | 比值 | 说明 |
 |---|---:|---:|---:|---|
 | `computeWork` | 34.238 ms | 32.535 ms | 1.05× | 噪声范围内，未改数值路径 |
-| `jsonWork` | 1690.643 ms | 1632.605 ms | 1.04× | `field_order_lit` 缓存收益很小 |
+| `jsonWork` | 1690.643 ms | 1632.605 ms | 1.04× | `field_order_lit` 缓存实验已回退；该差异属噪声 |
 | `validationWork` | 8633.842 ms | 3042.792 ms | **2.84×** | 原 1.7M 跨界降至约 300k（严格比较/null/typeof/短路内联） |
 
 载荷从 23514 B 降至 22986 B（-2.2%）；三负载 check 均一致。`validationWork` 仍慢于
 interp（0.03× vs 0.01×），但跨界热点已大幅收敛。剩余的 `qz.method_call`（200k，字符串
 `indexOf`）和 `qz.rem`（100k）未优化；一次 `rem` 零余数快路径实验因破坏 `-0`/宿主回退语义
 已完整回退。
+
+`field_order_lit` 静态字段名缓存已于 2026-11-24 回退：专项 A/B 仅约 0.6ms/30k 次，远低于
+本机运行间波动，不值得增加状态。回退后同口径重测：`computeWork` 28.836ms、`jsonWork`
+1342.846ms、`validationWork` 2367.801ms，check 全部一致、`test_aot.js ALL PASS`；跨轮
+绝对时间波动较大，因此只把跨界计数减少视为可靠收益指标。
 
 ## 优先级
 

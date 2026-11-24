@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-24T07:48:19"
+updated: "2026-11-24T09:34:59"
 ---
 
 <!-- compiled_truth -->
@@ -71,4 +71,10 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   kind: evidence
   summary: "同口径本地 A/B（run.js --rebuild, 5 reps, same qzjs, baseline c6797e04 vs optimized 2b2d5fc5): validationWork wasm p50 8633.842ms→3042.792ms = 2.84x；compute 34.238→32.535ms，json 1690.643→1632.605ms；载荷 23514→22986B；CI baseline 未改。"
   source: "docs/dev/aot-sub1x-analysis.md + /tmp/perf_baseline_final.txt + /tmp/perf_optimized_final.txt"
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-24T09:34:59
+  kind: reversal
+  summary: "回退 field_order_lit 静态字段名缓存（原提交 045da477）：专项 A/B 仅 8.25ms→7.643ms/30k 次，低于本机噪声；删除 litNames 与 test_field_order_cache.js。保留 strict 比较/null/typeof/短路内联；回退后 test_aot ALL PASS，validationWork(200000)=2367.801ms（本地噪声大，以跨界计数为准）。"
+  source: "docs/dev/aot-sub1x-analysis.md + /tmp/perf_after_cache_revert.txt"
   affects: [aot-sub1x-root-cause]

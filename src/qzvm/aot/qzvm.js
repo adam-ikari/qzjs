@@ -367,7 +367,6 @@ function makeQzvm(strings, opts) {
   let arrMetaAt = -1;
   const syncArrMeta = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < arrMetaAt) arrMeta.clear(); arrMetaAt = v; };
   const orderMap = new Map();              // POJO/实例偏移 → 插入序名字表（Object.keys/JSON/for-in 用）
-  const litNames = new Map();              // sid → 编译期字段名表解码结果（同一字面量只 split 一次）
   let orderAt = -1;
   const syncOrder = () => { const v = bumpRef ? Number(bumpRef.value) : -1; if (v < orderAt) orderMap.clear(); orderAt = v; };
   const propFlags = new Map();             // off|name → {w, c}（Object.defineProperty 的 writable/configurable）
@@ -1899,9 +1898,7 @@ function makeQzvm(strings, opts) {
       if (!((hi === TAG_HI && Number(u & MASK32) >= 8) || hi === INST_HI)) return;
       syncOrder(); const off = Number(u & MASK32); let l = orderMap.get(off);
       if (!l) { l = []; orderMap.set(off, l); }
-      let nms = litNames.get(sid);
-      if (!nms) { nms = strings[sid].split("\u0000"); litNames.set(sid, nms); }
-      for (const nm of nms) { if (nm && l.indexOf(nm) < 0) l.push(nm); }
+      for (const nm of strings[sid].split("\u0000")) { if (nm && l.indexOf(nm) < 0) l.push(nm); }
     },
     // delete o.k：宿主对象真删（原型链可继续透出）；POJO/实例 → 槽写 undefined sentinel（等价删除）
     prop_delete: (recv, id) => {
