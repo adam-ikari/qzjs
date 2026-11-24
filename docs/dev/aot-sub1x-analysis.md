@@ -132,6 +132,16 @@ interp（0.03× vs 0.01×），但跨界热点已大幅收敛。剩余的 `qz.me
 `test_numeric_rem_zero_sign.js` 验证符号、负数和非有限回退；同口径重测
 `validationWork` p50 从 601.030ms 降至 321.494ms，check 一致，`test_aot.js ALL PASS`。
 
+## 静态 number 的 `+` 直达 f64（2026-11-24）
+
+`checker` 证明两个操作数都是静态 `number`（排除 any/unknown/union/类型参数）时，`+`
+跳过 BigInt、字符串拼接和句柄分派，直接发 `f64.add`。`any + any` 仍走原拼接路径。
+`test_numeric_add_static.js` 验证小数、`-0 + 0`、`NaN`、`Infinity` 与字符串拼接语义。
+合并单模块同口径：`validationWork(200000)` 5.01×，`computeWork` 仍 >5×；
+默认 `N=500` 的 G2 抖动大，`VALIDATION_N` 环境变量可用于稳定复测。
+`test_numeric_add_static.js`、`test_numeric_rem_zero_sign.js`、`test_indexof_inline.js`、
+`test_aot.js` 全绿。
+
 ## 优先级
 
 1. 减少每次跨界的 JS shim 成本（最高杠杆，覆盖四个负载）。

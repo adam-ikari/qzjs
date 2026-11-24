@@ -102,7 +102,8 @@ function benchInterp(loads) {
   return m ? JSON.parse(m[1]) : [];
 }
 
-const LOADS = [['computeWork', 200000], ['jsonWork', 500], ['validationWork', 500]]; // jsonWork: JSON.parse 返回 host 对象，wasm 读属性 NaN → 结构性缺口
+const VALIDATION_N = Number(process.env.VALIDATION_N) || 500;
+const LOADS = [['computeWork', 200000], ['jsonWork', 500], ['validationWork', VALIDATION_N]]; // jsonWork: JSON.parse 返回 host 对象，wasm 读属性 NaN → 结构性缺口
 const rows = [];
 for (const [name, arg] of LOADS) {
   let inP50 = null, ret = null, err = null;

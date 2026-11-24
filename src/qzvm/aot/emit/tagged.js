@@ -2872,6 +2872,15 @@ Emitter.prototype._emitDynMethod = function (rx, method, args) {
     M.call("qz.method_call");
     this._emitErrCheck();          // 宿主方法可能抛出（如空数组 reduce）→ 转入本函数 catch
 };
+// emitAll 注入的 checker 仅用于静态 number 证明：Any/Unknown/Union/类型参数一律不优化。
+Emitter.prototype._isStaticNumber = function (n) {
+    if (!n || !this.checker) return false;
+    const t = this.checker.getTypeAtLocation(n);
+    if (!t) return false;
+    const F = ts.TypeFlags;
+    const bad = F.Any | F.Unknown | F.Union | F.Intersection | F.TypeParameter | F.Never;
+    return !(t.flags & bad) && !!(t.flags & F.NumberLike);
+};
 Emitter.prototype.emitTaggedBinary = function (e) {
     const op = e.operatorToken.kind;
     // 未实现的二元运算符：先于操作数求值报错（否则右操作数如类名 A 会先崩「未定义捕获变量: A」）
@@ -3051,6 +3060,15 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         else { this.emitTaggedExpr(e.left); if (nullCmp) this._emitNull(); else this.emitTaggedExpr(e.right); }
         if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) this.m.i64Eq(); else this.m.i64Ne();
         this.emitBoxBool();
+        return;
+    }
+    // 静态 number + number：跳过拼接/BigInt/句柄分派，直接 f64 加法（JS 数值语义由 f64 保证）。
+    if (op === ts.SyntaxKind.PlusToken && this._isStaticNumber(e.left) && this._isStaticNumber(e.right)) {
+        this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right);
+        this.m.localSet(this.scratchB); this.m.localSet(this.scratchA);
+        this.m.localGet(this.scratchA); this.m.f64ReinterpretI64();
+        this.m.localGet(this.scratchB); this.m.f64ReinterpretI64();
+        this.m.f64Add(); this.m.i64ReinterpretF64();
         return;
     }
     // 拼接左操作数来历 → 是否允许原地追加（_emitConcat 内部读 _concatInPlace）

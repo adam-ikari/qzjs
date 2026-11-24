@@ -1377,6 +1377,7 @@ function compileTS(input, outWasm, opts = {}) {
     const emitAll = (m, contract, passOpts) => {
         const _opts = passOpts || {};
         const em = new Emitter(m);
+        em.checker = checker;
         em.sf = sf;
         em.hoistedFns = hoistedFns;   // 顶层函数声明（其余函数声明按闭包处理）
         em.fieldMap = new Map([["__cls", 0], ...preNames.map((n, i) => [n, i + 1])]);   // 预登记字段表（与产物一起冻结）

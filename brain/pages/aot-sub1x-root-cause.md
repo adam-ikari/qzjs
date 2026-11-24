@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-24T13:18:48"
+updated: "2026-11-24T16:13:06"
 ---
 
 <!-- compiled_truth -->
@@ -97,3 +97,9 @@ AOT 的加速形态是**单一 wasm 模块**：emitter 产物（静态 wasm）�
   summary: "用户纠正路线：AOT 加速 = 单 wasm 内 qzvm + 静态产物，qz.* 内化；不存在 glue/host 跨界。本轮把 standalone run.js 的 qz.* 宿主调用当加速目标属偏离，其 p50 数字不再作为 AOT 验收；改用 run_inmod.mjs --merge。d2de880e/f651398a 暂按编译器层原语削减保留，待 in-module 复测。"
   source: user correction 2026-11-24
   affects: [aot-sub1x-root-cause, aot-performance-model, aot-m4-feasibility]
+
+- time: 2026-11-24T16:13:06
+  kind: evidence
+  summary: "静态 number + number 在 tagged wasm 内直达 f64.add，跳过 BigInt/字符串/句柄分派；any 拼接保持原路径。合并单模块 VALIDATION_N=200000 为 5.01×；默认 N=500 G2 抖动大。test_numeric_add_static.js + indexOf/rem/test_aot 全绿。"
+  source: "bench/aot-product/run_inmod.mjs + docs/dev/aot-sub1x-analysis.md + src/qzvm/aot/test_numeric_add_static.js"
+  affects: [aot-sub1x-root-cause]
