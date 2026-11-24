@@ -5,22 +5,17 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-24T13:12:43"
+updated: "2026-11-24T13:18:48"
 ---
 
 <!-- compiled_truth -->
-## 结论
+## 结论（2026-11-24 路线更正）
 
-CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×、objWork 0.110×、zodbench.bench 0.004×）的共同根因是 tagged 值的 `qz.*` 宿主跨界税，不是算法回退。报告：`docs/dev/aot-sub1x-analysis.md`。
+AOT 的加速形态是**单一 wasm 模块**：emitter 产物（静态 wasm）与 qzvm（动态 JS 引擎）在模块内共存；`qz.*` 经 wasm-merge 内化为模块内调用，**不存在 standalone glue/host 跨界**。因此把 `bench/aot-product/run.js` 的 JS glue `qz.*` 调用当“宿主跨界税”并把其调用数当加速目标是路线偏离；该 bench 的结果不能作为 AOT 加速验收。
 
-- `jsonWork`：30k 次 `JSON.parse` 返回 HOST_HI 宿主对象；每 iter 12 次调用（builtin 1、prop_get 6、get_index 4、restore_handles 1）。
-- `validationWork`：每 iter 8.5 次调用；四处 `typeof !==` 经 `qz.sne`，字符串 `indexOf` 经 `qz.method_call`，另有 rem/truthy/seq。
-- `objWork`：每 iter 2 次；不再是属性读，而是 `field_order_lit` + `restore_handles`。
-- `zodbench`：每 iter 4 次，其中 `safeParse` 是 0x7FFD HOST_HI 上的宿主方法；zod 实际逻辑在宿主 JS 执行，AOT 只增加包装/转换成本。558/559 函数为 tagged，1 个 interp；全 interp 对照 559/559，8 B wasm。
+验收口径：`bench/aot-product/run_inmod.mjs --merge`（emitter 产物 + libqzvm 静态合并，qz.* 内化，仅保留 WASI/qz_host 对外 import）。
 
-## 优化优先级
-
-降低单次跨界 JS shim 成本 > 宿主内建结果 wasm 落地/批量接口 > 静态类型收窄消除已知 tag 的 sne/truthy/seq/rem > 缓存 field_order_lit 并跳过纯 POJO 循环句柄维护 > zod 批量宿主调用。不得撤销 host-backed 类语义。
+2026-11-24 的 `d2de880e`（ASCII indexOf 下推 wasm）与 `f651398a`（有限 number % 零余数保号）确实减少了独立档 `qz.*` 调用并提升 standalone bench；这只能记作编译器层原语调用削减，**不是 AOT 路线收益**，除非在 in-module 合并模块上复测。后续优化必须先问：该行为在 qzvm 内部是否仍有原生 wasm 指令不可表达的动态语义；仅当答案肯定时才保留 qzvm 原语，否则优先编译期为静态 wasm。
 
 
 ## Timeline
@@ -90,3 +85,15 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   summary: "tagged 有限 number % 的零余数不再回退 qz.rem：在 wasm 用 r==0 ? a*0 : r 复刻 JS 保号语义。test_numeric_rem_zero_sign.js 验证 ±0/负数/非有限回退，AOT 全绿；validationWork(200000) p50 601.030ms→321.494ms，check 一致。"
   source: "src/qzvm/aot/test_numeric_rem_zero_sign.js + /tmp/perf_rem_inline.txt"
   affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-24T13:18:48
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "user correction 2026-11-24; brain aot-performance-model / aot-m4-feasibility"
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-24T13:18:48
+  kind: reversal
+  summary: "用户纠正路线：AOT 加速 = 单 wasm 内 qzvm + 静态产物，qz.* 内化；不存在 glue/host 跨界。本轮把 standalone run.js 的 qz.* 宿主调用当加速目标属偏离，其 p50 数字不再作为 AOT 验收；改用 run_inmod.mjs --merge。d2de880e/f651398a 暂按编译器层原语削减保留，待 in-module 复测。"
+  source: user correction 2026-11-24
+  affects: [aot-sub1x-root-cause, aot-performance-model, aot-m4-feasibility]

@@ -123,4 +123,4 @@ console.table(rows);
 console.log(`载荷字节: ${MERGE ? '合并单 wasm ' + statSync(mergedPath).size + ' B' : '产品 wasm ' + statSync(prodPath).size + ' B'}`);
 console.log(`边界税 tagLoop(POJO 内联 alloc+read): ${taxNs} ns/op（非内联 qz.* call PoC ~54ns ≤ 100ns）`);
 console.log('G1(热点计算≥3×): computeWork ' + (rows[0].ratio ?? '?') + '× ' + ((rows[0].ratio ?? 0) >= 3 ? '✓ 达标' : '✗'));
-console.log('G2(翻转≥1.5×): validationWork ' + (rows[1].ratio ?? '?') + '× ' + ((rows[1].ratio ?? 0) >= 1.5 ? '✓ 达标' : '✗'));
+console.log('G2(翻转≥1.5×): validationWork ' + (rows[2].ratio ?? '?') + '× ' + ((rows[2].ratio ?? 0) >= 1.5 ? '✓ 达标' : '✗'));
