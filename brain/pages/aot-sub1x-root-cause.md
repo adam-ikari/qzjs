@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, performance, analysis, cross-boundary]
 created: "2026-11-23T19:00:34"
-updated: "2026-11-24T11:21:55"
+updated: "2026-11-24T13:12:43"
 ---
 
 <!-- compiled_truth -->
@@ -83,4 +83,10 @@ CI 基线中四个低于 1× 负载（jsonWork 0.058×、validationWork 0.012×�
   kind: evidence
   summary: "String.prototype.indexOf(ASCII literal) 在 wasm 内扫描（qzs_indexof_ascii，按 UTF-8 前缀累加 UTF-16 码元；非字符串/多参回退 qz.method_call）。validationWork(200000) p50 从 2367.801ms 降至 601.030ms；test_indexof_inline.js 验证零 method_call、UTF-8 代理对索引、empty needle、非字符串 loud 抛错；test_aot.js ALL PASS。"
   source: "src/qzvm/aot/test_indexof_inline.js + /tmp/perf_indexof_inline.txt"
+  affects: [aot-sub1x-root-cause]
+
+- time: 2026-11-24T13:12:43
+  kind: evidence
+  summary: "tagged 有限 number % 的零余数不再回退 qz.rem：在 wasm 用 r==0 ? a*0 : r 复刻 JS 保号语义。test_numeric_rem_zero_sign.js 验证 ±0/负数/非有限回退，AOT 全绿；validationWork(200000) p50 601.030ms→321.494ms，check 一致。"
+  source: "src/qzvm/aot/test_numeric_rem_zero_sign.js + /tmp/perf_rem_inline.txt"
   affects: [aot-sub1x-root-cause]

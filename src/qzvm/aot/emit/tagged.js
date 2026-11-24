@@ -1920,14 +1920,13 @@ Emitter.prototype.emitTaggedRem = function () {
     M.localGet(this.scratchFB);
     M.localGet(this.scratch); M.f64ReinterpretI64(); M.f64Trunc();
     M.f64Mul(); M.f64Sub();
-    // 零余数 → qz.rem（宿主保号 -0/+0）
+    // 零余数符号随被除数：r==0 ? a*0 : r（同 num 档 emitRem），无需宿主保号。
     M.i64ReinterpretF64(); M.localSet(this.scratch);
+    M.localGet(this.scratchFA); M.f64Const(0); M.f64Mul();    // a*0：copysign(0, a)
+    M.localGet(this.scratch); M.f64ReinterpretI64();          // r
     M.localGet(this.scratch); M.f64ReinterpretI64(); M.f64Const(0); M.f64Eq();
-    M.ifBlock("i64");
-    M.localGet(this.scratchA); M.localGet(this.scratchB); M.call("qz.rem");
-    M.else_();
-    M.localGet(this.scratch);
-    M.end();
+    M.select();
+    M.i64ReinterpretF64();
     M.end();
     M.end();
     M.end();

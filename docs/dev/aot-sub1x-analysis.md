@@ -127,6 +127,11 @@ interp（0.03× vs 0.01×），但跨界热点已大幅收敛。剩余的 `qz.me
 2367.801ms 降至 601.030ms，check 一致；`computeWork` 29.278ms、`jsonWork` 1234.067ms。
 `indexOf` 剩余未优化形态：多参 `fromIndex`、非 ASCII needle。
 
+有限 number 的 `%`（包括零余数）已去掉 `qz.rem` 回退：wasm 侧用 `r==0 ? a*0 : r`
+保持 JS 的 `-0`/`+0` 符号语义，非有限操作数仍走宿主。新增
+`test_numeric_rem_zero_sign.js` 验证符号、负数和非有限回退；同口径重测
+`validationWork` p50 从 601.030ms 降至 321.494ms，check 一致，`test_aot.js ALL PASS`。
+
 ## 优先级
 
 1. 减少每次跨界的 JS shim 成本（最高杠杆，覆盖四个负载）。
