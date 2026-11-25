@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-25T15:41:50"
+updated: "2026-11-25T16:26:13"
 ---
 
 <!-- compiled_truth -->
@@ -830,4 +830,10 @@ wasm JIT 与 wasm AOT 必须分别单独测；每档都要同时与 qzjs 纯解�
   kind: evidence
   summary: "2026-11-25 真实场景扩展：从 qzjs polyfill 的纯计算路径取形，加入 4 个真实 workload 进四档矩阵——hpackIntBatch（hpack.js encodeInt 的 varint 长度）、varintBatch（protobuf.js Writer.varintNum 的数值部分）、hashBatch（滚动哈希）、policyGate（固定设备策略重复评估，@qz-pure → LICM）。M7 分析：前三者整函数 num（hpack/varint/hash），policyGate 经 LICM 抽出 1 片段；wasm 共 3 个 __aot_frag（validationWork/policyGate/mixedWork）。本地语义比对 4 负载 × N={1,10,100,500} 与 JS 逐点一致，4 AOT 回归 + 47 corpus 0 diff 不变。过程中发现独立 G4 缺陷：num 模式 emitBitI32 对 >>> 0 在操作数超 i32 范围时用 i32.trunc_f64_s 直接 trap（JS ToUint32 应环绕），hashBatch 原用 2654435761/16777619 触发；已把 workload 改为范围安全写法，缺陷本身未修（tagged 路径有 _emitInt32Safe guard，num 路径没有）。CI 四档复测待跑。"
   source: "src/polyfill/src/hpack.js / protobuf.js; bench/aot-product/workloads/aotp.ts; emitBitI32 num 路径"
+  affects: [aot-roadmap, aot-readiness]
+
+- time: 2026-11-25T16:26:13
+  kind: evidence
+  summary: "2026-11-25 真实场景加速效果（CI run 45574723363，ubuntu-latest AMD EPYC 7763 4 vCPU，wamrc 2.4.5，check 值与 JS 逐点一致）。Tier A WAMR-AOT vs qzjs-interp p50：hpackIntBatch（hpack.js RFC7541 varint 长度）0.73 vs 27.691ms=37.93×；varintBatch（protobuf.js varint 长度）2.323 vs 35.071ms=15.10×；policyGate（固定策略 @qz-pure→LICM）0.068 vs 2.361ms=34.72×；hashBatch（滚动哈希）5.73 vs 7.479ms=1.31×（弱：% 走宿主 math_rem）；已有 validationWork 59×、computeWork ~3.4×。vs node-JS：hpack AOT 1.22×、varint 1.21×、policyGate 1.68× 均快过 node；hashBatch 慢 14×。Tier B wasm-JIT vs qzjs-interp：hpack 2.15×、varint 3.34×、hash 1.35×、policyGate 15.19×。结论：真实纯整数/策略负载上 wasm AOT 普遍 15–38× 于 qzjs 解释且可快过 node；含大量 % 的负载收益被宿主 math_rem 吃掉。过程中暴露 G4 缺陷：num 模式 emitBitI32 的 >>> 0 对超 i32 范围直接 i32.trunc_f64_s trap（JS ToUint32 应环绕），varintBatch/hashBatch 原写法触发，已改成范围安全写法；底层缺陷未修，已入结论。"
+  source: "CI run 45574723363 artifact aot-perf-matrix: perf-wamr.txt / perf-jit.txt"
   affects: [aot-roadmap, aot-readiness]
