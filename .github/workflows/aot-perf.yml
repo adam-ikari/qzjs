@@ -118,7 +118,7 @@ jobs:
           WASM_MERGE: ${{ env.WASM_MERGE }}
         run: node bench/aot-product/run_inmod.mjs --merge 2>&1 | tee perf-jit.txt
 
-      - name: Tier C — wasm2c (no wasm runtime: wasm → C → gcc -O3)
+      - name: Tier C - wasm2c (wasm to C via gcc -O3, no wasm runtime)
         env:
           WABT_DIR: /tmp/wabt142
           WAMRC: /tmp/wamrc
