@@ -60,13 +60,23 @@ writeFileSync(path.join(OUT, 'polyfill_ext.h'),
 `/* generated: extern declaration for QZ_EXTRA_HEADERS */\n#ifndef QZ_W2C_POLYFILL_H\n#define QZ_W2C_POLYFILL_H\n#include <qzjs/qzjs.h>\nextern const qz_ext_t w2c_polyfill_ext;\n#endif\n`);
 
 // 5. 输出构建参数（供 CI 消费）
+// wabt runtime 是第三方源文件：qzjs 的 -std=c99/-Werror 不认 SA_ONSTACK/SIGSTKSZ，
+// 复制进工作区并加 _GNU_SOURCE + pragma（与项目对 miniz/quickjs 的 -isystem 隔离同思路）。
+const rtDir = path.join(WABT, 'share', 'wabt', 'wasm2c');
+const rtPrefix = '' +
+  ['unused-parameter','unused-variable','unused-function','unused-value','sign-compare'].map(w =>
+    `#pragma GCC diagnostic ignored "-W${w}"`).join('\n') + '\n';
+for (const f of ['wasm-rt-impl.c', 'wasm-rt-mem-impl.c']) {
+  writeFileSync(path.join(OUT, f), rtPrefix + readFileSync(path.join(rtDir, f), 'utf8'));
+}
+
 const cfg = {
   QZ_EXTRA_SOURCES: [path.join(OUT, 'polyfill_ext.c'), path.join(OUT, MOD + '.c'),
-    path.join(WABT, 'share', 'wabt', 'wasm2c', 'wasm-rt-impl.c'),
-    path.join(WABT, 'share', 'wabt', 'wasm2c', 'wasm-rt-mem-impl.c')].join(';'),
+    path.join(OUT, 'wasm-rt-impl.c'), path.join(OUT, 'wasm-rt-mem-impl.c')].join(';'),
   QZ_EXTRA_HEADERS: path.join(OUT, 'polyfill_ext.h'),
   QZ_EXTENSIONS: 'QZ_DEFAULT_EXTENSIONS &w2c_polyfill_ext',
-  CFLAGS: `-I${WABT}/include -I${OUT}`,
+  // _GNU_SOURCE 由 CI 命令行 -D 注入（源码 #define 会被 target 的 -D_POSIX_C_SOURCE 覆盖）
+  CFLAGS: `-I${WABT}/include -I${WABT}/share/wabt/wasm2c -I${OUT} -D_GNU_SOURCE`,
 };
 writeFileSync(path.join(OUT, 'build-config.json'), JSON.stringify(cfg, null, 2));
 console.log('wasm2c polyfill extension sources generated at', OUT);
