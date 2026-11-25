@@ -26,8 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake ninja-build pkg-config \
-            clang lld llvm-18-dev g++-multilib zlib1g-dev \
-            binaryen wasi-libc
+            clang lld zlib1g-dev binaryen wasi-libc curl
 
       - uses: actions/setup-node@v4
         with:
@@ -38,14 +37,22 @@ jobs:
           npm --prefix src/polyfill ci
           npm --prefix src/qzvm/aot ci
 
-      - name: Build wamrc (WAMR AOT compiler, system LLVM)
+      # WAMR 自带 CMake 不认系统 LLVM_DIR，只认 core/deps/llvm/build；现成 CI job
+      # (aot-perf-baseline) 已验证预编译包路径，沿用同一固定版本。
+      - name: Install wamrc 2.4.5 (prebuilt)
         run: |
-          cmake -S deps/wamr/wamr-compiler -B /tmp/wamrc-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm
-          cmake --build /tmp/wamrc-build --parallel
-          cp /tmp/wamrc-build/wamrc /tmp/wamrc
-          /tmp/wamrc --version
+          set -euo pipefail
+          mkdir -p /tmp/wamrc-2.4.5
+          curl -fsSL --retry 3 --connect-timeout 20 \
+            -o /tmp/wamrc-2.4.5.tar.gz \
+            https://github.com/wasm-micro-runtime/wasm-micro-runtime/releases/download/WAMR-2.4.5/wamrc-2.4.5-x86_64-ubuntu-22.04.tar.gz
+          tar -xzf /tmp/wamrc-2.4.5.tar.gz -C /tmp/wamrc-2.4.5
+          WAMRC=$(find /tmp/wamrc-2.4.5 -type f -name wamrc -print -quit)
+          test -n "$WAMRC"
+          chmod +x "$WAMRC"
+          "$WAMRC" --version
+          echo "$WAMRC" > /tmp/wamrc-path
+          cp "$WAMRC" /tmp/wamrc
 
       - name: Build qzjs Release (with WAMR)
         run: |
