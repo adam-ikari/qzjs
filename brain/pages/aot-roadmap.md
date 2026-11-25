@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-25T12:54:37"
+updated: "2026-11-25T13:43:22"
 ---
 
 <!-- compiled_truth -->
@@ -795,3 +795,15 @@ wasm JIT 与 wasm AOT 必须分别单独测；每档都要同时与 qzjs 纯解�
   summary: "2026-11-25 负优化规避裁决：jsonWork 与 validationWork 均回退 qzjs 解释执行（bench 构建显式 --interp / compileTS interp:['...']，四个 harness 同步）。jsonWork 依据：JSON.parse 产宿主对象，每迭代 prop_get 6 + get_index 4 + builtin 1 共 11 次跨界；CI 四档 wasm-AOT 0.50×、wasm-JIT 0.15× 于 qzjs 解释；wasm 侧 JSON 解析属大工程，无小改动空间。validationWork 依据：tagged typeof 比较内联 + 短路左侧 bool truthy 内联均已落地（编译器通用收益保留），但 CI run 45548788642 实测 wasm-AOT 仍 0.50×、wasm-JIT 0.11× 于解释；剩余 v===null 的 seq（null/undefined 共用 0x7FF9|0 句柄，按位型内联会错判）、email.indexOf 的 method_call（字符串 UTF-8 语义）、i%2 的 rem（需值域分析）均非小改动可消。裁决：按用户『避免负优化』原则，二者不进 wasm，AOT 定位收敛为纯计算热点（computeWork/mixedWork AOT 5.13×/5.15× 于 qzjs 解释）。回退后 CI 实测 jsonWork WAMR-AOT 1.00× 于解释（不再负优化）；truthy 内联作为通用编译器改进保留。"
   source: "CI run 45548788642 (aot-perf-matrix) + 45531990061 (aot-perf-baseline); --interp 回退实现见 bench/aot-product/*"
   affects: [aot-roadmap, aot-wasm-tagged-backend]
+
+- time: 2026-11-25T13:10:17
+  kind: evidence
+  summary: "2026-11-25 CI 复测（run 45550730482）确认回退决策生效：modes 显示 jsonWork/validationWork 均为 interp、仅 computeWork(num) 与 tagLoop/mixedWork(tagged) 编 wasm。Tier A WAMR-AOT vs qzjs-interp p50：computeWork 7.48×、jsonWork 1.01×、validationWork 0.97×——两项负优化消除（回退前 0.50×/0.50×），计算热点仍 7.48× 达标；WAMR-interp 也回到 0.96×/0.96×。Tier B (node WebAssembly) jsonWork 1.05×、validationWork 1.42×（现走 interp JS）、computeWork 4.81×。结论：AOT 产品负载收敛为纯计算热点，tagged 负载全部交 qzjs 解释；node-JS 仍是最快档（对 qzjs-interp 2.63–25.30×）。口径：CI runner host 校准非真机。"
+  source: "CI run 45550730482 artifact aot-perf-matrix (perf-wamr.txt / perf-jit.txt)"
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T13:43:22
+  kind: decision
+  summary: "2026-11-25 validationWork 理论优化通道已实证并落地（LICM）：M7 原判 validationWork 0 fragment，因循环体含 validate(good/bad) 这个 tagged 调用；但 validate 只读参数属性、good/bad 是循环外常量 → 满足循环不变调用外提。仿真（手工外提 + : number 注解）使 M7 抽出 1 个 num loop 片段（ops=5, carried=t），理论上限按 computeWork ~11ns/iter 推算相对 qzjs 解释 ~20×。实现：新增 emit/licm.js——仅对前导注释带 // @qz-pure 的函数做保守外提（实参须为循环外标识符且循环内不被赋值），外提声明带显式 : number；extract.js buildNumericVars 认显式注解为 numeric；compile-ts.js 在 M7 前调用 hoistPureCalls。aotp.ts 给 validate 加 @qz-pure，四个 bench 路径恢复 validationWork 编 wasm（jsonWork 仍 interp）。正确性：4 AOT 回归 + 47 corpus 0 diff + 新增 5 个 LICM check（片段存在 + work(1/2/5/10) 语义）+ validationWork(1/2/5/10/500) 逐点比对全通过。性能待 CI 四档复测。"
+  source: "M7_DESIGN.md; src/qzvm/aot/emit/extract.js findNumericFragments 仿真; CI 45550730482 基线"
+  affects: [aot-roadmap, aot-m7-ast-analysis]
