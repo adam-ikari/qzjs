@@ -75,3 +75,55 @@ function mixedWork(n: number): number {
   }
   return s + (base > 0 ? 0 : 1);
 }
+
+// ── 真实场景（取自 qzjs polyfill / 设备策略的纯计算形态）──
+// HPACK RFC7541 §5.1 整数编码长度（hpack.js encodeInt 数值部分）
+function hpackIntBatch(n: number): number {
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    let v = (i * 7919) >>> 0;
+    let len = 1;
+    while (v > 0x7f) { v = v >>> 7; len = len + 1; }
+    t = t + len;
+  }
+  return t;
+}
+// protobuf varint 长度（protobuf.js Writer.varintNum 数值部分）
+function varintBatch(n: number): number {
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    let v = (i * 104729) >>> 0;
+    let len = 1;
+    while (v > 0x7f) { v = v >>> 7; len = len + 1; }
+    t = t + len;
+  }
+  return t;
+}
+// FNV-1a 风格滚动哈希（帧/缓存键校验）
+function hashBatch(n: number): number {
+  let h = 2166136261 % 16777216;
+  for (let i = 0; i < n; i++) {
+    h = (h ^ (i * 7919)) % 16777216;
+    h = (h * 33) % 16777216;
+  }
+  return h;
+}
+// 固定设备策略的重复评估（LICM 形态）
+// @qz-pure
+function policyScore(cfg: any): number {
+  let s = 0;
+  if (cfg.retry < 0) s = s + 1;
+  if (cfg.timeout > 5000) s = s + 1;
+  if (cfg.name.length < 3) s = s + 1;
+  return s;
+}
+function policyGate(n: number): number {
+  const strict = { retry: 3, timeout: 1000, name: "strict-mode" };
+  const loose = { retry: -1, timeout: 9000, name: "x" };
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    if ((i % 2) === 0) t = t + policyScore(strict);
+    else t = t + policyScore(loose);
+  }
+  return t;
+}
