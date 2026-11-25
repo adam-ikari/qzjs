@@ -16,14 +16,14 @@ void TAIL_IMPL
 static %INST% g_inst;
 static int g_ready = 0;
 
-/* hpackIntBatch(n: number): number — 与 polyfill 同算法 */
-static JSValue js_hpack_batch(JSContext *ctx, JSValueConst this_val,
+/* polyfillBatch(n): 与 run_polyfill.js 的 hpack varint 算法完全一致 */
+static JSValue js_polyfill_batch(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
     (void)this_val;
     double n = 0;
     if (argc > 0) JS_ToFloat64(ctx, &n, argv[0]);
     if (!g_ready) return JS_ThrowInternalError(ctx, "wasm2c polyfill not initialized");
-    double r = %FN%( &g_inst, n);
+    double r = %FN%(&g_inst, n);
     return JS_NewFloat64(ctx, r);
 }
 
@@ -35,8 +35,8 @@ static int w2c_polyfill_init(qz_ext_t *ext, qz_t *rt) {
     %INST%_instantiate(&g_inst, NULL);   /* TOKEN: 生成名 instantiate */
     g_ready = 1;
     JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "hpackBatch",
-                      JS_NewCFunction(ctx, js_hpack_batch, "hpackBatch", 1));
+    JS_SetPropertyStr(ctx, global, "polyfillBatch",
+                      JS_NewCFunction(ctx, js_polyfill_batch, "polyfillBatch", 1));
     JS_FreeValue(ctx, global);
     return 0;
 }
