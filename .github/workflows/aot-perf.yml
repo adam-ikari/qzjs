@@ -83,6 +83,17 @@ jobs:
           "$M" --version
           echo "WASM_MERGE=$M" >> "$GITHUB_ENV"
 
+      # wasm2c：系统 wabt 1.0.27 在带 import 的模块上崩溃；用 1.0.42 预编译包。
+      - name: Install wabt 1.0.42 (wasm2c for no-wasm-runtime tier)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/wabt142
+          curl -fsSL --retry 3 --connect-timeout 20 \
+            -o /tmp/wabt142.tar.gz \
+            https://github.com/WebAssembly/wabt/releases/download/1.0.42/wabt-1.0.42-linux-x64.tar.gz
+          tar -xzf /tmp/wabt142.tar.gz -C /tmp/wabt142 --strip-components=1
+          /tmp/wabt142/bin/wasm2c --version
+
       - name: Record runner environment
         run: |
           {
@@ -90,6 +101,7 @@ jobs:
             echo "=== node ==="; node --version
             echo "=== wamrc ==="; /tmp/wamrc --version 2>&1 || true
             echo "=== wasm-merge ==="; "$WASM_MERGE" --version 2>&1 || true
+            echo "=== wasm2c ==="; /tmp/wabt142/bin/wasm2c --version 2>&1 || true
           } | tee perf-runner.txt
 
       - name: Tier A — qzjs-interp / node-JS / wasm-interp / wasm-AOT
@@ -106,15 +118,31 @@ jobs:
           WASM_MERGE: ${{ env.WASM_MERGE }}
         run: node bench/aot-product/run_inmod.mjs --merge 2>&1 | tee perf-jit.txt
 
+      - name: Tier C — wasm2c (no wasm runtime: wasm → C → gcc -O3)
+        env:
+          WABT_DIR: /tmp/wabt142
+          WAMRC: /tmp/wamrc
+        run: node bench/aot-product/run_wasm2c.mjs 2>&1 | tee perf-wasm2c.txt
+
+      # polyfill AOT 加速：同一 hpack varint 算法，JS vs AOT 在 qzjs 进程内对照。
+      - name: Tier D — AOT accelerating qzjs polyfill
+        env:
+          QZJS: ${{ github.workspace }}/build-rel/qzjs
+          WAMRC: /tmp/wamrc
+        run: node bench/aot-product/run_polyfill.js 2>&1 | tee perf-polyfill.txt
+
       - name: Verify all tiers produced data
         run: |
           grep -q 'qzjs-interp' perf-wamr.txt
           grep -q 'node-JS' perf-wamr.txt
           grep -q 'WAMR-AOT' perf-wamr.txt
-          if grep -q 'wamrc failed\|no RESULT\|wamrc FAIL' perf-wamr.txt perf-jit.txt; then
+          if grep -q 'wamrc failed\|no RESULT\|wamrc FAIL' perf-wamr.txt perf-jit.txt perf-polyfill.txt; then
             echo 'AOT tier missing — check wamrc'; exit 1
           fi
           grep -q 'computeWork' perf-jit.txt
+          grep -q 'RESULT {' perf-wasm2c.txt
+          grep -q 'speedup p50' perf-polyfill.txt
+          grep -q 'check 一致: true' perf-polyfill.txt || { echo 'polyfill check mismatch'; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -123,3 +151,5 @@ jobs:
             perf-runner.txt
             perf-wamr.txt
             perf-jit.txt
+            perf-wasm2c.txt
+            perf-polyfill.txt
