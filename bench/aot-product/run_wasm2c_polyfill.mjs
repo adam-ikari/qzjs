@@ -35,7 +35,11 @@ compileTS(SRC, path.join(OUT, 'pure.wasm'), {});
 
 // 2. wasm2c 生成 C/H
 execFileSync(WASM2C, [path.join(OUT, 'pure.wasm'), '-o', path.join(OUT, MOD)], { stdio: 'inherit' });
-writeFileSync(path.join(OUT, MOD + '.c'), readFileSync(path.join(OUT, MOD)));
+// wasm2c 生成 C 含 unused var/func，与 qzjs -Werror 冲突；注入 pragma 仅放松本文件。
+const genC = readFileSync(path.join(OUT, MOD), 'utf8');
+const pragma = ['unused-variable','unused-function','unused-value','unused-parameter','unused-but-set-variable']
+  .map(w => `#pragma GCC diagnostic ignored "-W${w}"`).join('\n') + '\n';
+writeFileSync(path.join(OUT, MOD + '.c'), pragma + genC);
 
 // 3. 生成扩展包装源码
 const tpl = readFileSync(path.join(WD, 'polyfill_ext.c.tpl'), 'utf8');
