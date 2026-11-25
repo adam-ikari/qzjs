@@ -30,7 +30,8 @@ const LOADS = [
 
 // 1. compile product + merge
 const { compileTS } = require(ROOT + 'src/qzvm/aot/emitter.js');
-const info = compileTS(SRC, PROD, { inModuleLink: true });
+// jsonWork 无 wasm 优化空间 → 回退 interp（与产品 glue 同口径），避免负优化。
+const info = compileTS(SRC, PROD, { inModuleLink: true, interp: ['jsonWork'] });
 const strings = info.strings || [];
 // build mode map from funcMeta
 const modes = {};
@@ -58,6 +59,9 @@ function genHarness(wasmPath, tag) {
 var MEM;
 var STRINGS = ${JSON.stringify(strings)};
 var MODES = ${JSON.stringify(modes)};
+var INTERP = (function(){ ${info.interpJs || ''}
+  return { jsonWork: typeof jsonWork === "function" ? jsonWork : null };
+})();
 var TAG = ${JSON.stringify(tag)};
 var LOADS = ${JSON.stringify(LOADS.map(([n, a]) => [n, a]))};
 function setStrTab(L) {
@@ -80,6 +84,7 @@ var unbox = function(b){var d=new DataView(new ArrayBuffer(8));d.setBigInt64(0,B
 var nm = function(r){return(typeof r==='bigint')?unbox(r):r;};
 var callFn = function(name, arg) {
   var mode = MODES[name];
+  if (mode === 'interp') return INTERP[name](arg);   // jsonWork 回退 interp（裸 JS 值）
   if (mode === 'tagged') return L[name](box(arg));
   return L[name](arg);
 };
