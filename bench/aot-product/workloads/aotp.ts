@@ -14,9 +14,9 @@ function computeWork(n: number): number {
 }
 
 // 2) JSON -> object mapping
-// 注意：本函数由 bench 构建脚本显式标记 --interp jsonWork（不编 wasm）。
+// 注意：本函数由 bench 构建脚本显式标记 --interp（不编 wasm）。
 // 原因：JSON.parse 产宿主对象，每轮 prop_get 6 + get_index 4 + builtin 1 次跨界；
-// CI 四档实测 wasm-AOT 0.50×、wasm-JIT 0.15× 于 qzjs 解释，属负优化 → 留 interp。
+// CI 实测 wasm-AOT 0.50× 于 qzjs 解释，属负优化 → 留 interp。
 function jsonWork(n: number): number {
   const src = '{"id":7,"name":"alice","tags":["a","b","c"],"vals":[1,2,3,4]}';
   let t = 0;
@@ -42,6 +42,9 @@ function validate(v: any): number {
   else if (v.email.indexOf("@") < 0) errs = errs + 1;
   return errs;
 }
+// 注意：本函数同样标记 --interp。truthy 内联后 CI 实测 wasm-AOT 仍 0.50× 于 qzjs 解释；
+// 剩余 v===null（null/undefined 共用句柄，不可按位型内联）、indexOf（字符串方法）、i%2
+// 均无法小改动消除，按「避免负优化」回退 interp。
 function validationWork(n: number): number {
   const good = { name: "Alice", age: 30, email: "a@b.com" };
   const bad = { name: "", age: 200, email: "nope" };
