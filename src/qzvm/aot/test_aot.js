@@ -1374,6 +1374,34 @@ function work(n: number): number {
   }
   return t;
 }
+// 反例 1：循环内写参数属性 → 不得外提（求值次数变化会静默错值）
+// @qz-pure
+function readX(o: any): number { return o.x; }
+function mutating(n: number): number {
+  const o = { x: 1 };
+  let t = 0;
+  for (let i = 0; i < n; i++) { t = t + readX(o); o.x = i; }
+  return t;
+}
+// 反例 2：标注说谎（被标 @qz-pure 但写参数）→ 纯度验证须拒绝外提
+// @qz-pure
+function bump(o: any): number { o.x = o.x + 1; return o.x; }
+function impureCallee(n: number): number {
+  const o = { x: 0 };
+  let t = 0;
+  for (let i = 0; i < n; i++) t = t + bump(o);
+  return t;
+}
+// 反例 3：被标 @qz-pure 但写模块级变量 → verifyPure 拒绝外提
+let counter = 0;
+// @qz-pure
+function badGlobal(o: any): number { counter = counter + 1; return o.x; }
+function globalWrite(n: number): number {
+  const o = { x: 1 };
+  let t = 0;
+  for (let i = 0; i < n; i++) t = t + badGlobal(o);
+  return t + counter;
+}
 `);
     const wasm = path.join(os.tmpdir(), "qz_aot_licm.wasm");
     const r = compileTS(src, wasm, {});
@@ -1390,6 +1418,15 @@ function work(n: number): number {
         const got = qz._toJS(instance.exports.work(qz._fromJS(n)));
         check("LICM: work(" + n + ")", got, n % 2 === 0 ? n / 2 * 2 : Math.floor(n / 2) * 2);
     }
+    // 反例：循环内写 o.x → readX(o) 不得外提；n=3 应得 1+0+1=2（外提会错成 3）
+    if (instance.exports.__bump_reset) instance.exports.__bump_reset();
+    check("LICM: 属性写阻止外提", qz._toJS(instance.exports.mutating(qz._fromJS(3))), 2);
+    // 反例：被标 @qz-pure 但写参数 → verifyPure 拒绝，调用保留在循环内；n=3 应得 1+2+3=6
+    if (instance.exports.__bump_reset) instance.exports.__bump_reset();
+    check("LICM: 说谎标注被拒", qz._toJS(instance.exports.impureCallee(qz._fromJS(3))), 6);
+    // 反例：写模块级 counter 的函数不得外提；n=3 应得 3+3=6（外提会错成 3+1=4）
+    if (instance.exports.__bump_reset) instance.exports.__bump_reset();
+    check("LICM: 模块状态写被拒", qz._toJS(instance.exports.globalWrite(qz._fromJS(3))), 6);
 }
 
 // typeof/literal 与两字面量比较内联（省 qz.seq/qz.sne 跨界）的语义边界
