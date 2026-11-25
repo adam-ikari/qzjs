@@ -94,7 +94,6 @@ jobs:
 
       - name: Tier A — qzjs-interp / node-JS / wasm-interp / wasm-AOT
         env:
-          QZJS_ROOT: ${{ github.workspace }}
           QZJS: ${{ github.workspace }}/build-rel/qzjs
           WAMRC: /tmp/wamrc
           WASM_MERGE: ${{ env.WASM_MERGE }}
