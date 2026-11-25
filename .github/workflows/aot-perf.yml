@@ -140,7 +140,7 @@ jobs:
             echo 'AOT tier missing — check wamrc'; exit 1
           fi
           grep -q 'computeWork' perf-jit.txt
-          grep -q 'RESULT {' perf-wasm2c.txt
+          grep -q 'p50_ms=' perf-wasm2c.txt
           grep -q 'speedup p50' perf-polyfill.txt
           grep -q 'check 一致: true' perf-polyfill.txt || { echo 'polyfill check mismatch'; exit 1; }
 
