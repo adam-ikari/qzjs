@@ -12,7 +12,7 @@ function validate(v){ if(v===null||typeof v!=="object") return -1; let e=0;
 function validationWork(n){ const good={name:"Alice",age:30,email:"a@b.com"}; const bad={name:"",age:200,email:"nope"}; let t=0;
   for(let i=0;i<n;i++){ if((i%2)===0) t=t+validate(good); else t=t+validate(bad); } return t; }
 function hpackIntBatch(n){ let t=0; for(let i=0;i<n;i++){ let v=(i*7919)>>>0; let len=1; while(v>0x7f){ v=v>>>7; len=len+1; } t=t+len; } return t; }
-function varintBatch(n){ let t=0; for(let i=0;i<n;i++){ let v=(i*104729)>>>0; let len=1; while(v>0x7f){ v=v>>>7; len=len+1; } t=t+len; } return t; }
+function varintBatch(n){ let t=0; for(let i=0;i<n;i++){ let v=(i*104729)%2147483647; let len=1; while(v>0x7f){ v=v>>>7; len=len+1; } t=t+len; } return t; }
 function hashBatch(n){ let h=2166136261%16777216; for(let i=0;i<n;i++){ h=(h^(i*7919))%16777216; h=(h*33)%16777216; } return h; }
 function policyScore(c){ let s=0; if(c.retry<0)s=s+1; if(c.timeout>5000)s=s+1; if(c.name.length<3)s=s+1; return s; }
 function policyGate(n){ const strict={retry:3,timeout:1000,name:"strict-mode"},loose={retry:-1,timeout:9000,name:"x"}; let t=0; for(let i=0;i<n;i++){ if((i%2)===0)t=t+policyScore(strict); else t=t+policyScore(loose); } return t; }
