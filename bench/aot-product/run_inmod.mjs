@@ -91,8 +91,14 @@ function validate(v){ if(v===null||typeof v!=="object") return -1; let e=0;
   if(typeof v.email!=="string") e=e+1; else if(v.email.indexOf("@")<0) e=e+1; return e; }
 function validationWork(n){ const good={name:"Alice",age:30,email:"a@b.com"}; const bad={name:"",age:200,email:"nope"}; let t=0;
   for(let i=0;i<n;i++){ if((i%2)===0) t=t+validate(good); else t=t+validate(bad); } return t; }
+
+function hpackIntBatch(n){ let t=0; for(let i=0;i<n;i++){ let v=(i*7919)>>>0; let len=1; while(v>0x7f){ v=v>>>7; len=len+1; } t=t+len; } return t; }
+function varintBatch(n){ let t=0; for(let i=0;i<n;i++){ let v=(i*104729)>>>0; let len=1; while(v>0x7f){ v=v>>>7; len=len+1; } t=t+len; } return t; }
+function hashBatch(n){ let h=2166136261%16777216; for(let i=0;i<n;i++){ h=(h^(i*7919))%16777216; h=(h*33)%16777216; } return h; }
+function policyScore(c){ let s=0; if(c.retry<0)s=s+1; if(c.timeout>5000)s=s+1; if(c.name.length<3)s=s+1; return s; }
+function policyGate(n){ const strict={retry:3,timeout:1000,name:"strict-mode"},loose={retry:-1,timeout:9000,name:"x"}; let t=0; for(let i=0;i<n;i++){ if((i%2)===0)t=t+policyScore(strict); else t=t+policyScore(loose); } return t; }
 const L = ${JSON.stringify(loads)};
-const FN = { computeWork, jsonWork, validationWork };
+const FN = { computeWork, jsonWork, validationWork, hpackIntBatch, varintBatch, hashBatch, policyGate };
 const out = [];
 for (const [name, arg] of L) { if (!FN[name]) { out.push({ load: name, skip: true }); continue; } FN[name](arg);
   const ts=[]; for(let r=0;r<5;r++){ const t=performance.now(); FN[name](arg); ts.push(performance.now()-t); }
@@ -109,7 +115,7 @@ function benchInterp(loads) {
   return m ? JSON.parse(m[1]) : [];
 }
 
-const LOADS = [['computeWork', 200000], ['jsonWork', 500], ['validationWork', 500]]; // jsonWork: JSON.parse 返回 host 对象，wasm 读属性 NaN → 结构性缺口
+const LOADS = [['computeWork', 200000], ['jsonWork', 500], ['validationWork', 500], ['hpackIntBatch', 200000], ['varintBatch', 200000], ['hashBatch', 200000], ['policyGate', 20000]]; // jsonWork: JSON.parse 返回 host 对象，wasm 读属性 NaN → 结构性缺口
 const rows = [];
 for (const [name, arg] of LOADS) {
   let inP50 = null, ret = null, err = null;
