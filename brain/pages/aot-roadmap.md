@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-25T09:38:06"
+updated: "2026-11-25T12:54:37"
 ---
 
 <!-- compiled_truth -->
@@ -777,3 +777,21 @@ wasm JIT 与 wasm AOT 必须分别单独测；每档都要同时与 qzjs 纯解�
   summary: Rewrote compiled_truth to the new best understanding
   source: "性能测量四档矩阵协议"
   affects: [aot-roadmap]
+
+- time: 2026-11-25T10:38:05
+  kind: evidence
+  summary: "2026-11-25 CI 实测（首次本机之外性能数字）：CI run 45531990061，job aot-perf-baseline，ubuntu-latest Azure / AMD EPYC 9V74 4 vCPU 16GB / wamrc 2.4.5 / node v22.23.5 / 5 reps。AOT vs qzjs-interp p50：computeWork 2.285 vs 14.276ms=6.248×（G1 ✓）；jsonWork 756.464 vs 41.987ms=0.056×；validationWork 1618.639 vs 54.913ms=0.034×；micro numWork 23.997×、objWork 0.119×、strWork 0.854×；zodbench 142.393 vs 0.602ms=0.004×。与已提交基线（2026-11-23，Intel Xeon 6975P-C / AWS）比：validationWork AOT 3626.740→1618.639ms = -55.4%，而同机 interp 还涨 23%，故该改善不是硬件造成的，来自本次 tagged typeof/字面量比较内联（省 4 次 qz.sne/迭代）；其余项 AOT +2.9~41.9% 但 interp 同步 +10~39%，属跨硬件不可比。zodbench 0.004× 说明真实库入口的 wasm AOT 仍远慢于解释，与 brain 既有『tagged/对象密集留 interp』裁决一致。口径：CI runner host 校准，非真机 C1 Slim 验收；wasm-JIT 与 node 产品负载对照由 aot-perf.yml 工作流另测（首次 dispatch 因 wamrc 构建失败，改预编译包后重跑中）。"
+  source: "CI run 45531990061 aot-perf-baseline artifact aot-perf-baseline-0c2dc5a8...; committed baseline test/perf_baselines/aot.json (2026-11-23)"
+  affects: [aot-roadmap, aot-performance-model]
+
+- time: 2026-11-25T11:44:52
+  kind: evidence
+  summary: "2026-11-25 CI 四档矩阵跑通（run 45541139576，ubuntu-latest AMD EPYC 7763 4 vCPU，wamrc 2.4.5 + binaryen 133 + node 22）。Tier A (run_wamr.js, WAMR 路径, p50 ms)：computeWork N=200000 qzjs-interp 19.205 / node-JS 1.058 / WAMR-interp 29.919 / WAMR-AOT 2.452 → AOT 对 interp 7.83×、对 node 0.43×；jsonWork N=50000 92.007 / 35.115 / 6581.865 / 183.071 → AOT 对 interp 0.50×、对 node 0.19×；validationWork N=20000 6.798 / 0.263 / 422.802 / 11.99 → AOT 对 interp 0.57×、对 node 0.02×；mixedWork N=200000 20.641 / 1.062 / 31.045 / 2.427 → AOT 对 interp 8.50×、对 node 0.44×。Tier B (run_inmod.mjs --merge, wasm-JIT=node WebAssembly V8)：computeWork N=200000 4.125 vs qzjs-interp 18.667 = 4.53×；jsonWork N=500 6.103 vs 0.919 = 0.15×；validationWork N=500 1.186 vs 0.169 = 0.14×。同 N 可比档：computeWork 上 wasm-AOT 2.452 比 wasm-JIT 4.125 快 1.68×。结论：num/mixed 上 AOT 明显胜 qzjs-interp（G1 ✓），tagged 上 AOT 仍慢于 interp（0.5–0.57×），WAMR-interp 在 tagged 上灾难性（0.01–0.02×）绝不可用；node-JS 在全部负载上是最快档（对 qzjs-interp 2.6–25.9×），AOT 距 node 还有 2.3–45× 差距。口径限制：Tier A/B 的 jsonWork/validationWork N 不同（50000/20000 vs 500/500），因 wasm 侧 bump arena 无 GC 撑不到大 N，故两档 tagged 数字不能跨档直接比；本轮为 CI runner host 校准，非真机 C1 Slim 验收。"
+  source: "CI run 45541139576 artifact aot-perf-matrix: perf-wamr.txt / perf-jit.txt / perf-runner.txt"
+  affects: [aot-roadmap, aot-performance-model]
+
+- time: 2026-11-25T12:54:37
+  kind: decision
+  summary: "2026-11-25 负优化规避裁决：jsonWork 与 validationWork 均回退 qzjs 解释执行（bench 构建显式 --interp / compileTS interp:['...']，四个 harness 同步）。jsonWork 依据：JSON.parse 产宿主对象，每迭代 prop_get 6 + get_index 4 + builtin 1 共 11 次跨界；CI 四档 wasm-AOT 0.50×、wasm-JIT 0.15× 于 qzjs 解释；wasm 侧 JSON 解析属大工程，无小改动空间。validationWork 依据：tagged typeof 比较内联 + 短路左侧 bool truthy 内联均已落地（编译器通用收益保留），但 CI run 45548788642 实测 wasm-AOT 仍 0.50×、wasm-JIT 0.11× 于解释；剩余 v===null 的 seq（null/undefined 共用 0x7FF9|0 句柄，按位型内联会错判）、email.indexOf 的 method_call（字符串 UTF-8 语义）、i%2 的 rem（需值域分析）均非小改动可消。裁决：按用户『避免负优化』原则，二者不进 wasm，AOT 定位收敛为纯计算热点（computeWork/mixedWork AOT 5.13×/5.15× 于 qzjs 解释）。回退后 CI 实测 jsonWork WAMR-AOT 1.00× 于解释（不再负优化）；truthy 内联作为通用编译器改进保留。"
+  source: "CI run 45548788642 (aot-perf-matrix) + 45531990061 (aot-perf-baseline); --interp 回退实现见 bench/aot-product/*"
+  affects: [aot-roadmap, aot-wasm-tagged-backend]
