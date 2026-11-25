@@ -1360,6 +1360,10 @@ function tsBad(x: any): number { return typeof x === "foo" ? 1 : 0; }
 function litEq(): number { return "abc" === "abc" ? 1 : 0; }
 function litNe(): number { return "abc" !== "abd" ? 1 : 0; }
 function tsVar(x: any, y: string): number { return typeof x === y ? 1 : 0; }
+// 短路左侧为比较（tagged bool）→ 内联 truthy；非比较左侧仍走 qz.truthy
+function orCmp(a: any): number { return (a === null || typeof a === "string") ? 1 : 0; }
+function andCmp(a: any): number { return (a !== null && a !== undefined) ? 1 : 0; }
+function orNum(a: any): number { const r = a || 7; return typeof r === "number" ? r : -1; }
 `);
     const wasm = path.join(os.tmpdir(), "qz_aot_typeoflit.wasm");
     compileTS(src, wasm, {});
@@ -1377,6 +1381,13 @@ function tsVar(x: any, y: string): number { return typeof x === y ? 1 : 0; }
     check("literal === same", r(e.litEq()), 1);
     check("literal !== other", r(e.litNe()), 1);
     check("typeof vs variable (generic path)", r(e.tsVar(j("x"), j("string"))), 1);
+    check("orCmp: left true short-circuits", r(e.orCmp(j(null))), 1);
+    check("orCmp: left false → right", r(e.orCmp(j("x"))), 1);
+    check("orCmp: both false", r(e.orCmp(j(5))), 0);
+    check("andCmp: left false", r(e.andCmp(j(null))), 0);
+    check("andCmp: both true", r(e.andCmp(j("x"))), 1);
+    check("orNum: non-comparison → qz.truthy", r(e.orNum(j(0))), 7);
+    check("orNum: truthy number", r(e.orNum(j(5))), 5);
     // 宿主对象方法 typeof → "function" 是既有已知限制（tagged.js TypeOfExpression 注释），非本优化范围
 }
 
