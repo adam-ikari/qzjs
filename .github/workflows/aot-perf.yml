@@ -1,0 +1,110 @@
+name: AOT performance matrix
+
+# 性能测量协议（brain aot-roadmap, 2026-11-25）：
+# wasm-JIT 与 wasm-AOT 必须分别测，每档都要同时与 qzjs 纯解释和 node 比较。
+# 本机 12 核长期满载，性能数字只在这里产；CI runner = host 校准，不是真机验收。
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * 0'   # 每周日 18:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  aot-perf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build + perf dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            clang lld llvm-18-dev g++-multilib zlib1g-dev \
+            binaryen wasi-libc
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install npm dependencies
+        run: |
+          npm --prefix src/polyfill ci
+          npm --prefix src/qzvm/aot ci
+
+      - name: Build wamrc (WAMR AOT compiler, system LLVM)
+        run: |
+          cmake -S deps/wamr/wamr-compiler -B /tmp/wamrc-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm
+          cmake --build /tmp/wamrc-build --parallel
+          cp /tmp/wamrc-build/wamrc /tmp/wamrc
+          /tmp/wamrc --version
+
+      - name: Build qzjs Release (with WAMR)
+        run: |
+          cmake -S . -B build-rel -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQZ_BUILD_TESTS=OFF
+          cmake --build build-rel --parallel
+
+      - name: Build in-module guest (libqzvm.wasm)
+        run: |
+          cmake -S . -B build-inmod -G Ninja \
+            -DQZ_PROFILE=in-module \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/wasm32.cmake
+          cmake --build build-inmod --target qzvm-guest --parallel
+
+      - name: Resolve wasm-merge
+        run: |
+          M=$(command -v wasm-merge || true)
+          if [ -z "$M" ]; then echo "wasm-merge not found (binaryen package)"; exit 1; fi
+          echo "WASM_MERGE=$M" >> "$GITHUB_ENV"
+
+      - name: Record runner environment
+        run: |
+          {
+            echo "=== lscpu ==="; lscpu | head -25
+            echo "=== node ==="; node --version
+            echo "=== wamrc ==="; /tmp/wamrc --version 2>&1 || true
+            echo "=== wasm-merge ==="; "$WASM_MERGE" --version 2>&1 || true
+          } | tee perf-runner.txt
+
+      - name: Tier A — qzjs-interp / node-JS / wasm-interp / wasm-AOT
+        env:
+          QZJS_ROOT: ${{ github.workspace }}
+          QZJS: ${{ github.workspace }}/build-rel/qzjs
+          WAMRC: /tmp/wamrc
+          WASM_MERGE: ${{ env.WASM_MERGE }}
+          LIBQZVM: ${{ github.workspace }}/build-inmod/src/qzvm/libqzvm.wasm
+        run: node bench/aot-product/run_wamr.js 2>&1 | tee perf-wamr.txt
+
+      - name: Tier B — wasm-JIT (node WebAssembly / V8 TurboFan)
+        env:
+          QZJS: ${{ github.workspace }}/build-rel/qzjs
+          WASM_MERGE: ${{ env.WASM_MERGE }}
+        run: node bench/aot-product/run_inmod.mjs --merge 2>&1 | tee perf-jit.txt
+
+      - name: Verify all tiers produced data
+        run: |
+          grep -q 'qzjs-interp' perf-wamr.txt
+          grep -q 'node-JS' perf-wamr.txt
+          grep -q 'WAMR-AOT' perf-wamr.txt
+          if grep -q 'wamrc failed\|no RESULT\|wamrc FAIL' perf-wamr.txt perf-jit.txt; then
+            echo 'AOT tier missing — check wamrc'; exit 1
+          fi
+          grep -q 'computeWork' perf-jit.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aot-perf-matrix
+          path: |
+            perf-runner.txt
+            perf-wamr.txt
+            perf-jit.txt

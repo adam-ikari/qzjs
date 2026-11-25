@@ -1761,7 +1761,31 @@ Emitter.prototype.emitCmpI32 = function (qzName, f64cmp) {
     M[f64cmp]();
     M.end();
 };
+// typeof x ==/=== "字面量"（及两字面量比较）内联：typeof 结果恒为内部 intern 的字符串句柄，
+// 字面量按内容 intern 到同一 offset（_litOffset）→ 同内容必同 i64 位型、异内容必异。
+// JS 字符串 === 按值，故 i64.eq 精确，省 qz.seq/qz.sne 跨界。
+// 反例：宿主对象 typeof 经 typeof_host 后仍落字面量句柄；非法字面量恒 false；
+// 变量侧（非字面量）不命中，原样走 qz.seq/qz.sne。boxed=true 封 tagged bool，false 留裸 i32。
+Emitter.prototype._tryTypeofLitEqI32 = function (e, boxed) {
+    const K = ts.SyntaxKind, op = e.operatorToken.kind;
+    if (op !== K.EqualsEqualsEqualsToken && op !== K.ExclamationEqualsEqualsToken
+        && op !== K.EqualsEqualsToken && op !== K.ExclamationEqualsToken) return false;
+    const neg = op === K.ExclamationEqualsEqualsToken || op === K.ExclamationEqualsToken;
+    let ty = null, lit = null;
+    if (ts.isTypeOfExpression(e.left) && ts.isStringLiteral(e.right)) { ty = e.left; lit = e.right; }
+    else if (ts.isTypeOfExpression(e.right) && ts.isStringLiteral(e.left)) { ty = e.right; lit = e.left; }
+    if (ty) {
+        this.emitTaggedExpr(ty); this._emitStrLitHandle(lit.text);
+    } else if (ts.isStringLiteral(e.left) && ts.isStringLiteral(e.right)) {
+        this._emitStrLitHandle(e.left.text); this._emitStrLitHandle(e.right.text);
+    } else return false;
+    this.m.i64Eq();
+    if (neg) this.m.i32Eqz();
+    if (boxed) this.emitBoxBool();
+    return true;
+};
 Emitter.prototype.emitCondI32 = function (expr) {
+    if (ts.isBinaryExpression(expr) && this._tryTypeofLitEqI32(expr, false)) return;
     if (ts.isBinaryExpression(expr) && CMP_GUARD[expr.operatorToken.kind]) {
         const [qz, f64] = CMP_GUARD[expr.operatorToken.kind];
         this.emitTaggedExpr(expr.left); this.emitTaggedExpr(expr.right);
@@ -2963,6 +2987,8 @@ Emitter.prototype.emitTaggedBinary = function (e) {
         this.emitNullish(e.left, e.right);
         this._emitVarStore(e.left.text, this.scratchB); return;
     }
+    // typeof x === "字面量" / 两字面量比较：见 _tryTypeofLitEqI32（省 qz.seq/qz.sne 跨界）
+    if (this._tryTypeofLitEqI32(e, true)) return;
     // 拼接左操作数来历 → 是否允许原地追加（_emitConcat 内部读 _concatInPlace）
     if (op === ts.SyntaxKind.PlusToken) this._concatInPlace = this._concatSafe(e.left);
     this.emitTaggedExpr(e.left); this.emitTaggedExpr(e.right);
