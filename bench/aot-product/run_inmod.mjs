@@ -19,7 +19,7 @@ const src = fileURLToPath(new URL('./workloads/aotp.ts', import.meta.url));
 const prodPath = fileURLToPath(new URL('./workloads/aotp_inmod.wasm', import.meta.url));
 const mergedPath = '/tmp/aotp_merged.wasm';
 // jsonWork / validationWork wasm 负优化 → 回退 interp（与产品 glue 同口径）。
-const info = compileTS(src, prodPath, { inModuleLink: true, interp: ['jsonWork', 'validationWork'] });
+const info = compileTS(src, prodPath, { inModuleLink: true, interp: ['jsonWork'] });
 // strtab 注入：产物 strId → 名字须经宿主写共享内存 + __set_strtab(base)，否则
 // qz_str_by_id 按无表返回 NULL → JSON.parse/属性名/方法名查不到（静默 0）。
 const setStrTab = (names) => {
@@ -71,7 +71,7 @@ setStrTab(info.strings || []);   // 注入产物字符串表（strId → 名字�
 const box = (x) => { const d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, x); return d.getBigInt64(0); };
 const unbox = (b) => { const d = new DataView(new ArrayBuffer(8)); d.setBigInt64(0, BigInt.asIntN(64, b)); return d.getFloat64(0); };
 const interpFns = info.interpJs
-  ? new Function(info.interpJs + '\nreturn { jsonWork: typeof jsonWork === "function" ? jsonWork : null, validationWork: typeof validationWork === "function" ? validationWork : null };')()
+  ? new Function(info.interpJs + '\nreturn { jsonWork: typeof jsonWork === "function" ? jsonWork : null };')()
   : {};
 const callFn = (name, arg) => {
   if (interpFns[name]) return interpFns[name](arg);  // 回退 interp，裸 JS 值
