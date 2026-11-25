@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake ninja-build pkg-config \
-            clang lld zlib1g-dev binaryen wasi-libc curl
+            clang lld zlib1g-dev wasi-libc curl
 
       - uses: actions/setup-node@v4
         with:
@@ -68,10 +68,19 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=cmake/wasm32.cmake
           cmake --build build-inmod --target qzvm-guest --parallel
 
-      - name: Resolve wasm-merge
+      # Ubuntu 的 binaryen 包不含 wasm-merge；用 release 预编译包（与 wamrc 同法）。
+      - name: Install wasm-merge (binaryen release)
         run: |
-          M=$(command -v wasm-merge || true)
-          if [ -z "$M" ]; then echo "wasm-merge not found (binaryen package)"; exit 1; fi
+          set -euo pipefail
+          mkdir -p /tmp/binaryen
+          curl -fsSL --retry 3 --connect-timeout 20 \
+            -o /tmp/binaryen.tar.gz \
+            https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
+          tar -xzf /tmp/binaryen.tar.gz -C /tmp/binaryen --strip-components=1
+          M=$(find /tmp/binaryen -type f -name wasm-merge -print -quit)
+          test -n "$M"
+          chmod +x "$M"
+          "$M" --version
           echo "WASM_MERGE=$M" >> "$GITHUB_ENV"
 
       - name: Record runner environment
