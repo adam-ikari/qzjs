@@ -124,12 +124,43 @@ jobs:
           WAMRC: /tmp/wamrc
         run: node bench/aot-product/run_wasm2c.mjs 2>&1 | tee perf-wasm2c.txt
 
-      # polyfill AOT 加速：同一 hpack varint 算法，JS vs AOT 在 qzjs 进程内对照。
+      # polyfill AOT 加速：同一 hpack varint 算法，JS vs wamrc AOT vs wasm2c native ext。
       - name: Tier D — AOT accelerating qzjs polyfill
         env:
           QZJS: ${{ github.workspace }}/build-rel/qzjs
           WAMRC: /tmp/wamrc
         run: node bench/aot-product/run_polyfill.js 2>&1 | tee perf-polyfill.txt
+
+      # wasm2c 加速 polyfill：wasm → C → 编译期扩展(qz_ext_t) 编进 qzjs。
+      - name: Generate wasm2c polyfill extension sources
+        env:
+          WABT_DIR: /tmp/wabt142
+          WASM2C_OUT: ${{ github.workspace }}/build/aot/wasm2c-polyfill
+        run: node bench/aot-product/run_wasm2c_polyfill.mjs 2>&1 | tee perf-w2c-polyfill-gen.txt
+
+      - name: Build qzjs with wasm2c polyfill extension
+        run: |
+          set -euo pipefail
+          CFG=$(cat build/aot/wasm2c-polyfill/build-config.json)
+          SRC=$(echo "$CFG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["QZ_EXTRA_SOURCES"])')
+          HDR=$(echo "$CFG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["QZ_EXTRA_HEADERS"])')
+          CFLAGS=$(echo "$CFG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["CFLAGS"])')
+          cmake -B build-w2c-poly -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQZ_BUILD_TESTS=OFF \
+            -DQZ_EXTRA_SOURCES="$SRC" \
+            -DQZ_EXTRA_HEADERS="$HDR" \
+            -DQZ_EXTENSIONS='QZ_DEFAULT_EXTENSIONS &w2c_polyfill_ext' \
+            -DCMAKE_C_FLAGS="$CFLAGS"
+          cmake --build build-w2c-poly --target qzjs --parallel
+          ./build-w2c-poly/qzjs -e 'console.log("wasm2c ext:", typeof hpackBatch)'
+
+      - name: Tier E — wasm2c native extension accelerating polyfill
+        env:
+          QZJS: ${{ github.workspace }}/build-rel/qzjs
+          QZJS_W2C: ${{ github.workspace }}/build-w2c-poly/qzjs
+          WAMRC: /tmp/wamrc
+        run: node bench/aot-product/run_polyfill_all.js 2>&1 | tee perf-polyfill-all.txt
 
       - name: Verify all tiers produced data
         run: |
@@ -143,6 +174,8 @@ jobs:
           grep -q 'p50_ms=' perf-wasm2c.txt
           grep -q 'speedup p50' perf-polyfill.txt
           grep -q 'check 一致: true' perf-polyfill.txt || { echo 'polyfill check mismatch'; exit 1; }
+          grep -q 'wasm2c native ext' perf-polyfill-all.txt
+          grep -q 'check 一致: true' perf-polyfill-all.txt || { echo 'wasm2c polyfill check mismatch'; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -153,3 +186,5 @@ jobs:
             perf-jit.txt
             perf-wasm2c.txt
             perf-polyfill.txt
+            perf-w2c-polyfill-gen.txt
+            perf-polyfill-all.txt
