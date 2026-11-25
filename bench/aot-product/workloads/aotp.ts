@@ -14,6 +14,9 @@ function computeWork(n: number): number {
 }
 
 // 2) JSON -> object mapping
+// 注意：本函数由 bench 构建脚本显式标记 --interp jsonWork（不编 wasm）。
+// 原因：JSON.parse 产宿主对象，每轮 prop_get 6 + get_index 4 + builtin 1 次跨界；
+// CI 四档实测 wasm-AOT 0.50×、wasm-JIT 0.15× 于 qzjs 解释，属负优化 → 留 interp。
 function jsonWork(n: number): number {
   const src = '{"id":7,"name":"alice","tags":["a","b","c"],"vals":[1,2,3,4]}';
   let t = 0;

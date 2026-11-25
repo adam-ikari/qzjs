@@ -2996,13 +2996,28 @@ Emitter.prototype.emitTaggedBinary = function (e) {
 };
 // 短路逻辑（值语义，真短路）：结果留 tagged i64。
 //  && : truthy(a) ? b : a；|| : truthy(a) ? a : b
+// 比较表达式结果恒为 tagged bool（0x7FFC|0/1，含宿主 qz.seq/bigint_binop 的 bool 返回），
+// 短路左侧命中时 truthy = bits & 1 → 免一次 qz.truthy 跨界；其余表达式仍走宿主。
+Emitter.prototype._isTaggedBoolExpr = function (n) {
+    if (!ts.isBinaryExpression(n)) return false;
+    const K = ts.SyntaxKind, op = n.operatorToken.kind;
+    return op === K.EqualsEqualsEqualsToken || op === K.ExclamationEqualsEqualsToken
+        || op === K.EqualsEqualsToken || op === K.ExclamationEqualsToken
+        || op === K.LessThanToken || op === K.GreaterThanToken
+        || op === K.LessThanEqualsToken || op === K.GreaterThanEqualsToken;
+};
 Emitter.prototype.emitShortCircuit = function (isAnd, left, right) {
     const M = this.m;
     M.block("i64"); this.depth++;                    // block (result i64)
     this.emitTaggedExpr(left);                       // [a]
     M.localSet(this.scratch);                        // []
     M.localGet(this.scratch);                        // [a]（跳转时作块结果）
-    M.localGet(this.scratch); M.call("qz.truthy");   // [a, i32 ]
+    M.localGet(this.scratch);                        // [a, a]
+    if (this._isTaggedBoolExpr(left)) {
+        M.i64Const(1n); M.i64And(); M.i32WrapI64();  // tagged bool 的真值 = 低 1 位
+    } else {
+        M.call("qz.truthy");                         // [a, i32]
+    }
     if (isAnd) M.i32Eqz();                           // && : falsy(a) → 1
     M.brIf(0);                                       // 条件真 → 跳出块，[a] 为结果
     M.drop();                                        // 落下路径丢弃 a → []
