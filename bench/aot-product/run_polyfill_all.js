@@ -51,7 +51,7 @@ const gluePath = path.join(OUT, "hpack_int.glue.js");
 const aot = fs.existsSync(gluePath)
   ? run(QZJS, fs.readFileSync(gluePath, "utf8") + `globalThis.__main = function(__call) {${benchSrc(`__call('batch', [${N}])`)}};`, "aot")
   : null;
-const w2c = QZJS_W2C ? run(QZJS_W2C, benchSrc(`hpackBatch(${N})`), "w2c") : null;
+const w2c = QZJS_W2C ? run(QZJS_W2C, benchSrc(`polyfillBatch(${N})`), "w2c") : null;
 
 console.log("\n=== polyfill 加速三档（qzjs 进程内，N=" + N + "，5 reps）===");
 for (const [name, r] of [["baseline JS", base], ["wamrc AOT", aot], ["wasm2c native ext", w2c]]) {

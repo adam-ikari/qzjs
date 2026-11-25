@@ -21,7 +21,7 @@ const SRC = path.join(ROOT, 'bench', 'aot-product', 'workloads', 'pure.ts'); // 
 const MOD = 'w2c_pf';                            // wasm2c 输出前缀
 const GEN = 'pure';                              // 生成标识符 = wasm 文件名 basename
 const HDR = `${MOD}.h`;
-const FN = `w2c_${GEN}_hpackIntBatch`;
+const FN = `w2c_${GEN}_polyfillBatch`;
 const INST = `w2c_${GEN}`;
 const INIT = `wasm2c_${GEN}_instantiate`;
 const FREE = `wasm2c_${GEN}_free`;
