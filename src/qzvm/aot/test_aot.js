@@ -1350,6 +1350,48 @@ async function runSemantics() {
     check("generator.类方法可执行", new Function(genClsR.interpJs + "; return useBag;")()(), "1-2");
 }
 
+// LICM：// @qz-pure 函数的循环不变调用外提 → 循环体变纯 f64 → M7 抽 num 片段
+async function runLicm() {
+    const src = path.join(os.tmpdir(), "qz_aot_licm.ts");
+    fs.writeFileSync(src, `
+// @qz-pure
+function grade(v: any): number {
+  if (v === null || typeof v !== "object") return -1;
+  let e = 0;
+  if (typeof v.name !== "string") e = e + 1;
+  else if (v.name.length < 2) e = e + 1;
+  if (typeof v.age !== "number") e = e + 1;
+  else if (v.age > 150) e = e + 1;
+  return e;
+}
+function work(n: number): number {
+  const good = { name: "Alice", age: 30 };
+  const bad = { name: "", age: 200 };
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    if ((i % 2) === 0) t = t + grade(good);
+    else t = t + grade(bad);
+  }
+  return t;
+}
+`);
+    const wasm = path.join(os.tmpdir(), "qz_aot_licm.wasm");
+    const r = compileTS(src, wasm, {});
+    const frags = WebAssembly.Module.exports(new WebAssembly.Module(fs.readFileSync(wasm)))
+        .filter(x => x.name.startsWith("__aot_frag"));
+    check("LICM: work 循环被 M7 抽成 num 片段", frags.length > 0, true);
+    const qz = makeQzvm(r.strings, { fields: r.fields });
+    const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasm), { qz });
+    qz.bindMem(instance.exports.memory);
+    if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
+    qz.bindClosures(instance.exports, r.lamMeta);
+    for (const n of [1, 2, 5, 10]) {
+        if (instance.exports.__bump_reset) instance.exports.__bump_reset();
+        const got = qz._toJS(instance.exports.work(qz._fromJS(n)));
+        check("LICM: work(" + n + ")", got, n % 2 === 0 ? n / 2 * 2 : Math.floor(n / 2) * 2);
+    }
+}
+
 // typeof/literal 与两字面量比较内联（省 qz.seq/qz.sne 跨界）的语义边界
 async function runTypeofLit() {
     const src = path.join(os.tmpdir(), "qz_aot_typeoflit.ts");
@@ -1393,6 +1435,7 @@ function orNum(a: any): number { const r = a || 7; return typeof r === "number" 
 
 (async () => {
     await runNum();
+    await runLicm();
     await runTypeofLit();
     await runTagged();
     await runClasses();

@@ -29,6 +29,7 @@ function jsonWork(n: number): number {
 }
 
 // 3) schema validation (zod-like: required / type / range / nested)
+// @qz-pure
 function validate(v: any): number {
   if (v === null || typeof v !== "object") return -1;
   let errs = 0;
@@ -42,9 +43,7 @@ function validate(v: any): number {
   else if (v.email.indexOf("@") < 0) errs = errs + 1;
   return errs;
 }
-// 注意：本函数同样标记 --interp。truthy 内联后 CI 实测 wasm-AOT 仍 0.50× 于 qzjs 解释；
-// 剩余 v===null（null/undefined 共用句柄，不可按位型内联）、indexOf（字符串方法）、i%2
-// 均无法小改动消除，按「避免负优化」回退 interp。
+// validate 已标注为纯函数 → LICM 把两个循环不变调用外提，循环体变纯 f64 → M7 抽 num 片段。
 function validationWork(n: number): number {
   const good = { name: "Alice", age: 30, email: "a@b.com" };
   const bad = { name: "", age: 200, email: "nope" };

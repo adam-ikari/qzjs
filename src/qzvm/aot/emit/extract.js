@@ -140,8 +140,11 @@ function buildNumericVars(f, checker) {
     const walk = (n) => {
         if (!n) return;
         if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
-            // checker type takes precedence (handles `const x = item.v` where item.v: number)
-            if (checker && isNumericTypeAt(n.name, checker, ts)) {
+            // 显式 : number 注解优先（LICM 外提的合成声明带此注解；AST 重建后 checker
+            // 可能无符号信息，此时按注解认定 numeric，与 TS 类型系统一致）。
+            if (n.type && n.type.kind === ts.SyntaxKind.NumberKeyword) {
+                numericVars.add(n.name.text);
+            } else if (checker && isNumericTypeAt(n.name, checker, ts)) {
                 numericVars.add(n.name.text);
             } else if (n.initializer && isNumericExpr(n.initializer, numericVars, checker)) {
                 numericVars.add(n.name.text);
