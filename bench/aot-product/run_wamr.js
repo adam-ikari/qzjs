@@ -31,7 +31,7 @@ const LOADS = [
 // 1. compile product + merge
 const { compileTS } = require(ROOT + 'src/qzvm/aot/emitter.js');
 // jsonWork / validationWork wasm 负优化 → 回退 interp（与产品 glue 同口径）。
-const info = compileTS(SRC, PROD, { inModuleLink: true, interp: ['jsonWork', 'validationWork'] });
+const info = compileTS(SRC, PROD, { inModuleLink: true, interp: ['jsonWork'] });
 const strings = info.strings || [];
 // build mode map from funcMeta
 const modes = {};
@@ -60,7 +60,7 @@ var MEM;
 var STRINGS = ${JSON.stringify(strings)};
 var MODES = ${JSON.stringify(modes)};
 var INTERP = (function(){ ${info.interpJs || ''}
-  return { jsonWork: typeof jsonWork === "function" ? jsonWork : null, validationWork: typeof validationWork === "function" ? validationWork : null };
+  return { jsonWork: typeof jsonWork === "function" ? jsonWork : null };
 })();
 var TAG = ${JSON.stringify(tag)};
 var LOADS = ${JSON.stringify(LOADS.map(([n, a]) => [n, a]))};
