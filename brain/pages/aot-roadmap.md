@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-25T14:45:24"
+updated: "2026-11-25T15:41:50"
 ---
 
 <!-- compiled_truth -->
@@ -819,3 +819,15 @@ wasm JIT 与 wasm AOT 必须分别单独测；每档都要同时与 qzjs 纯解�
   summary: "2026-11-25 LICM 语义 100% 审计与加固：构造三类反例，初版实现全部误外提（hoisted=2 含不安全项）。修复：(1) collectMutated 同时识别属性/元素写（o.x=i 使 readX(o) 不可外提）；(2) verifyPure 拒绝写形参/属性/模块级变量、++、new/await/yield/delete/throw/try、非白名单调用（Math.random 等），且要求显式 : number 返回、非 async/generator；(3) 实参必须是本函数内 const 字面量声明且全函数内无属性写；(4) QZ_NO_LICM=1 可关闭。@qz-pure 契约 = 确定性+无副作用+对常量实参全函数（前两者机器校验，全函数性由标注者保证，类比 LLVM nounwind）。新反例测试：属性写阻止外提 n=3 得 2（错外提会得 3）、说谎标注 n=3 得 6（错得 3）、模块状态写 n=3 得 6（错得 4），全通过。本地闸门：test_aot 351 ok、4 回归 PASS、47 corpus 0 diff。合法用例 hoisted=2、反例 hoisted=0。"
   source: "src/qzvm/aot/emit/licm.js 反例审计；test_aot.js runLicm 8 个 check；47 corpus"
   affects: [aot-roadmap]
+
+- time: 2026-11-25T15:03:23
+  kind: evidence
+  summary: "2026-11-25 LICM 加固后 CI 复测（run 45564183181）：validationWork check=30000 语义一致，WAMR-AOT p50 0.058ms vs qzjs-interp 6.674ms = 115.07×（加固前 71.61×，差异来自 interp p95 抖动 9.386ms，AOT 绝对值 0.057→0.058ms 不变），WAMR-interp 4.82×，相对 node-JS 仍 AOT 更快；wasm-JIT 档 0.027 vs 0.169ms = 6.26×。加固（属性写/说谎标注/模块状态写三类反例拒外提）未损失 LICM 收益，100% 兼容闸门（351 check + 4 回归 + 47 corpus 0 diff）在 CI 全绿。"
+  source: "CI run 45564183181 artifact aot-perf-matrix: perf-wamr.txt / perf-jit.txt"
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T15:41:50
+  kind: evidence
+  summary: "2026-11-25 真实场景扩展：从 qzjs polyfill 的纯计算路径取形，加入 4 个真实 workload 进四档矩阵——hpackIntBatch（hpack.js encodeInt 的 varint 长度）、varintBatch（protobuf.js Writer.varintNum 的数值部分）、hashBatch（滚动哈希）、policyGate（固定设备策略重复评估，@qz-pure → LICM）。M7 分析：前三者整函数 num（hpack/varint/hash），policyGate 经 LICM 抽出 1 片段；wasm 共 3 个 __aot_frag（validationWork/policyGate/mixedWork）。本地语义比对 4 负载 × N={1,10,100,500} 与 JS 逐点一致，4 AOT 回归 + 47 corpus 0 diff 不变。过程中发现独立 G4 缺陷：num 模式 emitBitI32 对 >>> 0 在操作数超 i32 范围时用 i32.trunc_f64_s 直接 trap（JS ToUint32 应环绕），hashBatch 原用 2654435761/16777619 触发；已把 workload 改为范围安全写法，缺陷本身未修（tagged 路径有 _emitInt32Safe guard，num 路径没有）。CI 四档复测待跑。"
+  source: "src/polyfill/src/hpack.js / protobuf.js; bench/aot-product/workloads/aotp.ts; emitBitI32 num 路径"
+  affects: [aot-roadmap, aot-readiness]
