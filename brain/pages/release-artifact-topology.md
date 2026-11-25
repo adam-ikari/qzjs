@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [bytecode, release, artifact, wasm, wintertc, abi]
 created: "2026-10-07T15:07:14"
-updated: "2026-10-18T06:02:17"
+updated: "2026-11-25T17:27:09"
 ---
 
 <!-- compiled_truth -->
@@ -215,3 +215,9 @@ emitter.js 现实现性能数据见脑页 `aot-performance-model`（objWork(3000
   summary: "推翻 2026-10-08 'AOT 主线 = AssemblyScript（asc）→wasm' 裁决。改为：自研 emitter.js（src/qzvm/aot/emitter.js，TS→wasm）为唯一 AOT 主线。否决理由：AS 真实代码化率 0%（bigint/对象/字符串无法 strict 子集），emitter.js 无此限制覆盖全 TS 子集。早期实现 ts2c.py(TS→C99直编)/wasm2c so 派生(ab3k.c/wrap_*.c) 工作树已无（refactor 2e43702e aot/→src/qzvm/aot/ 时清出）；Perry 不用。工作树 find 确认无 ts2c/gen_ts2c/build_ts2c/Perry/asc/assemblyscript 依赖。so 发行形态随 wasm2c 删除失效（待决）。保留：核心约束1-4 + 性能结论（-O3必需/-march=native拒绝/wasm 1.76x抽象税/解释模式无意义）。"
   source: "用户 2026-10-18 拍板：删除早期实现不走 AS 路线"
   affects: [release-artifact-topology, aot-experiment-verification, aot-performance-model]
+
+- time: 2026-11-25T17:27:09
+  kind: reversal
+  summary: "用户指令 2026-11-25：wasm2c 档重新纳入性能比较（反转 2026-10-08『wasm2c so 派生实验已删、不再走』的裁决）。理由：不是所有设备可运行 wasm，需同口径比较 wasm→C→gcc -O3 的原生交付形态。范围仅限性能测量（wabt 1.0.42 预编译包 + 纯数值子集模块，唯一 qz.math_rem import 用 fmod C 实现），不改发行产物拓扑；so 发行形态是否恢复待决。"
+  source: "user directive 2026-11-25; CI aot-perf.yml Tier C"
+  affects: [release-artifact-topology, aot-roadmap]
