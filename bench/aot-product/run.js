@@ -71,7 +71,7 @@ function build() {
   const b = path.join(ROOT, "src", "qzvm", "aot", "build.js");
   // jsonWork（JSON.parse 宿主对象，11 次跨界/轮）与 validationWork（剩余 seq/method_call/rem
   // 不可安全内联）经 CI 实测均慢于 qzjs 解释 → 回退 interp，避免负优化。
-  execFileSync("node", [b, "compile", SRC, PREFIX, "--interp", "jsonWork,validationWork"], { stdio: "inherit" });
+  execFileSync("node", [b, "compile", SRC, PREFIX, "--interp", "jsonWork"], { stdio: "inherit" });
   execFileSync("node", [b, "glue", PREFIX, "--no-aot"], { cwd: OUT, stdio: "inherit" });
 }
 
