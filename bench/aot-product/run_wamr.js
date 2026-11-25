@@ -1,18 +1,23 @@
 #!/usr/bin/env node
-// bench/aot-product/run_wamr.js — 3 负载 × 3 档（qzjs interp / WAMR interp / WAMR AOT）
+// bench/aot-product/run_wamr.js — WAMR 侧档位：qzjs-interp / wasm-interp / wasm-AOT / node-JS
 // WAMR 经 qzjs ext_wamr（fast-interp + AOT）。合并单 wasm（wasm-merge 终态）。
+//
+// 测量协议（brain aot-roadmap, 2026-11-25）：wasm JIT 与 AOT 必须分别测，每档都要同时
+// 与 qzjs 纯解释和 node 比较。本脚本覆盖 WAMR 三档 + node-JS 对照；
+// wasm-JIT 档（node WebAssembly / V8 TurboFan）由 run_inmod.mjs 单独提供，
+// 两脚本各自输出按同一负载矩阵对照，不混为一档。
 // Usage: node bench/aot-product/run_wamr.js
 const { readFileSync, writeFileSync, statSync } = require('fs');
 const { spawnSync } = require('child_process');
 const { fileURLToPath } = require('url');
 
-const ROOT = __dirname + '/../../';
-const QZJS = ROOT + 'build-master/qzjs';
-const WAMRC = ROOT + 'deps/wamr/wamr-compiler/build/wamrc';
-const MERGE_BIN = '/home/gem/emsdk/upstream/bin/wasm-merge';
+const ROOT = process.env.QZJS_ROOT || __dirname + '/../../';
+const QZJS = process.env.QZJS || ROOT + 'build-master/qzjs';
+const WAMRC = process.env.WAMRC || ROOT + 'deps/wamr/wamr-compiler/build/wamrc';
+const MERGE_BIN = process.env.WASM_MERGE || '/home/gem/emsdk/upstream/bin/wasm-merge';
 const SRC = __dirname + '/workloads/aotp.ts';
 const PROD = __dirname + '/workloads/aotp_inmod.wasm';
-const LIB = ROOT + 'build-inmod/src/qzvm/libqzvm.wasm';
+const LIB = process.env.LIBQZVM || ROOT + 'build-inmod/src/qzvm/libqzvm.wasm';
 const MERGED = '/tmp/aotp_merged.wasm';
 const AOT = '/tmp/aotp_merged.aot';
 
@@ -34,7 +39,7 @@ console.error('strings:', strings.length, 'modes:', JSON.stringify(modes));
 
 // merge
 const mergeArgs = [MERGE_BIN, LIB, 'qz', PROD, 'prod', '--rename-export-conflicts', '-o', MERGED];
-spawnSync(MERGE_BIN, ['build-inmod/src/qzvm/libqzvm.wasm', 'qz', PROD, 'prod', '--rename-export-conflicts', '-o', MERGED], { cwd: ROOT, stdio: 'pipe' });
+spawnSync(MERGE_BIN, [LIB, 'qz', PROD, 'prod', '--rename-export-conflicts', '-o', MERGED], { cwd: ROOT, stdio: 'pipe' });
 if (!statSync(MERGED).size) { console.error('merge failed'); process.exit(1); }
 console.error('merged:', statSync(MERGED).size, 'bytes');
 
@@ -125,6 +130,16 @@ function runQzjs(jsCode, tag) {
   return JSON.parse(m[1]);
 }
 
+// node-JS 对照档：同一份 interpSrc（等价 JS）直接跑在 node/V8 上。
+function runNode(jsCode, tag) {
+  const f = '/tmp/aotp_' + tag + '.js';
+  writeFileSync(f, jsCode);
+  const r = spawnSync(process.execPath, [f], { encoding: 'utf8', timeout: 300000 });
+  const m = (r.stdout || '').match(/RESULT (\[.*\]|\{.*\})/);
+  if (!m) { console.error(tag, 'no RESULT. stderr:', (r.stderr||'').slice(0,200)); return []; }
+  return JSON.parse(m[1]);
+}
+
 // 4. qzjs interp baseline
 function interpSrc(loads) {
   return `
@@ -152,6 +167,9 @@ console.log("RESULT " + JSON.stringify(out));
 console.error('\n=== running qzjs interp ===');
 const interpRes = runQzjs(interpSrc(LOADS), 'interp');
 
+console.error('=== running node-JS (V8 JS reference) ===');
+const nodeRes = runNode(interpSrc(LOADS), 'node-js');
+
 console.error('=== running WAMR interp (fast-interp) ===');
 const wamrInterpRes = runQzjs(genHarness(MERGED, 'WAMR-interp'), 'wamr-interp');
 
@@ -166,6 +184,7 @@ if (statSync(AOT).size) {
 // 5. build table
 const tiers = [
   { tag: 'qzjs-interp', data: interpRes },
+  { tag: 'node-JS', data: nodeRes },
   { tag: 'WAMR-interp', data: wamrInterpRes },
   { tag: 'WAMR-AOT', data: wamrAotRes },
 ];
@@ -192,6 +211,8 @@ for (const load of loads) {
   const interp = interpRes.find(x => x.load === load);
   const wi = wamrInterpRes.find(x => x.load === load);
   const ao = wamrAotRes.find(x => x.load === load);
-  const ip = interp?.p50_ms, wp = wi?.p50_ms, ap = ao?.p50_ms;
-  console.log(`${load}: WAMR-interp ${ip&&wp?(ip/wp).toFixed(2):'—'}×  WAMR-AOT ${ip&&ap?(ip/ap).toFixed(2):'—'}×`);
+  const nd = nodeRes.find(x => x.load === load);
+  const ip = interp?.p50_ms, wp = wi?.p50_ms, ap = ao?.p50_ms, np = nd?.p50_ms;
+  console.log(`${load}: qzjs-interp/node-JS ${ip&&np?(ip/np).toFixed(2):'—'}×  WAMR-interp ${ip&&wp?(ip/wp).toFixed(2):'—'}×  WAMR-AOT ${ip&&ap?(ip/ap).toFixed(2):'—'}×`);
+  console.log(`  (相对 node-JS: WAMR-interp ${np&&wp?(np/wp).toFixed(2):'—'}×  WAMR-AOT ${np&&ap?(np/ap).toFixed(2):'—'}×)`);
 }

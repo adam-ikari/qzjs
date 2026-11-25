@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-23T12:32:18"
+updated: "2026-11-25T09:38:06"
 ---
 
 <!-- compiled_truth -->
@@ -112,6 +112,21 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
 - AOT 必须对 JS 语义 100% 兼容；覆盖率、性能、工期都不能作为放宽正确性或接受静默错值的理由。
 - 兼容口径是可观察语义与解释器一致：audit_diff 全量 0 diff、shared-state 无双份状态、身份/Map 键/副作用次数一致；async/generator 可留 interp，但行为必须正确。
 - 当前 zod 完整入口 wasm 仍未过 wasm-validate/wamrc（func[819] 栈失衡），因此不能宣称 100% 兼容完成；修到端到端产物可验证后，才进入 G1–G5 性能与体积验收。
+
+## 性能测量协议（用户指令 2026-11-25，强制）
+wasm JIT 与 wasm AOT 必须分别单独测；每档都要同时与 qzjs 纯解释和 node 比较。四档：qzjs-interp / wasm-JIT(node WebAssembly) / wasm-AOT(wamrc→WAMR) / node-JS(等价 JS)。同负载同 N 同 reps，各报 p50/p95 + 载荷，再给相对 qzjs-interp 与 node-JS 的比值。本机不跑性能；须在具备 wamrc 的环境执行。
+
+## 性能测量口径约束（用户指令 2026-11-25）
+本机不做 AOT 性能测试（12 核长期满载，wall-clock 不可复现）。性能结论只用已记录基线文档或真机 WAMR/C1 Slim 数据；本会话本机数字仅历史参考，不进验收。
+
+## 当前验收结论（2026-11-25，host 基线）
+- G1 达标：computeWork 6.43–6.49×（M6b 合并单模块，node V8 JIT，非真机）。
+- G5 达标：host Release 冷启动 min5/median6/max11ms ≤ 80ms；真机未测。
+- G2 按 2026-11-13 决策原则 #2 不适用：AOT 已收缩为热点计算专用，tagged 负载（jsonWork 0.22× / validationWork 0.23×）留 interp，未翻转故不触发回退。
+- G3 超标：微负载 +2254%、zod 真实 app +309%（wasm+interpJs 5.60MB vs TS 源码 1.37MB），需独立议题处理。
+- G4 本轮 4 个 AOT 回归全 PASS；47 corpus 0 diff 系上次会话结论，本轮未重跑。
+- 数字口径与复现命令见本页 timeline 2026-11-25 evidence 条目。
+- 非计算路径：typeof/字面量比较内联已落地（tagged.js），validationWork 每迭代宿主调用 8.5→4.5、低负载窗口 p50 0.722→0.674ms（6.6%）；结构证据确凿，时间证据因机器满载不可稳态复现。emitRem 常量除数特化已试做并回退（增益 0.4% 噪声内）。
 
 
 ## Timeline
@@ -707,4 +722,58 @@ noop AOT 133.8ns 证明 ext_wamr raw-native 蹦床已生效。qz.add 3.55µs = �
   kind: evidence
   summary: "2026-11-23: PR #29 已 squash 合并到 master（3682dd5e），CI 31/31 pass。master Pages job 因 docs/guide/cli.md 指向被 srcExclude 排除的 /architecture/qzvm-qzjs-layering 而死链失败；hotfix 改为 GitHub 源文件链接，本地 npm run build 通过。"
   source: "gh run 45108366473; docs build /tmp/docs.build.log"
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T07:58:55
+  kind: evidence
+  summary: "2026-11-25 G1–G5 首次完整基线（host 自测，口径：M6b 合并单模块 + build/qzjs，node V8 JIT，非真机 WAMR，无 wamrc）。G1：computeWork N=200000 p50 2.926ms vs interp 18.997ms = 6.49× ✓（≥3×）；两次跑 6.43/6.49× 稳定。G2：validationWork N=500 0.23× ✗、jsonWork N=500 0.22× ✗——按 roadmap 决策原则 #2，AOT 已收缩为计算热点专用，tagged 负载留 interp，此失败为预期内、不触发回退（这些模块从未翻）。G3：微负载 wasm+interpJs 23514B vs interp-only 999B=+2254% ✗；真实 zod app wasm 4767512+interpJs 834503=5602015B vs zod TS 源码 1367735B=+309% ✗，微负载与真实 app 均超 +10%。G4：四个 AOT 回归（test_aot / test_interp_shared_clash / test_ss_module_bindings / test_aot_constructor_hoist）当前 HEAD 全 PASS，含 2026-11-23 曾 RED 的 constructor_hoist；47 corpus 0 diff 为上次会话结论，本轮未重跑（证据等级：查证=本轮4测试+bench，继承=corpus）。G5：冷启动 build/qzjs -e '1+1' 12 次 min5/median6/max11ms（host Release），远低于 ≤80ms ✓；真机 C1 Slim 未测。修 bench bug：run_inmod.mjs:126 G2 行原取 rows[1]（jsonWork）却标 validationWork，已改 rows[2]，复跑 G2 行报 0.23× 与表格一致。结论：G1 与 G5 达标，G2 按收缩定位不适用，G3 显著超标需作为独立议题；端到端 100% 兼容的剩余阻塞（v3 module-suspend 4 文件）未在 G1–G5 范围内。"
+  source: "bench/aot-product/run.js --rebuild + run_inmod.mjs --merge (QZJS=build/qzjs, 2026-11-25); 4× AOT node 回归; build/qzjs 冷启动 12 次"
+  affects: [aot-roadmap, aot-readiness]
+
+- time: 2026-11-25T07:59:02
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "2026-11-25 host 自测：bench/aot-product run.js + run_inmod.mjs --merge + 4 AOT 回归 + 冷启动 12 次"
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T09:00:05
+  kind: evidence
+  summary: "2026-11-25 负结果：emitRem 常量除数特化（数值字面量除数跳过 |b|==Inf 分支）已试做并回退。实验前设计反例：变量除数 Infinity（必须仍走通用分支）、常量除数遇 NaN/±Inf/1e308%1e-308 溢出/除零（必须落 qz.math_rem）、-0%3=-0。实现为 emitBinaryOp(op,right) 传右节点 + emitRem 条件跳过外层 if；新增 11 个边界 check 并把 test_aot.js 的 math_rem stub 从返回 0 修正为真实 a%b（此前慢路径未被正确验证）。闸门：4 个 AOT 回归全 PASS；47 corpus 全 0 diff（含 audit_corpus4，qzjs-396 报告中的 6 diff 已不复现）；11 个新边界 check 全 PASS。A/B（M6b 合并，QZJS=build/qzjs，各 5 次 p50）：baseline 中位 2.796ms（2.683–2.867），优化版中位 2.784ms（2.663–2.851），差 0.4% 落在噪声内，未达预设的 5% 保留阈值 → 按『先算上限+反例优先』回退编译器改动。保留：math_rem stub 修正、常量除数边界用例、run_inmod.mjs G2 标注修复。结论：num 路径的剩余开销不在这道检查；继续压 G1 需要值域分析或更大改动，不做小修。"
+  source: "src/qzvm/aot/emit/emitter.js 临时改动 + test_aot.js 新用例；audit_diff.js × 47 corpus；bench/aot-product/run_inmod.mjs --merge A/B 各 5 次"
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T09:28:06
+  kind: evidence
+  summary: "2026-11-25 非计算路径优化（保留）：tagged 模式下 typeof x ==/===/!=/!== 字符串字面量（及两侧字面量）内联为 i64 位型相等，省 qz.seq/qz.sne 跨界。依据：typeof 结果恒为内部 intern 字面量句柄（含宿主对象经 typeof_host 后仍落字面量），字面量按内容 intern 到同一 offset，故同内容必同句柄、异内容必异，i64.eq 精确等于 JS 按值相等。反例设计：宿主对象、非法字面量（恒 false）、变量侧（不命中走原路径）、松散相等（两侧皆字符串故同义）。实现：tagged.js 新增 _tryTypeofLitEqI32，emitTaggedExpr 与 emitCondI32 两处接入。闸门：4 个 AOT 回归全 PASS；47 corpus 全 0 diff；test_aot 新增 8 个边界 check 全 PASS（宿主对象方法 typeof 的既有已知限制不在此范围，未写入断言）。结构性证据（不受机器负载影响）：validationWork 每迭代宿主调用 8.5→4.5（sne:4 全消），jsonWork 12.0 不变、tagLoop 1.0 不变。时间证据（口径：M6b 合并 host，QZJS=build/qzjs，机器低负载窗口各 5 次 p50）：validationWork 0.714/0.707/0.722/0.722/0.738 → 0.654/0.640/0.685/0.674/0.685，中位 0.722→0.674ms = 6.6%；该测量后机器负载升至 22+（12 核全满），后续重测不可用，故 6.6% 标为[低负载窗口查证，非可复现稳态]。剩余调用：truthy:2、seq:1（v===null）、method_call:1（indexOf）、rem:0.5，未动。"
+  source: "src/qzvm/aot/emit/tagged.js + test_aot.js；/tmp/count_qz_calls.js 宿主调用计数；bench/aot-product/run_inmod.mjs --merge A/B"
+  affects: [aot-roadmap, aot-wasm-tagged-backend]
+
+- time: 2026-11-25T09:28:25
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "2026-11-25 非计算路径优化结果"
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T09:32:21
+  kind: decision
+  summary: "用户指令 2026-11-25：不要用本机做 AOT 性能测试。本机 12 核长期满载（load 18–23），wall-clock A/B 不可复现；后续性能结论只用已记录的基线文档口径或真机 WAMR/C1 Slim 数据，不在本机新增 bench 运行。本会话已采的本机数字（低负载窗口的 validationWork 0.722→0.674ms）仅作历史参考，不作为验收依据。"
+  source: user directive 2026-11-25
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T09:32:51
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "用户指令：本机不做性能测试"
+  affects: [aot-roadmap]
+
+- time: 2026-11-25T09:37:47
+  kind: decision
+  summary: "用户指令 2026-11-25（性能测量协议，强制）：wasm JIT 与 wasm AOT 必须分别单独测量，且每一档都要同时与 qzjs 纯解释和 node 比较，不能把 JIT/AOT 混在一档、也不能缺对照。四档矩阵：qzjs-interp（纯解释基线）、wasm-JIT（node WebAssembly / V8 TurboFan）、wasm-AOT（wamrc→WAMR 原生）、node-JS（等价 JS 直接跑，V8 JS 参考）；同负载同 N 同 reps，各报 p50/p95 与载荷字节，再分别给相对 qzjs-interp 与相对 node-JS 的比值。现状缺口：bench/aot-product/run_wamr.js 只有 qzjs-interp/WAMR-interp/WAMR-AOT 三档、无 node-JS 档；wasm-JIT 只在 run_inmod.mjs 的 node WebAssembly 路径，未与 AOT 分离；wamrc 本机缺失，AOT 档不可产。本机不做性能测试（上一条指令），此矩阵须在具备 wamrc 的环境执行。"
+  source: user directive 2026-11-25
+  affects: [aot-roadmap, aot-performance-model]
+
+- time: 2026-11-25T09:38:06
+  kind: decision
+  summary: Rewrote compiled_truth to the new best understanding
+  source: "性能测量四档矩阵协议"
   affects: [aot-roadmap]

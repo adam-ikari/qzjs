@@ -25,6 +25,10 @@ const NUM_SRC = `
 function big(n: number): number { let s = 0; for (let i = 0; i < n; i++) s = s + 1000000000; return s; }
 function div(a: number, b: number): number { return a / b; }
 function mod(a: number, b: number): number { return a % b; }
+// 常量除数取模的语义边界：负数/小数/NaN/Inf/-0/溢出/除零（守 math_rem 宿主慢路径）
+function modConst(a: number): number { return a % 3; }
+function modConstTiny(a: number): number { return a % 1e-308; }
+function modConstZero(a: number): number { return a % 0; }
 function nested(a: number, b: number, c: number): number { return a % (b % c); }
 function neg(a: number): number { return -a; }
 function cmp(a: number, b: number): number { if (a < b) return 1; return 0; }
@@ -63,7 +67,7 @@ async function runNum() {
     const wasm = path.join(os.tmpdir(), "qz_aot_num.wasm");
     compileTS(tmp, wasm, {});
     const bytes = fs.readFileSync(wasm);
-    const stub = new Proxy({}, { get: (_, k) => k === "math_pow" ? Math.pow : (..._a) => 0 });
+    const stub = new Proxy({}, { get: (_, k) => k === "math_pow" ? Math.pow : k === "math_rem" ? ((a, b) => a % b) : (..._a) => 0 });
     const { instance } = await WebAssembly.instantiate(bytes, { qz: stub, env: stub });
     const e = instance.exports;
     check("big(5)", e.big(5), 5e9);
@@ -71,6 +75,17 @@ async function runNum() {
     check("mod(7,3)", e.mod(7, 3), 1);
     check("mod(-7,3)", e.mod(-7, 3), -1);
     check("mod(7.5,2)", e.mod(7.5, 2), 1.5);
+    // 取模语义边界须与 JS 逐点一致；变量除数 Infinity 走 |b|==Inf 分支，常量除数走通用路径
+    check("mod(7,Inf)", e.mod(7, Infinity), 7);
+    check("mod(7,-Inf)", e.mod(7, -Infinity), 7);
+    check("modConst(7,3)", e.modConst(7), 1);
+    check("modConst(-7,3)", e.modConst(-7), -1);
+    check("modConst(7.5,3)", e.modConst(7.5), 1.5);
+    check("modConst(-0,3) = -0", Object.is(e.modConst(-0), -0), true);
+    check("modConst(NaN,3) = NaN", isNaN(e.modConst(NaN)), true);
+    check("modConst(Inf,3) = NaN", isNaN(e.modConst(Infinity)), true);
+    check("modConstTiny(1e308) 相对误差", e.modConstTiny(1e308) / (1e308 % 1e-308), 1);
+    check("modConstZero(5) = NaN", isNaN(e.modConstZero(5)), true);
     check("nested(100,7,3)", e.nested(100, 7, 3), 0);   // 100 % (7%3) = 100 % 1 = 0
     check("neg(5)", e.neg(5), -5);
     check("cmp(2,3)", e.cmp(2, 3), 1);
@@ -1335,8 +1350,39 @@ async function runSemantics() {
     check("generator.类方法可执行", new Function(genClsR.interpJs + "; return useBag;")()(), "1-2");
 }
 
+// typeof/literal 与两字面量比较内联（省 qz.seq/qz.sne 跨界）的语义边界
+async function runTypeofLit() {
+    const src = path.join(os.tmpdir(), "qz_aot_typeoflit.ts");
+    fs.writeFileSync(src, `
+function tsS(x: any): number { return typeof x === "string" ? 1 : 0; }
+function tsN(x: any): number { return typeof x !== "number" ? 1 : 0; }
+function tsBad(x: any): number { return typeof x === "foo" ? 1 : 0; }
+function litEq(): number { return "abc" === "abc" ? 1 : 0; }
+function litNe(): number { return "abc" !== "abd" ? 1 : 0; }
+function tsVar(x: any, y: string): number { return typeof x === y ? 1 : 0; }
+`);
+    const wasm = path.join(os.tmpdir(), "qz_aot_typeoflit.wasm");
+    compileTS(src, wasm, {});
+    const qz = makeQzvm([], {});
+    const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasm), { qz });
+    if (instance.exports.memory) qz.bindMem(instance.exports.memory);
+    if (instance.exports.__bump) qz.bindBump(instance.exports.__bump);
+    const e = instance.exports;
+    const j = (v) => qz._fromJS(v), r = (v) => qz._toJS(v);
+    check("typeof lit: string", r(e.tsS(j("hi"))), 1);
+    check("typeof lit: number", r(e.tsS(j(5))), 0);
+    check("typeof lit: !== number on number", r(e.tsN(j(5))), 0);
+    check("typeof lit: !== number on string", r(e.tsN(j("x"))), 1);
+    check("typeof lit: impossible literal", r(e.tsBad(j("x"))), 0);
+    check("literal === same", r(e.litEq()), 1);
+    check("literal !== other", r(e.litNe()), 1);
+    check("typeof vs variable (generic path)", r(e.tsVar(j("x"), j("string"))), 1);
+    // 宿主对象方法 typeof → "function" 是既有已知限制（tagged.js TypeOfExpression 注释），非本优化范围
+}
+
 (async () => {
     await runNum();
+    await runTypeofLit();
     await runTagged();
     await runClasses();
     await runMultiFile();
