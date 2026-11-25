@@ -5,7 +5,7 @@ category: reference
 status: active
 tags: [aot, roadmap, emitter, reference]
 created: "2026-10-18T06:06:51"
-updated: "2026-11-25T13:43:22"
+updated: "2026-11-25T14:45:24"
 ---
 
 <!-- compiled_truth -->
@@ -807,3 +807,15 @@ wasm JIT 与 wasm AOT 必须分别单独测；每档都要同时与 qzjs 纯解�
   summary: "2026-11-25 validationWork 理论优化通道已实证并落地（LICM）：M7 原判 validationWork 0 fragment，因循环体含 validate(good/bad) 这个 tagged 调用；但 validate 只读参数属性、good/bad 是循环外常量 → 满足循环不变调用外提。仿真（手工外提 + : number 注解）使 M7 抽出 1 个 num loop 片段（ops=5, carried=t），理论上限按 computeWork ~11ns/iter 推算相对 qzjs 解释 ~20×。实现：新增 emit/licm.js——仅对前导注释带 // @qz-pure 的函数做保守外提（实参须为循环外标识符且循环内不被赋值），外提声明带显式 : number；extract.js buildNumericVars 认显式注解为 numeric；compile-ts.js 在 M7 前调用 hoistPureCalls。aotp.ts 给 validate 加 @qz-pure，四个 bench 路径恢复 validationWork 编 wasm（jsonWork 仍 interp）。正确性：4 AOT 回归 + 47 corpus 0 diff + 新增 5 个 LICM check（片段存在 + work(1/2/5/10) 语义）+ validationWork(1/2/5/10/500) 逐点比对全通过。性能待 CI 四档复测。"
   source: "M7_DESIGN.md; src/qzvm/aot/emit/extract.js findNumericFragments 仿真; CI 45550730482 基线"
   affects: [aot-roadmap, aot-m7-ast-analysis]
+
+- time: 2026-11-25T14:02:45
+  kind: evidence
+  summary: "2026-11-25 CI 验证 LICM（run 45556800658）：validationWork 恢复编 wasm（validate 加 @qz-pure → 两不变调用外提 → M7 抽 num 片段），check=30000 语义一致。WAMR-AOT p50 0.057ms vs qzjs-interp 4.082ms = 71.61×（回退前 0.50×、interp 回退时 0.97×）；WAMR-interp 5.96×；相对 node-JS 则 AOT 3.18×（0.057 vs 0.181ms）——首次出现 wasm AOT 快过 node JS 的负载。wasm-JIT 档 0.013 vs 0.108ms = 8.31×。computeWork 5.09×、mixedWork 5.15×、jsonWork 0.99×（仍 interp）。结论：此前『validationWork 无优化空间』判断被推翻——LICM 把 tagged 调用移出循环后 M7 能抽纯 f64 片段，是比省跨界大一个量级的机制；理论 20× 估算保守，实测 71.6×。AOT 定位修正为『纯计算 + 可被 LICM/M7 化为纯计算的负载』，jsonWork（JSON.parse 宿主对象，无固定参数可调）仍留 interp。"
+  source: "CI run 45556800658 artifact aot-perf-matrix: perf-wamr.txt / perf-jit.txt"
+  affects: [aot-roadmap, aot-m7-ast-analysis]
+
+- time: 2026-11-25T14:45:24
+  kind: evidence
+  summary: "2026-11-25 LICM 语义 100% 审计与加固：构造三类反例，初版实现全部误外提（hoisted=2 含不安全项）。修复：(1) collectMutated 同时识别属性/元素写（o.x=i 使 readX(o) 不可外提）；(2) verifyPure 拒绝写形参/属性/模块级变量、++、new/await/yield/delete/throw/try、非白名单调用（Math.random 等），且要求显式 : number 返回、非 async/generator；(3) 实参必须是本函数内 const 字面量声明且全函数内无属性写；(4) QZ_NO_LICM=1 可关闭。@qz-pure 契约 = 确定性+无副作用+对常量实参全函数（前两者机器校验，全函数性由标注者保证，类比 LLVM nounwind）。新反例测试：属性写阻止外提 n=3 得 2（错外提会得 3）、说谎标注 n=3 得 6（错得 3）、模块状态写 n=3 得 6（错得 4），全通过。本地闸门：test_aot 351 ok、4 回归 PASS、47 corpus 0 diff。合法用例 hoisted=2、反例 hoisted=0。"
+  source: "src/qzvm/aot/emit/licm.js 反例审计；test_aot.js runLicm 8 个 check；47 corpus"
+  affects: [aot-roadmap]
