@@ -129,6 +129,30 @@ zod 实测 wasm 6053/20945（28.9%）→ 20845/20945（99.5%），整模块 inte
 | **AS 切分器**（strict 类型子集，`splitter.js`/`*.as.ts`/`qzvm.c` C 版） | 真实代码 AS 化率 0%（bigint/对象/字符串）；完整 TS→wasm 无此限制 |
 | **wasm2c 中间产物**（`ab3k.c`/`wrap_*.c` 等）                           | so 由 wasm 派生的早期实验                                        |
 
+## LICM / `@qz-pure` 契约（2026-11-25）
+
+`emit/licm.js` 在 M7 抽取前做循环不变调用外提。启用条件是**显式标注 + 机器可验的纯度**，两者缺一不可：
+
+- 只有前导注释含 `// @qz-pure` 的函数才参与外提；无标注一律不动。
+- `verifyPure` 拒绝：写形参/属性/元素/模块级变量、`++`/`--`、`new`/`await`/`yield`/`delete`/`throw`/`try`、白名单外的调用（`Math.random` 等非确定性函数）。白名单为纯字符串方法与确定性 `Math.*`。
+- 函数须有显式 `: number` 返回类型，且非 `async`/generator。
+- 实参必须是调用者函数体内 `const` 字面量声明，且该函数内从不写它的属性。
+- `@qz-pure` 的语义契约 = 确定性 + 无副作用 + 对常量实参全函数（不抛异常）。前两者机器校验，全函数性由标注者保证（类比 LLVM `nounwind`）；所以 `verifyPure` 另检查函数体无 `throw`/`try`。
+- `QZ_NO_LICM=1` 可整体关闭做 A/B。
+
+动机：M7 把普通函数调判为 tagged 硬边界。`validationWork` 循环体含 `validate(good/bad)` 时抽不出片段；两个调用外提后循环变纯 f64，M7 抽出 num 片段。CI 实测 validationWork WAMR-AOT 对 qzjs-interp 从 0.50×（负优化）变为 113×。反例必须覆盖：循环内写参数属性、标注说谎（写 `o.x`）、写模块级变量——三者都会因误外提静默错值，已有回归钉住。
+
+## wasm2c 加速路径（无 wasm 运行时设备）
+
+测量脚本 `bench/aot-product/run_wasm2c.mjs`、`run_wasm2c_polyfill.mjs`；产物生成于 `build/aot/wasm2c*`。协议见 brain `aot-roadmap` 五档矩阵，与 qzjs-interp / node-JS / wasm-JIT / wasm-AOT 同负载同 N。
+
+- **工具链版本**：必须用 wabt 1.0.42 预编译包。系统 1.0.27 在带 import 的模块上崩溃（`std::out_of_range`）。
+- **模块范围**：目前仅纯数值子集（`workloads/pure.ts`，唯一 import `qz.math_rem` 用 C `fmod` 实现）。整模块带 20 个 `qz.*` import，要跑对象/字符串负载须先实现 C 侧 `qz.*` 宿主——属大工程，未完成前不能宣称通用可行。
+- **与 qzjs `-Werror` 的隔离**：wasm2c 生成 C 含 unused var/func/value/parameter/sign-compare，`wasm-rt-impl.c` 还需 `SA_ONSTACK`/`SIGSTKSZ`（被 `-std=c99` 隐藏）。做法：生成后注入 `#pragma GCC diagnostic ignored`（仅生成文件），CI 的 `CFLAGS` 加 `-D_GNU_SOURCE` 与 `-I<wabt>/share/wabt/wasm2c`，runtime 源文件复制进工作区。这与项目对 miniz/libuv 的第三方隔离同思路，不改 qzjs 自身源码的 `-Werror`。
+- **polyfill 接入**：把 wasm2c 产物包成 `qz_ext_t`（模板 `wasm2c/polyfill_ext.c.tpl`），经 `QZ_EXTRA_SOURCES`/`QZ_EXTRA_HEADERS`/`QZ_EXTENSIONS` 编进 qzjs，注册 JS 全局。对照脚本 `run_polyfill_all.js` 要求三档 check 逐点一致才计比值。CI 实测 hpack varint 长度：baseline JS 46.303ms / wamrc AOT 1.715ms / wasm2c ext 1.355ms（check=796621 一致）。
+
+**UTF-8 扩展的上限判断（暂不做）**：`text-encoding.js` 的 decode 带流式状态、BOM/fatal/U+FFFD 语义且 I/O 是 Uint8Array→String，encode 的 I/O 是 String→Uint8Array，都需在 C 侧用 QuickJS typed array API 构造 JS 对象；不是纯函数，且 100% 语义边界多。只抽 `utf8LeadLen` 这类纯判定辅助收益上限有限（解码循环的一小部分），不值得单独做。若要做，先做 `encodeInto`（原地写、返回长度）并在 CI 上以完整 Unicode 向量验语义，再决定是否投入。
+
 ## 设计文档
 - `STR_BACKEND_DESIGN.md` — 字符串后端优化设计（独立实现计划）
 - `PORTABILITY_32BIT.md` — 32 位可移植性评估与「单 f64 表示」裁决（i386 实测通过）
