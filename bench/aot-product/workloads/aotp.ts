@@ -92,7 +92,7 @@ function hpackIntBatch(n: number): number {
 function varintBatch(n: number): number {
   let t = 0;
   for (let i = 0; i < n; i++) {
-    let v = (i * 104729) >>> 0;
+    let v = (i * 104729) % 2147483647;
     let len = 1;
     while (v > 0x7f) { v = v >>> 7; len = len + 1; }
     t = t + len;
