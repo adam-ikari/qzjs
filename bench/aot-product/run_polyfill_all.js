@@ -41,6 +41,11 @@ function run(bin, code, tag) {
   const f = path.join(os.tmpdir(), "qz_poly3_" + tag + ".js");
   fs.writeFileSync(f, code);
   const r = spawnSync(bin, [f], { encoding: "utf8", timeout: 300000, cwd: OUT });
+  if (r.error || r.status !== 0) {
+    console.error(tag, "failed:", r.error ? r.error.message : "exit " + r.status,
+                  (r.stderr || "").slice(0, 300));
+    return null;
+  }
   const m = (r.stdout || "").match(/RESULT (\{.*\})/);
   if (!m) { console.error(tag, "no RESULT:", (r.stderr || "").slice(0, 300)); return null; }
   return JSON.parse(m[1]);
@@ -58,9 +63,16 @@ for (const [name, r] of [["baseline JS", base], ["wamrc AOT", aot], ["wasm2c nat
   console.log(name.padEnd(20), r ? JSON.stringify(r) : "N/A");
 }
 const ref = base && base.check;
-const allOk = base && (!aot || aot.check === ref) && (!w2c || w2c.check === ref);
-console.log("check 一致:", !!allOk);
+// 三档必须都存在：缺档不能算「一致」，否则 CI 会在 wasm2c 档没跑时静默变绿。
+const allOk = !!(base && aot && w2c) &&
+  aot.check === ref && w2c.check === ref;
+console.log("check 一致:", allOk);
 if (base && aot) console.log("AOT vs JS p50:", +(base.p50_ms / aot.p50_ms).toFixed(2) + "×");
 if (base && w2c) console.log("wasm2c vs JS p50:", +(base.p50_ms / w2c.p50_ms).toFixed(2) + "×");
 if (aot && w2c) console.log("wasm2c vs AOT p50:", +(aot.p50_ms / w2c.p50_ms).toFixed(2) + "×");
-if (!allOk) process.exit(1);
+if (!allOk) {
+  if (!base) console.error("missing tier: baseline JS");
+  if (!aot) console.error("missing tier: wamrc AOT");
+  if (!w2c) console.error("missing tier: wasm2c native ext");
+  process.exit(1);
+}
