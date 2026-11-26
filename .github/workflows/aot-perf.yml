@@ -122,6 +122,16 @@ jobs:
           set -euo pipefail
           node bench/aot-product/run_wasm2c_full.mjs 2>&1 | tee perf-wasm2c-full.txt
 
+      # 字节码拆分可行性：真实 qzjs bytecode 的纯数值 opcode 区间 → wasm，尾部留 qzjs 解释。
+      - name: Tier G — bytecode split (equivalence + perf)
+        env:
+          MEASURE: "1"
+          QZJS: ${{ github.workspace }}/build-rel/qzjs
+          OUT: ${{ github.workspace }}/build/aot/bytecode-split
+        run: |
+          set -euo pipefail
+          node bench/bytecode-aot/bytecode-split.mjs 2>&1 | tee perf-bytecode-split.txt
+
       - name: Tier B — wasm-JIT (node WebAssembly / V8 TurboFan)
         env:
           QZJS: ${{ github.workspace }}/build-rel/qzjs
@@ -185,6 +195,8 @@ jobs:
           grep -q 'computeWork' perf-jit.txt
           grep -q 'p50_ms=' perf-wasm2c.txt
           grep -q 'COMPILE_OK' perf-wasm2c-full.txt
+          grep -q 'EQUIVALENCE PASS' perf-bytecode-split.txt
+          grep -q 'wasm + bytecode tail' perf-bytecode-split.txt
           grep -q 'speedup p50' perf-polyfill.txt
           grep -q 'check 一致: true' perf-polyfill.txt || { echo 'polyfill check mismatch'; exit 1; }
           grep -q 'baseline JS .*p50_ms' perf-polyfill-all.txt
@@ -202,6 +214,7 @@ jobs:
             perf-jit.txt
             perf-wasm2c.txt
             perf-wasm2c-full.txt
+            perf-bytecode-split.txt
             perf-polyfill.txt
             perf-w2c-polyfill-gen.txt
             perf-polyfill-all.txt
