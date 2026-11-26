@@ -63,7 +63,6 @@ const { registerQz, stripTsTypes, usesArguments, ctorName, symbolNameOf, methNam
 const { SCRATCH, STR_BASE, STR_BUMP, INMOD_HOST_LIMIT, INMOD_STR_BUMP, INMOD_TABLE_CAP, INMOD_STR_BASE, INMOD_PAGES, memLayout, emitBumpAlloc, emitMemHelpers, emitStringHelpers, emitNumArrHelpers, numArrNames, funcMode, aotWorthiness } = require("./layout.js");
 const { Emitter } = require("./emitter.js");
 const { __extractFragments: extractFragments } = require("./extract.js");
-const { hoistPureCalls } = require("./licm.js");
 require("./tagged.js");   // 副作用：挂上 Emitter.prototype 的 tagged 发射方法
 
 function compileTS(input, outWasm, opts = {}) {
@@ -1478,9 +1477,6 @@ function compileTS(input, outWasm, opts = {}) {
             emitStringHelpers(m);
             emitNumArrHelpers(m);
         }
-        // LICM：显式 // @qz-pure 函数，其循环不变调用外提到循环外（带 : number 注解），
-        //   让 M7 能把剩下的纯数值循环抽成 num 片段。无标注一律不动（避免误判副作用）。
-        const licm = hoistPureCalls(fns, fnSf);
         // M7：提取纯数值子树（合成 __aot_frag_N num 函数 + 重写原函数）——须在声明循环前
         //   QZ_NO_M7=1 关闭提取（A/B 对照用）
         const fragCounter = { n: 0 };
