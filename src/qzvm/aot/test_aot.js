@@ -1398,6 +1398,15 @@ function globalWrite(n: number): number {
   for (let i = 0; i < n; i++) t = t + badGlobal(o);
   return t + counter;
 }
+// 反例 4：只读模块可变状态也不算纯——逐轮变化的 gstate 外提会错值
+let gstate = 0;
+function readState(o: any): number { return gstate + o.x; }
+function stateRead(n: number): number {
+  const o = { x: 1 };
+  let t = 0;
+  for (let i = 0; i < n; i++) { gstate = i; t = t + readState(o); }
+  return t;
+}
 `);
     const wasm = path.join(os.tmpdir(), "qz_aot_licm.wasm");
     const r = compileTS(src, wasm, {});
@@ -1423,6 +1432,9 @@ function globalWrite(n: number): number {
     // 反例：写模块级 counter 的函数不得外提；n=3 应得 3+3=6（外提会错成 3+1=4）
     if (instance.exports.__bump_reset) instance.exports.__bump_reset();
     check("LICM: 模块状态写被拒", qz._toJS(instance.exports.globalWrite(qz._fromJS(3))), 6);
+    // 反例：只读模块可变 gstate 的函数不得外提；n=3 应得 1+2+3=6（外提会错成 3）
+    if (instance.exports.__bump_reset) instance.exports.__bump_reset();
+    check("LICM: 读模块可变状态被拒", qz._toJS(instance.exports.stateRead(qz._fromJS(3))), 6);
 }
 
 // typeof/literal 与两字面量比较内联（省 qz.seq/qz.sne 跨界）的语义边界

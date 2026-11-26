@@ -1480,7 +1480,7 @@ function compileTS(input, outWasm, opts = {}) {
         }
         // AST 自动纯度判定：纯函数的循环不变调用外提，让 M7 能把剩余循环抽成 num 片段。
         // 判定由 pure-hoist.js 的 verifyPure 完成，不需要人工标注。
-        hoistPureCalls(fns, fnSf);
+        hoistPureCalls(fns, fnSf, mutableModNames);
         // M7：提取纯数值子树（合成 __aot_frag_N num 函数 + 重写原函数）——须在声明循环前
         //   QZ_NO_M7=1 关闭提取（A/B 对照用）
         const fragCounter = { n: 0 };

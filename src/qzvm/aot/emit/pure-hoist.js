@@ -60,8 +60,9 @@ const PURE_MATH = new Set(["sqrt", "abs", "floor", "ceil", "trunc", "round", "po
     "log", "log2", "log10", "exp", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "sign", "cbrt", "hypot", "fround", "clz32"]);
 
-/** 保守纯度验证：仅当 AST 确认函数确属纯函数时才参与外提。 */
-function verifyPure(fn) {
+/** 保守纯度验证：仅当 AST 确认函数确属纯函数时才参与外提。
+ *  mutableMods 是模块级可变名集合；读它也不算纯——循环里逐轮变化的值外提后会静默错值。 */
+function verifyPure(fn, mutableMods = new Set()) {
     // 返回类型必须是显式 number：外提声明是 : number，函数返回非 number 会被当 f64 静默错值。
     if (!fn.type || fn.type.kind !== ts.SyntaxKind.NumberKeyword) return false;
     if (fn.asteriskToken || (fn.modifiers && fn.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword))) return false;
@@ -73,6 +74,8 @@ function verifyPure(fn) {
         ts.forEachChild(n, collectLocals);
     };
     if (fn.body) collectLocals(fn.body);
+    const params = new Set();
+    for (const p of fn.parameters || []) if (ts.isIdentifier(p.name)) params.add(p.name.text);
     let ok = true;
     const walk = (n) => {
         if (!ok || !n) return;
@@ -91,9 +94,18 @@ function verifyPure(fn) {
             const c = n.expression;
             const pure = (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression)
                     && c.expression.text === "Math" && PURE_MATH.has(c.name.text))
-                || (ts.isPropertyAccessExpression(c) && PURE_METHODS.has(c.name.text));
+                 || (ts.isPropertyAccessExpression(c) && PURE_METHODS.has(c.name.text));
             if (!pure) { ok = false; return; }
         }
+        // 模块级可变名出现在值位置 = 读共享状态；局部同名与形参同名不在此列。
+        if (ts.isIdentifier(n) && mutableMods.has(n.text) && !locals.has(n.text) && !params.has(n.text)) {
+            ok = false; return;
+        }
+        // 属性名、声明名、形参名不是「读」：跳过，避免 o.counter 被当成模块变量 counter。
+        if (ts.isPropertyAccessExpression(n)) { walk(n.expression); return; }
+        if (ts.isVariableDeclaration(n)) { if (n.initializer) walk(n.initializer); return; }
+        if (ts.isPropertyAssignment(n)) { walk(n.initializer); return; }
+        if (ts.isParameter(n)) return;
         ts.forEachChild(n, walk);
     };
     if (fn.body) walk(fn.body);
@@ -160,10 +172,10 @@ function replaceCalls(loop, mapping, sf) {
  * @param fnSf Map<node, SourceFile>          函数节点 → 所属源文件
  * @returns {hoisted: number}                外提次数（诊断用）
  */
-function hoistPureCalls(fns, fnSf) {
+function hoistPureCalls(fns, fnSf, mutableMods = new Set()) {
     const pureNames = new Set();
     for (const f of fns) {
-        if (f.name && verifyPure(f)) pureNames.add(f.name.text);
+        if (f.name && verifyPure(f, mutableMods)) pureNames.add(f.name.text);
     }
     if (!pureNames.size) return { hoisted: 0 };
 
