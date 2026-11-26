@@ -114,6 +114,21 @@ const __meta = ${JSON.stringify(meta)};
 const __lams = ${JSON.stringify(lams)};
 const __classes = ${JSON.stringify(classes)};
 const __fs = globalThis.qzjs && globalThis.qzjs.fs;
+// interp → wasm 片段调用桥：函数拆分后，interp 片段按名调用 wasm 片段。
+// __wasmExports 在实例创建后注入；mode 从 __meta 查，num 传裸数字、tagged 经 _fromJS/_toJS。
+let __wasmExports = null;
+const __wasmCall = (name, args) => {
+  const f = __wasmExports && __wasmExports[name];
+  if (typeof f !== "function") throw new Error("wasm 片段缺失: " + name);
+  const m = __meta.find(x => x.name === name);
+  const mode = m ? m.mode : "num";
+  const conv = mode === "num" ? args : args.map(a => qz._fromJS(a));
+  qz.setInWasm(true);
+  let r;
+  try { r = f(...conv); } finally { qz.setInWasm(false); }
+  qz.take_err();
+  return mode === "num" ? r : qz._toJS(r);
+};
 // interp 回退函数：transpile 出的 JS（去类型）在闭包里求值，按名取出。
 // 与 wasm 路径语义等价（同一份 TS 源码），只是跑在宿主解释器而非 AOT 机器码。
 const __interp = (function () {
@@ -122,6 +137,7 @@ return { ${interpEntries.join(", ")} };
 })();
 ${load}
     const __ex = instance.exports;
+    __wasmExports = __ex;   // 供 __wasmCall 从 interp 片段调用拆分出的 wasm 片段
     if (__ex.memory) qz.bindMem(__ex.memory);   // 全 interp 产物无内存（空 wasm 模块）
     if (__ex.__bump) qz.bindBump(__ex.__bump);
     qz.bindClosures(__ex, __lams);
