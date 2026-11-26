@@ -133,6 +133,17 @@ jobs:
           set -euo pipefail
           node bench/bytecode-aot/bytecode-split.mjs 2>&1 | tee perf-bytecode-split.txt
 
+      # TS/ES2023 直接加速矩阵：带类型标注的 TS 源码 → 字节码拆分 → wasm AOT。
+      - name: Tier H — TS/ES2023 direct acceleration matrix
+        env:
+          MEASURE: "1"
+          QZJS: ${{ github.workspace }}/build-rel/qzjs
+          WAMRC: /tmp/wamrc
+          OUT: ${{ github.workspace }}/build/aot/ts-direct
+        run: |
+          set -euo pipefail
+          node bench/bytecode-aot/ts-direct.mjs 2>&1 | tee perf-ts-direct.txt
+
       - name: Tier B — wasm-JIT (node WebAssembly / V8 TurboFan)
         env:
           QZJS: ${{ github.workspace }}/build-rel/qzjs
@@ -198,6 +209,7 @@ jobs:
           grep -q 'COMPILE_OK' perf-wasm2c-full.txt
           grep -q 'EQUIVALENCE PASS' perf-bytecode-split.txt
           grep -q 'wasm + bytecode tail' perf-bytecode-split.txt
+          grep -qE 'summary: [1-9][0-9]* PASS' perf-ts-direct.txt
           grep -q 'speedup p50' perf-polyfill.txt
           grep -q 'check 一致: true' perf-polyfill.txt || { echo 'polyfill check mismatch'; exit 1; }
           grep -q 'baseline JS .*p50_ms' perf-polyfill-all.txt
@@ -216,6 +228,7 @@ jobs:
             perf-wasm2c.txt
             perf-wasm2c-full.txt
             perf-bytecode-split.txt
+            perf-ts-direct.txt
             perf-polyfill.txt
             perf-w2c-polyfill-gen.txt
             perf-polyfill-all.txt
