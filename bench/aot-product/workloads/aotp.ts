@@ -29,7 +29,6 @@ function jsonWork(n: number): number {
 }
 
 // 3) schema validation (zod-like: required / type / range / nested)
-// @qz-pure
 function validate(v: any): number {
   if (v === null || typeof v !== "object") return -1;
   let errs = 0;
@@ -108,8 +107,7 @@ function hashBatch(n: number): number {
   }
   return h;
 }
-// 固定设备策略的重复评估（LICM 形态）
-// @qz-pure
+// 固定设备策略的重复评估
 function policyScore(cfg: any): number {
   let s = 0;
   if (cfg.retry < 0) s = s + 1;
