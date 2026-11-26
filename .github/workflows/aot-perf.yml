@@ -127,6 +127,7 @@ jobs:
         env:
           MEASURE: "1"
           QZJS: ${{ github.workspace }}/build-rel/qzjs
+          WAMRC: /tmp/wamrc
           OUT: ${{ github.workspace }}/build/aot/bytecode-split
         run: |
           set -euo pipefail
