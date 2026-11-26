@@ -21,7 +21,7 @@ static JSValue js_polyfill_batch(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
     (void)this_val;
     double n = 0;
-    if (argc > 0) JS_ToFloat64(ctx, &n, argv[0]);
+    if (argc > 0 && JS_ToFloat64(ctx, &n, argv[0]) < 0) return JS_EXCEPTION;
     if (!g_ready) return JS_ThrowInternalError(ctx, "wasm2c polyfill not initialized");
     double r = %FN%(&g_inst, n);
     return JS_NewFloat64(ctx, r);
@@ -29,10 +29,14 @@ static JSValue js_polyfill_batch(JSContext *ctx, JSValueConst this_val,
 
 static int w2c_polyfill_init(qz_ext_t *ext, qz_t *rt) {
     (void)ext;
+    /* g_inst/g_ready 与 wasm_rt_init/free 都是进程级状态；第二个 context 会共享
+     * 同一实例。这里 fail-closed，避免多 context 下静默用错实例（见 README
+     * 的「单 context 限制」）。 */
+    if (g_ready) return -1;
     JSContext *ctx = qz_get_active_jsctx(rt);
     if (!ctx) return -1;
     wasm_rt_init();
-    %INST%_instantiate(&g_inst, NULL);   /* TOKEN: 生成名 instantiate */
+    %INST%_instantiate(&g_inst, NULL);   /* 生成名 wasm2c_pure_instantiate(w2c_pure*, struct w2c_qz*) */
     g_ready = 1;
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "polyfillBatch",
