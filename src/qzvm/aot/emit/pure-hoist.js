@@ -62,7 +62,7 @@ const PURE_MATH = new Set(["sqrt", "abs", "floor", "ceil", "trunc", "round", "po
 
 /** 保守纯度验证：仅当 AST 确认函数确属纯函数时才参与外提。
  *  mutableMods 是模块级可变名集合；读它也不算纯——循环里逐轮变化的值外提后会静默错值。 */
-function verifyPure(fn, mutableMods = new Set()) {
+function verifyPure(fn, mutableMods = new Set(), allowedCalls = new Set()) {
     // 返回类型必须是显式 number：外提声明是 : number，函数返回非 number 会被当 f64 静默错值。
     if (!fn.type || fn.type.kind !== ts.SyntaxKind.NumberKeyword) return false;
     if (fn.asteriskToken || (fn.modifiers && fn.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword))) return false;
@@ -94,7 +94,8 @@ function verifyPure(fn, mutableMods = new Set()) {
             const c = n.expression;
             const pure = (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression)
                     && c.expression.text === "Math" && PURE_MATH.has(c.name.text))
-                 || (ts.isPropertyAccessExpression(c) && PURE_METHODS.has(c.name.text));
+                 || (ts.isPropertyAccessExpression(c) && PURE_METHODS.has(c.name.text))
+                 || (ts.isIdentifier(c) && allowedCalls.has(c.text));   // 已被证明纯的模块内函数
             if (!pure) { ok = false; return; }
         }
         // 模块级可变名出现在值位置 = 读共享状态；局部同名与形参同名不在此列。
@@ -173,9 +174,17 @@ function replaceCalls(loop, mapping, sf) {
  * @returns {hoisted: number}                外提次数（诊断用）
  */
 function hoistPureCalls(fns, fnSf, mutableMods = new Set()) {
+    // 不动点：先收只调白名单的纯函数，再逐轮收「只调已证明纯函数」的函数。
+    // 递归/互递归不会被收（自身不在已证明集合里），保守拒绝。
     const pureNames = new Set();
-    for (const f of fns) {
-        if (f.name && verifyPure(f, mutableMods)) pureNames.add(f.name.text);
+    for (const f of fns) if (f.name && verifyPure(f, mutableMods)) pureNames.add(f.name.text);
+    let grew = true;
+    while (grew) {
+        grew = false;
+        for (const f of fns) {
+            if (!f.name || pureNames.has(f.name.text)) continue;
+            if (verifyPure(f, mutableMods, pureNames)) { pureNames.add(f.name.text); grew = true; }
+        }
     }
     if (!pureNames.size) return { hoisted: 0 };
 
