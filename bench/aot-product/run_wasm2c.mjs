@@ -7,19 +7,15 @@
 // 用法：node bench/aot-product/run_wasm2c.mjs
 //   WABT_DIR=<dir> 覆盖 wabt 根目录；WASM2C_OUT=<dir> 覆盖产物目录。
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { spawnSync, execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { toolchain, wasmToC, linkNative } from './wasm2c/common.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const DIR = path.join(ROOT, 'bench', 'aot-product', 'wasm2c');
 const OUT = process.env.WASM2C_OUT || path.join(ROOT, 'build', 'aot', 'wasm2c');
 const SRC = path.join(ROOT, 'bench', 'aot-product', 'workloads', 'pure.ts');
-const WABT = process.env.WABT_DIR || path.join(OUT, 'wabt');
-const WASM2C = path.join(WABT, 'bin', 'wasm2c');
-const WASM_RT_INC = path.join(WABT, 'include');
-const WASM_RT_SRC = path.join(WABT, 'share', 'wabt', 'wasm2c');
 const REPS = 5;
 
 const { compileTS } = await import(ROOT + 'src/qzvm/aot/emitter.js');
@@ -39,10 +35,7 @@ const FREE = `wasm2c_${GEN}_free`;
 const IMPL = `f64 w2c_qz_math_rem(struct w2c_qz* i, f64 a, f64 b) { (void)i; return fmod(a, b); }`;
 const TAIL = `void wasm_tailcall_w2c_qz_math_rem(void **ip, void *ts, wasm_rt_tailcallee_t *n) { (void)ip; (void)ts; (void)n; }`;
 
-if (!existsSync(WASM2C)) {
-  console.error('wasm2c not found at', WASM2C, '— set WABT_DIR');
-  process.exit(1);
-}
+const tc = toolchain(OUT);
 mkdirSync(OUT, { recursive: true });
 
 // 1. 编 wasm（纯数值子集）
@@ -50,8 +43,7 @@ const r = compileTS(SRC, path.join(OUT, 'pure.wasm'), {});
 const modes = Object.fromEntries(r.funcMeta.map((f) => [f.name, f.mode]));
 
 // 2. wasm2c → C/H
-execFileSync(WASM2C, [path.join(OUT, 'pure.wasm'), '-o', path.join(OUT, M)], { stdio: 'inherit' });
-writeFileSync(path.join(OUT, M + '.c'), readFileSync(path.join(OUT, M)));  // wasm2c 输出无扩展名，补 .c 供 gcc
+const gen = wasmToC(tc, path.join(OUT, 'pure.wasm'), path.join(OUT, M));
 
 // 3. 生成 harness（从模板填充导出函数签名）
 const tpl = readFileSync(path.join(ROOT, 'bench', 'aot-product', 'wasm2c', 'bench.c.tpl'), 'utf8');
@@ -70,11 +62,7 @@ const c = tpl
 writeFileSync(path.join(OUT, 'bench.c'), c);
 
 // 4. gcc -O3 链接 wasm-rt
-execFileSync('gcc', [
-  '-O3', '-I' + WASM_RT_INC, '-I' + OUT, '-o', path.join(OUT, 'bench'),
-  path.join(OUT, 'bench.c'), path.join(OUT, M + '.c'),
-  path.join(WASM_RT_SRC, 'wasm-rt-impl.c'), path.join(WASM_RT_SRC, 'wasm-rt-mem-impl.c'), '-lm',
-], { stdio: 'inherit' });
+linkNative({ tc, outDir: OUT, sources: [path.join(OUT, 'bench.c'), gen.c], binary: path.join(OUT, 'bench') });
 
 // 5. 运行计时
 const out = execFileSync(path.join(OUT, 'bench'), { encoding: 'utf8' });
