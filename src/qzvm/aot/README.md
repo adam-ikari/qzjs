@@ -129,18 +129,7 @@ zod 实测 wasm 6053/20945（28.9%）→ 20845/20945（99.5%），整模块 inte
 | **AS 切分器**（strict 类型子集，`splitter.js`/`*.as.ts`/`qzvm.c` C 版） | 真实代码 AS 化率 0%（bigint/对象/字符串）；完整 TS→wasm 无此限制 |
 | **wasm2c 中间产物**（`ab3k.c`/`wrap_*.c` 等）                           | so 由 wasm 派生的早期实验                                        |
 
-## LICM / `@qz-pure` 契约（2026-11-25）
-
-`emit/licm.js` 在 M7 抽取前做循环不变调用外提。启用条件是**显式标注 + 机器可验的纯度**，两者缺一不可：
-
-- 只有前导注释含 `// @qz-pure` 的函数才参与外提；无标注一律不动。
-- `verifyPure` 拒绝：写形参/属性/元素/模块级变量、`++`/`--`、`new`/`await`/`yield`/`delete`/`throw`/`try`、白名单外的调用（`Math.random` 等非确定性函数）。白名单为纯字符串方法与确定性 `Math.*`。
-- 函数须有显式 `: number` 返回类型，且非 `async`/generator。
-- 实参必须是调用者函数体内 `const` 字面量声明，且该函数内从不写它的属性。
-- `@qz-pure` 的语义契约 = 确定性 + 无副作用 + 对常量实参全函数（不抛异常）。前两者机器校验，全函数性由标注者保证（类比 LLVM `nounwind`）；所以 `verifyPure` 另检查函数体无 `throw`/`try`。
-- `QZ_NO_LICM=1` 可整体关闭做 A/B。
-
-动机：M7 把普通函数调判为 tagged 硬边界。`validationWork` 循环体含 `validate(good/bad)` 时抽不出片段；两个调用外提后循环变纯 f64，M7 抽出 num 片段。CI 实测 validationWork WAMR-AOT 对 qzjs-interp 从 0.50×（负优化）变为 113×。反例必须覆盖：循环内写参数属性、标注说谎（写 `o.x`）、写模块级变量——三者都会因误外提静默错值，已有回归钉住。
+> **LICM / `@qz-pure` 已删除（2026-11-26）**：手工标注契约作废，`emit/licm.js`、`verifyPure`、`QZ_NO_LICM` 一并移除。纯度与可外提性改由 AST 自动分析判定，见 brain `ast-fragment-split`。当前负载不再做调用外提，`policyGate` 回到 tagged 路径；性能数字须带新 run id。
 
 ## wasm2c 加速路径（无 wasm 运行时设备）
 
