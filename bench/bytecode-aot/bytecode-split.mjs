@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const MEASURE = process.env.MEASURE === '1';
 const QZJS = process.env.QZJS || path.join(ROOT, 'build', 'qzjs');
+const WAMRC = process.env.WAMRC || path.join(ROOT, 'deps', 'wamr', 'wamr-compiler', 'build', 'wamrc');
 const OUT = process.env.OUT || '/tmp/bcaot';
 const DUMP = process.env.DUMP || path.join(OUT, 'work.dump');
 fs.mkdirSync(OUT, { recursive: true });
@@ -96,12 +97,22 @@ const codeSec = section(10, vec([[...uleb(body.length), ...body]]));
 const wasm = Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, ...typeSec, ...funcSec, ...expSec, ...codeSec]);
 const wasmPath = path.join(OUT, 'loop.wasm');
 fs.writeFileSync(wasmPath, wasm);
+// 关键：裸 wasm 在 qzjs 里走 WAMR Fast Interp（JIT 关闭），必须 wamrc 预编 AOT 才拿到机器码。
+let aotBytes = null;
+if (fs.existsSync(WAMRC)) {
+  const aotPath = path.join(OUT, 'loop.aot');
+  execFileSync(WAMRC, ['-o', aotPath, wasmPath], { stdio: 'inherit' });
+  aotBytes = fs.readFileSync(aotPath);
+  console.log('wamrc AOT:', aotPath, aotBytes.length, 'bytes');
+} else {
+  console.error('wamrc not found — wasm fragment will run in WAMR Fast Interp (no speedup)');
+}
 
 // ── 3. qzjs 里跑：原函数 vs wasm 循环 + qzjs 解释尾部 ──────────────────
 const driver = `
 const bytes = new Uint8Array(${JSON.stringify(Array.from(wasm))});
-const mod = new WebAssembly.Module(bytes);
-const instance = new WebAssembly.Instance(mod);
+${aotBytes ? `const aot = new Uint8Array(${JSON.stringify(Array.from(aotBytes))});` : 'const aot = null;'}
+WebAssembly.instantiate(bytes, {}, aot ? { aot: aot } : undefined).then(({ instance }) => {
 const loop = instance.exports.loop;
 function original(n) {
   let s = 0;
@@ -134,6 +145,7 @@ console.log("RESULT " + JSON.stringify({
   N: N, reps: REPS,
 }));
 ` : ''}
+});
 `;
 const driverPath = path.join(OUT, 'driver.js');
 fs.writeFileSync(driverPath, driver);
