@@ -214,7 +214,7 @@ async function main() {
 
   const buildStats = {};
   // jsonWork / validationWork 经 CI 实测 wasm 负优化 → 回退 interp（与 run.js 同口径）。
-  buildStats.aotp = build("aotp_ci", AOTP_SRC, opt, ["--interp", "jsonWork"]);
+  buildStats.aotp = build("aotp_ci", AOTP_SRC, opt, ["--interp", "jsonWork,validationWork"]);
   buildStats.mix = build("mix_ci", MIX_SRC, opt);
   buildStats.str = build("str_ci", STR_SRC, opt);
   buildStats.zodbench = build("zodbench_ci", ZOD_BENCH_SRC, opt);
