@@ -757,6 +757,15 @@ endif()
 # table). Non-invasive: set(QZ_EXTRA_SOURCES ...) before add_subdirectory(qzjs).
 if(DEFINED QZ_EXTRA_SOURCES)
     target_sources(qzjs PRIVATE ${QZ_EXTRA_SOURCES})
+    # Flags for the extra sources only (e.g. wasm2c output needs -D_GNU_SOURCE,
+    # its own include dirs, and -DWASM_RT_SKIP_SIGNAL_RECOVERY). They must not
+    # leak into qzjs's own TUs: -D_GNU_SOURCE changes feature-test macros for
+    # every source, and the wasm2c include dirs are not meant for src/.
+    if(DEFINED QZ_EXTRA_CFLAGS)
+        separate_arguments(_qz_extra_cflags NATIVE_COMMAND "${QZ_EXTRA_CFLAGS}")
+        set_source_files_properties(${QZ_EXTRA_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "${_qz_extra_cflags}")
+    endif()
 endif()
 if(DEFINED QZ_EXTRA_HEADERS)
     # 自定义扩展声明（extern qz_ext_t ...）强制预包含，context.c 展开
