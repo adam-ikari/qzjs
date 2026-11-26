@@ -1407,6 +1407,15 @@ function stateRead(n: number): number {
   for (let i = 0; i < n; i++) { gstate = i; t = t + readState(o); }
   return t;
 }
+// 传递纯：pureChain 调 pureInc（模块内函数），后者已证明纯 → 两者都可外提
+function pureInc(v: any): number { return Math.floor(v.x) + 1; }
+function pureChain(v: any): number { return pureInc(v) * 2; }
+function chainWork(n: number): number {
+  const good = { x: 3 };
+  let t = 0;
+  for (let i = 0; i < n; i++) t = t + pureChain(good);
+  return t;
+}
 `);
     const wasm = path.join(os.tmpdir(), "qz_aot_licm.wasm");
     const r = compileTS(src, wasm, {});
@@ -1435,6 +1444,9 @@ function stateRead(n: number): number {
     // 反例：只读模块可变 gstate 的函数不得外提；n=3 应得 1+2+3=6（外提会错成 3）
     if (instance.exports.__bump_reset) instance.exports.__bump_reset();
     check("LICM: 读模块可变状态被拒", qz._toJS(instance.exports.stateRead(qz._fromJS(3))), 6);
+    // 传递纯调用链：pureInc 已证明纯 → pureChain 也可外提；n=3 应得 8*3=24
+    if (instance.exports.__bump_reset) instance.exports.__bump_reset();
+    check("LICM: 传递纯调用链", qz._toJS(instance.exports.chainWork(qz._fromJS(3))), 24);
 }
 
 // typeof/literal 与两字面量比较内联（省 qz.seq/qz.sne 跨界）的语义边界
