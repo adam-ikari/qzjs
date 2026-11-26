@@ -54,7 +54,9 @@ for (const raw of lines.slice(start, end + 1)) {
   if (!l || l.startsWith(';;')) continue;
   const m = l.match(/^(?:\d+:\s*)?([a-z_][a-z0-9_]*)\s*(.*)$/);
   if (!m) continue;
-  ops.push([m[1], m[2].replace(/;.*$/, '').trim()]);
+  const rest = m[2];
+  const vn = rest.match(/;\s*([A-Za-z_$][\w$]*)\s*$/);
+  ops.push([m[1], rest.replace(/;.*$/, '').trim(), vn ? vn[1] : null]);
 }
 console.log('bytecode loop opcodes:', ops.length, ops.map((o) => o[0]).join(' '));
 
