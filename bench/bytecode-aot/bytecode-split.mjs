@@ -16,18 +16,21 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const MEASURE = process.env.MEASURE === '1';
+const QZJS = process.env.QZJS || path.join(ROOT, 'build', 'qzjs');
 const OUT = process.env.OUT || '/tmp/bcaot';
 const DUMP = process.env.DUMP || path.join(OUT, 'work.dump');
 fs.mkdirSync(OUT, { recursive: true });
 
-// dumpbc 依赖 debug 构建的 quickjs-ng（ENABLE_DUMPS）。没有就现编一个。
+// dumpbc 需要 ENABLE_DUMPS：直接编 quickjs-ng 源码（不定义 NDEBUG），不依赖 build-dbg。
 const dumpTool = path.join(OUT, 'dumpbc');
 if (!fs.existsSync(dumpTool)) {
+  const qjs = path.join(ROOT, 'deps', 'quickjs-ng');
   execFileSync('gcc', [
-    '-I' + path.join(ROOT, 'deps', 'quickjs-ng'), '-o', dumpTool,
+    '-O1', '-D_GNU_SOURCE', '-DQJS_BUILD_LIBC', '-I' + qjs, '-o', dumpTool,
     path.join(ROOT, 'bench', 'bytecode-aot', 'dumpbc.c'),
-    path.join(ROOT, 'build-dbg', 'deps', 'quickjs-ng', 'libqjs-libc.a'),
-    path.join(ROOT, 'build-dbg', 'deps', 'quickjs-ng', 'libqjs.a'),
+    path.join(qjs, 'dtoa.c'), path.join(qjs, 'libregexp.c'), path.join(qjs, 'libunicode.c'),
+    path.join(qjs, 'quickjs.c'), path.join(qjs, 'quickjs-libc.c'),
     '-lm', '-ldl', '-lpthread',
   ], { stdio: 'inherit' });
 }
@@ -117,10 +120,33 @@ for (const n of [0,1,2,10,100,1000,20000]) {
   if (a !== c) { ok = false; console.log("MISMATCH", n, a, c); }
 }
 console.log("EQUIVALENCE", ok ? "PASS" : "FAIL");
+${MEASURE ? `
+const N = 1000000, REPS = 7;
+function p50(fn) {
+  const xs = [];
+  for (let r = 0; r < REPS; r++) { const t = Date.now(); fn(N); xs.push(Date.now() - t); }
+  xs.sort((a, b) => a - b);
+  return xs[Math.floor(xs.length / 2)];
+}
+console.log("RESULT " + JSON.stringify({
+  interp_qzjs_bytecode: p50(original),
+  wasm_plus_bytecode: p50(split),
+  N: N, reps: REPS,
+}));
+` : ''}
 `;
 const driverPath = path.join(OUT, 'driver.js');
 fs.writeFileSync(driverPath, driver);
-const out = execFileSync(path.join(ROOT, 'build', 'qzjs'), [driverPath], { encoding: 'utf8', maxBuffer: 1 << 20 });
+const out = execFileSync(QZJS, [driverPath], { encoding: 'utf8', maxBuffer: 1 << 20 });
 console.log(out.trim());
 console.log('wasm:', wasmPath, wasm.length, 'bytes');
+if (MEASURE) {
+  const m = out.match(/RESULT (\{.*\})/);
+  if (!m) { console.error('no RESULT in qzjs output'); process.exit(2); }
+  const r = JSON.parse(m[1]);
+  console.log('\n=== bytecode split p50 (qzjs, N=' + r.N + ', reps=' + r.reps + ') ===');
+  console.log('interp (qzjs bytecode):', r.interp_qzjs_bytecode, 'ms');
+  console.log('wasm + bytecode tail :', r.wasm_plus_bytecode, 'ms');
+  console.log('speedup              :', +(r.interp_qzjs_bytecode / r.wasm_plus_bytecode).toFixed(2) + 'x');
+}
 process.exit(out.includes('EQUIVALENCE PASS') ? 0 : 1);
