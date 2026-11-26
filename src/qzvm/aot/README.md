@@ -129,7 +129,7 @@ zod 实测 wasm 6053/20945（28.9%）→ 20845/20945（99.5%），整模块 inte
 | **AS 切分器**（strict 类型子集，`splitter.js`/`*.as.ts`/`qzvm.c` C 版） | 真实代码 AS 化率 0%（bigint/对象/字符串）；完整 TS→wasm 无此限制 |
 | **wasm2c 中间产物**（`ab3k.c`/`wrap_*.c` 等）                           | so 由 wasm 派生的早期实验                                        |
 
-> **LICM / `@qz-pure` 已删除（2026-11-26）**：手工标注契约作废，`emit/licm.js`、`verifyPure`、`QZ_NO_LICM` 一并移除。纯度与可外提性改由 AST 自动分析判定，见 brain `ast-fragment-split`。当前负载不再做调用外提，`policyGate` 回到 tagged 路径；性能数字须带新 run id。
+> **AST 自动纯度与片段拆分（2026-11-26）**：`@qz-pure` 手工标注、`verifyPure` 标注契约与 `QZ_NO_LICM` 已删除。`emit/pure-hoist.js` 改为对 AST 自动判定纯函数（无副作用、不写形参/属性/模块状态、无 `throw`/`try`/`await`/`yield`/`new`/`delete`、只调白名单纯函数），把循环不变调用外提，使 M7 能抽出 num 片段；含挂起与副作用的片段继续走 interp 回落。判据与新方向见 brain `ast-fragment-split`。
 
 ## wasm2c 加速路径（无 wasm 运行时设备）
 
