@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { mapOpcodes, uleb, f64c, section, vec } from './opcode-map.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const MEASURE = process.env.MEASURE === '1';
@@ -57,35 +58,8 @@ for (const raw of lines.slice(start, end + 1)) {
 }
 console.log('bytecode loop opcodes:', ops.length, ops.map((o) => o[0]).join(' '));
 
-// ── 2. opcode → wasm f64 指令（局部机械映射） ──────────────────────────
-const uleb = (n) => { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; };
-const f64c = (x) => { const b = Buffer.alloc(8); b.writeDoubleLE(x); return [0x44, ...b]; };
-const section = (id, payload) => [id, ...uleb(payload.length), ...payload];
-const vec = (items) => [...uleb(items.length), ...items.flat()];
-// qzjs locals: 0=s,1=i,2=a → wasm locals 1,2,3（0 是参数 n）
-const LOC = { '0': 1, '1': 2, '2': 3 };
-const nu = (s) => parseInt(String(s).replace(/[^0-9-]/g, ''), 10);
-const code = [];
-let mapped = 0, ignored = 0;
-for (const [op, arg] of ops) {
-  if (op === 'get_loc_check' || op === 'get_loc') { code.push(0x20, LOC[nu(arg)]); mapped++; }
-  else if (op === 'get_arg0') { code.push(0x20, 0); mapped++; }
-  else if (op === 'push_0' || op === 'push_1' || op === 'push_2' || op === 'push_3') { code.push(...f64c(nu(op.slice(-1)))); mapped++; }
-  else if (op.startsWith('push_i')) { code.push(...f64c(nu(arg))); mapped++; }
-  else if (op === 'add') { code.push(0xa0); mapped++; }
-  else if (op === 'sub') { code.push(0xa1); mapped++; }
-  else if (op === 'mul') { code.push(0xa2); mapped++; }
-  else if (op === 'mod') {   // wasm MVP 无 f64.rem：a%b = a - trunc(a/b)*b（4→5 槽临时）
-    code.push(0x21, 0x04, 0x21, 0x05, 0x20, 0x05,
-              0x20, 0x05, 0x20, 0x04, 0xa3, 0x9d, 0x20, 0x04, 0xa2, 0xa1); mapped++;
-  }
-  else if (op === 'lt') { code.push(0x63); mapped++; }
-  else if (op === 'if_false8') { code.push(0x45, 0x0d, 0x01); mapped++; }  // if_false: 取反后 br_if 出循环
-  else if (op === 'goto8') { code.push(0x0c, 0x00); mapped++; }
-  else if (op.startsWith('put_loc')) { code.push(0x21, LOC[nu(arg)]); mapped++; }
-  else if (op === 'dup' || op === 'drop' || op === 'set_loc_uninitialized') { ignored++; }
-  else { console.error('UNMAPPED opcode:', op, arg); process.exit(2); }
-}
+// ── 2. opcode → wasm f64 指令（局部机械映射，见 opcode-map.mjs） ─────────
+const { code, mapped, ignored } = mapOpcodes(ops);
 console.log('opcode mapping:', mapped, 'mapped,', ignored, 'ignored');
 
 const body = [0x01, 0x05, 0x7c, 0x02, 0x40, 0x03, 0x40, ...code, 0x0b, 0x0b, 0x20, 0x01, 0x0b];
