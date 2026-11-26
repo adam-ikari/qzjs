@@ -13,36 +13,27 @@
 // 用法：WABT_DIR=/tmp/wabt142 MERGED=/tmp/aotp_merged.wasm node bench/aot-product/run_wasm2c_full.mjs
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { toolchain, wasmToC, linkNative } from './wasm2c/common.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const WABT = process.env.WABT_DIR || '/tmp/wabt142';
-const WASM2C = path.join(WABT, 'bin', 'wasm2c');
 const MERGED = process.env.MERGED || '/tmp/aotp_merged.wasm';
 const OUT = process.env.WASM2C_FULL_OUT || path.join(ROOT, 'build', 'aot', 'wasm2c-full');
 const MOD = 'merged';
 
-if (!existsSync(WASM2C)) { console.error('wasm2c not found:', WASM2C, '— set WABT_DIR'); process.exit(1); }
 if (!existsSync(MERGED)) {
   console.error('merged wasm not found:', MERGED, '— Tier A (run_wamr.js) must run first');
   process.exit(1);
 }
+const tc = toolchain(OUT);
 mkdirSync(OUT, { recursive: true });
-
-// wabt 1.0.42 硬约束（1.0.27 在带 import 的模块上崩溃）
-const v = spawnSync(WASM2C, ['--version'], { encoding: 'utf8' });
-if (v.status !== 0 || !(v.stdout || '').includes('1.0.42')) {
-  console.error(`wasm2c 1.0.42 required, got "${(v.stdout || v.stderr || '').trim()}"`);
-  process.exit(1);
-}
 
 // 1. wasm2c：合并模块 → C
 const t0 = Date.now();
-execFileSync(WASM2C, [MERGED, '-o', path.join(OUT, MOD)], { stdio: 'inherit', maxBuffer: 1 << 28 });
-writeFileSync(path.join(OUT, MOD + '.c'), readFileSync(path.join(OUT, MOD)));
-const hdr = readFileSync(path.join(OUT, MOD + '.h'), 'utf8');
+const gen = wasmToC(tc, MERGED, path.join(OUT, MOD));
+const hdr = readFileSync(gen.h, 'utf8');
 
 // 2. 从生成的头文件抽 import 声明，生成桩定义（GCC 允许定义里省略参数名）
 //    只桩 import 与 tailcall；export / get_func_type 由生成 C 自己定义。
@@ -88,18 +79,8 @@ writeFileSync(path.join(OUT, 'main.c'), [
 ].join('\n') + '\n');
 
 // 4. gcc -O3 编译 + 链接（flags 只给本实验的 C，不进 qzjs 自身 TU）
-const rtSrc = path.join(WABT, 'share', 'wabt', 'wasm2c');
-const cc = spawnSync('gcc', [
-  '-O3', '-std=c99', '-D_GNU_SOURCE', '-DWASM_RT_SKIP_SIGNAL_RECOVERY=1',
-  '-I' + path.join(WABT, 'include'), '-I' + OUT,
-  '-o', path.join(OUT, 'check'),
-  path.join(OUT, MOD + '.c'), path.join(OUT, 'stubs.c'), path.join(OUT, 'main.c'),
-  path.join(rtSrc, 'wasm-rt-impl.c'), path.join(rtSrc, 'wasm-rt-mem-impl.c'), '-lm',
-], { encoding: 'utf8', maxBuffer: 1 << 28 });
-if (cc.status !== 0) {
-  console.error('gcc FAILED:\n' + (cc.stderr || '').slice(0, 6000));
-  process.exit(1);
-}
+linkNative({ tc, outDir: OUT, sources: [gen.c, path.join(OUT, 'stubs.c'), path.join(OUT, 'main.c')],
+  binary: path.join(OUT, 'check') });
 const compileMs = Date.now() - t0;
 
 // 5. 实例化运行（桩 WASI 返回 0；能跑通即证明初始化路径可用）
