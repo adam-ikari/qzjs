@@ -112,6 +112,16 @@ jobs:
           LIBQZVM: ${{ github.workspace }}/build-inmod/src/qzvm/libqzvm.wasm
         run: node bench/aot-product/run_wamr.js 2>&1 | tee perf-wamr.txt
 
+      # 复用可行性：M6b 合并单模块（emitter 产品 + libqzvm.wasm）经 wasm2c → C，
+      # 验证 qzvm 已有的 qz.* C 宿主能否整体复用，而不是重写一份宿主。
+      - name: Tier F — wasm2c of merged qzvm module (reuse feasibility, no perf)
+        env:
+          WABT_DIR: /tmp/wabt142
+          MERGED: /tmp/aotp_merged.wasm
+        run: |
+          set -euo pipefail
+          node bench/aot-product/run_wasm2c_full.mjs 2>&1 | tee perf-wasm2c-full.txt
+
       - name: Tier B — wasm-JIT (node WebAssembly / V8 TurboFan)
         env:
           QZJS: ${{ github.workspace }}/build-rel/qzjs
@@ -174,6 +184,7 @@ jobs:
           fi
           grep -q 'computeWork' perf-jit.txt
           grep -q 'p50_ms=' perf-wasm2c.txt
+          grep -q 'COMPILE_OK' perf-wasm2c-full.txt
           grep -q 'speedup p50' perf-polyfill.txt
           grep -q 'check 一致: true' perf-polyfill.txt || { echo 'polyfill check mismatch'; exit 1; }
           grep -q 'baseline JS .*p50_ms' perf-polyfill-all.txt
@@ -190,6 +201,7 @@ jobs:
             perf-wamr.txt
             perf-jit.txt
             perf-wasm2c.txt
+            perf-wasm2c-full.txt
             perf-polyfill.txt
             perf-w2c-polyfill-gen.txt
             perf-polyfill-all.txt
