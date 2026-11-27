@@ -12,8 +12,20 @@ const nu = (s) => parseInt(String(s).replace(/[^0-9-]/g, ''), 10);
 
 export function mapOpcodes(ops) {
   const code = [];
-  let mapped = 0, ignored = 0, branches = 0;
-  for (const [op, arg, name] of ops) {
+  let mapped = 0, ignored = 0;
+  const labels = new Map();
+  ops.forEach((entry, index) => {
+    if (Number.isInteger(entry[3])) labels.set(entry[3], index);
+  });
+  const lastPc = labels.size ? Math.max(...labels.keys()) : -1;
+  const openBranches = [];
+
+  for (let index = 0; index < ops.length; index++) {
+    while (openBranches.length && openBranches[openBranches.length - 1] === index) {
+      code.push(0x0b);
+      openBranches.pop();
+    }
+    const [op, arg, name, pc] = ops[index];
     if (op === 'get_loc_check' || op === 'get_loc') {
       const slot = LOC[name]; if (slot === undefined) throw new Error(`UNMAPPED local: ${name}`);
       code.push(0x20, slot); mapped++;
@@ -29,8 +41,35 @@ export function mapOpcodes(ops) {
                 0x20, 0x05, 0x20, 0x04, 0xa3, 0x9d, 0x20, 0x04, 0xa2, 0xa1); mapped++;
     }
     else if (op === 'lt') { code.push(0x63); mapped++; }
-    else if (op === 'if_false8') { branches++; if (branches > 1) throw new Error('UNMAPPED nested branch (ES2023 operator in loop)'); code.push(0x45, 0x0d, 0x01); mapped++; }
-    else if (op === 'goto8') { code.push(0x0c, 0x00); mapped++; }
+    else if (op === 'is_undefined_or_null') {
+      // This fragment only carries f64 values, so nullish values cannot enter it.
+      code.push(0x1a, 0x41, 0x00); mapped++;
+    }
+    else if (op === 'if_false8') {
+      const targetPc = nu(arg);
+      const targetIndex = labels.get(targetPc);
+      if ((Number.isInteger(pc) && targetPc <= pc)
+          || (targetIndex !== undefined && targetIndex <= index)) {
+        throw new Error(`UNMAPPED backward branch: ${op} ${arg}`);
+      }
+      if (labels.size && targetPc <= lastPc && targetIndex === undefined) {
+        throw new Error(`UNMAPPED branch target: ${op} ${arg}`);
+      }
+      if (targetIndex !== undefined) {
+        // QuickJS falls through when true; wasm `if` has the same shape.
+        code.push(0x04, 0x40);
+        openBranches.push(targetIndex);
+      } else {
+        // Leave the surrounding loop block when false.
+        code.push(0x45, 0x0d, openBranches.length + 1);
+      }
+      mapped++;
+    }
+    else if (op === 'goto8') {
+      const targetIndex = labels.get(nu(arg));
+      if (targetIndex !== 0) throw new Error(`UNMAPPED goto target: ${op} ${arg}`);
+      code.push(0x0c, 0x00); mapped++;
+    }
     else if (op.startsWith('put_loc')) {
       const slot = LOC[name]; if (slot === undefined) throw new Error(`UNMAPPED local: ${name}`);
       code.push(0x21, slot); mapped++;
@@ -38,5 +77,6 @@ export function mapOpcodes(ops) {
     else if (op === 'dup' || op === 'drop' || op === 'set_loc_uninitialized') { ignored++; }
     else throw new Error(`UNMAPPED opcode: ${op} ${arg}`);
   }
+  if (openBranches.length) throw new Error('UNMAPPED branch target outside opcode slice');
   return { code, mapped, ignored };
 }

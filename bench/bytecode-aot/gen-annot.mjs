@@ -36,11 +36,13 @@ const annotOf = (file) => {
   };
   collect(fn.body);
   const loop = fn.body.statements.find((n) => ts.isForStatement(n));
-  // ES2023 运算符进入循环体时，verifyPure 的调用白名单会拒绝（?. / ??= 不是白名单调用）。
+  // Optional chaining introduces object/nullish short-circuit state that the
+  // numeric fragment cannot represent. `??=` compiles to numeric-check + branch
+  // opcodes and is accepted here; unsupported right-hand sides still fail closed
+  // in mapOpcodes.
   let suspendInLoop = false;
   if (loop) {
     const walk = (n) => {
-      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.QuestionQuestionEqualsToken) suspendInLoop = true;
       if (ts.isPropertyAccessExpression(n) && n.questionDotToken) suspendInLoop = true;
       ts.forEachChild(n, walk);
     };

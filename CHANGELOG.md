@@ -3,7 +3,12 @@
 All notable changes to qzjs.
 
 ## [Unreleased]
--
+
+### AOT: bytecode split supports numeric `??=` loops (2026-11-27)
+- Map `is_undefined_or_null` and structured forward branches inside pure numeric bytecode fragments. Values in these fragments are f64, so the nullish check is always false; the assignment body is skipped without changing the numeric local.
+- Preserve bytecode PCs in both split harnesses so internal branch targets resolve to real labels. Unknown opcodes, non-loop `goto` targets, backward branches, and missing targets still fail closed.
+- `nullish-in-loop` now passes; the TS/ES2023 matrix is 6 PASS / 0 NOT-APPLICABLE. The harness exits non-zero on any failed or skipped case, and CI runs the opcode mapper unit test.
+
 ### AOT: `in` operator and non-callable instanceof RHS match V8 (2026-11-13)
 - **`in` operator**
   - **Class value**: `"k" in C` returned `false` for static fields (stored in wasm memory, invisible to the JS class object). `in_op` now walks the classMeta static chain (fields/methods/getters/setters); `staticFields` is added to the runtime class metadata.
