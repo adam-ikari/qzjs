@@ -10,13 +10,11 @@
  } JSFunctionBytecode;
  
  typedef struct JSBoundFunction {
-@@ -2457,9 +2460,54 @@
+@@ -2456,6 +2459,56 @@
+ #endif
  }
  
- /* qzjs AOT annotation side table: attach/retrieve raw bytes on a function bytecode object. */
--
--
--
++/* qzjs AOT annotation side table: attach/retrieve raw bytes on a function bytecode object. */
 +static JSFunctionBytecode *qz_get_function_bytecode(JSValueConst v)
 +{
 +    if (JS_VALUE_GET_TAG(v) == JS_TAG_FUNCTION_BYTECODE)
@@ -65,10 +63,34 @@
 +        *plen = (size_t)b->qz_annot_len;
 +    return (const uint8_t *)b->qz_annot;
 +}
- 
++
  uint64_t JS_GetDumpFlags(JSRuntime *rt)
  {
-@@ -37506,6 +37554,8 @@
+ #ifdef ENABLE_DUMPS
+@@ -9182,8 +9235,10 @@
+ {
+     JSValue method;
+ 
+-    if (!JS_IsObject(obj))
+-        goto fail;
++    if (!JS_IsObject(obj)) {
++        JS_ThrowTypeError(ctx, "Right-hand side of 'instanceof' is not an object");
++        return -1;
++    }
+     method = JS_GetProperty(ctx, obj, JS_ATOM_Symbol_hasInstance);
+     if (JS_IsException(method))
+         return -1;
+@@ -9195,8 +9250,7 @@
+ 
+     /* legacy case */
+     if (!JS_IsFunction(ctx, obj)) {
+-    fail:
+-        JS_ThrowTypeError(ctx, "invalid 'instanceof' right operand");
++        JS_ThrowTypeError(ctx, "Right-hand side of 'instanceof' is not callable");
+         return -1;
+     }
+     return JS_OrdinaryIsInstanceOf(ctx, val, obj);
+@@ -37500,6 +37554,8 @@
  
      if (b->byte_code_buf)
          free_bytecode_atoms(rt, b->byte_code_buf, b->byte_code_len, true);
@@ -77,7 +99,7 @@
  
      if (b->vardefs) {
          for(i = 0; i < b->arg_count + b->var_count; i++) {
-@@ -39140,7 +39190,8 @@
+@@ -39134,7 +39190,8 @@
      bc_set_flags(&flags, &idx, b->arguments_allowed, 1);
      bc_set_flags(&flags, &idx, b->backtrace_barrier, 1);
      bc_set_flags(&flags, &idx, s->allow_debug, 1);
@@ -87,7 +109,7 @@
      bc_put_u16(s, flags);
      bc_put_u8(s, b->is_strict_mode);
      bc_put_atom(s, b->func_name);
-@@ -39210,6 +39261,10 @@
+@@ -39204,6 +39261,10 @@
          } else {
              bc_put_leb128(s, 0);
          }
@@ -98,7 +120,7 @@
      }
      return 0;
   fail:
-@@ -40091,7 +40146,7 @@
+@@ -40085,7 +40146,7 @@
      JSValue obj = JS_UNDEFINED;
      uint16_t v16;
      uint8_t v8;
@@ -107,7 +129,7 @@
      int function_size, cpool_offset, byte_code_offset;
      int closure_var_offset, vardefs_offset;
  
-@@ -40112,6 +40167,7 @@
+@@ -40106,6 +40167,7 @@
      bc.arguments_allowed = bc_get_flags(v16, &idx, 1);
      bc.backtrace_barrier = bc_get_flags(v16, &idx, 1);
      has_debug_info = bc_get_flags(v16, &idx, 1);
@@ -115,7 +137,7 @@
      if (bc_get_u8(s, &v8))
          goto fail;
      bc.is_strict_mode = (v8 > 0);
-@@ -40372,6 +40428,21 @@
+@@ -40366,6 +40428,21 @@
      bc_read_trace(s, "}\n");
  
   nodebug:
