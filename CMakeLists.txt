@@ -385,6 +385,7 @@ set(QZVM_PATCHES
     "engine-bc-reader-harden.patch"   # #1: bc-reader 加固 + GC-window SEGV 防护
     "engine-dap-debugger.patch"       # #2: DAP debugger + JS_DrainPendingJobsForContext
     "engine-seed.patch"               # #3: JS_SetRandomSeed（确定性 Math.random/Map 序）——须在 #1/#2 之后（上下文依赖）
+    "engine-qz-annotations.patch"     # #4: 字节码携带 TS 标注 side table（AOT 纯路径拆分用）
 )
 foreach(_qz_patch IN LISTS QZVM_PATCHES)
     set(_qz_patch_file "${CMAKE_CURRENT_SOURCE_DIR}/src/qzvm/patches/${_qz_patch}")
