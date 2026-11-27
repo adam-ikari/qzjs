@@ -1,0 +1,153 @@
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -900,6 +900,9 @@
+     int pc2line_len;
+     uint8_t *pc2line_buf;
+     char *source;
++    /* qzjs AOT: TS annotation side table carried inside the bytecode object. */
++    char *qz_annot;
++    int qz_annot_len;
+ } JSFunctionBytecode;
+ 
+ typedef struct JSBoundFunction {
+@@ -2457,9 +2460,54 @@
+ }
+ 
+ /* qzjs AOT annotation side table: attach/retrieve raw bytes on a function bytecode object. */
+-
+-
+-
++static JSFunctionBytecode *qz_get_function_bytecode(JSValueConst v)
++{
++    if (JS_VALUE_GET_TAG(v) == JS_TAG_FUNCTION_BYTECODE)
++        return JS_VALUE_GET_PTR(v);
++    if (JS_VALUE_GET_TAG(v) == JS_TAG_OBJECT) {
++        JSObject *p = JS_VALUE_GET_OBJ(v);
++        if (p->class_id == JS_CLASS_BYTECODE_FUNCTION)
++            return p->u.func.function_bytecode;
++    }
++    return NULL;
++}
++
++JSValue JS_GetFunctionBytecodeValue(JSContext *ctx, JSValueConst func)
++{
++    JSFunctionBytecode *b = qz_get_function_bytecode(func);
++    if (!b)
++        return JS_EXCEPTION;
++    return JS_MKPTR(JS_TAG_FUNCTION_BYTECODE, b);
++}
++
++int JS_SetFunctionAnnotation(JSContext *ctx, JSValueConst func, const uint8_t *data, size_t len)
++{
++    JSFunctionBytecode *b = qz_get_function_bytecode(func);
++    if (!b)
++        return -1;
++    if (b->qz_annot)
++        js_free(ctx, b->qz_annot);
++    b->qz_annot = NULL;
++    b->qz_annot_len = 0;
++    if (len > 0) {
++        b->qz_annot = js_malloc(ctx, len);
++        if (!b->qz_annot)
++            return -1;
++        memcpy(b->qz_annot, data, len);
++        b->qz_annot_len = (int)len;
++    }
++    return 0;
++}
++
++const uint8_t *JS_GetFunctionAnnotation(JSContext *ctx, JSValueConst func, size_t *plen)
++{
++    JSFunctionBytecode *b = qz_get_function_bytecode(func);
++    if (!b)
++        return NULL;
++    if (plen)
++        *plen = (size_t)b->qz_annot_len;
++    return (const uint8_t *)b->qz_annot;
++}
+ 
+ uint64_t JS_GetDumpFlags(JSRuntime *rt)
+ {
+@@ -37506,6 +37554,8 @@
+ 
+     if (b->byte_code_buf)
+         free_bytecode_atoms(rt, b->byte_code_buf, b->byte_code_len, true);
++    if (b->qz_annot)
++        js_free_rt(rt, b->qz_annot);
+ 
+     if (b->vardefs) {
+         for(i = 0; i < b->arg_count + b->var_count; i++) {
+@@ -39140,7 +39190,8 @@
+     bc_set_flags(&flags, &idx, b->arguments_allowed, 1);
+     bc_set_flags(&flags, &idx, b->backtrace_barrier, 1);
+     bc_set_flags(&flags, &idx, s->allow_debug, 1);
+-    assert(idx <= 16);
++    bc_set_flags(&flags, &idx, b->qz_annot_len > 0, 1);
++    assert(idx <= 17);
+     bc_put_u16(s, flags);
+     bc_put_u8(s, b->is_strict_mode);
+     bc_put_atom(s, b->func_name);
+@@ -39210,6 +39261,10 @@
+         } else {
+             bc_put_leb128(s, 0);
+         }
++    }
++    if (b->qz_annot_len > 0) {
++        bc_put_leb128(s, b->qz_annot_len);
++        dbuf_put(&s->dbuf, (const uint8_t *)b->qz_annot, b->qz_annot_len);
+     }
+     return 0;
+  fail:
+@@ -40091,7 +40146,7 @@
+     JSValue obj = JS_UNDEFINED;
+     uint16_t v16;
+     uint8_t v8;
+-    int idx, i, local_count, has_debug_info;
++    int idx, i, local_count, has_debug_info, has_qz_annot = 0;
+     int function_size, cpool_offset, byte_code_offset;
+     int closure_var_offset, vardefs_offset;
+ 
+@@ -40112,6 +40167,7 @@
+     bc.arguments_allowed = bc_get_flags(v16, &idx, 1);
+     bc.backtrace_barrier = bc_get_flags(v16, &idx, 1);
+     has_debug_info = bc_get_flags(v16, &idx, 1);
++    has_qz_annot = bc_get_flags(v16, &idx, 1);
+     if (bc_get_u8(s, &v8))
+         goto fail;
+     bc.is_strict_mode = (v8 > 0);
+@@ -40372,6 +40428,21 @@
+     bc_read_trace(s, "}\n");
+ 
+  nodebug:
++    if (has_qz_annot) {
++        int annot_len;
++        if (bc_get_leb128_int(s, &annot_len))
++            goto fail;
++        if (annot_len < 0 || annot_len > s->buf_end - s->ptr) {
++            JS_ThrowSyntaxError(ctx, "invalid qz annotation length");
++            goto fail;
++        }
++        b->qz_annot_len = annot_len;
++        b->qz_annot = js_mallocz(ctx, annot_len ? annot_len : 1);
++        if (!b->qz_annot)
++            goto fail;
++        if (bc_get_buf(s, (uint8_t *)b->qz_annot, annot_len))
++            goto fail;
++    }
+     b->realm = JS_DupContext(ctx);
+     return obj;
+ 
+--- a/quickjs.h
++++ b/quickjs.h
+@@ -514,6 +514,11 @@
+ /* use 0 to disable memory limit */
+ JS_EXTERN void JS_SetMemoryLimit(JSRuntime *rt, size_t limit);
+ JS_EXTERN void JS_SetDumpFlags(JSRuntime *rt, uint64_t flags);
++JS_EXTERN JSValue JS_GetFunctionBytecodeValue(JSContext *ctx, JSValueConst func);
++JS_EXTERN int JS_SetFunctionAnnotation(JSContext *ctx, JSValueConst func,
++                                       const uint8_t *data, size_t len);
++JS_EXTERN const uint8_t *JS_GetFunctionAnnotation(JSContext *ctx, JSValueConst func,
++                                                  size_t *plen);
+ JS_EXTERN uint64_t JS_GetDumpFlags(JSRuntime *rt);
+ JS_EXTERN size_t JS_GetGCThreshold(JSRuntime *rt);
+ JS_EXTERN void JS_SetGCThreshold(JSRuntime *rt, size_t gc_threshold);
