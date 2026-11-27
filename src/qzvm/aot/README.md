@@ -131,6 +131,14 @@ zod 实测 wasm 6053/20945（28.9%）→ 20845/20945（99.5%），整模块 inte
 
 > **AST 自动纯度与片段拆分（2026-11-26）**：`@qz-pure` 手工标注、`verifyPure` 标注契约与 `QZ_NO_LICM` 已删除。`emit/pure-hoist.js` 改为对 AST 自动判定纯函数（无副作用、不写形参/属性/模块状态、无 `throw`/`try`/`await`/`yield`/`new`/`delete`、只调白名单纯函数），把循环不变调用外提，使 M7 能抽出 num 片段；含挂起与副作用的片段继续走 interp 回落。判据与新方向见 brain `ast-fragment-split`。
 
+## 字节码 TS 标注 side table（2026-11-27）
+
+`src/qzvm/patches/engine-qz-annotations.patch` 给 quickjs-ng 的 `JSFunctionBytecode` 增加 `qz_annot`（原始字节），随字节码序列化往返；flag 位在原有 16 位后加一位，reader 校验长度，越界报错。公开 C API：`JS_SetFunctionAnnotation` / `JS_GetFunctionAnnotation` / `JS_GetFunctionBytecodeValue`（同时支持 `JS_TAG_FUNCTION_BYTECODE` 与字节码函数对象）。
+
+用途：让字节码自身携带 TS 类型/纯度标注，AOT 拆分据此定位纯数值区间，不再依赖源码侧启发式。构建期工具 `bench/bytecode-aot/annotate.c` 注入标注并做往返校验（本机实测：103 字节标注随 523 字节字节码完整往返）。
+
+**未接入**：qjsc 尚未从 TS 标注自动生成 side table；当前靠注入工具 + TS AST 侧收集。这是下一阶段工作。
+
 ## wasm2c 加速路径（无 wasm 运行时设备）
 
 测量脚本 `bench/aot-product/run_wasm2c.mjs`、`run_wasm2c_polyfill.mjs`；产物生成于 `build/aot/wasm2c*`。协议见 brain `aot-roadmap` 五档矩阵，与 qzjs-interp / node-JS / wasm-JIT / wasm-AOT 同负载同 N。
