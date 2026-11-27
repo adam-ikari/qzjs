@@ -17,6 +17,21 @@ static uint8_t *slurp(const char *path, size_t *plen) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "--print") == 0) {
+        size_t clen;
+        uint8_t *code = slurp(argv[2], &clen);
+        if (!code) return 3;
+        JSRuntime *rt = JS_NewRuntime();
+        JSContext *ctx = JS_NewContext(rt);
+        JSValue v = JS_ReadObject(ctx, code, clen, JS_READ_OBJ_BYTECODE);
+        if (JS_IsException(v)) { js_std_dump_error(ctx); return 4; }
+        size_t len = 0;
+        const uint8_t *a = JS_GetFunctionAnnotation(ctx, v, &len);
+        if (a && len) fwrite(a, 1, len, stdout);
+        JS_FreeValue(ctx, v);
+        JS_FreeContext(ctx); JS_FreeRuntime(rt); free(code);
+        return a && len ? 0 : 5;
+    }
     if (argc != 5) return 2;
     size_t clen, alen;
     uint8_t *code = slurp(argv[1], &clen);

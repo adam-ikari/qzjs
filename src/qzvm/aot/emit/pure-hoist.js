@@ -62,7 +62,7 @@ const PURE_MATH = new Set(["sqrt", "abs", "floor", "ceil", "trunc", "round", "po
 
 /** 保守纯度验证：仅当 AST 确认函数确属纯函数时才参与外提。
  *  mutableMods 是模块级可变名集合；读它也不算纯——循环里逐轮变化的值外提后会静默错值。 */
-function verifyPure(fn, mutableMods = new Set(), allowedCalls = new Set()) {
+function verifyPure(fn, mutableMods = new Set(), allowedCalls = new Set(), extraLocals = new Set()) {
     // 返回类型必须是显式 number：外提声明是 : number，函数返回非 number 会被当 f64 静默错值。
     if (!fn.type || fn.type.kind !== ts.SyntaxKind.NumberKeyword) return false;
     if (fn.asteriskToken || (fn.modifiers && fn.modifiers.some(m => m.kind === ts.SyntaxKind.AsyncKeyword))) return false;
@@ -74,6 +74,7 @@ function verifyPure(fn, mutableMods = new Set(), allowedCalls = new Set()) {
         ts.forEachChild(n, collectLocals);
     };
     if (fn.body) collectLocals(fn.body);
+    for (const nm of extraLocals) locals.add(nm);
     const params = new Set();
     for (const p of fn.parameters || []) if (ts.isIdentifier(p.name)) params.add(p.name.text);
     let ok = true;

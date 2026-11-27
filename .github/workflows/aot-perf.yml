@@ -138,6 +138,7 @@ jobs:
         env:
           MEASURE: "1"
           QZJS: ${{ github.workspace }}/build-rel/qzjs
+          QJSC: ${{ github.workspace }}/build-rel/deps/quickjs-ng/qjsc
           WAMRC: /tmp/wamrc
           OUT: ${{ github.workspace }}/build/aot/ts-direct
         run: |

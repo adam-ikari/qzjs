@@ -16,6 +16,7 @@ const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const OUT = process.env.OUT || '/tmp/tsdirect';
 const QZJS = process.env.QZJS || path.join(ROOT, 'build', 'qzjs');
 const WAMRC = process.env.WAMRC || path.join(ROOT, 'deps', 'wamr', 'wamr-compiler', 'build', 'wamrc');
+const QJSC = process.env.QJSC || path.join(ROOT, 'build', 'deps', 'quickjs-ng', 'qjsc');
 const MEASURE = process.env.MEASURE === '1';
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -28,6 +29,19 @@ if (!fs.existsSync(dumpTool)) {
     path.join(qjs, 'quickjs.c'), path.join(qjs, 'quickjs-libc.c'), '-lm', '-ldl', '-lpthread'],
     { stdio: 'inherit' });
 }
+
+const annotTool = path.join(OUT, 'annotate');
+if (!fs.existsSync(annotTool)) {
+  const qjs = path.join(ROOT, 'deps', 'quickjs-ng');
+  execFileSync('gcc', ['-O1', '-D_GNU_SOURCE', '-DQJS_BUILD_LIBC', '-I' + qjs, '-o', annotTool,
+    path.join(ROOT, 'bench', 'bytecode-aot', 'annotate.c'),
+    path.join(qjs, 'dtoa.c'), path.join(qjs, 'libregexp.c'), path.join(qjs, 'libunicode.c'),
+    path.join(qjs, 'quickjs.c'), path.join(qjs, 'quickjs-libc.c'), '-lm', '-ldl', '-lpthread'],
+    { stdio: 'inherit' });
+}
+// TS AST → side table 标注（自动），再注入字节码并读回：边界判定以字节码标注为准。
+execFileSync(process.execPath, [path.join(ROOT, 'bench', 'bytecode-aot', 'gen-annot.mjs')],
+  { env: { ...process.env, OUT }, stdio: 'ignore' });
 
 const dir = path.join(ROOT, 'bench', 'aot-product', 'workloads', 'es2023');
 const cases = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.ts')).sort() : [];
@@ -71,6 +85,16 @@ for (const file of cases) {
   } }).outputText + '\nglobalThis.work = work;\n';
   const jsPath = path.join(OUT, name + '.js');
   fs.writeFileSync(jsPath, js);
+  const bcPath = path.join(OUT, name + '.bytecode');
+  execFileSync(QJSC, ['-b', '-o', bcPath, jsPath], { stdio: 'ignore' });
+  const annotText = fs.readFileSync(path.join(OUT, name + '.annot'), 'utf8');
+  const annotFile = path.join(OUT, name + '.annot.txt');
+  fs.writeFileSync(annotFile, annotText);
+  const annotatedPath = path.join(OUT, name + '.annotated.bytecode');
+  execFileSync(annotTool, [bcPath, 'work', annotFile, annotatedPath], { stdio: 'ignore' });
+  // 字节码自己说是否纯：读回标注作为拆分 go/no-go 的唯一依据。
+  const back = execFileSync(annotTool, ['--print', annotatedPath], { encoding: 'utf8' });
+  const meta = JSON.parse(back).work;
   const dumpPath = path.join(OUT, name + '.dump');
   const dump = execFileSync('/bin/sh', ['-c', `"${dumpTool}" "${jsPath}" 2>&1`], { encoding: 'utf8', maxBuffer: 1 << 20 });
   fs.writeFileSync(dumpPath, dump);
@@ -94,11 +118,13 @@ for (const file of cases) {
       ops.push([m[1], rest.replace(/;.*$/, '').trim(), nm ? nm[1] : null]);
     }
   }
-  // ES2023 运算符（??= 等）在循环里引入额外分支/判定 opcode：显式判不适用，不静默生成错值。
-  const loopDump = dl.slice(start, goto + 1).join('\n');
-  const esOp = loopDump.match(/is_undefined_or_null|is_undefined|is_nullish/);
+  // 边界判定来自字节码 side table：标注说非纯或循环内有 ES2023 运算符 → fail-closed。
   let mapped;
-  try { if (esOp) throw new Error(`UNMAPPED ES2023 opcode: ${esOp[0]}`); mapped = mapOpcodes(ops); }
+  try {
+    if (!meta.pure) throw new Error('bytecode annotation: loop not pure');
+    if (meta.esOperatorInLoop) throw new Error('bytecode annotation: ES2023 operator in loop');
+    mapped = mapOpcodes(ops);
+  }
   catch (e) {
     console.log(`${name.padEnd(18)} NOT-APPLICABLE (${e.message}) [typed=${typed}]`);
     notApplicable++; continue;
