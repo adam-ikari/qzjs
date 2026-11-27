@@ -52,11 +52,12 @@ const ops = [];
 for (const raw of lines.slice(start, end + 1)) {
   const l = raw.trim();
   if (!l || l.startsWith(';;')) continue;
-  const m = l.match(/^(?:\d+:\s*)?([a-z_][a-z0-9_]*)\s*(.*)$/);
+  const m = l.match(/^(?:(\d+):\s*)?([a-z_][a-z0-9_]*)\s*(.*)$/);
   if (!m) continue;
-  const rest = m[2];
+  const rest = m[3];
   const vn = rest.match(/;\s*([A-Za-z_$][\w$]*)\s*$/);
-  ops.push([m[1], rest.replace(/;.*$/, '').trim(), vn ? vn[1] : null]);
+  ops.push([m[2], rest.replace(/;.*$/, '').trim(), vn ? vn[1] : null,
+    m[1] === undefined ? null : Number(m[1])]);
 }
 console.log('bytecode loop opcodes:', ops.length, ops.map((o) => o[0]).join(' '));
 

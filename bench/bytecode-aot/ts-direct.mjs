@@ -111,11 +111,12 @@ for (const file of cases) {
   for (const raw of dl.slice(start, goto + 1)) {
     const l = raw.trim();
     if (!l || l.startsWith(';;')) continue;
-    const m = l.match(/^(?:\d+:\s*)?([a-z_][a-z0-9_]*)\s*(.*)$/);
+    const m = l.match(/^(?:(\d+):\s*)?([a-z_][a-z0-9_]*)\s*(.*)$/);
     if (m) {
-      const rest = m[2];
+      const rest = m[3];
       const nm = rest.match(/;\s*([A-Za-z_$][\w$]*)\s*$/);
-      ops.push([m[1], rest.replace(/;.*$/, '').trim(), nm ? nm[1] : null]);
+      ops.push([m[2], rest.replace(/;.*$/, '').trim(), nm ? nm[1] : null,
+        m[1] === undefined ? null : Number(m[1])]);
     }
   }
   // 边界判定来自字节码 side table：标注说非纯或循环内有 ES2023 运算符 → fail-closed。
@@ -178,4 +179,4 @@ ${MEASURE ? `
   if (ok) pass++;
 }
 console.log(`\nsummary: ${pass} PASS, ${notApplicable} NOT-APPLICABLE, total ${cases.length}`);
-process.exit(pass > 0 ? 0 : 1);
+process.exit(pass === cases.length ? 0 : 1);
